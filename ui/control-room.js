@@ -12,10 +12,6 @@
   const colors = ["#3ac9b6", "#5e91ef", "#a283e8", "#4dbee4", "#d1aa6c", "#ef7b6b", "#f39963", "#8792a8", "#d77cb3", "#69c97c"];
   const skins = ["#eab58c", "#bd896c", "#dcac8b", "#d49c77", "#e7b58f", "#b98263", "#f1c5a3", "#d7a082", "#e4b391", "#d4a17f"];
   const hairColors = ["#58372c", "#242e40", "#342c2a", "#a45635", "#58372b", "#303039", "#4f302b", "#2c3546", "#403045", "#59402d"];
-  const workerStages = {
-    hunter: ["hunt"], repro: ["repro"], fixer: ["fix"], ci: ["ci"],
-    reviewer: ["review"], submit: ["gate", "submit"], vet: ["vet"]
-  };
   const stageLabels = {
     ready: "Pendente", vet: "Triagem", hunt: "Pesquisa", repro: "Reprodução",
     fix: "Correção", ci: "Testes", review: "Revisão", gate: "Validação",
@@ -182,18 +178,19 @@
   });
   const offline = (s) => Boolean(s?.o?.off);
   const paused = (s) => Boolean(s?.o?.man || s?.o?.pause || s?.o?.off);
-  const work = (s, role) => {
-    const worker = s?.w?.[role] || {};
-    return worker.st === "work" ||
-      safeArray(s?.q).some((j) => workerStages[role]?.includes(j.st));
-  };
+  // The server already normalizes persistent background jobs into w[role].st
+  // (web.rs::state). Queue membership alone is not proof of worker activity.
   const mode = (s, role) => {
-    const w = s?.w?.[role] || {};
+    if (!s?.w || !Object.hasOwn(s.w, role)) return "unknown";
+    const w = s.w[role] || {};
     if (w.hold || paused(s)) return "paused";
-    if (work(s, role)) return "work";
+    if (w.st === "work") return "work";
     return w.st === "sleep" ? "sleep" : "idle";
   };
-  const statusText = {work:"A trabalhar",idle:"Disponível",sleep:"Em repouso",paused:"Em pausa"};
+  const statusText = {
+    work:"A trabalhar", idle:"Disponível", sleep:"Em repouso",
+    paused:"Em pausa", unknown:"Sem dados"
+  };
   const resultText = {ok:"Último resultado: OK",sad:"Último resultado: problema",err:"Último resultado: erro"};
   const lastCommands = (worker) => safeArray(worker.cmds).filter((entry) =>
     Array.isArray(entry) && entry.length >= 2 && typeof entry[1] === "string").slice(-4).reverse();
@@ -208,8 +205,7 @@
       if (state === "work") working++;
       // Only celebrate the completion of a job this worker was previously
       // observed handling. A stale entry in the recent history is not enough.
-      const activeJob = w.job ?? safeArray(s.q).find((j) =>
-        workerStages[role]?.includes(j.st))?.id;
+      const activeJob = w.job;
       const priorJob = el.dataset.lastJob;
       const completed = Number.isFinite(Number(s.t)) && safeArray(s.dn).some((j) => {
         const finishedAt = Number(j.t1);
@@ -419,8 +415,7 @@
     selected = role;
     byId("aoDetailTitle").textContent = names[role];
     const jobs = safeArray(snapshot.q);
-    const job = (w.job != null ? jobs.find((j) => String(j.id) === String(w.job)) : null)
-      || jobs.find((j) => workerStages[role]?.includes(j.st));
+    const job = w.job != null ? jobs.find((j) => String(j.id) === String(w.job)) : null;
     const recent = lastCommands(w);
     const signature = JSON.stringify([role, stage, w.md, w.tk, w.say, w.mood, recent, job?.id, job?.title]);
     if (!focus && signature === lastDetailSignature) return;
