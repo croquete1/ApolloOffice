@@ -203,9 +203,10 @@
     syncMotion();
     if (!animationsOn) clearReactions();
   });
-  document.addEventListener("visibilitychange", () => {
+  const onVisibilityChange = () => {
     if (document.hidden) clearReactions();
-  });
+  };
+  document.addEventListener("visibilitychange", onVisibilityChange);
   byId("aoExpand").addEventListener("click", (e) => {
     const expanded = byId("aoRoomPanel").classList.toggle("ao-expanded");
     e.currentTarget.setAttribute("aria-label", expanded ? "Reduzir o escritório" : "Ampliar o escritório");
@@ -573,7 +574,7 @@
   };
   byId("aoDetailClose").addEventListener("click", hideAgent);
   overlay.addEventListener("click", (e) => { if (e.target === overlay) hideAgent(); });
-  document.addEventListener("keydown", (e) => {
+  const onModalKeydown = (e) => {
     if (overlay.hidden) return;
     if (e.key === "Escape") { e.preventDefault(); hideAgent(); return; }
     if (e.key !== "Tab") return;
@@ -585,7 +586,8 @@
     } else if (!e.shiftKey && document.activeElement === last) {
       e.preventDefault(); first.focus();
     }
-  });
+  };
+  document.addEventListener("keydown", onModalKeydown);
   const handlers = {repos:"bRepos",hosts:"bHosts",costs:"bCost",settings:"bSet"};
   app.addEventListener("click", (event) => {
     const node = event.target.closest("[data-role],[data-agent],[data-job],[data-pr-url],[data-target],[data-open]");
@@ -610,6 +612,9 @@
   const fallback = (error) => {
     healthy = false;
     unsubscribe();
+    A.stopOfficeMotion?.();
+    document.removeEventListener("keydown", onModalKeydown);
+    document.removeEventListener("visibilitychange", onVisibilityChange);
     if (staleTimer !== null) clearInterval(staleTimer);
     console.error("Apollo Control Room: reverting to original interface", error);
     app.remove();
@@ -625,6 +630,9 @@
   if (A.S) {
     try { render(A.S); } catch (error) { fallback(error); }
   }
+  // When startup recovery already restored the old interface, do not
+  // register a timer or any additional work for the removed dashboard.
+  if (!healthy) return;
   // Keep the connection label honest if WebSocket and polling stop updating.
   staleTimer = setInterval(() => {
     if (!healthy || !app.isConnected) { clearInterval(staleTimer); return; }
