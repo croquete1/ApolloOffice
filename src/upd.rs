@@ -172,7 +172,9 @@ fn idle(a: &Ax) -> bool {
 }
 
 pub fn spawn(a: Ax) {
-    if !on(&a) { return; }
+    // Start the watcher whenever a trusted channel exists: the user's
+    // automatic-updates switch may be enabled later without restarting.
+    if !configured() { return; }
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(60)).await;
         loop {
