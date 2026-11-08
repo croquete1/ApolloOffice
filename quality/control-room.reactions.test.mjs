@@ -25,8 +25,10 @@ function fixture(){
     };
   }
   const scene={querySelectorAll:()=>Object.values(stations)};
-  let studioCleanupCalls=0;
-  const window={AOOfficeV2:{clearTransitions(container){
+  let studioCleanupCalls=0, walkerCancelCalls=0;
+  const window={
+    AO:{cancelOfficeMotion(){walkerCancelCalls++;}},
+    AOOfficeV2:{clearTransitions(container){
     assert.equal(container,scene);
     studioCleanupCalls++;
     for(const node of container.querySelectorAll(".ao-station")){
@@ -34,12 +36,16 @@ function fixture(){
     }
   }}};
   const {clearReactions}=runInNewContext(`(() => {
+    const A=window.AO;
     const stationNodes=__stations;
     const stations=__scene;
     ${implementation}
     return {clearReactions};
   })()`,{__stations:stations,__scene:scene,window});
-  return {clearReactions,stations,listeners,get studioCleanupCalls(){return studioCleanupCalls}};
+  return {clearReactions,stations,listeners,
+    get studioCleanupCalls(){return studioCleanupCalls},
+    get walkerCancelCalls(){return walkerCancelCalls}
+  };
 }
 
 test("celebration ends without stopping permanent breathing",()=>{
@@ -73,4 +79,5 @@ test("disabling motion removes all transient effects",()=>{
     assert.equal(station.classList.contains("ao-v2-interacting"),false);
   }
   assert.equal(h.studioCleanupCalls,1);
+  assert.equal(h.walkerCancelCalls,1,"stale/motion cleanup must cancel an active handoff");
 });
