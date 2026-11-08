@@ -298,10 +298,10 @@
     if (!s || typeof s !== "object" || s.error) return;
     snapshot = s;
     lastStateAt = Date.now();
-    const isPaused = paused(s), isOffline = offline(s);
+    const isPaused = paused(s), isOffline = offline(s), isWarn = !!s.o?.warn;
     const state = byId("aoOfficeStatus");
-    state.className = "ao-status-chip" + (isPaused ? " is-paused" : "");
-    state.textContent = isOffline ? "Sem ligação" : isPaused ? "Escritório em pausa" : "Sistema operacional";
+    state.className = "ao-status-chip" + (isPaused || isWarn ? " is-paused" : "");
+    state.textContent = isOffline ? "Serviços indisponíveis" : isPaused ? "Escritório em pausa" : isWarn ? "Aviso de utilização" : "Ligação ativa";
     byId("aoConnection").textContent = isOffline ? "Ligação indisponível" : "Ligação em tempo real";
     byId("aoPause").textContent = s.o?.man ? "Retomar escritório" : "Pausar escritório";
     byId("aoPause").disabled = !s.o;
