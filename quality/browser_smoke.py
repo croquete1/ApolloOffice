@@ -82,6 +82,15 @@ class Handler(SimpleHTTPRequestHandler):
       var overlay = document.getElementById("aoAgentOverlay");
       assert(Boolean(app), "Control Room indisponível");
       assert(Boolean(fixer), "Personagem Fixer em falta");
+      var room = document.querySelector(".ao-office");
+      assert(room && room.dataset.visualVersion === "2",
+             "O escritório 2.5D premium não está ativo");
+      assert(document.querySelectorAll(".ao-v2-character").length === 10,
+             "Faltam personagens SVG detalhadas");
+      assert(document.querySelectorAll(".ao-v2-window").length === 2,
+             "A sala premium não tem as janelas esperadas");
+      assert(document.querySelectorAll(".ao-v2-plant").length === 2,
+             "Faltam elementos de profundidade da sala");
       if (app && fixer && overlay) {
         fixer.click();
         assert(!overlay.hidden, "O detalhe do agente não abriu");
@@ -91,6 +100,8 @@ class Handler(SimpleHTTPRequestHandler):
         toggle.checked = false;
         toggle.dispatchEvent(new Event("change", {bubbles: true}));
         assert(app.classList.contains("ao-motion-disabled"), "Desativar animações falhou");
+        assert(getComputedStyle(fixer.querySelector(".ao-v2-character")).animationName === "none",
+               "A preferência de movimento desativado não foi aplicada à personagem");
         toggle.checked = true;
         toggle.dispatchEvent(new Event("change", {bubbles: true}));
         assert(!app.classList.contains("ao-motion-disabled"), "Reativar animações falhou");

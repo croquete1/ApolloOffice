@@ -100,6 +100,7 @@
     stage.appendChild(visitor);
     src.classList.add("ao-travelling");
     dst.classList.add("ao-receiving");
+    dst.classList.add("ao-v2-interacting");
 
     indicator.textContent =
       (names[from] || from) + " → " + (names[to] || to) + " · tarefa #" + id +
@@ -110,6 +111,20 @@
     // No claim is made that an actual agent has physically moved or communicated.
     const dx = toX - fromX, dy = toY - fromY;
     const direction = dx < 0 ? -1 : 1;
+    // Travel via the central aisle so walkers do not pass through workstations.
+    const corridorY = Math.max(18, Math.min(roomBox.height - 45, roomBox.height * .56)) - fromY;
+    // On narrow screens the desks form five rows: use the vertical central
+    // aisle instead of walking through a horizontal row of workstations.
+    const narrow = window.matchMedia?.("(max-width: 530px)")?.matches;
+    const corridorX = Math.max(12, Math.min(roomBox.width - 30, roomBox.width * .5)) - fromX;
+    // Two mobile desks may share a row: dy is then zero, so choose a
+    // gutter outside both desks before walking horizontally.
+    const sameMobileRow = narrow && Math.abs(dy) < Math.min(a.height, b.height) * .25;
+    const rowTop = Math.min(a.top, b.top) - roomBox.top;
+    const rowBottom = Math.max(a.top + a.height, b.top + b.height) - roomBox.top;
+    const gutterY = (roomBox.height - rowBottom > 14
+      ? Math.min(roomBox.height - 10, rowBottom + 10)
+      : Math.max(10, rowTop - 10)) - fromY;
     let finished = false;
     const finish = () => {
       if (finished) return;
@@ -117,22 +132,27 @@
       visitor.remove();
       src.classList.remove("ao-travelling");
       dst.classList.remove("ao-receiving");
+      dst.classList.remove("ao-v2-interacting");
       indicator.hidden = true;
       if (active?.visitor === visitor) active = null;
     };
     if (typeof visitor.animate !== "function") { finish(); return; }
     let animation;
     try {
-      animation = visitor.animate(
-        [
-          { transform: "translate(0px, 0px) scaleX(" + direction + ")", offset: 0 },
-          { transform: "translate(" + dx * .48 + "px," + (dy * .48 - 9) + "px) scaleX(" + direction + ")", offset: .32 },
-          { transform: "translate(" + dx + "px," + dy + "px) scaleX(" + direction + ")", offset: .56 },
-          { transform: "translate(" + dx + "px," + dy + "px) scaleX(" + -direction + ")", offset: .7 },
-          { transform: "translate(0px, 0px) scaleX(" + -direction + ")", offset: 1 }
-        ],
-        { duration: 2800, easing: "ease-in-out", fill: "forwards" }
-      );
+      const route = sameMobileRow
+        ? [[0, 0], [0, gutterY], [corridorX, gutterY], [dx, gutterY],
+           [dx, dy], [dx, dy], [dx, gutterY], [0, gutterY], [0, 0]]
+        : narrow
+          ? [[0, 0], [corridorX, 0], [corridorX, dy * .5], [corridorX, dy],
+             [dx, dy], [dx, dy], [corridorX, dy], [corridorX, 0], [0, 0]]
+          : [[0, 0], [0, corridorY], [dx * .55, corridorY], [dx, corridorY],
+             [dx, dy], [dx, dy], [dx, corridorY], [0, corridorY], [0, 0]];
+      const offsets = [0, .16, .33, .44, .54, .65, .75, .88, 1];
+      const frames = route.map(([x, y], i) => ({
+        transform: "translate(" + x + "px," + y + "px) scaleX(" + (i < 5 ? direction : -direction) + ")",
+        offset: offsets[i]
+      }));
+      animation = visitor.animate(frames, { duration: 3900, easing: "ease-in-out", fill: "forwards" });
     } catch (error) {
       // A failed animation must never leave the agent invisible.
       finish();
@@ -176,7 +196,16 @@
   });
 
   const onMotionChange = () => { if (!motionControl.checked) cancel(); };
-  const onReducedMotion = () => { if (reduceMotion.matches) cancel(); };
+  /**
+   * Cancela deslocações e poses se o sistema pedir movimento reduzido.
+   * Mantém os estados reais dos agentes e os respetivos dados intactos.
+   */
+  const onReducedMotion = () => {
+    if (reduceMotion.matches) {
+      cancel();
+      window.AOOfficeV2?.clearTransitions(stage);
+    }
+  };
   const onVisibilityChange = () => { if (document.hidden) cancel(); };
   /**
    * Tear down animation observers and restore the original dashboard cleanly.
