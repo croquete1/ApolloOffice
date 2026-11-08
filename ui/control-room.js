@@ -183,6 +183,9 @@
    * o documento fica oculto ou os dados deixam de ser recentes.
    */
   const clearReactions = () => {
+    // Stale data must immediately restore hidden desk sprites. Merely
+    // clearing CSS classes leaves an active Web Animations walker visible.
+    A.cancelOfficeMotion?.();
     window.AOOfficeV2?.clearTransitions(stations);
     for (const node of Object.values(stationNodes)) {
       node.classList.remove("ao-celebrate", "ao-action-pulse");
