@@ -192,3 +192,12 @@ test("agent detail never fabricates per-worker token usage absent from Rust stat
   assert.doesNotMatch(modern, /\bw\.tk\b/);
   assert.match(modern, /"Comandos recentes"/);
 });
+
+
+test("stale agent detail does not advertise historical work as current", () => {
+  assert.match(modern, /const stale = app\.classList\.contains\("ao-data-stale"\)/);
+  assert.match(modern, /const stage = stale \? "unknown" : mode\(snapshot, role\)/);
+  assert.match(modern, /"Por confirmar — dados desatualizados"/);
+  assert.match(modern, /"Último registo: " \+ current/);
+  assert.match(modern, /"Último registo: " \+ w\.say/);
+});
