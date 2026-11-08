@@ -28,7 +28,7 @@ Se o renderizador moderno falhar ao processar um estado, a interface original é
 ## Verificação
 
 ```bash
-node --test quality/control-room.test.mjs quality/office-motion.test.mjs
+node --test quality/control-room.test.mjs quality/office-motion.test.mjs quality/state-subscription.test.mjs
 cargo test
 cargo run --release
 ```
@@ -43,4 +43,4 @@ Aceder à ligação de autenticação impressa pela aplicação e testar:
 6. Interruptor de animações, `prefers-reduced-motion` e ecrãs pequenos.
 7. Regressão das ações existentes de aprovação, configurações, custos, repositórios e máquinas.
 
-**Nota:** os testes de browser, integração Rust e medição de desempenho requerem execução local. A criação da branch não atualiza automaticamente um binário instalado.
+**Nota:** as verificações em JavaScript isolado não substituem a execução desta suíte no Node, a validação de browser, os testes de integração Rust nem a medição de desempenho local. A criação da branch não atualiza automaticamente um binário instalado.
