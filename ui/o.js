@@ -13,6 +13,31 @@
     return r.json();
   };
   window.AO = { get, post, esc, $ };
+  // Dedicated, exception-isolated presentation subscriptions. Consumers do not
+  // need to wrap the legacy onState callback or perform extra network requests.
+  const stateListeners = new Set();
+  /**
+   * Register an independent, exception-isolated observer for server state.
+   * @param {(state:object)=>void} listener
+   * @returns {()=>void} Idempotent unsubscribe callback.
+   */
+  window.AO.subscribeState = (listener) => {
+    if (typeof listener !== "function") throw new TypeError("State subscriber must be a function");
+    stateListeners.add(listener);
+    return () => stateListeners.delete(listener);
+  };
+  /**
+   * Publish one server snapshot to all independent UI subscribers.
+   * A subscriber failure does not interrupt other consumers.
+   * @param {object} state
+   */
+  const notifyState = (state) => {
+    for (const listener of stateListeners) {
+      try { listener(state); } catch (error) {
+        console.error("Apollo Office: state subscriber failed", error);
+      }
+    }
+  };
   const open = (u) => { if (/^https:\/\//.test(u || "")) window.open(u, "_blank", "noopener"); };
   window.AO.open = open;
 
@@ -378,6 +403,12 @@
 
   let last = performance.now();
   const frame = () => {
+    // The modern office has its own lightweight animations. Preserve the legacy
+    // canvas for fallback, but avoid drawing hidden pixel art every frame.
+    if (window.AO?.modernRoom || window.AO?.disablePixelArt) {
+      setTimeout(() => requestAnimationFrame(frame), 1500);
+      return;
+    }
     const t = (performance.now() - t0) / 1000;
     c.imageSmoothingEnabled = false;
     fc.imageSmoothingEnabled = false;
@@ -509,7 +540,23 @@
     }
     seen = ids;
   };
-  const apply = (s) => { if (!s || s.error) return; nt(s); S = s; last = performance.now(); err = 0; tiles(); lists(); chips(); tip(); window.AO.S = s; window.AO.onState && window.AO.onState(s); };
+  /**
+   * Apply the authoritative snapshot and notify the modern interface.
+   * Retains legacy callbacks, websocket behavior and error handling.
+   * @param {object} s
+   */
+  const apply = (s) => {
+    if (!s || s.error) return;
+    nt(s); S = s; last = performance.now(); err = 0;
+    if (!window.AO.modernRoom) { tiles(); lists(); tip(); }
+    chips();
+    window.AO.S = s;
+    try {
+      window.AO.onState?.(s);
+    } finally {
+      notifyState(s);
+    }
+  };
   window.AO.apply = apply;
 
   document.addEventListener("change", (e) => {
