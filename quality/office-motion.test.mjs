@@ -38,7 +38,8 @@ function harness({ mobile = false } = {}) {
     getBoundingClientRect: () => ({ left: 0, top: 0, width: mobile ? 390 : 900, height: mobile ? 825 : 210 }),
     appendChild: (node) => { visits.push(node); }
   };
-  const office = { appendChild: (node) => { indicator = node; } };
+  const indicators = [];
+  const office = { appendChild: (node) => { indicator = node; indicators.push(node); } };
   const document = {
     visibilityState: "visible",
     hidden: false,
@@ -75,19 +76,27 @@ function harness({ mobile = false } = {}) {
     onState: () => { oldCalls++; },
     subscribeState: (fn) => { subscribers.add(fn); return () => subscribers.delete(fn); }
   };
-  runInNewContext(source, {
+  const context = {
     window: { AO, matchMedia: (query) => query.includes('max-width: 530px') ? { matches: mobile } : prefers },
     document,
     console,
     Date: { now: () => now }
-  });
+  };
+  runInNewContext(source, context);
   const send = (q, o = {}) => {
     const state = { q, o };
     AO.S = state;
     AO.onState(state);
     for (const listener of subscribers) listener(state);
   };
-  return { visits, send, agents, motion, prefers, app, document, listeners, AO, advance(ms) { now += ms; }, get indicator() { return indicator; }, get oldCalls() { return oldCalls; } };
+  return {
+    visits, send, agents, motion, prefers, app, document, listeners, AO, indicators,
+    restart() { runInNewContext(source, context); },
+    advance(ms) { now += ms; },
+    get subscriberCount() { return subscribers.size; },
+    get indicator() { return indicator; },
+    get oldCalls() { return oldCalls; }
+  };
 }
 
 test("initial state never creates imaginary handoffs", () => {
@@ -261,4 +270,33 @@ test("desktop return stays in the same aisle until reaching the source column", 
   assert.equal(Number(forward[1]),Number(backward[1]));
   assert.ok(Math.abs(Number(forward[1]))>1);
   assert.match(frames[8].transform,/^translate\(0px,0px\)/);
+});
+
+
+test("reinitializing the controller disposes old state subscriptions and indicator", () => {
+  const h = harness();
+  assert.equal(h.subscriberCount, 1);
+  h.restart();
+  assert.equal(h.subscriberCount, 1, "only the newest controller may receive state updates");
+  assert.equal(h.indicators.length, 2);
+  assert.equal(h.indicators[0].removed, true, "the old status indicator must leave the DOM");
+  h.AO.stopOfficeMotion();
+  assert.equal(h.subscriberCount, 0);
+  assert.equal(h.indicators[1].removed, true, "disposing the current controller must remove the indicator");
+});
+
+test("stale-state cleanup cancels the walker without permanently unsubscribing", () => {
+  const h = harness();
+  h.send([{id:7,st:"fix"}]);
+  h.send([{id:7,st:"ci"}]);
+  const walker = h.visits[0];
+  assert.equal(typeof h.AO.cancelOfficeMotion, "function");
+  h.AO.cancelOfficeMotion();
+  assert.equal(walker.removed, true);
+  assert.equal(h.indicator.hidden, true);
+  assert.equal(h.agents.fixer.classList.contains("ao-travelling"), false);
+  assert.equal(h.agents.ci.classList.contains("ao-receiving"), false);
+  assert.equal(h.subscriberCount, 1, "staleness must not disable animation after recovery");
+  h.send([{id:7,st:"review"}]);
+  assert.equal(h.visits.length, 2, "fresh transitions may animate again after recovery");
 });
