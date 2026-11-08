@@ -206,13 +206,26 @@
     for (let i=0;i<roles.length;i++) {
       const role = roles[i], w = s.w?.[role] || {}, el = stationNodes[role], state = mode(s, role);
       if (state === "work") working++;
-      if (el.dataset.mode === "work" && state !== "work" && !paused(s) && animationsOn &&
-          safeArray(s.dn).some((j) => j.st === "done" && String(j.id) === el.dataset.lastJob)) {
+      // Only celebrate the completion of a job this worker was previously
+      // observed handling. A stale entry in the recent history is not enough.
+      const activeJob = w.job ?? safeArray(s.q).find((j) =>
+        workerStages[role]?.includes(j.st))?.id;
+      const priorJob = el.dataset.lastJob;
+      const completed = Number.isFinite(Number(s.t)) && safeArray(s.dn).some((j) => {
+        const finishedAt = Number(j.t1);
+        const age = Number(s.t) - finishedAt;
+        return priorJob && String(j.id) === priorJob && j.st === "done" &&
+          j.t1 != null && Number.isFinite(finishedAt) && age >= 0 && age <= 60_000;
+      });
+      if (el.dataset.mode === "work" && state !== "work" && completed &&
+          !paused(s) && animationsOn && !document.hidden &&
+          !window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) {
         el.classList.remove("ao-celebrate");
         void el.offsetWidth;
         el.classList.add("ao-celebrate");
       }
-      if (w.job) el.dataset.lastJob = String(w.job);
+      if (state === "work" && activeJob != null) el.dataset.lastJob = String(activeJob);
+      else if (state !== "work") delete el.dataset.lastJob;
       el.dataset.mode = state;
       // A subtle screen reaction only when a genuinely new command is reported.
       const latestCommand = lastCommands(w)[0];
@@ -308,7 +321,7 @@
   ];
   const pipeline = byId("aoPipeline");
   pipeline.innerHTML = pipelineSteps.map(({label}, i) =>
-    '<div class="ao-pipeline-stage" data-pipeline-index="' + i +
+    '<div class="ao-pipeline-stage" role="group" data-pipeline-index="' + i +
     '"><span class="ao-pipeline-index">' + String(i + 1).padStart(2, "0") +
     '</span><strong>' + label +
     '</strong><span class="ao-pipeline-value">—</span></div>'
