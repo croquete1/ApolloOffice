@@ -59,7 +59,7 @@
     '      <section class="ao-primary-grid" aria-label="Escritório e agentes">',
     '        <article class="ao-panel ao-room-panel" id="aoRoomPanel">',
     '          <div class="ao-panel-heading"><div><h2>Escritório virtual</h2><p>Personagens animadas · atividade real</p></div>',
-    '            <div class="ao-room-controls"><label class="ao-motion-label" for="aoMotion">Animações</label><input id="aoMotion" type="checkbox" checked aria-label="Ativar animações"><button id="aoExpand" type="button" class="ao-icon-button" aria-label="Ampliar o escritório" title="Ampliar o escritório">⤢</button></div>',
+    '            <div class="ao-room-controls"><label class="ao-motion-label" for="aoMotion">Animações</label><input id="aoMotion" type="checkbox" checked aria-label="Ativar animações"><button id="aoExpand" type="button" class="ao-icon-button" aria-label="Ampliar o escritório" aria-controls="aoRoomPanel" aria-expanded="false" title="Ampliar o escritório">⤢</button></div>',
     '          </div>',
     '          <div class="ao-office" role="group" aria-label="Dez agentes no escritório virtual">',
     '            <div class="ao-room-glow" aria-hidden="true"></div>',
@@ -173,6 +173,7 @@
   byId("aoExpand").addEventListener("click", (e) => {
     const expanded = byId("aoRoomPanel").classList.toggle("ao-expanded");
     e.currentTarget.setAttribute("aria-label", expanded ? "Reduzir o escritório" : "Ampliar o escritório");
+    e.currentTarget.setAttribute("aria-expanded", String(expanded));
     e.currentTarget.textContent = expanded ? "↙" : "⤢";
   });
   const offline = (s) => Boolean(s?.o?.off);
@@ -214,6 +215,8 @@
       el.querySelector(".ao-result-mark").textContent = result === "ok" ? "✓" : result === "err" ? "!" : result === "sad" ? "!" : "";
       el.querySelector(".ao-station-state").textContent = statusText[state];
       el.title = [names[role], statusText[state], resultText[result], w.say].filter(Boolean).join(" · ");
+      const accessible = ["Ver agente " + names[role], statusText[state], resultText[result]].filter(Boolean).join(". ");
+      if (el.getAttribute("aria-label") !== accessible) el.setAttribute("aria-label", accessible);
       const status = list.querySelector('[data-agent="' + role + '"] .ao-agent-status');
       status.className = "ao-agent-status ao-state-" + state;
       status.textContent = statusText[state];
@@ -222,7 +225,9 @@
     byId("aoAgentSummary").textContent = working + " em execução · " + (roles.length - working) + " restantes";
   };
   const rowHTML = (label, caption, badge, attr, val, extraClass = "") => {
-    return '<button class="ao-data-row ' + extraClass + '" type="button" ' + attr + '="' + escapeHTML(val) + '">' +
+    const unavailable = attr === "data-pr-url" && !val;
+    return '<button class="ao-data-row ' + extraClass + '" type="button" ' +
+      (unavailable ? 'disabled title="Ligação indisponível"' : attr + '="' + escapeHTML(val) + '"') + '>' +
       '<span class="ao-row-main"><strong>' + escapeHTML(label) + '</strong><small>' + escapeHTML(caption) + '</small></span>' +
       '<span class="ao-row-badge">' + escapeHTML(badge) + '</span></button>';
   };
