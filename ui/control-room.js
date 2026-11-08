@@ -52,9 +52,13 @@
     '    <main class="ao-content" id="aoOverview">',
     '      <section class="ao-metrics" aria-label="Indicadores operacionais">',
     '        <div class="ao-metric"><span>Agentes a trabalhar</span><strong id="aoMetricWorkers">—</strong><small>Estados reais</small></div>',
-    '        <div class="ao-metric"><span>Tarefas apresentadas</span><strong id="aoMetricQueue">—</strong><small>Até 60 trabalhos em aberto</small></div>',
+    '        <div class="ao-metric"><span>Tarefas em aberto</span><strong id="aoMetricQueue">—</strong><small>Total registado no sistema</small></div>',
     '        <div class="ao-metric"><span>PRs abertos (recentes)</span><strong id="aoMetricPR">—</strong><small>Até 40 PRs registados</small></div>',
-    '        <div class="ao-metric"><span>Concluídas recentes</span><strong id="aoMetricDone">—</strong><small>Últimos 25 trabalhos terminados</small></div>',
+    '        <div class="ao-metric"><span>Tarefas concluídas</span><strong id="aoMetricDone">—</strong><small>Total registado no sistema</small></div>',
+    '      </section>',
+    '      <section class="ao-panel ao-pipeline-panel" aria-label="Fluxo de trabalho">',
+    '        <div class="ao-panel-heading"><div><h2>Fluxo de trabalho</h2><p>Contagem total de tarefas por fase, diretamente da base de dados</p></div></div>',
+    '        <div id="aoPipeline" class="ao-pipeline"></div>',
     '      </section>',
     '      <section class="ao-primary-grid" aria-label="Escritório e agentes">',
     '        <article class="ao-panel ao-room-panel" id="aoRoomPanel">',
@@ -148,16 +152,16 @@
   };
   const stations = byId("aoStations");
   stations.innerHTML = roles.map((role, i) => {
-    return '<button class="ao-station" type="button" data-role="' + role + '" data-mode="idle" style="--agent-accent:' + colors[i] + '" aria-label="Ver agente ' + names[role] + '">' +
+    return '<button class="ao-station" type="button" data-role="' + role + '" data-mode="unknown" style="--agent-accent:' + colors[i] + '" aria-label="Ver agente ' + names[role] + ' · sem dados">' +
       '<span class="ao-monitor"><span class="ao-screen"><i></i><i></i><i></i><i></i></span><span class="ao-result-mark" aria-hidden="true"></span></span>' +
       '<span class="ao-chair"></span><span class="ao-avatar-holder">' + character(i) + '</span>' +
       '<span class="ao-desk"><span class="ao-keyboard"></span></span>' +
-      '<span class="ao-station-name">' + names[role] + '</span><span class="ao-station-state">Sem dados</span>' +
+      '<span class="ao-station-name">' + names[role] + '</span><span class="ao-station-state">A ligar…</span>' +
       '</button>';
   }).join("");
   const stationNodes = Object.fromEntries(roles.map((role) => [role, stations.querySelector('[data-role="' + role + '"]')]));
   let snapshot = null, selected = null, selectedRepo = "", lastFocus = null;
-  let lastRepoSignature = "", lastListSignature = "", lastMergeSignature = "";
+  let lastRepoSignature = "", lastListSignature = "", lastMergeSignature = "", lastPipelineSignature = "";
   let lastMachineSignature = "", lastDetailSignature = "", lastStateAt = 0;
   let animationsOn = true;
   try { animationsOn = localStorage.getItem("ao.motion") !== "off"; } catch {}
@@ -247,9 +251,10 @@
   const filtered = (items) => safeArray(items).filter((x) => !selectedRepo || x.repo === selectedRepo);
   const renderLists = (s) => {
     const q = filtered(s.q), prs = filtered(s.pr);
-    byId("aoMetricQueue").textContent = formatNum(safeArray(s.q).length);
+    const totals = countTotals(s);
+    byId("aoMetricQueue").textContent = formatNum(totals.active);
     byId("aoMetricPR").textContent = formatNum(safeArray(s.pr).filter((x) => x.st === "open").length);
-    byId("aoMetricDone").textContent = formatNum(safeArray(s.dn).filter((x) => x.st === "done").length);
+    byId("aoMetricDone").textContent = formatNum(totals.done);
     const signature = JSON.stringify([selectedRepo, q, prs, safeArray(s.ev).slice(0, 8)]);
     if (signature === lastListSignature) return;
     lastListSignature = signature;
@@ -290,6 +295,45 @@
       empty.className = "ao-muted"; empty.textContent = "Sem repositórios nos registos atuais.";
       wrap.appendChild(empty);
     }
+  };
+  // Unlike the limited queue preview, s.n contains the server's full database counts.
+  const pipelineSteps = [
+    {label: "Triagem", statuses: ["vet", "ready"]},
+    {label: "Pesquisa", statuses: ["hunt"]},
+    {label: "Reprodução", statuses: ["repro"]},
+    {label: "Correção", statuses: ["fix"]},
+    {label: "Testes", statuses: ["ci"]},
+    {label: "Revisão", statuses: ["review"]},
+    {label: "Aprovação", statuses: ["gate", "approve", "submit"]}
+  ];
+  const pipeline = byId("aoPipeline");
+  pipeline.innerHTML = pipelineSteps.map(({label}, i) =>
+    '<div class="ao-pipeline-stage" data-pipeline-index="' + i +
+    '"><span class="ao-pipeline-index">' + String(i + 1).padStart(2, "0") +
+    '</span><strong>' + label +
+    '</strong><span class="ao-pipeline-value">—</span></div>'
+  ).join("");
+  const renderPipeline = (s) => {
+    const counts = s.n && typeof s.n === "object" ? s.n : {};
+    const values = pipelineSteps.map(({statuses}) =>
+      statuses.reduce((sum, key) => sum + Math.max(0, Number(counts[key]) || 0), 0)
+    );
+    const signature = JSON.stringify(values);
+    if (signature === lastPipelineSignature) return;
+    lastPipelineSignature = signature;
+    for (let i = 0; i < values.length; i++) {
+      const item = pipeline.children[i];
+      item.classList.toggle("is-busy", values[i] > 0);
+      item.querySelector(".ao-pipeline-value").textContent = formatNum(values[i]);
+      item.setAttribute("aria-label", pipelineSteps[i].label + ": " + formatNum(values[i]) + " tarefas");
+    }
+  };
+  const countTotals = (s) => {
+    const counts = s.n && typeof s.n === "object" ? s.n : {};
+    const active = Object.entries(counts)
+      .filter(([key]) => key !== "done" && key !== "drop")
+      .reduce((total, [, amount]) => total + Math.max(0, Number(amount) || 0), 0);
+    return {active, done: Math.max(0, Number(counts.done) || 0)};
   };
   const renderMerges = (s) => {
     const signature = JSON.stringify([s.mg, new Date().toDateString()]);
@@ -352,7 +396,7 @@
     if (byId("aoConnection").textContent !== connection) byId("aoConnection").textContent = connection;
     byId("aoPause").textContent = s.o?.man ? "Retomar escritório" : "Pausar escritório";
     byId("aoPause").disabled = !s.o;
-    updateAgents(s); renderRepos(s); renderLists(s); renderMerges(s); renderMachines(s);
+    updateAgents(s); renderPipeline(s); renderRepos(s); renderLists(s); renderMerges(s); renderMachines(s);
     if (selected) showAgent(selected, false);
   };
   const overlay = byId("aoAgentOverlay");
