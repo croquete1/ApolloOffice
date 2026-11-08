@@ -367,3 +367,97 @@ body.ao-enabled #dr { color: var(--t1); }
   .ao-agent-list{grid-template-columns:1fr;}
   .ao-expanded .ao-office{height:68vh;}
 }
+
+
+/* Stage-aware microinteractions: animate only while a real role is working. */
+.ao-head {
+  transform-box: fill-box;
+  transform-origin: center 60%;
+}
+.ao-station[data-mode="work"] .ao-head {
+  animation: ao-head-focus 3.1s ease-in-out infinite alternate;
+}
+.ao-station[data-mode="idle"] .ao-head {
+  animation: ao-head-look 7.3s ease-in-out infinite;
+}
+.ao-station[data-role="ci"][data-mode="work"] .ao-screen {
+  background: repeating-linear-gradient(180deg, #102735 0 6px, #0a2029 6px 12px);
+  box-shadow: inset 0 0 14px #2b9c8a55;
+}
+.ao-station[data-role="reviewer"][data-mode="work"] .ao-screen {
+  background: linear-gradient(90deg,#204534 0 47%,#12202d 47% 53%,#493029 53% 100%);
+}
+.ao-station[data-role="repro"][data-mode="work"] .ao-screen {
+  box-shadow:inset 0 0 14px #e7a27655;
+}
+.ao-station[data-role="submit"][data-mode="work"] .ao-screen {
+  background:linear-gradient(90deg,#286354 0 72%,#102332 72% 100%);
+}
+.ao-station.ao-travelling .ao-avatar-holder {
+  opacity: 0;
+}
+.ao-walking-agent {
+  position: absolute;
+  pointer-events: none;
+  z-index: 8;
+  width: clamp(46px, 7vw, 76px);
+  height: 100px;
+  transform-origin: 50% 100%;
+  will-change: transform;
+  filter: drop-shadow(0 12px 9px #020711b0);
+}
+.ao-walking-agent .ao-person {
+  width: 100%;
+  height: 100%;
+  animation: ao-walk-step .34s ease-in-out infinite alternate;
+}
+.ao-transfer-label {
+  position: absolute;
+  z-index: 11;
+  left: 50%;
+  bottom: 13px;
+  transform: translateX(-50%);
+  max-width: min(80%, 560px);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 7px 12px;
+  border: 1px solid #488b9a;
+  border-radius: 20px;
+  background: #0e2636e8;
+  color: #c8f1ed;
+  font-size: 11px;
+  box-shadow: 0 3px 13px #040c17b8;
+  pointer-events:none;
+}
+.ao-transfer-label[hidden] { display: none !important; }
+.ao-data-stale .ao-person,
+.ao-data-stale .ao-head,
+.ao-data-stale .ao-arm,
+.ao-data-stale .ao-eyes,
+.ao-data-stale .ao-screen i,
+.ao-motion-disabled .ao-head,
+.ao-motion-disabled .ao-walking-agent,
+.ao-motion-disabled .ao-walking-agent .ao-person {
+  animation: none !important;
+}
+@keyframes ao-head-focus {
+  from { transform: rotate(-2deg) translateY(1px); }
+  to { transform: rotate(3deg) translateY(-1px); }
+}
+@keyframes ao-head-look {
+  0%, 55%, 100% { transform: rotate(0deg); }
+  65%, 76% { transform: rotate(-4deg); }
+  82%, 92% { transform: rotate(3deg); }
+}
+@keyframes ao-walk-step {
+  from { transform: translateY(0px) rotate(-2deg); }
+  to { transform: translateY(-4px) rotate(2deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ao-walking-agent { display: none !important; }
+}
+@media (max-width: 530px) {
+  .ao-walking-agent { width: 48px; height: 68px; }
+  .ao-transfer-label { bottom: 8px; max-width: 92%; font-size: 10px; }
+}
