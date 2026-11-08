@@ -179,6 +179,7 @@
   });
   // One-shot visual reactions must not override normal breathing/typing forever.
   const clearReactions = () => {
+    window.AOOfficeV2?.clearTransitions(stations);
     for (const node of Object.values(stationNodes)) {
       node.classList.remove("ao-celebrate", "ao-action-pulse");
     }
