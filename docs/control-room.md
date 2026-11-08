@@ -5,6 +5,7 @@ Esta versão substitui apenas a apresentação do painel. O Apollo Office manté
 ## O que é apresentado
 
 - Dashboard com dados efetivos de `/api/state` e `/api/ws`, recebidos através de `AO.subscribeState()` sem substituir o callback original; cada subscritor é isolado contra erros.
+- Os painéis de tarefas e PRs aparecem antes do escritório virtual na ordem visual e na navegação por teclado. O escritório, embora visível e animado, é uma área secundária do dashboard.
 - Dez postos de trabalho, um por agente original, com personagens vetoriais não pixelizadas.
 - Animações de respiração, pestanejar e digitação conforme os estados de atividade.
 - Movimentação temporária de uma personagem entre secretárias apenas quando uma mesma tarefa muda de fase entre dois agentes identificáveis (por exemplo, `fix` → `ci`). Não há deslocações aleatórias nem tarefas simuladas.
@@ -13,7 +14,7 @@ Esta versão substitui apenas a apresentação do painel. O Apollo Office manté
 - Breve reação do monitor a um novo comando real em `w.cmds`; diálogo de agente com os últimos quatro comandos disponíveis.
 - Celebração apenas quando uma tarefa anteriormente associada a um agente surge como concluída (`dn[].st === "done"`).
 - Painéis de tarefas, PRs, eventos, integrações dos últimos 30 dias e informações de máquinas, sem estimativas fictícias de progresso ou GPU.
-- Pipeline informativo com contagens completas da base de dados para triagem, pesquisa, reprodução, correção, testes, revisão e aprovação. Não contém botões de ações rápidas.
+- Pipeline informativo de dez fases reais, sem agrupar validação ou submissão automática com aprovação humana: Pendente, Triagem, Pesquisa, Reprodução, Correção, Testes, Revisão, Validação, Aprovação e Submissão. Todas as contagens vêm da base de dados. Não contém botões de ações rápidas.
 - Os indicadores de tarefas em aberto e concluídas usam o mapa completo `s.n`, não a lista de pré-visualização limitada. A lista de PRs continua limitada aos últimos 40 registos.
 - As personagens iniciam-se num estado desconhecido, sem simular disponibilidade antes da primeira resposta do servidor.
 - O estado de cada agente vem exclusivamente de `s.w[role].st`; o backend já representa as tarefas persistentes nesse campo. Uma tarefa na fila não constitui prova de que determinado agente a está a executar.
