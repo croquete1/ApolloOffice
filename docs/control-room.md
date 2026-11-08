@@ -34,7 +34,7 @@ Os movimentos mostram os estados que o Apollo Office disponibiliza, não o conte
 
 **Esta versão não inclui** circulação livre sem tarefas associadas, sincronização labial nem uma cena 3D navegável. Os movimentos entre postos são representações de transições reais do fluxo, implementadas com Web Animations API. Uma mudança detetada após mais de 10 segundos sem observações não gera uma animação de passagem de trabalho. Melhorias adicionais dependem da validação funcional e do desempenho no navegador.
 
-Se o renderizador moderno falhar ao processar um estado, a interface original é restaurada automaticamente. O desenho pixelizado legado permanece nos ficheiros de origem para permitir a reversão. O fallback remove as subscrições, os handlers globais de teclado/visibilidade, animações temporárias e timers do Control Room, evitando interferências com a interface original.
+Se o renderizador moderno falhar ao processar um estado, a interface original é restaurada automaticamente. O desenho pixelizado antigo permanece no código para compatibilidade, mas não é apresentado, nem durante a recuperação após falha. O fallback remove as subscrições, os handlers globais de teclado/visibilidade, animações temporárias e timers do Control Room. Restaura os formulários e controlos operacionais, mas mantém o canvas pixelizado desativado.
 
 ## Verificação
 
