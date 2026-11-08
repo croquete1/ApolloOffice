@@ -9,9 +9,16 @@ use std::time::Duration;
 // public, but embedding an upstream client ID or secret would bind users to
 // credentials they cannot rotate in their own Google Cloud project.
 fn cfg() -> (String, String) {
-    let value = |name| std::env::var(name)
-        .ok().map(|v| v.trim().to_string()).unwrap_or_default();
-    (value("APOLLO_OFFICE_GOOGLE_ID"), value("APOLLO_OFFICE_GOOGLE_SECRET"))
+    let value = |name| {
+        std::env::var(name)
+            .ok()
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default()
+    };
+    (
+        value("APOLLO_OFFICE_GOOGLE_ID"),
+        value("APOLLO_OFFICE_GOOGLE_SECRET"),
+    )
 }
 
 pub fn available() -> bool {
@@ -20,7 +27,15 @@ pub fn available() -> bool {
 }
 
 fn ue(s: &str) -> String {
-    s.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
+    s.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
 }
 
 fn redir(a: &Ax) -> String {
@@ -56,15 +71,41 @@ pub async fn back(a: &Ax, code: &str, st: &str) -> Result<(String, String, Strin
     if id.is_empty() || sec.is_empty() {
         return Err("Google sign-in requires your own OAuth client ID and secret from environment; rotate any previously published secret".into());
     }
-    let Some((ve, mode, exp)) = a.oa.lock().unwrap().remove(st) else { return Err("this sign-in attempt is unknown or was already used".into()) };
+    let Some((ve, mode, exp)) = a.oa.lock().unwrap().remove(st) else {
+        return Err("this sign-in attempt is unknown or was already used".into());
+    };
     if exp < now() {
         return Err("this sign-in attempt expired, start again".into());
     }
     let body = format!("code={}&client_id={}&client_secret={}&redirect_uri={}&grant_type=authorization_code&code_verifier={}", ue(code), ue(&id), ue(&sec), ue(&redir(a)), ue(&ve));
-    let r = a.hc.post("https://oauth2.googleapis.com/token").timeout(Duration::from_secs(20)).header("content-type", "application/x-www-form-urlencoded").body(body).send().await.map_err(|e| format!("Google did not answer: {e}"))?;
+    let r =
+        a.hc.post("https://oauth2.googleapis.com/token")
+            .timeout(Duration::from_secs(20))
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| format!("Google did not answer: {e}"))?;
     let t: Value = r.json().await.map_err(|e| e.to_string())?;
-    let Some(at) = t["access_token"].as_str() else { return Err(format!("Google refused the sign-in: {}", t["error_description"].as_str().or(t["error"].as_str()).unwrap_or("unknown error"))) };
-    let u: Value = a.hc.get("https://openidconnect.googleapis.com/v1/userinfo").bearer_auth(at).timeout(Duration::from_secs(20)).send().await.map_err(|e| e.to_string())?.json().await.map_err(|e| e.to_string())?;
+    let Some(at) = t["access_token"].as_str() else {
+        return Err(format!(
+            "Google refused the sign-in: {}",
+            t["error_description"]
+                .as_str()
+                .or(t["error"].as_str())
+                .unwrap_or("unknown error")
+        ));
+    };
+    let u: Value =
+        a.hc.get("https://openidconnect.googleapis.com/v1/userinfo")
+            .bearer_auth(at)
+            .timeout(Duration::from_secs(20))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?
+            .json()
+            .await
+            .map_err(|e| e.to_string())?;
     let sub = u["sub"].as_str().unwrap_or("").to_string();
     let em = u["email"].as_str().unwrap_or("").to_string();
     if sub.is_empty() || u["email_verified"].as_bool() != Some(true) {
@@ -86,6 +127,9 @@ mod t {
     #[test]
     fn enc() {
         assert_eq!(super::ue("openid email"), "openid%20email");
-        assert_eq!(super::ue("http://127.0.0.1:1/a"), "http%3A%2F%2F127.0.0.1%3A1%2Fa");
+        assert_eq!(
+            super::ue("http://127.0.0.1:1/a"),
+            "http%3A%2F%2F127.0.0.1%3A1%2Fa"
+        );
     }
 }
