@@ -79,3 +79,62 @@ test("the walker has leg cycles, real handoff gesture and reduced-motion support
   assert.match(css,/prefers-reduced-motion:reduce/);
   assert.doesNotMatch(js,/<canvas/);
 });
+
+
+test("cancelling an old arrival cannot remove a newer rise", () => {
+  const studio=fixture();
+  const classes=new Set();
+  const handlers={};
+  const agent={
+    classList:{
+      add:x=>classes.add(x),
+      remove:(...xs)=>xs.forEach(x=>classes.delete(x)),
+      contains:x=>classes.has(x)
+    },
+    dataset:{},insertAdjacentHTML(){},
+    addEventListener:(event,fn)=>{handlers[event]=fn;},
+    closest:()=>({classList:{contains:()=>false}})
+  };
+  const room={dataset:{},insertAdjacentHTML(){}};
+  studio.decorate(room,{querySelectorAll:()=>[agent]});
+  studio.onAgentState(agent,"idle","work");
+  assert.ok(classes.has("ao-v2-arriving"));
+  studio.onAgentState(agent,"work","idle");
+  assert.ok(classes.has("ao-v2-rising"));
+  const target={classList:{contains:x=>x==="ao-v2-character"},getAnimations:()=>[]};
+  handlers.animationcancel({type:"animationcancel",animationName:"ao-v2-arrive",target});
+  assert.ok(classes.has("ao-v2-rising"),"old arrival must not cancel a newer rise");
+  handlers.animationcancel({type:"animationcancel",animationName:"ao-v2-rise",target});
+  assert.equal(classes.has("ao-v2-rising"),false);
+});
+
+test("cancel of a replaced animation with the same name preserves its live pose",()=>{
+  const studio=fixture();
+  const classes=new Set(["ao-v2-arriving"]);
+  const listeners={};
+  const agent={
+    classList:{add:x=>classes.add(x),remove:x=>classes.delete(x),contains:x=>classes.has(x)},
+    dataset:{},insertAdjacentHTML(){},
+    addEventListener:(type,fn)=>{listeners[type]=fn}
+  };
+  studio.decorate({dataset:{},insertAdjacentHTML(){}},{querySelectorAll:()=>[agent]});
+  const target={
+    classList:{contains:x=>x==="ao-v2-character"},
+    getAnimations:()=>[{animationName:"ao-v2-arrive",playState:"running"}]
+  };
+  listeners.animationcancel({type:"animationcancel",animationName:"ao-v2-arrive",target});
+  assert.ok(classes.has("ao-v2-arriving"),"new arrival still running");
+  studio.clearTransitions({querySelectorAll:()=>[agent]});
+  assert.equal(classes.size,0);
+});
+
+test("motion disabled clears a stale arrival instead of replaying it later",()=>{
+  const studio=fixture();
+  const classes=new Set(["ao-v2-arriving"]);
+  const agent={
+    classList:{add:x=>classes.add(x),remove:(...x)=>x.forEach(y=>classes.delete(y))},
+    closest:()=>({classList:{contains:x=>x==="ao-motion-disabled"}})
+  };
+  studio.onAgentState(agent,"idle","work");
+  assert.equal(classes.has("ao-v2-arriving"),false);
+});
