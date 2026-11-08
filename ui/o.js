@@ -515,7 +515,7 @@
     }
     seen = ids;
   };
-  const apply = (s) => { if (!s || s.error) return; nt(s); S = s; last = performance.now(); err = 0; tiles(); lists(); chips(); tip(); window.AO.S = s; window.AO.onState && window.AO.onState(s); };
+  const apply = (s) => { if (!s || s.error) return; nt(s); S = s; last = performance.now(); err = 0; if (!window.AO.modernRoom) { tiles(); lists(); tip(); } chips(); window.AO.S = s; window.AO.onState && window.AO.onState(s); };
   window.AO.apply = apply;
 
   document.addEventListener("change", (e) => {
