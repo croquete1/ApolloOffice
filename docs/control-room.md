@@ -39,10 +39,13 @@ Se o renderizador moderno falhar ao processar um estado, a interface original é
 ## Verificação
 
 ```bash
-node --test quality/*.test.mjs
-cargo test
+node --test
+python3 quality/browser_smoke.py
+cargo test --locked
 cargo run --release
 ```
+
+A verificação de navegador utiliza Chrome ou Chromium em modo headless e um servidor HTTP temporário restrito a `127.0.0.1`. Serve os ficheiros reais de `ui/` e fornece dois estados sintéticos (agentes em repouso e Fixer ativo com `ollama:qwen3:8b`). **Não** contacta um backend de produção, não executa agentes, não cria PRs e não necessita de credenciais. A CI já existente corre os testes Node e Rust em Ubuntu/Windows e a verificação de navegador em Ubuntu.
 
 Aceder à ligação de autenticação impressa pela aplicação e testar:
 
