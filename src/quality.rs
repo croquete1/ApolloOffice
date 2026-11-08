@@ -59,11 +59,10 @@ pub fn validate(plan: &Value) -> Result<(), String> {
         return Err("expected 1..12 acceptance checks".into());
     }
     let mut unique = std::collections::BTreeSet::new();
+    let valid_name = regex::Regex::new(r"^[a-z][a-z0-9_]{1,63}$").unwrap();
     for name in names {
         let s = name.as_str().ok_or("invalid check name")?;
-        if !regex::Regex::new(r"^[a-z][a-z0-9_]{1,63}$")
-            .unwrap()
-            .is_match(s)
+        if !valid_name.is_match(s)
             || !unique.insert(s)
         {
             return Err("invalid or duplicate check name".into());
