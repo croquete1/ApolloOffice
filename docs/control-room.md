@@ -58,3 +58,16 @@ Aceder à ligação de autenticação impressa pela aplicação e testar:
 7. Regressão das ações existentes de aprovação, configurações, custos, repositórios e máquinas.
 
 **Nota:** as verificações em JavaScript isolado não substituem a execução desta suíte no Node, a validação de browser, os testes de integração Rust nem a medição de desempenho local. A criação da branch não atualiza automaticamente um binário instalado.
+
+## Studio 2.5D — revisão visual premium
+
+O escritório virtual utiliza agora `ui/office-v2.js` e `ui/office-v2.css`, carregados antes do Control Room para preservar os componentes operacionais existentes. Mantém-se como **área secundária** do dashboard; não são acrescentadas ações rápidas.
+
+- Dez personagens SVG individualizadas, com cabelo, tons de pele, roupa, expressões, acessórios profissionais e juntas de braços/pernas próprias. Não utiliza pixel art, imagens externas nem motor 3D.
+- Sala com arquitetura em camadas, janelas e horizonte, iluminação indireta, vegetação, mobiliário, tapete e chão em perspetiva. Toda a ilustração é vetorial e adaptável.
+- Estados **reais** alimentados por `s.w[role].st`: trabalho (digitação ou gesto do papel), repouso (respiração/pestanejar), pausa ou ausência de estado. A passagem entre trabalho e repouso aciona uma reação curta e não um ciclo falso de atividade.
+- Handoff apenas quando a **mesma tarefa** muda realmente de agente; a personagem percorre o corredor central, faz uma breve paragem no posto de destino e regressa. A reação do colega acompanha exclusivamente esse evento. Nenhuma ação é enviada aos agentes.
+- Em ecrãs largos, cinco postos por fila; em telemóvel, dois postos por fila. Os controlos de acessibilidade e as preferências de movimento reduzido continuam ativos.
+- `quality/office-v2.test.mjs` cobre a anatomia SVG, unicidade, decoração idempotente, transições reais, movimento reduzido e integração. `quality/browser_smoke.py` valida também a nova sala e a suspensão das animações em Chromium.
+
+A implementação continua **2.5D**, conforme a opção leve para execução simultânea com modelos locais. Não inclui modelos esqueléticos tridimensionais, sincronização labial ou circulação sem tarefa associada. Nenhuma configuração do Ollama ou do Qwen foi alterada. O impacto de desempenho no computador do utilizador continua a exigir medição local.
