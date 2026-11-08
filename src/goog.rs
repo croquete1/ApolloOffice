@@ -52,13 +52,13 @@ pub fn start(a: &Ax, mode: &str) -> String {
 }
 
 pub async fn back(a: &Ax, code: &str, st: &str) -> Result<(String, String, String), String> {
+    let (id, sec) = cfg();
+    if id.is_empty() || sec.is_empty() {
+        return Err("Google sign-in requires your own OAuth client ID and secret from environment; rotate any previously published secret".into());
+    }
     let Some((ve, mode, exp)) = a.oa.lock().unwrap().remove(st) else { return Err("this sign-in attempt is unknown or was already used".into()) };
     if exp < now() {
         return Err("this sign-in attempt expired, start again".into());
-    }
-    let (id, sec) = cfg();
-    if id.is_empty() || sec.is_empty() {
-        return Err("Google sign-in requires a private OAuth client ID and secret from environment; rotate the previously published secret".into());
     }
     let body = format!("code={}&client_id={}&client_secret={}&redirect_uri={}&grant_type=authorization_code&code_verifier={}", ue(code), ue(&id), ue(&sec), ue(&redir(a)), ue(&ve));
     let r = a.hc.post("https://oauth2.googleapis.com/token").timeout(Duration::from_secs(20)).header("content-type", "application/x-www-form-urlencoded").body(body).send().await.map_err(|e| format!("Google did not answer: {e}"))?;
