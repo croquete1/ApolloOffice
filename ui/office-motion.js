@@ -18,6 +18,7 @@
   });
   const names = A.NM || {};
   let previous = null;
+  let previousAt = 0;
   let active = null;
   const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)");
   const motionControl = document.getElementById("aoMotion");
@@ -131,6 +132,7 @@
   if (Array.isArray(A.S?.q)) {
     previous = new Map(A.S.q.filter(j => j && j.id != null && owners[j.st])
       .map(j => [String(j.id), { stage: j.st, title: String(j.title || "") }]));
+    previousAt = Date.now();
   }
   const unsubscribe = A.subscribeState((s) => {
     if (!app.isConnected || !A.modernRoom) { cancel(); unsubscribe(); return; }
@@ -139,7 +141,11 @@
       s.q.filter(j => j && j.id != null && owners[j.st])
         .map(j => [String(j.id), { stage: j.st, title: String(j.title || "") }])
     );
-    if (previous && stateAllowed(s) && !active) {
+    // The animation must represent a recently observed transition, not a
+    // historical change discovered after a long disconnect or suspended tab.
+    const now = Date.now();
+    const contiguous = previousAt && now - previousAt <= 10000;
+    if (previous && contiguous && stateAllowed(s) && !active) {
       for (const [id, next] of current) {
         const prior = previous.get(id);
         if (!prior || prior.stage === next.stage) continue;
@@ -150,6 +156,7 @@
       }
     }
     previous = current;
+    previousAt = now;
     if (active && !stateAllowed(s)) cancel();
   });
 
