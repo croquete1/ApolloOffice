@@ -103,16 +103,24 @@
       if (active?.visitor === visitor) active = null;
     };
     if (typeof visitor.animate !== "function") { finish(); return; }
-    const animation = visitor.animate(
-      [
-        { transform: "translate(0px, 0px) scaleX(" + direction + ")", offset: 0 },
-        { transform: "translate(" + dx * .48 + "px," + (dy * .48 - 9) + "px) scaleX(" + direction + ")", offset: .32 },
-        { transform: "translate(" + dx + "px," + dy + "px) scaleX(" + direction + ")", offset: .56 },
-        { transform: "translate(" + dx + "px," + dy + "px) scaleX(" + -direction + ")", offset: .7 },
-        { transform: "translate(0px, 0px) scaleX(" + -direction + ")", offset: 1 }
-      ],
-      { duration: 2800, easing: "ease-in-out", fill: "forwards" }
-    );
+    let animation;
+    try {
+      animation = visitor.animate(
+        [
+          { transform: "translate(0px, 0px) scaleX(" + direction + ")", offset: 0 },
+          { transform: "translate(" + dx * .48 + "px," + (dy * .48 - 9) + "px) scaleX(" + direction + ")", offset: .32 },
+          { transform: "translate(" + dx + "px," + dy + "px) scaleX(" + direction + ")", offset: .56 },
+          { transform: "translate(" + dx + "px," + dy + "px) scaleX(" + -direction + ")", offset: .7 },
+          { transform: "translate(0px, 0px) scaleX(" + -direction + ")", offset: 1 }
+        ],
+        { duration: 2800, easing: "ease-in-out", fill: "forwards" }
+      );
+    } catch (error) {
+      // A failed animation must never leave the agent invisible.
+      finish();
+      console.warn("Apollo Office: handoff animation unavailable", error);
+      return;
+    }
     active = { animation, finish, visitor };
     animation.onfinish = finish;
     animation.oncancel = finish;
