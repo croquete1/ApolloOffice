@@ -9,6 +9,9 @@
   const stage = document.getElementById("aoStations");
   const office = document.querySelector(".ao-office");
   if (!A?.modernRoom || !app || !stage || !office) return;
+  // A second script evaluation must not leave two polling subscribers,
+  // duplicate live-region IDs or independent animations in the same room.
+  if (typeof A.stopOfficeMotion === "function") A.stopOfficeMotion();
 
   // Map only stages the server can tie to a specific worker. Other states do
   // not imply a handoff and therefore never make a character travel.
@@ -216,10 +219,15 @@
     motionControl?.removeEventListener?.("change", onMotionChange);
     reduceMotion?.removeEventListener?.("change", onReducedMotion);
     document.removeEventListener?.("visibilitychange", onVisibilityChange);
+    indicator.remove();
+    if (A.cancelOfficeMotion === cancel) delete A.cancelOfficeMotion;
     if (A.stopOfficeMotion === dispose) delete A.stopOfficeMotion;
   };
   motionControl?.addEventListener("change", onMotionChange);
   reduceMotion?.addEventListener?.("change", onReducedMotion);
   document.addEventListener("visibilitychange", onVisibilityChange);
+  // Stale-data recovery must stop movement without removing the observer:
+  // the next confirmed state can then restart the animation controller.
+  A.cancelOfficeMotion = cancel;
   A.stopOfficeMotion = dispose;
 })();
