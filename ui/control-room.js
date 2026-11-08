@@ -390,8 +390,18 @@
         pieces.push(used.toFixed(1) + " / " + (Number(info.mem[0])/1024).toFixed(1) + " GB RAM");
       }
       if (Array.isArray(info.disk) && Number(info.disk[0])>0) pieces.push(info.disk[1] + " GB livres");
+      // Never present old CPU/RAM/temperature readings as if they were live.
+      const lastSeen = Number(info.t);
+      const timestamp = Number.isFinite(lastSeen) && lastSeen > 0
+        ? new Date(lastSeen).toLocaleString("pt-PT", {
+            day:"2-digit", month:"2-digit", hour:"2-digit", minute:"2-digit"
+          })
+        : null;
+      const description = recent
+        ? (pieces.join(" · ") || "Sem métricas de hardware")
+        : timestamp ? "Última leitura: " + timestamp : "Sem leituras recentes";
       return '<div class="ao-machine-row"><span class="ao-host-dot ' + (recent ? "ao-host-up" : "ao-host-down") + '"></span><span><strong>' +
-        escapeHTML(h.id) + '</strong><small>' + escapeHTML(pieces.join(" · ") || "Sem métricas de hardware") + '</small></span><em>' +
+        escapeHTML(h.id) + '</strong><small>' + escapeHTML(description) + '</small></span><em>' +
         status + '</em></div>';
     }).join("");
   };
