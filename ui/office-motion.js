@@ -100,6 +100,7 @@
     stage.appendChild(visitor);
     src.classList.add("ao-travelling");
     dst.classList.add("ao-receiving");
+    dst.classList.add("ao-v2-interacting");
 
     indicator.textContent =
       (names[from] || from) + " → " + (names[to] || to) + " · tarefa #" + id +
@@ -110,6 +111,8 @@
     // No claim is made that an actual agent has physically moved or communicated.
     const dx = toX - fromX, dy = toY - fromY;
     const direction = dx < 0 ? -1 : 1;
+    // Travel via the central aisle so walkers do not pass through workstations.
+    const corridorY = Math.max(18, Math.min(roomBox.height - 45, roomBox.height * .56)) - fromY;
     let finished = false;
     const finish = () => {
       if (finished) return;
@@ -117,6 +120,7 @@
       visitor.remove();
       src.classList.remove("ao-travelling");
       dst.classList.remove("ao-receiving");
+      dst.classList.remove("ao-v2-interacting");
       indicator.hidden = true;
       if (active?.visitor === visitor) active = null;
     };
@@ -126,12 +130,16 @@
       animation = visitor.animate(
         [
           { transform: "translate(0px, 0px) scaleX(" + direction + ")", offset: 0 },
-          { transform: "translate(" + dx * .48 + "px," + (dy * .48 - 9) + "px) scaleX(" + direction + ")", offset: .32 },
-          { transform: "translate(" + dx + "px," + dy + "px) scaleX(" + direction + ")", offset: .56 },
-          { transform: "translate(" + dx + "px," + dy + "px) scaleX(" + -direction + ")", offset: .7 },
-          { transform: "translate(0px, 0px) scaleX(" + -direction + ")", offset: 1 }
+          { transform: "translate(0px," + corridorY + "px) scaleX(" + direction + ")", offset: .16 },
+          { transform: "translate(" + dx * .55 + "px," + corridorY + "px) scaleX(" + direction + ")", offset: .33 },
+          { transform: "translate(" + dx + "px," + corridorY + "px) scaleX(" + direction + ")", offset: .44 },
+          { transform: "translate(" + dx + "px," + dy + "px) scaleX(" + direction + ")", offset: .54 },
+          { transform: "translate(" + dx + "px," + dy + "px) scaleX(" + -direction + ")", offset: .65 },
+          { transform: "translate(" + dx + "px," + corridorY + "px) scaleX(" + -direction + ")", offset: .75 },
+          { transform: "translate(" + dx * .45 + "px," + corridorY + "px) scaleX(" + -direction + ")", offset: .88 },
+          { transform: "translate(0px,0px) scaleX(" + -direction + ")", offset: 1 }
         ],
-        { duration: 2800, easing: "ease-in-out", fill: "forwards" }
+        { duration: 3900, easing: "ease-in-out", fill: "forwards" }
       );
     } catch (error) {
       // A failed animation must never leave the agent invisible.
