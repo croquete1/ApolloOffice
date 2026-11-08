@@ -19,7 +19,7 @@ function fixture() {
     set innerHTML(markup) {
       assert.match(markup, /ao-pipeline-stage/);
       stages.length = 0;
-      for (let i = 0; i < 7; i++) {
+      for (let i = 0; i < 10; i++) {
         let active = false;
         const value = { textContent: "" };
         const attributes = {};
@@ -63,9 +63,11 @@ test("pipeline uses real phase totals independently of the limited queue", () =>
     n: {vet:4,ready:1,hunt:2,repro:0,fix:3,ci:1,review:2,gate:1,approve:5,submit:1,done:26,drop:7},
     q: [{id: 1, st:"ci"}]
   });
-  assert.deepEqual(x.stages.map((s) => s.count), ["5","2","0","3","1","2","7"]);
-  assert.deepEqual(x.stages.map((s) => s.active), [true,true,false,true,true,true,true]);
-  assert.match(x.stages[6].label, /Aprovação: 7 tarefas/);
+  assert.deepEqual(x.stages.map((s) => s.count), ["1","4","2","0","3","1","2","1","5","1"]);
+  assert.deepEqual(x.stages.map((s) => s.active), [true,true,true,false,true,true,true,true,true,true]);
+  assert.match(x.stages[8].label, /Aprovação: 5 tarefas/);
+  assert.match(x.stages[7].label, /Validação: 1 tarefas/);
+  assert.match(x.stages[9].label, /Submissão: 1 tarefas/);
 });
 
 test("active and finished metrics derive from the full status map", () => {
@@ -85,12 +87,12 @@ test("unchanged snapshots do not trigger DOM writes", () => {
   x.api.renderPipeline(state);
   assert.equal(x.updates, changes);
   x.api.renderPipeline({n: {fix: 3, review: 4}});
-  assert.equal(x.updates, changes + 7);
+  assert.equal(x.updates, changes + 10);
 });
 
 test("absent or invalid numeric counts remain harmless", () => {
   const x = fixture();
   x.api.renderPipeline({n: {fix: -3,ci: "not-a-number",review: null}});
-  assert.deepEqual(x.stages.map((s) => s.count), ["0","0","0","0","0","0","0"]);
+  assert.deepEqual(x.stages.map((s) => s.count), ["0","0","0","0","0","0","0","0","0","0"]);
   assert.equal(x.api.countTotals({n: {ready:-4,done: null}}).active, 0);
 });
