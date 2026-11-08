@@ -621,3 +621,9 @@ body.ao-enabled #dr { color: var(--t1); }
 .ao-station[data-mode="unknown"] .ao-screen { filter: brightness(.35) grayscale(.7); }
 .ao-station[data-mode="unknown"] .ao-avatar-holder { opacity: .57; }
 .ao-station[data-mode="unknown"] .ao-station-state { color: #8fa5bc; }
+.ao-station[data-mode="unknown"] .ao-eyes,
+.ao-station[data-mode="unknown"] .ao-head,
+.ao-station[data-mode="paused"] .ao-eyes,
+.ao-station[data-mode="paused"] .ao-head {
+  animation: none !important;
+}
