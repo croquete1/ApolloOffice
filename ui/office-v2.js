@@ -96,18 +96,31 @@
         '<span class="ao-v2-notes" aria-hidden="true"></span>' +
         '<span class="ao-v2-worklight" aria-hidden="true"></span>');
       node.dataset.personality = i % 4 === 0 ? "focused" : i % 4 === 1 ? "observant" : i % 4 === 2 ? "analytical" : "calm";
-      node.addEventListener("animationend", event => {
-        if (event.animationName === "ao-v2-arrive" || event.animationName === "ao-v2-rise") {
-          node.classList.remove("ao-v2-arriving", "ao-v2-rising");
-        }
-      });
+      // A canceled arrival must not erase a newer rise (or vice versa).
+      // If a replacement animation with the same name is running, let its
+      // own completion clear the class rather than handling the old cancel.
+      const stopPose = event => {
+        const poseClass = event.animationName === "ao-v2-arrive" ? "ao-v2-arriving"
+          : event.animationName === "ao-v2-rise" ? "ao-v2-rising" : null;
+        if (!poseClass || (event.target && !event.target.classList?.contains("ao-v2-character"))) return;
+        if (event.type === "animationcancel" &&
+            Array.from(event.target?.getAnimations?.() || []).some(animation =>
+              animation.animationName === event.animationName && animation.playState === "running")) return;
+        node.classList.remove(poseClass);
+      };
+      node.addEventListener("animationend", stopPose);
+      node.addEventListener("animationcancel", stopPose);
     });
   }
   function onAgentState(station, previous, next) {
-    if (!station || previous === next || previous === "unknown" || next === "unknown") return;
+    if (!station) return;
     const app = station.closest("#aoControlRoom");
     if (!app || app.classList.contains("ao-motion-disabled") ||
-        window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) return;
+        window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) {
+      station.classList.remove("ao-v2-arriving", "ao-v2-rising");
+      return;
+    }
+    if (previous === next || previous === "unknown" || next === "unknown") return;
     station.classList.remove("ao-v2-arriving", "ao-v2-rising");
     if (next === "work" && previous !== "work") station.classList.add("ao-v2-arriving");
     else if (previous === "work" && next === "idle") station.classList.add("ao-v2-rising");
