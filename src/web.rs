@@ -949,7 +949,13 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
             _ => er(StatusCode::BAD_REQUEST, "op"),
         },
         ("POST", "/api/google") => match b["op"].as_str().unwrap_or("") {
-            "link" => js(json!({"url": crate::goog::start(a, "link")})),
+            "link" => {
+                if !crate::goog::available() {
+                    er(StatusCode::CONFLICT, "Configure APOLLO_OFFICE_GOOGLE_SECRET before linking Google")
+                } else {
+                    js(json!({"url": crate::goog::start(a, "link")}))
+                }
+            },
             "unlink" => {
                 a.db.kd("google");
                 js(cfg(a))
