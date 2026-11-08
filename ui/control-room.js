@@ -177,7 +177,9 @@
     e.currentTarget.textContent = expanded ? "↙" : "⤢";
   });
   const offline = (s) => Boolean(s?.o?.off);
-  const paused = (s) => Boolean(s?.o?.man || s?.o?.pause || s?.o?.off);
+  // External provider/network failures are not the same as manual pausing;
+  // a locally running worker can still be active while o.off is true.
+  const paused = (s) => Boolean(s?.o?.man || s?.o?.pause);
   // The server already normalizes persistent background jobs into w[role].st
   // (web.rs::state). Queue membership alone is not proof of worker activity.
   const mode = (s, role) => {
@@ -185,7 +187,9 @@
     const w = s.w[role] || {};
     if (w.hold || paused(s)) return "paused";
     if (w.st === "work") return "work";
-    return w.st === "sleep" ? "sleep" : "idle";
+    if (w.st === "sleep") return "sleep";
+    if (w.st === "idle") return "idle";
+    return "unknown";
   };
   const statusText = {
     work:"A trabalhar", idle:"Disponível", sleep:"Em repouso",
