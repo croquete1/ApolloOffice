@@ -7,7 +7,7 @@ import { runInNewContext } from "node:vm";
 
 const source = readFileSync(new URL("../ui/office-motion.js", import.meta.url), "utf8");
 
-function harness() {
+function harness({ mobile = false } = {}) {
   const listeners = {};
   let now = 100_000;
   const motion = { checked: true, addEventListener: (name, fn) => { listeners["motion:" + name] = fn; } };
@@ -35,7 +35,7 @@ function harness() {
   const stage = {
     isConnected: true,
     querySelector: (selector) => agents[selector.match(/data-role="([^"]+)"/)?.[1]] ?? null,
-    getBoundingClientRect: () => ({ left: 0, top: 0, width: 900, height: 210 }),
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: mobile ? 390 : 900, height: mobile ? 825 : 210 }),
     appendChild: (node) => { visits.push(node); }
   };
   const office = { appendChild: (node) => { indicator = node; } };
@@ -76,7 +76,7 @@ function harness() {
     subscribeState: (fn) => { subscribers.add(fn); return () => subscribers.delete(fn); }
   };
   runInNewContext(source, {
-    window: { AO, matchMedia: () => prefers },
+    window: { AO, matchMedia: (query) => query.includes('max-width: 530px') ? { matches: mobile } : prefers },
     document,
     console,
     Date: { now: () => now }
@@ -232,4 +232,33 @@ test("explicit motion disposal unregisters the animation controller", () => {
   h.send([{id:8,st:"fix"}]);
   h.send([{id:8,st:"ci"}]);
   assert.equal(h.visits.length, 0);
+});
+
+
+test("same-row mobile handoff walks through the row gutter", () => {
+  const h = harness({mobile: true});
+  h.send([{id:70, st:"fix"}]);
+  h.send([{id:70, st:"ci"}]);
+  const frames=h.visits[0].frames;
+  assert.equal(frames.length,9);
+  const gutter=Number(frames[1].transform.match(/^translate\(0px,(-?[\d.]+)px\)/)?.[1]);
+  assert.ok(Number.isFinite(gutter) && Math.abs(gutter)>10,
+    "mobile path must leave the workstation row before crossing");
+  assert.match(frames[3].transform,/^translate\(90px,/);
+  assert.match(frames[7].transform,/^translate\(0px,/);
+  assert.ok(frames[3].transform.includes("px," + gutter + "px)"));
+  assert.ok(frames[7].transform.includes("px," + gutter + "px)"));
+});
+
+test("desktop return stays in the same aisle until reaching the source column", () => {
+  const h=harness();
+  h.send([{id:71,st:"fix"}]);
+  h.send([{id:71,st:"ci"}]);
+  const frames=h.visits[0].frames;
+  const forward=frames[1].transform.match(/^translate\(0px,(-?[\d.]+)px\)/);
+  const backward=frames[7].transform.match(/^translate\(0px,(-?[\d.]+)px\)/);
+  assert.ok(forward && backward);
+  assert.equal(Number(forward[1]),Number(backward[1]));
+  assert.ok(Math.abs(Number(forward[1]))>1);
+  assert.match(frames[8].transform,/^translate\(0px,0px\)/);
 });
