@@ -32,6 +32,12 @@
   indicator.setAttribute("aria-live", "polite");
   office.appendChild(indicator);
 
+  /**
+   * Check that an observed handoff is eligible for visible animation.
+   * Disabled motion, reduced-motion preferences and stale data prohibit it.
+   * @param {object} state Latest server snapshot.
+   * @returns {boolean}
+   */
   const stateAllowed = (state) => {
     if (!A.modernRoom || !app.isConnected || document.visibilityState === "hidden") return false;
     if (!motionControl?.checked || reduceMotion?.matches) return false;
@@ -39,6 +45,10 @@
     return !state?.o?.man && !state?.o?.pause && !state?.o?.off;
   };
 
+  /**
+   * Cancel an active walker and restore both involved desk characters.
+   * The cleanup is idempotent so animation and unmount races remain safe.
+   */
   const cancel = () => {
     if (!active) return;
     const { animation, finish } = active;
@@ -47,6 +57,11 @@
     finish();
   };
 
+  /**
+   * Animate the visual handoff of an observed job between two agent desks.
+   * Does not submit jobs, call models or imply physical agent communication.
+   * @param {{id:string,title:string,from:string,to:string}} transition
+   */
   const play = ({ id, title, from, to }) => {
     const src = stage.querySelector('[data-role="' + from + '"]');
     const dst = stage.querySelector('[data-role="' + to + '"]');
@@ -163,6 +178,9 @@
   const onMotionChange = () => { if (!motionControl.checked) cancel(); };
   const onReducedMotion = () => { if (reduceMotion.matches) cancel(); };
   const onVisibilityChange = () => { if (document.hidden) cancel(); };
+  /**
+   * Tear down animation observers and restore the original dashboard cleanly.
+   */
   const dispose = () => {
     cancel();
     unsubscribe();
