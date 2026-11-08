@@ -128,10 +128,12 @@
     animation.oncancel = finish;
   };
 
-  const onState = A.onState;
-  A.onState = (s) => {
-    // Preserve all of the original UI's subscriptions and error fallback.
-    if (typeof onState === "function") onState(s);
+  if (Array.isArray(A.S?.q)) {
+    previous = new Map(A.S.q.filter(j => j && j.id != null && owners[j.st])
+      .map(j => [String(j.id), { stage: j.st, title: String(j.title || "") }]));
+  }
+  const unsubscribe = A.subscribeState((s) => {
+    if (!app.isConnected || !A.modernRoom) { cancel(); unsubscribe(); return; }
     if (!s || !Array.isArray(s.q)) return;
     const current = new Map(
       s.q.filter(j => j && j.id != null && owners[j.st])
@@ -149,7 +151,7 @@
     }
     previous = current;
     if (active && !stateAllowed(s)) cancel();
-  };
+  });
 
   motionControl?.addEventListener("change", () => { if (!motionControl.checked) cancel(); });
   reduceMotion?.addEventListener?.("change", () => { if (reduceMotion.matches) cancel(); });
