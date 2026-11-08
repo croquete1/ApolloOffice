@@ -47,13 +47,13 @@ function fixture() {
     let lastPipelineSignature = "";
     const byId = (id) => {
       if (id !== "aoPipeline") throw Error("unexpected DOM lookup");
-      return pipeline;
+      return __scene;
     };
     const formatNum = (number) => Number(number || 0).toLocaleString("pt-PT");
     ${implementation}
     return { renderPipeline, countTotals, pipelineSteps };
   })()`;
-  const api = runInNewContext(script, {pipeline});
+  const api = runInNewContext(script, {__scene: pipeline});
   return { api, stages, get updates() { return updates; } };
 }
 
