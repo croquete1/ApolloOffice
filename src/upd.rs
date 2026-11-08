@@ -26,8 +26,15 @@ static CK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 pub fn newer(a: &str, b: &str) -> bool {
     let p = |s: &str| -> (Vec<u64>, bool) {
         let s = s.trim().trim_start_matches('v');
-        let (n, pre) = s.split_once('-').map(|(n, _)| (n, true)).unwrap_or((s, false));
-        let mut v: Vec<u64> = n.split('.').take(3).map(|x| x.parse().unwrap_or(0)).collect();
+        let (n, pre) = s
+            .split_once('-')
+            .map(|(n, _)| (n, true))
+            .unwrap_or((s, false));
+        let mut v: Vec<u64> = n
+            .split('.')
+            .take(3)
+            .map(|x| x.parse().unwrap_or(0))
+            .collect();
         v.resize(3, 0);
         (v, !pre)
     };
@@ -43,11 +50,17 @@ fn writable(me: &Path) -> bool {
 }
 
 pub fn check_sig(pk: &str, body: &[u8], sig: &str) -> Result<Value, String> {
-    let k: [u8; 32] = hex::decode(pk).map_err(|_| "key")?.try_into().map_err(|_| "key")?;
+    let k: [u8; 32] = hex::decode(pk)
+        .map_err(|_| "key")?
+        .try_into()
+        .map_err(|_| "key")?;
     let vk = VerifyingKey::from_bytes(&k).map_err(|_| "key")?;
-    let sb = base64::engine::general_purpose::STANDARD.decode(sig.trim()).map_err(|_| "broken signature")?;
+    let sb = base64::engine::general_purpose::STANDARD
+        .decode(sig.trim())
+        .map_err(|_| "broken signature")?;
     let s = Signature::from_slice(&sb).map_err(|_| "broken signature")?;
-    vk.verify(body, &s).map_err(|_| "invalid signature on update manifest")?;
+    vk.verify(body, &s)
+        .map_err(|_| "invalid signature on update manifest")?;
     serde_json::from_slice(body).map_err(|_| "unreadable update manifest".into())
 }
 
@@ -60,22 +73,39 @@ fn st(a: &Ax, f: impl FnOnce(&mut Value)) {
     a.db.ks("upd", &v);
 }
 
-fn trusted_channel_inputs(url: Option<&str>, key: Option<&str>) -> Result<(String, String), String> {
-    let url = url.map(str::trim).filter(|s| !s.is_empty())
+fn trusted_channel_inputs(
+    url: Option<&str>,
+    key: Option<&str>,
+) -> Result<(String, String), String> {
+    let url = url
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
         .ok_or("No trusted fork update source configured (APOLLO_OFFICE_UPDATE_URL)")?;
-    let key = key.map(str::trim).filter(|s| !s.is_empty())
+    let key = key
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
         .ok_or("No trusted fork signing key configured (APOLLO_OFFICE_UPDATE_PUBKEY)")?;
     let parsed = reqwest::Url::parse(url).map_err(|_| "Invalid fork update URL")?;
-    if parsed.scheme() != "https" || parsed.host_str().is_none()
-        || !parsed.username().is_empty() || parsed.password().is_some()
-        || parsed.query().is_some() || parsed.fragment().is_some()
+    if parsed.scheme() != "https"
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
     {
-        return Err("Fork update source must be an HTTPS URL without credentials, query or fragment".into());
+        return Err(
+            "Fork update source must be an HTTPS URL without credentials, query or fragment".into(),
+        );
     }
-    let decoded: [u8; 32] = hex::decode(key).map_err(|_| "Invalid fork signing key")?
-        .try_into().map_err(|_| "Fork signing key must be 32 bytes")?;
+    let decoded: [u8; 32] = hex::decode(key)
+        .map_err(|_| "Invalid fork signing key")?
+        .try_into()
+        .map_err(|_| "Fork signing key must be 32 bytes")?;
     VerifyingKey::from_bytes(&decoded).map_err(|_| "Invalid fork signing key")?;
-    Ok((url.trim_end_matches('/').to_string(), key.to_ascii_lowercase()))
+    Ok((
+        url.trim_end_matches('/').to_string(),
+        key.to_ascii_lowercase(),
+    ))
 }
 
 fn channel() -> Result<(String, String), String> {
@@ -88,7 +118,9 @@ fn channel_id(url: &str, key: &str) -> String {
     hex::encode(Sha256::digest(format!("{url}\n{key}").as_bytes()))
 }
 
-pub fn configured() -> bool { channel().is_ok() }
+pub fn configured() -> bool {
+    channel().is_ok()
+}
 
 pub fn on(a: &Ax) -> bool {
     a.set()["updates"].as_bool().unwrap_or(false) && configured()
@@ -96,14 +128,21 @@ pub fn on(a: &Ax) -> bool {
 
 pub fn info(a: &Ax) -> Value {
     let mut v = a.db.kg("upd");
-    if !v.is_object() { v = json!({}); }
+    if !v.is_object() {
+        v = json!({});
+    }
     v["configured"] = json!(configured());
     v["auto"] = json!(on(a));
     v
 }
 
 async fn get(a: &Ax, u: &str) -> Result<Vec<u8>, String> {
-    let r = a.hc.get(u).timeout(Duration::from_secs(300)).send().await.map_err(|e| e.to_string())?;
+    let r =
+        a.hc.get(u)
+            .timeout(Duration::from_secs(300))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
     if r.status().as_u16() == 404 {
         return Err("no published release found (the repository may still be private)".into());
     }
@@ -121,7 +160,8 @@ pub async fn check(a: &Ax) -> Result<Value, String> {
     let cid = channel_id(&b, &key);
     let r: Result<Value, String> = async {
         let body = get(a, &format!("{b}/latest.json")).await?;
-        let sig = String::from_utf8_lossy(&get(a, &format!("{b}/latest.json.sig")).await?).to_string();
+        let sig =
+            String::from_utf8_lossy(&get(a, &format!("{b}/latest.json.sig")).await?).to_string();
         let m = check_sig(&key, &body, &sig)?;
         let v = m["v"].as_str().unwrap_or("").to_string();
         st(a, |x| {
@@ -130,7 +170,10 @@ pub async fn check(a: &Ax) -> Result<Value, String> {
         if !newer(&v, crate::app::V) {
             return Ok(json!({"latest": v, "new": false}));
         }
-        let want = m["files"][asset()].as_str().ok_or("no build for this system in the release")?.to_string();
+        let want = m["files"][asset()]
+            .as_str()
+            .ok_or("no build for this system in the release")?
+            .to_string();
         let bin = get(a, &format!("{b}/{}", asset())).await?;
         if hex::encode(Sha256::digest(&bin)) != want {
             return Err("downloaded update does not match the signed checksum".into());
@@ -144,7 +187,11 @@ pub async fn check(a: &Ax) -> Result<Value, String> {
             x["sha"] = json!(want);
             x["channel"] = json!(cid);
         });
-        a.say("submit", &format!("update {v} downloaded, it installs once the running jobs are done"), None);
+        a.say(
+            "submit",
+            &format!("update {v} downloaded, it installs once the running jobs are done"),
+            None,
+        );
         Ok(json!({"latest": v, "new": true}))
     }
     .await;
@@ -156,14 +203,23 @@ pub async fn check(a: &Ax) -> Result<Value, String> {
 }
 
 pub fn staged(a: &Ax) -> PathBuf {
-    a.dd.join(if cfg!(windows) { "update.exe" } else { "update.bin" })
+    a.dd.join(if cfg!(windows) {
+        "update.exe"
+    } else {
+        "update.bin"
+    })
 }
 
 pub fn ready(a: &Ax) -> bool {
-    let Ok((url, key)) = channel() else { return false };
+    let Ok((url, key)) = channel() else {
+        return false;
+    };
     let state = a.db.kg("upd");
     state["channel"].as_str() == Some(channel_id(&url, &key).as_str())
-        && state["ready"].as_str().map(|v| newer(v, crate::app::V)).unwrap_or(false)
+        && state["ready"]
+            .as_str()
+            .map(|v| newer(v, crate::app::V))
+            .unwrap_or(false)
         && staged(a).exists()
 }
 
@@ -174,7 +230,9 @@ fn idle(a: &Ax) -> bool {
 pub fn spawn(a: Ax) {
     // Start the watcher whenever a trusted channel exists: the user's
     // automatic-updates switch may be enabled later without restarting.
-    if !configured() { return; }
+    if !configured() {
+        return;
+    }
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(60)).await;
         loop {
@@ -185,7 +243,11 @@ pub fn spawn(a: Ax) {
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 if on(&a) && ready(&a) && writable(&a.me) {
                     if !a.drain.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                        a.say("submit", "update ready: finishing running jobs, then restarting", None);
+                        a.say(
+                            "submit",
+                            "update ready: finishing running jobs, then restarting",
+                            None,
+                        );
                     }
                     if idle(&a) {
                         apply(&a);
@@ -198,16 +260,24 @@ pub fn spawn(a: Ax) {
 }
 
 pub fn apply(a: &Ax) {
-    if !ready(a) { return; }
+    if !ready(a) {
+        return;
+    }
     let v = a.db.kg("upd")["ready"].as_str().unwrap_or("").to_string();
-    a.say("submit", &format!("installing update {} -> {v}, restarting", crate::app::V), None);
+    a.say(
+        "submit",
+        &format!("installing update {} -> {v}, restarting", crate::app::V),
+        None,
+    );
     *a.restart.lock().unwrap() = true;
     a.quit.notify_waiters();
 }
 
 pub fn install(a: &Ax) -> std::io::Result<()> {
     if !ready(a) {
-        return Err(std::io::Error::other("No trusted, verified fork update is ready"));
+        return Err(std::io::Error::other(
+            "No trusted, verified fork update is ready",
+        ));
     }
     let sha = a.db.kg("upd")["sha"].as_str().unwrap_or("").to_string();
     let me = &a.me;
@@ -215,7 +285,9 @@ pub fn install(a: &Ax) -> std::io::Result<()> {
     let bin = std::fs::read(&f0)?;
     let _ = std::fs::remove_file(&f0);
     if sha.len() != 64 || hex::encode(Sha256::digest(&bin)) != sha {
-        return Err(std::io::Error::other("staged update does not match the signed checksum"));
+        return Err(std::io::Error::other(
+            "staged update does not match the signed checksum",
+        ));
     }
     let f = me.with_extension(if cfg!(windows) { "upd.exe" } else { "upd" });
     let _ = std::fs::remove_file(&f);
@@ -288,15 +360,25 @@ mod t {
 
     #[test]
     fn fork_channel_fails_closed_until_url_and_signer_are_explicit() {
-        let good = hex::encode(SigningKey::from_bytes(&[5u8; 32]).verifying_key().to_bytes());
+        let good = hex::encode(
+            SigningKey::from_bytes(&[5u8; 32])
+                .verifying_key()
+                .to_bytes(),
+        );
         assert!(trusted_channel_inputs(None, None).is_err());
         assert!(trusted_channel_inputs(Some("https://fork.example/releases"), None).is_err());
         assert!(trusted_channel_inputs(Some("http://fork.example/releases"), Some(&good)).is_err());
         assert!(trusted_channel_inputs(Some("https://fork.example?token=x"), Some(&good)).is_err());
-        assert!(trusted_channel_inputs(Some("https://fork.example/releases"), Some("bad")).is_err());
-        let (base, key) = trusted_channel_inputs(Some("https://fork.example/releases/"), Some(&good)).unwrap();
+        assert!(
+            trusted_channel_inputs(Some("https://fork.example/releases"), Some("bad")).is_err()
+        );
+        let (base, key) =
+            trusted_channel_inputs(Some("https://fork.example/releases/"), Some(&good)).unwrap();
         assert_eq!(base, "https://fork.example/releases");
         assert_eq!(key, good);
-        assert_ne!(channel_id(&base, &key), channel_id("https://other.example", &key));
+        assert_ne!(
+            channel_id(&base, &key),
+            channel_id("https://other.example", &key)
+        );
     }
 }

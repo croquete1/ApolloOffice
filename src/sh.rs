@@ -22,8 +22,14 @@ impl Out {
 const MAXO: usize = 400_000;
 
 pub fn which(n: &str) -> Option<PathBuf> {
-    let ex: Vec<String> = if cfg!(windows) { vec![".exe".into(), ".cmd".into(), ".bat".into(), "".into()] } else { vec!["".into()] };
-    let mut ps: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+    let ex: Vec<String> = if cfg!(windows) {
+        vec![".exe".into(), ".cmd".into(), ".bat".into(), "".into()]
+    } else {
+        vec!["".into()]
+    };
+    let mut ps: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
     if let Some(h) = dirs::home_dir() {
         ps.push(h.join(".local/bin"));
         ps.push(h.join(".claude/local"));
@@ -50,7 +56,9 @@ pub fn tool(n: &str) -> String {
             return v;
         }
     }
-    which(n).map(|p| p.display().to_string()).unwrap_or_else(|| n.to_string())
+    which(n)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| n.to_string())
 }
 
 pub fn bash() -> String {
@@ -59,14 +67,23 @@ pub fn bash() -> String {
     }
     if cfg!(windows) {
         if let Some(g) = which("git") {
-            for r in [g.parent().and_then(|p| p.parent()), g.parent().and_then(|p| p.parent()).and_then(|p| p.parent())].into_iter().flatten() {
-                    let b = r.join("bin").join("bash.exe");
-                    if b.is_file() {
-                        return b.display().to_string();
-                    }
+            for r in [
+                g.parent().and_then(|p| p.parent()),
+                g.parent().and_then(|p| p.parent()).and_then(|p| p.parent()),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let b = r.join("bin").join("bash.exe");
+                if b.is_file() {
+                    return b.display().to_string();
+                }
             }
         }
-        for c in [r"C:\Program Files\Git\bin\bash.exe", r"C:\Program Files (x86)\Git\bin\bash.exe"] {
+        for c in [
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files (x86)\Git\bin\bash.exe",
+        ] {
             if Path::new(c).is_file() {
                 return c.into();
             }
@@ -104,7 +121,11 @@ pub fn kill(pid: u32) {
     }
     #[cfg(windows)]
     {
-        let _ = std::process::Command::new("taskkill").args(["/T", "/F", "/PID", &pid.to_string()]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+        let _ = std::process::Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
 }
 
@@ -121,21 +142,40 @@ pub struct Rq<'a> {
 
 impl<'a> Default for Rq<'a> {
     fn default() -> Self {
-        Rq { i: None, t: 120, env: vec![], rm: vec![], cwd: None, ln: None, keep: false, strip_provider_secrets: false }
+        Rq {
+            i: None,
+            t: 120,
+            env: vec![],
+            rm: vec![],
+            cwd: None,
+            ln: None,
+            keep: false,
+            strip_provider_secrets: false,
+        }
     }
 }
 
 pub async fn run(p: &str, a: &[String], r: Rq<'_>) -> Out {
     let mut c = cmd(p, a);
-    c.stdin(if r.i.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+    c.stdin(if r.i.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    })
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .kill_on_drop(true);
     // Worker code and subscription-only calls must not inherit provider secrets.
     if r.strip_provider_secrets {
-    for (k, _) in std::env::vars_os() {
-        let name = k.to_string_lossy();
-        if name.ends_with("_API_KEY") || name.starts_with("MIGRATION_PROVIDER_") || name == "ANTHROPIC_AUTH_TOKEN" {
-            c.env_remove(&k);
+        for (k, _) in std::env::vars_os() {
+            let name = k.to_string_lossy();
+            if name.ends_with("_API_KEY")
+                || name.starts_with("MIGRATION_PROVIDER_")
+                || name == "ANTHROPIC_AUTH_TOKEN"
+            {
+                c.env_remove(&k);
+            }
         }
-    }
     }
     for k in &r.rm {
         c.env_remove(k);
@@ -148,13 +188,25 @@ pub async fn run(p: &str, a: &[String], r: Rq<'_>) -> Out {
     }
     let mut ch = match c.spawn() {
         Ok(x) => x,
-        Err(e) => return Out { c: -1, o: String::new(), e: format!("{p}: {e}") },
+        Err(e) => {
+            return Out {
+                c: -1,
+                o: String::new(),
+                e: format!("{p}: {e}"),
+            }
+        }
     };
     let pid = ch.id().unwrap_or(0);
     #[cfg(unix)]
     struct ProcessGroup(u32);
     #[cfg(unix)]
-    impl Drop for ProcessGroup { fn drop(&mut self) { if self.0 > 0 { kill(self.0); } } }
+    impl Drop for ProcessGroup {
+        fn drop(&mut self) {
+            if self.0 > 0 {
+                kill(self.0);
+            }
+        }
+    }
     #[cfg(unix)]
     let mut process_group = ProcessGroup(pid);
     if let (Some(i), Some(mut si)) = (r.i.clone(), ch.stdin.take()) {
@@ -206,12 +258,22 @@ pub async fn run(p: &str, a: &[String], r: Rq<'_>) -> Out {
     match tokio::time::timeout(Duration::from_secs(r.t), w).await {
         Ok((o, e, st)) => {
             #[cfg(unix)]
-            { process_group.0 = 0; }
-            Out { c: st.ok().and_then(|s| s.code()).unwrap_or(-1), o: if kp { o } else { tail(&o) }, e }
+            {
+                process_group.0 = 0;
+            }
+            Out {
+                c: st.ok().and_then(|s| s.code()).unwrap_or(-1),
+                o: if kp { o } else { tail(&o) },
+                e,
+            }
         }
         Err(_) => {
             kill(pid);
-            Out { c: -1, o: String::new(), e: format!("timeout after {} s", r.t) }
+            Out {
+                c: -1,
+                o: String::new(),
+                e: format!("timeout after {} s", r.t),
+            }
         }
     }
 }
@@ -245,7 +307,10 @@ pub fn clip(s: &str, n: usize) -> String {
     }
     let h = head(s, n / 3);
     let t = last(s, n - h.len());
-    format!("{h}\n…[{} bytes omitted]…\n{t}", s.len() - h.len() - t.len())
+    format!(
+        "{h}\n…[{} bytes omitted]…\n{t}",
+        s.len() - h.len() - t.len()
+    )
 }
 
 pub fn last(s: &str, n: usize) -> String {
@@ -283,7 +348,6 @@ impl Ho {
         self.no.iter().any(|x| *x == r || *x == n)
     }
 
-
     fn of(v: &Value) -> Ho {
         Ho {
             id: v["id"].as_str().unwrap_or("").into(),
@@ -293,24 +357,37 @@ impl Ho {
             ci: v["ci"].as_i64().unwrap_or(1).clamp(1, 8),
             gb: v["gb"].as_i64().unwrap_or(50).max(5),
             on: v["on_"].as_i64().unwrap_or(1) == 1,
-            no: v["no"].as_str().unwrap_or("").split([',', ' ']).map(|x| x.trim().to_lowercase()).filter(|x| !x.is_empty()).collect(),
+            no: v["no"]
+                .as_str()
+                .unwrap_or("")
+                .split([',', ' '])
+                .map(|x| x.trim().to_lowercase())
+                .filter(|x| !x.is_empty())
+                .collect(),
             cpu: v["cpu"].as_i64().unwrap_or(0).max(0),
         }
     }
 }
 
 pub fn hosts(a: &App) -> Vec<Ho> {
-    a.db.all("select * from hs order by id='local' desc, id", pa![]).iter().map(Ho::of).collect()
+    a.db.all("select * from hs order by id='local' desc, id", pa![])
+        .iter()
+        .map(Ho::of)
+        .collect()
 }
 
 pub fn ho(a: &App, id: &str) -> Option<Ho> {
-    a.db.one("select * from hs where id=?", pa![id.to_string()]).map(|v| Ho::of(&v))
+    a.db.one("select * from hs where id=?", pa![id.to_string()])
+        .map(|v| Ho::of(&v))
 }
 
 pub const CT: &str = "apollo-office";
 pub fn im() -> String {
     use sha2::{Digest, Sha256};
-    format!("apollo-office-build:{}", &hex::encode(Sha256::digest(DF.as_bytes()))[..10])
+    format!(
+        "apollo-office-build:{}",
+        &hex::encode(Sha256::digest(DF.as_bytes()))[..10]
+    )
 }
 
 pub fn bp(p: &Path) -> String {
@@ -336,16 +413,37 @@ pub fn hb(a: &App, h: &Ho) -> String {
 }
 
 pub fn hbid(a: &App, h: &str) -> String {
-    ho(a, h).map(|x| hb(a, &x)).unwrap_or_else(|| "/work".into())
+    ho(a, h)
+        .map(|x| hb(a, &x))
+        .unwrap_or_else(|| "/work".into())
 }
 
 pub const PRE: &str = "ulimit -n 10240 2>/dev/null; export PATH=\"$HOME/.cargo/bin:$HOME/.local/bin:$HOME/go/bin:/usr/local/go/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\" CARGO_TERM_COLOR=never NO_COLOR=1 CI=1 GIT_TERMINAL_PROMPT=0 CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_PROFILE_TEST_DEBUG=line-tables-only CARGO_PROFILE_RELEASE_LTO=off CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_PROFILE_BENCH_LTO=off; to() { s=$1; shift; if command -v timeout >/dev/null 2>&1 && timeout --version 2>/dev/null | head -n 1 | grep -q 'coreutils'; then timeout -k 10 \"$s\" \"$@\"; else \"$@\"; fi; }\n";
 
 fn sshv(h: &Ho) -> Vec<String> {
-    let mut v: Vec<String> = vec!["-o".into(), "ConnectTimeout=15".into(), "-o".into(), "ServerAliveInterval=15".into(), "-o".into(), "ServerAliveCountMax=4".into(), "-o".into(), "BatchMode=yes".into()];
+    let mut v: Vec<String> = vec![
+        "-o".into(),
+        "ConnectTimeout=15".into(),
+        "-o".into(),
+        "ServerAliveInterval=15".into(),
+        "-o".into(),
+        "ServerAliveCountMax=4".into(),
+        "-o".into(),
+        "BatchMode=yes".into(),
+    ];
     if cfg!(unix) {
-        if let Some(d) = std::env::var_os("APOLLO_OFFICE_SSH_CONTROL_DIR").map(PathBuf::from).or_else(dirs::home_dir) {
-            v.extend(["-o".into(), "ControlMaster=auto".into(), "-o".into(), format!("ControlPath={}/.ssh/cm-ao-%r@%h:%p", d.display()), "-o".into(), "ControlPersist=10m".into()]);
+        if let Some(d) = std::env::var_os("APOLLO_OFFICE_SSH_CONTROL_DIR")
+            .map(PathBuf::from)
+            .or_else(dirs::home_dir)
+        {
+            v.extend([
+                "-o".into(),
+                "ControlMaster=auto".into(),
+                "-o".into(),
+                format!("ControlPath={}/.ssh/cm-ao-%r@%h:%p", d.display()),
+                "-o".into(),
+                "ControlPersist=10m".into(),
+            ]);
         }
     }
     v.push(h.ssh.clone());
@@ -353,7 +451,11 @@ fn sshv(h: &Ho) -> Vec<String> {
 }
 
 fn jobs(a: &App, h: &Ho) -> String {
-    let c = a.db.kg(&format!("cpu:{}", h.id)).as_i64().filter(|_| h.dk).unwrap_or(0);
+    let c =
+        a.db.kg(&format!("cpu:{}", h.id))
+            .as_i64()
+            .filter(|_| h.dk)
+            .unwrap_or(0);
     if c <= 0 {
         return String::new();
     }
@@ -364,15 +466,41 @@ fn jobs(a: &App, h: &Ho) -> String {
 pub async fn hraw(h: &Ho, s: &str, t: u64) -> Out {
     let i = format!("{PRE}{s}");
     if h.ssh.is_empty() {
-        run(&bash(), &["-s".into()], Rq { i: Some(i), t, strip_provider_secrets: true, ..Default::default() }).await
+        run(
+            &bash(),
+            &["-s".into()],
+            Rq {
+                i: Some(i),
+                t,
+                strip_provider_secrets: true,
+                ..Default::default()
+            },
+        )
+        .await
     } else {
         let mut v = sshv(h);
         v.extend(["bash".into(), "-s".into()]);
-        run(&tool("ssh"), &v, Rq { i: Some(i), t, strip_provider_secrets: true, ..Default::default() }).await
+        run(
+            &tool("ssh"),
+            &v,
+            Rq {
+                i: Some(i),
+                t,
+                strip_provider_secrets: true,
+                ..Default::default()
+            },
+        )
+        .await
     }
 }
 
-pub async fn hxl(a: &App, id: &str, s: &str, t: u64, ln: Option<&(dyn Fn(&str) + Send + Sync)>) -> Out {
+pub async fn hxl(
+    a: &App,
+    id: &str,
+    s: &str,
+    t: u64,
+    ln: Option<&(dyn Fn(&str) + Send + Sync)>,
+) -> Out {
     hxo(a, id, s, t, ln, false).await
 }
 
@@ -380,25 +508,61 @@ pub async fn hxk(a: &App, id: &str, s: &str, t: u64) -> Out {
     hxo(a, id, s, t, None, true).await
 }
 
-async fn hxo(a: &App, id: &str, s: &str, t: u64, ln: Option<&(dyn Fn(&str) + Send + Sync)>, keep: bool) -> Out {
-    let Some(h) = ho(a, id) else { return Out { c: -1, o: String::new(), e: format!("machine {id} is gone") } };
+async fn hxo(
+    a: &App,
+    id: &str,
+    s: &str,
+    t: u64,
+    ln: Option<&(dyn Fn(&str) + Send + Sync)>,
+    keep: bool,
+) -> Out {
+    let Some(h) = ho(a, id) else {
+        return Out {
+            c: -1,
+            o: String::new(),
+            e: format!("machine {id} is gone"),
+        };
+    };
     // Stream even large git bundles through stdin; never place a script in argv.
     // GNU timeout runs on compatible workers; the outer process watchdog remains
     // active everywhere, including Windows/macOS without GNU coreutils timeout.
-    let boundary=format!("APOLLO_JOB_{}",hex::encode(rand::random::<[u8;16]>()));
+    let boundary = format!("APOLLO_JOB_{}", hex::encode(rand::random::<[u8; 16]>()));
     let body=format!("if command -v timeout >/dev/null 2>&1 && timeout --version 2>/dev/null | head -n 1 | grep -q 'coreutils'; then exec timeout -k 5 {t}s bash -s; else exec bash -s; fi <<'{boundary}'\n{PRE}{s}\n{boundary}\n");
     let i = format!("{PRE}{}{body}", jobs(a, &h));
-    let mut command: Vec<String> = if h.dk { vec!["docker".into(), "exec".into(), "-i".into(), CT.into()] } else { vec![] };
+    let mut command: Vec<String> = if h.dk {
+        vec!["docker".into(), "exec".into(), "-i".into(), CT.into()]
+    } else {
+        vec![]
+    };
     command.extend(["bash".into(), "-s".into()]);
     let (p, v) = if h.ssh.is_empty() {
         let program = command.remove(0);
-        (if program == "bash" { bash() } else { tool(&program) }, command)
+        (
+            if program == "bash" {
+                bash()
+            } else {
+                tool(&program)
+            },
+            command,
+        )
     } else {
         let mut args = sshv(&h);
         args.extend(command);
         (tool("ssh"), args)
     };
-    let r = run(&p, &v, Rq { i: Some(i), t, ln, keep, strip_provider_secrets: true, ..Default::default() }).await;
+    let r = run(
+        &p,
+        &v,
+        Rq {
+            i: Some(i),
+            t,
+            ln,
+            keep,
+            strip_provider_secrets: true,
+            ..Default::default()
+        },
+    )
+    .await;
     if h.dk && r.c != 0 && (r.e.contains("is not running") || r.e.contains("No such container")) {
         a.lv.lock().unwrap().o.net.insert(id.into(), false);
     }
@@ -438,32 +602,95 @@ pub async fn orph(a: &Ax, id: &str) {
     let r = hx(a, id, &format!("n=0; for p in $(pgrep -f \"{b}/\"); do [ \"$p\" = $$ ] || {{ kill -9 \"$p\" 2>/dev/null && n=$((n+1)); }}; done; echo $n"), 60).await;
     let n = r.o.trim().parse::<i64>().unwrap_or(0);
     if n > 0 {
-        a.say("ci", &format!("[{id}] back online, killed {n} orphaned build processes"), None);
+        a.say(
+            "ci",
+            &format!("[{id}] back online, killed {n} orphaned build processes"),
+            None,
+        );
     }
 }
 
 pub async fn ensure(a: &Ax, id: &str) -> Result<(), String> {
-    let Some(h) = ho(a, id) else { return Err("unknown machine".into()) };
+    let Some(h) = ho(a, id) else {
+        return Err("unknown machine".into());
+    };
     if !h.dk {
-        let r = hraw(&h, &format!("mkdir -p \"{}\" && git --version >/dev/null && echo ok", hb(a, &h)), 60).await;
-        return if r.c == 0 { Ok(()) } else { Err(format!("{}{}", r.o, r.e).trim().chars().take(300).collect()) };
+        let r = hraw(
+            &h,
+            &format!(
+                "mkdir -p \"{}\" && git --version >/dev/null && echo ok",
+                hb(a, &h)
+            ),
+            60,
+        )
+        .await;
+        return if r.c == 0 {
+            Ok(())
+        } else {
+            Err(format!("{}{}", r.o, r.e).trim().chars().take(300).collect())
+        };
     }
-    let n = hraw(&h, "getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 4", 30).await.o.trim().parse::<i64>().unwrap_or(4);
-    let cpu = if h.cpu > 0 { h.cpu.min(n) } else { (n - 1).max(1) };
+    let n = hraw(
+        &h,
+        "getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 4",
+        30,
+    )
+    .await
+    .o
+    .trim()
+    .parse::<i64>()
+    .unwrap_or(4);
+    let cpu = if h.cpu > 0 {
+        h.cpu.min(n)
+    } else {
+        (n - 1).max(1)
+    };
     a.db.ks(&format!("cpu:{id}"), &serde_json::json!(cpu));
     let r = hraw(&h, &dkup(&h, cpu), 3600).await;
     if r.c == 0 {
         Ok(())
     } else {
-        Err(format!("{}{}", r.o, r.e).trim().chars().rev().take(400).collect::<String>().chars().rev().collect())
+        Err(format!("{}{}", r.o, r.e)
+            .trim()
+            .chars()
+            .rev()
+            .take(400)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect())
     }
 }
 
 pub async fn gh(a: &[&str], t: u64) -> Result<String, String> {
     let v: Vec<String> = a.iter().map(|x| x.to_string()).collect();
-    let r = run(&tool("gh"), &v, Rq { t, env: vec![("GH_PROMPT_DISABLED".into(), "1".into()), ("NO_COLOR".into(), "1".into())], keep: true, ..Default::default() }).await;
+    let r = run(
+        &tool("gh"),
+        &v,
+        Rq {
+            t,
+            env: vec![
+                ("GH_PROMPT_DISABLED".into(), "1".into()),
+                ("NO_COLOR".into(), "1".into()),
+            ],
+            keep: true,
+            ..Default::default()
+        },
+    )
+    .await;
     if r.c != 0 {
-        return Err(format!("gh {}: {}", a.iter().take(3).cloned().collect::<Vec<_>>().join(" "), if r.e.trim().is_empty() { r.o.trim() } else { r.e.trim() }).chars().take(400).collect());
+        return Err(format!(
+            "gh {}: {}",
+            a.iter().take(3).cloned().collect::<Vec<_>>().join(" "),
+            if r.e.trim().is_empty() {
+                r.o.trim()
+            } else {
+                r.e.trim()
+            }
+        )
+        .chars()
+        .take(400)
+        .collect());
     }
     Ok(r.o)
 }
@@ -479,15 +706,27 @@ pub async fn ghj(a: &[&str], t: u64) -> Result<Value, String> {
 pub async fn apip(p: &str) -> Result<Vec<Value>, String> {
     // --paginate emits a stream of JSON arrays on old and new gh versions.
     // --slurp is unavailable in the distro's installed gh 2.46.
-    let o = gh(&["api", "--paginate", "-H", "Accept: application/vnd.github+json", p], 180).await?;
+    let o = gh(
+        &[
+            "api",
+            "--paginate",
+            "-H",
+            "Accept: application/vnd.github+json",
+            p,
+        ],
+        180,
+    )
+    .await?;
     api_pages(&o)
 }
 
 fn api_pages(output: &str) -> Result<Vec<Value>, String> {
     let mut rows = Vec::new();
     for page in serde_json::Deserializer::from_str(output).into_iter::<Value>() {
-        let page = page.map_err(|e|format!("gh paginated json: {e}"))?;
-        let Value::Array(items) = page else { return Err("gh paginated response must contain arrays".into()); };
+        let page = page.map_err(|e| format!("gh paginated json: {e}"))?;
+        let Value::Array(items) = page else {
+            return Err("gh paginated response must contain arrays".into());
+        };
         rows.extend(items);
     }
     Ok(rows)
@@ -500,18 +739,36 @@ mod t {
     #[cfg(unix)]
     #[tokio::test]
     async fn credentials_stay_available_to_cli_but_are_removed_from_workers() {
-        let _lock=crate::ai::CLI_TEST_LOCK.lock().await;
-        let key="APOLLO_TEST_WORKER_API_KEY";std::env::set_var(key,"controlled-fixture-value");
-        let args=vec!["-c".into(),"printf '%s' \"$APOLLO_TEST_WORKER_API_KEY\"".into()];
-        let cli=run(&bash(),&args,Rq::default()).await;
-        let worker=run(&bash(),&args,Rq{strip_provider_secrets:true,..Default::default()}).await;
+        let _lock = crate::ai::CLI_TEST_LOCK.lock().await;
+        let key = "APOLLO_TEST_WORKER_API_KEY";
+        std::env::set_var(key, "controlled-fixture-value");
+        let args = vec![
+            "-c".into(),
+            "printf '%s' \"$APOLLO_TEST_WORKER_API_KEY\"".into(),
+        ];
+        let cli = run(&bash(), &args, Rq::default()).await;
+        let worker = run(
+            &bash(),
+            &args,
+            Rq {
+                strip_provider_secrets: true,
+                ..Default::default()
+            },
+        )
+        .await;
         std::env::remove_var(key);
-        assert_eq!(cli.c,0);assert_eq!(cli.o,"controlled-fixture-value");assert_eq!(worker.c,0);assert_eq!(worker.o,"");
+        assert_eq!(cli.c, 0);
+        assert_eq!(cli.o, "controlled-fixture-value");
+        assert_eq!(worker.c, 0);
+        assert_eq!(worker.o, "");
     }
 
     #[test]
     fn paginated_api_accepts_old_cli_streams_without_hiding_invalid_pages() {
-        assert_eq!(api_pages("[{\"id\":1}]\n[]\n[{\"id\":2}]").unwrap(),vec![serde_json::json!({"id":1}),serde_json::json!({"id":2})]);
+        assert_eq!(
+            api_pages("[{\"id\":1}]\n[]\n[{\"id\":2}]").unwrap(),
+            vec![serde_json::json!({"id":1}), serde_json::json!({"id":2})]
+        );
         assert!(api_pages("[]").unwrap().is_empty());
         assert!(api_pages("[{\"id\":1}]\n[{broken").is_err());
         assert!(api_pages("[]\n{\"message\":\"error\"}").is_err());
@@ -519,36 +776,65 @@ mod t {
 
     #[tokio::test]
     async fn keeps_long_output() {
-        let r = run(&bash(), &["-c".into(), "head -c 900000 /dev/zero | tr '\\0' a; echo END".into()], Rq { t: 30, keep: true, ..Default::default() }).await;
+        let r = run(
+            &bash(),
+            &[
+                "-c".into(),
+                "head -c 900000 /dev/zero | tr '\\0' a; echo END".into(),
+            ],
+            Rq {
+                t: 30,
+                keep: true,
+                ..Default::default()
+            },
+        )
+        .await;
         assert!(r.o.starts_with('a') && r.o.trim_end().ends_with("END") && r.o.len() > 900_000);
     }
 
     #[tokio::test]
     async fn utf8_stderr() {
-        let r = run(&bash(), &["-c".into(), "printf a >&2; printf '€%.0s' {1..200000} >&2".into()], Rq { t: 30, ..Default::default() }).await;
+        let r = run(
+            &bash(),
+            &[
+                "-c".into(),
+                "printf a >&2; printf '€%.0s' {1..200000} >&2".into(),
+            ],
+            Rq {
+                t: 30,
+                ..Default::default()
+            },
+        )
+        .await;
         assert!(r.e.len() <= MAXO && r.e.ends_with('€'));
     }
     #[tokio::test]
     async fn pilot_streams_large_scripts_without_exec_argument_limits() {
-        let db=crate::db::Db::mem();
-        db.ks("set",&serde_json::json!({"free_first":true}));
-        db.run("insert into hs(id,ssh,dk,raw,on_) values('local','',0,1,1)",pa![]);
-        let a=App::new(db,std::env::temp_dir(),1,"apollo-office".into());
-        let script=format!("#{}\nprintf BUNDLE_STREAM_OK\n","x".repeat(200_000));
-        let r=hxk(&a,"local",&script,10).await;
-        assert_eq!(r.c,0,"{}",r.e);
+        let db = crate::db::Db::mem();
+        db.ks("set", &serde_json::json!({"free_first":true}));
+        db.run(
+            "insert into hs(id,ssh,dk,raw,on_) values('local','',0,1,1)",
+            pa![],
+        );
+        let a = App::new(db, std::env::temp_dir(), 1, "apollo-office".into());
+        let script = format!("#{}\nprintf BUNDLE_STREAM_OK\n", "x".repeat(200_000));
+        let r = hxk(&a, "local", &script, 10).await;
+        assert_eq!(r.c, 0, "{}", r.e);
         assert!(r.o.ends_with("BUNDLE_STREAM_OK"));
-        let nested=hx(&a,"local","to 3 bash -c 'printf nested-timeout-ok'",5).await;
-        assert_eq!(nested.c,0,"{}",nested.all());assert_eq!(nested.o,"nested-timeout-ok");
+        let nested = hx(&a, "local", "to 3 bash -c 'printf nested-timeout-ok'", 5).await;
+        assert_eq!(nested.c, 0, "{}", nested.all());
+        assert_eq!(nested.o, "nested-timeout-ok");
     }
-
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
     fn clip_keeps_exit_marker_at_the_end() {
-        let s = format!("{}FAILED test_offset\n[exit 1]", "collected line\n".repeat(2000));
+        let s = format!(
+            "{}FAILED test_offset\n[exit 1]",
+            "collected line\n".repeat(2000)
+        );
         let c = super::clip(&s, 6000);
         assert!(c.len() < 6100);
         assert!(c.starts_with("collected line"));
@@ -560,10 +846,28 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn timeout_kills_child_processes() {
-        if std::process::Command::new("timeout").arg("--version").output().is_err() {
+        if std::process::Command::new("timeout")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
             return;
         }
-        let o = super::run("bash", &["-c".into(), format!("{}to 1 bash -c 'sleep 30 & wait'; echo \"[exit $?]\"", super::PRE)], super::Rq { t: 20, ..Default::default() }).await;
+        let o = super::run(
+            "bash",
+            &[
+                "-c".into(),
+                format!(
+                    "{}to 1 bash -c 'sleep 30 & wait'; echo \"[exit $?]\"",
+                    super::PRE
+                ),
+            ],
+            super::Rq {
+                t: 20,
+                ..Default::default()
+            },
+        )
+        .await;
         assert!(o.o.contains("[exit 124]"), "{}", o.all());
     }
 }

@@ -105,7 +105,10 @@ impl Db {
     }
 
     pub fn n(&self, s: &str, p: P) -> i64 {
-        self.one(s, p).and_then(|v| v.as_object().and_then(|o| o.values().next().cloned())).and_then(|v| v.as_i64()).unwrap_or(0)
+        self.one(s, p)
+            .and_then(|v| v.as_object().and_then(|o| o.values().next().cloned()))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
     }
 
     pub fn run(&self, s: &str, p: P) -> i64 {
@@ -123,7 +126,8 @@ impl Db {
     pub fn ch(&self, s: &str, p: P) -> usize {
         let c = self.0.lock().unwrap();
         crate::app::chg();
-        c.execute(s, params_from_iter(p.iter().map(|x| x.as_ref()))).unwrap_or(0)
+        c.execute(s, params_from_iter(p.iter().map(|x| x.as_ref())))
+            .unwrap_or(0)
     }
 
     pub fn kg(&self, k: &str) -> Value {
@@ -133,7 +137,10 @@ impl Db {
     }
 
     pub fn ks(&self, k: &str, v: &Value) {
-        self.run("insert into kv(k,v) values(?,?) on conflict(k) do update set v=excluded.v", crate::pa![k.to_string(), v.to_string()]);
+        self.run(
+            "insert into kv(k,v) values(?,?) on conflict(k) do update set v=excluded.v",
+            crate::pa![k.to_string(), v.to_string()],
+        );
     }
 
     pub fn kd(&self, k: &str) {
@@ -142,14 +149,21 @@ impl Db {
 
     pub fn usd(&self, r: Option<&str>) -> f64 {
         let v = match r {
-            Some(r) => self.one("select coalesce(sum(usd),0) s from cost where day=? and sub=0 and repo=?", crate::pa![day(), r.to_string()]),
-            None => self.one("select coalesce(sum(usd),0) s from cost where day=? and sub=0", crate::pa![day()]),
+            Some(r) => self.one(
+                "select coalesce(sum(usd),0) s from cost where day=? and sub=0 and repo=?",
+                crate::pa![day(), r.to_string()],
+            ),
+            None => self.one(
+                "select coalesce(sum(usd),0) s from cost where day=? and sub=0",
+                crate::pa![day()],
+            ),
         };
         v.and_then(|x| x["s"].as_f64()).unwrap_or(0.0)
     }
 
     pub fn jg(&self, id: i64) -> Option<Job> {
-        self.one("select * from jobs where id=?", crate::pa![id]).map(Job::of)
+        self.one("select * from jobs where id=?", crate::pa![id])
+            .map(Job::of)
     }
 
     pub fn jset(&self, id: i64, f: &[(&str, Value)]) {
@@ -170,7 +184,10 @@ impl Db {
         }
         p.push(Box::new(now()));
         p.push(Box::new(id));
-        self.run(&format!("update jobs set {}, t1=? where id=?", s.join(",")), p);
+        self.run(
+            &format!("update jobs set {}, t1=? where id=?", s.join(",")),
+            p,
+        );
     }
 
     pub fn jd(&self, j: &Job) {
@@ -179,8 +196,23 @@ impl Db {
 
     // Column order deliberately mirrors the jobs table; refactoring this API
     // would alter numerous pipeline call sites without improving validation.
-    #[expect(clippy::too_many_arguments, reason = "Typed insert mirrors the existing jobs schema")]
-    pub fn jnew(&self, repo: &str, num: i64, kind: &str, title: &str, url: &str, st: &str, why: &str, d: Value, pr: Option<i64>, prio: f64) -> i64 {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Typed insert mirrors the existing jobs schema"
+    )]
+    pub fn jnew(
+        &self,
+        repo: &str,
+        num: i64,
+        kind: &str,
+        title: &str,
+        url: &str,
+        st: &str,
+        why: &str,
+        d: Value,
+        pr: Option<i64>,
+        prio: f64,
+    ) -> i64 {
         let t = now();
         self.run("insert into jobs(repo,num,kind,title,url,st,why,d,pr,prio,t0,t1) values(?,?,?,?,?,?,?,?,?,?,?,?)", crate::pa![repo.to_string(), num, kind.to_string(), title.to_string(), url.to_string(), st.to_string(), why.to_string(), d.to_string(), pr, prio, t, t])
     }
@@ -213,7 +245,11 @@ impl Job {
             url: v["url"].as_str().unwrap_or("").into(),
             st: v["st"].as_str().unwrap_or("").into(),
             why: v["why"].as_str().unwrap_or("").into(),
-            d: if v["d"].is_object() { v["d"].clone() } else { json!({}) },
+            d: if v["d"].is_object() {
+                v["d"].clone()
+            } else {
+                json!({})
+            },
             pr: v["pr"].as_i64(),
             t0: v["t0"].as_i64().unwrap_or(0),
         }
@@ -237,7 +273,11 @@ impl Job {
         self.hunt() || self.ext()
     }
     pub fn wh(&self) -> String {
-        self.d["hunt"]["where"].as_str().or(self.d["ext"]["where"].as_str()).unwrap_or("").to_string()
+        self.d["hunt"]["where"]
+            .as_str()
+            .or(self.d["ext"]["where"].as_str())
+            .unwrap_or("")
+            .to_string()
     }
     pub fn orig(&self) -> String {
         if self.hunt() {
@@ -271,5 +311,9 @@ pub fn day() -> String {
 
 pub fn day0() -> i64 {
     let n = chrono::Local::now();
-    n.date_naive().and_hms_opt(0, 0, 0).and_then(|d| d.and_local_timezone(chrono::Local).single()).map(|d| d.timestamp_millis()).unwrap_or(0)
+    n.date_naive()
+        .and_hms_opt(0, 0, 0)
+        .and_then(|d| d.and_local_timezone(chrono::Local).single())
+        .map(|d| d.timestamp_millis())
+        .unwrap_or(0)
 }
