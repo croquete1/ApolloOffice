@@ -117,6 +117,14 @@
     // aisle instead of walking through a horizontal row of workstations.
     const narrow = window.matchMedia?.("(max-width: 530px)")?.matches;
     const corridorX = Math.max(12, Math.min(roomBox.width - 30, roomBox.width * .5)) - fromX;
+    // Two mobile desks may share a row: dy is then zero, so choose a
+    // gutter outside both desks before walking horizontally.
+    const sameMobileRow = narrow && Math.abs(dy) < Math.min(a.height, b.height) * .25;
+    const rowTop = Math.min(a.top, b.top) - roomBox.top;
+    const rowBottom = Math.max(a.top + a.height, b.top + b.height) - roomBox.top;
+    const gutterY = (roomBox.height - rowBottom > 14
+      ? Math.min(roomBox.height - 10, rowBottom + 10)
+      : Math.max(10, rowTop - 10)) - fromY;
     let finished = false;
     const finish = () => {
       if (finished) return;
@@ -131,11 +139,14 @@
     if (typeof visitor.animate !== "function") { finish(); return; }
     let animation;
     try {
-      const route = narrow
-        ? [[0, 0], [corridorX, 0], [corridorX, dy * .5], [corridorX, dy],
-           [dx, dy], [dx, dy], [corridorX, dy], [corridorX, 0], [0, 0]]
-        : [[0, 0], [0, corridorY], [dx * .55, corridorY], [dx, corridorY],
-           [dx, dy], [dx, dy], [dx, corridorY], [dx * .45, corridorY], [0, 0]];
+      const route = sameMobileRow
+        ? [[0, 0], [0, gutterY], [corridorX, gutterY], [dx, gutterY],
+           [dx, dy], [dx, dy], [dx, gutterY], [0, gutterY], [0, 0]]
+        : narrow
+          ? [[0, 0], [corridorX, 0], [corridorX, dy * .5], [corridorX, dy],
+             [dx, dy], [dx, dy], [corridorX, dy], [corridorX, 0], [0, 0]]
+          : [[0, 0], [0, corridorY], [dx * .55, corridorY], [dx, corridorY],
+             [dx, dy], [dx, dy], [dx, corridorY], [0, corridorY], [0, 0]];
       const offsets = [0, .16, .33, .44, .54, .65, .75, .88, 1];
       const frames = route.map(([x, y], i) => ({
         transform: "translate(" + x + "px," + y + "px) scaleX(" + (i < 5 ? direction : -direction) + ")",
@@ -185,7 +196,12 @@
   });
 
   const onMotionChange = () => { if (!motionControl.checked) cancel(); };
-  const onReducedMotion = () => { if (reduceMotion.matches) cancel(); };
+  const onReducedMotion = () => {
+    if (reduceMotion.matches) {
+      cancel();
+      window.AOOfficeV2?.clearTransitions(stage);
+    }
+  };
   const onVisibilityChange = () => { if (document.hidden) cancel(); };
   /**
    * Tear down animation observers and restore the original dashboard cleanly.
