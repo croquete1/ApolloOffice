@@ -150,11 +150,12 @@
   stations.innerHTML = roles.map((role, i) => {
     return '<button class="ao-station" type="button" data-role="' + role + '" data-mode="unknown" style="--agent-accent:' + colors[i] + '" aria-label="Ver agente ' + names[role] + ' · sem dados">' +
       '<span class="ao-monitor"><span class="ao-screen"><i></i><i></i><i></i><i></i></span><span class="ao-result-mark" aria-hidden="true"></span></span>' +
-      '<span class="ao-chair"></span><span class="ao-avatar-holder">' + character(i) + '</span>' +
+      '<span class="ao-chair"></span><span class="ao-avatar-holder">' + (window.AOOfficeV2?.character(i) || character(i)) + '</span>' +
       '<span class="ao-desk"><span class="ao-keyboard"></span></span>' +
       '<span class="ao-station-name">' + names[role] + '</span><span class="ao-station-state">A ligar…</span>' +
       '</button>';
   }).join("");
+  window.AOOfficeV2?.decorate(document.querySelector('.ao-office'), stations);
   const stationNodes = Object.fromEntries(roles.map((role) => [role, stations.querySelector('[data-role="' + role + '"]')]));
   // Arrow navigation follows the same 5/2-column layout used in CSS.
   // Buttons remain individually tabbable; arrows are an optional shortcut.
@@ -277,6 +278,7 @@
       }
       if (state === "work" && activeJob != null) el.dataset.lastJob = String(activeJob);
       else if (state !== "work") delete el.dataset.lastJob;
+      window.AOOfficeV2?.onAgentState(el, el.dataset.mode, state);
       el.dataset.mode = state;
       // A subtle screen reaction only when a genuinely new command is reported.
       const latestCommand = lastCommands(w)[0];
