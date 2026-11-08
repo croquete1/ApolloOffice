@@ -444,9 +444,12 @@
   byId("aoPause").addEventListener("click", () => byId("bPause")?.click());
   let healthy = true;
   let unsubscribe = () => {};
+  let staleTimer = null;
+  const startedAt = Date.now();
   const fallback = (error) => {
     healthy = false;
     unsubscribe();
+    if (staleTimer !== null) clearInterval(staleTimer);
     console.error("Apollo Control Room: reverting to original interface", error);
     app.remove();
     legacy.replaceWith(...Array.from(legacy.children));
@@ -462,8 +465,9 @@
     try { render(A.S); } catch (error) { fallback(error); }
   }
   // Keep the connection label honest if WebSocket and polling stop updating.
-  setInterval(() => {
-    if (!lastStateAt || Date.now() - lastStateAt <= 12000) return;
+  staleTimer = setInterval(() => {
+    if (!healthy || !app.isConnected) { clearInterval(staleTimer); return; }
+    if (Date.now() - (lastStateAt || startedAt) <= 12000) return;
     const state = byId("aoOfficeStatus");
     app.classList.add("ao-data-stale");
     state.className = "ao-status-chip is-paused";
