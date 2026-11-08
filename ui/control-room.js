@@ -321,7 +321,13 @@
       const recent = enabled && !unavailable && age >= 0 && age < 120_000;
       const status = !enabled ? "Desativada" : unavailable ? "Indisponível" : recent ? "Dados recentes" : "Por confirmar";
       let pieces = [];
-      if (Number.isFinite(Number(info.cpu)) && Number(info.cpu)>0) pieces.push(info.cpu + " núcleos");
+      if (Number.isFinite(Number(info.cpu)) && Number(info.cpu) > 0) pieces.push(info.cpu + " núcleos");
+      if (info.load != null && Number.isFinite(Number(info.load)) && Number(info.load) >= 0) {
+        pieces.push("Carga " + Number(info.load).toLocaleString("pt-PT", {maximumFractionDigits:2}));
+      }
+      if (info.temp != null && Number.isFinite(Number(info.temp))) {
+        pieces.push(Number(info.temp).toLocaleString("pt-PT", {maximumFractionDigits:1}) + " °C");
+      }
       if (Array.isArray(info.mem) && Number(info.mem[0])>0) {
         const used = (Number(info.mem[0])-Number(info.mem[1]))/1024;
         pieces.push(used.toFixed(1) + " / " + (Number(info.mem[0])/1024).toFixed(1) + " GB RAM");
