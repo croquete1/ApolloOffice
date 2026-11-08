@@ -86,7 +86,7 @@ test("live events use an isolated subscription channel", () => {
 });
 
 test("actual command and mood telemetry drive visual reactions", () => {
-  assert.match(modern, /w\.cmds/);
+  assert.match(modern, /worker\.cmds/);
   assert.match(modern, /lastCommands\(w\)/);
   assert.match(modern, /el\.dataset\.lastCommand !== commandKey/);
   assert.match(modern, /Object\.hasOwn\(resultText, w\.mood\)/);
