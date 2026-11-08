@@ -156,6 +156,26 @@
       '</button>';
   }).join("");
   const stationNodes = Object.fromEntries(roles.map((role) => [role, stations.querySelector('[data-role="' + role + '"]')]));
+  // Arrow navigation follows the same 5/2-column layout used in CSS.
+  // Buttons remain individually tabbable; arrows are an optional shortcut.
+  stations.addEventListener("keydown", (event) => {
+    if (event.altKey || event.ctrlKey || event.metaKey) return;
+    const station = event.target.closest?.("[data-role]");
+    if (!station || !stations.contains(station)) return;
+    const index = roles.indexOf(station.dataset.role);
+    if (index < 0) return;
+    const columns = window.matchMedia?.("(max-width: 530px)")?.matches ? 2 : 5;
+    const offsets = {
+      ArrowLeft: -1, ArrowRight: 1,
+      ArrowUp: -columns, ArrowDown: columns
+    };
+    const offset = offsets[event.key];
+    if (!offset) return;
+    const next = index + offset;
+    if (next < 0 || next >= roles.length) return;
+    event.preventDefault();
+    stationNodes[roles[next]].focus({preventScroll:true});
+  });
   // One-shot visual reactions must not override normal breathing/typing forever.
   const clearReactions = () => {
     for (const node of Object.values(stationNodes)) {
