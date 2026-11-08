@@ -114,7 +114,7 @@ class Handler(SimpleHTTPRequestHandler):
     var ready = document.getElementById("aoControlRoom") &&
       document.querySelector('.ao-station[data-role="fixer"]') &&
       document.getElementById("aoMetricWorkers") &&
-      /\\d+\\s*\\/\\s*10/.test(document.getElementById("aoMetricWorkers").textContent);
+      document.getElementById("aoMetricWorkers").textContent.includes(" / 10");
     if (ready || Date.now() - started >= 3500) verify();
     else setTimeout(waitForDashboard, 100);
   })();
