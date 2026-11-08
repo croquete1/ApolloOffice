@@ -219,6 +219,13 @@
   const paused = (s) => Boolean(s?.o?.man || s?.o?.pause);
   // The server already normalizes persistent background jobs into w[role].st
   // (web.rs::state). Queue membership alone is not proof of worker activity.
+  /**
+   * Resolve a worker's visible state from the authoritative backend snapshot.
+   * Queued jobs alone are never treated as evidence of active execution.
+   * @param {object} s Latest /api/state payload.
+   * @param {string} role Worker identifier.
+   * @returns {"work"|"idle"|"sleep"|"paused"|"unknown"}
+   */
   const mode = (s, role) => {
     if (!s?.w || !Object.hasOwn(s.w, role)) return "unknown";
     const w = s.w[role] || {};
@@ -317,6 +324,11 @@
       '<span class="ao-row-badge">' + escapeHTML(badge) + '</span></button>';
   };
   const filtered = (items) => safeArray(items).filter((x) => !selectedRepo || x.repo === selectedRepo);
+  /**
+   * Render the limited task, pull-request and activity previews.
+   * Preserves keyboard focus on an equivalent row after live updates.
+   * @param {object} s Latest server state.
+   */
   const renderLists = (s) => {
     const q = filtered(s.q), prs = filtered(s.pr);
     const totals = countTotals(s);
@@ -401,6 +413,10 @@
     '</span><strong>' + label +
     '</strong><span class="ao-pipeline-value">—</span></div>'
   ).join("");
+  /**
+   * Present full job totals grouped by the backend's ten distinct statuses.
+   * @param {object} s Server state with untruncated s.n status counts.
+   */
   const renderPipeline = (s) => {
     const counts = s.n && typeof s.n === "object" ? s.n : {};
     const values = pipelineSteps.map(({statuses}) =>
@@ -423,6 +439,11 @@
       .reduce((total, [, amount]) => total + Math.max(0, Number(amount) || 0), 0);
     return {active, done: Math.max(0, Number(counts.done) || 0)};
   };
+  /**
+   * Draw 30 daily UTC buckets to match backend mergedAt grouping.
+   * The source reports UTC dates; local calendar dates would shift buckets.
+   * @param {object} s Server state containing s.mg merge history.
+   */
   const renderMerges = (s) => {
     // The Rust backend groups GitHub mergedAt values by UTC date.
     const now = Date.now();
@@ -441,6 +462,11 @@
       days.map((d) => '<span title="' + d.date + ': ' + d.count + ' PRs" style="height:' + Math.max(2,d.count/max*100) + '%" class="' + (d.count?"ao-bar-live":"ao-bar-zero") + '"></span>').join("") +
       '</div><div class="ao-trend-labels"><span>Há 30 dias</span><span>Hoje (UTC)</span></div>';
   };
+  /**
+   * Show measured host telemetry only while its heartbeat and state are fresh.
+   * Previous readings are labeled as history, never current performance.
+   * @param {object} s Server state with hosts, telemetry and connectivity.
+   */
   const renderMachines = (s) => {
     const signature = JSON.stringify([s.hs, s.hst, s.o?.net, app.classList.contains("ao-data-stale"), Math.floor(Date.now() / 60000)]);
     if (signature === lastMachineSignature) return;
@@ -502,6 +528,11 @@
     byId("aoAgentSummary").textContent = "Sem atualização recente";
     if (snapshot) renderMachines(snapshot);
   };
+  /**
+   * Reconcile the modern dashboard with a new authoritative state snapshot.
+   * Unknown or invalid snapshots do not overwrite the last valid UI.
+   * @param {object} s /api/state payload.
+   */
   const render = (s) => {
     if (!s || typeof s !== "object" || s.error) return;
     snapshot = s;
@@ -524,6 +555,11 @@
     if (selected) showAgent(selected, false);
   };
   const overlay = byId("aoAgentOverlay");
+  /**
+   * Open or refresh an accessible read-only detail view for one agent.
+   * @param {string} role Authorized agent key.
+   * @param {boolean} focus Whether to move keyboard focus to the dialog.
+   */
   const showAgent = (role, focus = true) => {
     if (!snapshot || !roles.includes(role)) return;
     const w = snapshot.w?.[role] || {}, stage = mode(snapshot,role);
