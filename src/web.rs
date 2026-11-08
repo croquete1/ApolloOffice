@@ -34,6 +34,17 @@ fn er(c: StatusCode, m: &str) -> Response<Body> {
     rs(c, "application/json", json!({"error": m}).to_string())
 }
 
+// Parse OAuth query values as application/x-www-form-urlencoded, including
+// percent-escapes and plus signs, without accepting a similarly named key.
+fn query_value(query: &str, name: &str) -> String {
+    reqwest::Url::parse(&format!("http://localhost/?{query}"))
+        .ok()
+        .and_then(|url| url.query_pairs()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.into_owned()))
+        .unwrap_or_default()
+}
+
 fn ck(h: &HeaderMap, n: &str) -> Option<String> {
     h.get_all("cookie").iter().filter_map(|v| v.to_str().ok()).flat_map(|s| s.split(';')).map(|s| s.trim()).find_map(|s| s.strip_prefix(&format!("{n}=")).map(String::from))
 }
@@ -146,7 +157,7 @@ async fn checks(a: &Ax) -> Value {
 
 fn cfg(a: &Ax) -> Value {
     let rs: Vec<Value> = a.db.all("select * from rp order by full", pa![]).into_iter().map(|mut r| { let f = r["full"].as_str().unwrap_or("").to_string(); r["st"] = rst(a, &f); r }).collect();
-    json!({"repos": rs, "hosts": a.db.all("select * from hs order by id='local' desc, id", pa![]), "set": a.set(), "data": a.dd.display().to_string(), "auto": crate::sys::autostart_on(&a.dd), "prov": crate::prov::status(a), "google": crate::goog::linked(a)["email"], "upd": a.db.kg("upd"), "asset": crate::upd::asset(), "api": {"on": a.db.kg("api")["h"].is_string(), "t0": a.db.kg("api")["t0"], "last": a.db.kg("api")["last"], "port": a.port}, "hook": {"on": a.db.kg("hook")["h"].is_string(), "t0": a.db.kg("hook")["t0"]}})
+    json!({"repos": rs, "hosts": a.db.all("select * from hs order by id='local' desc, id", pa![]), "set": a.set(), "data": a.dd.display().to_string(), "auto": crate::sys::autostart_on(&a.dd), "prov": crate::prov::status(a), "google": crate::goog::linked(a)["email"], "upd": crate::upd::info(a), "asset": crate::upd::asset(), "api": {"on": a.db.kg("api")["h"].is_string(), "t0": a.db.kg("api")["t0"], "last": a.db.kg("api")["last"], "port": a.port}, "hook": {"on": a.db.kg("hook")["h"].is_string(), "t0": a.db.kg("hook")["t0"]}})
 }
 
 fn rst(a: &Ax, r: &str) -> Value {
@@ -219,7 +230,7 @@ fn sets(a: &Ax, b: &Value) {
         s["hunters"] = json!(x.clamp(0, 12));
     }
     if let Some(x) = b["updates"].as_bool() {
-        s["updates"] = json!(x);
+        s["updates"] = json!(x && crate::upd::configured());
     }
     if let Some(x) = b["cckc"].as_str() {
         if regex::Regex::new(r"^[A-Za-z0-9._ -]{0,100}$").unwrap().is_match(x.trim()) {
@@ -1007,13 +1018,16 @@ pub async fn h(State(a): State<Ax>, req: Request<Body>) -> Response<Body> {
         return er(StatusCode::MISDIRECTED_REQUEST, "use http://127.0.0.1");
     }
     if p == "/auth/google" && m == Method::GET {
+        if !crate::goog::available() {
+            return page("Google sign-in is disabled until APOLLO_OFFICE_GOOGLE_SECRET is configured. Use <code>apollo-office login-link</code> instead.");
+        }
         if crate::goog::linked(&a)["sub"].is_null() {
             return page("No Google account is connected yet. Log in with <code>apollo-office login-link</code>, then connect Google in Settings.");
         }
         return Response::builder().status(StatusCode::SEE_OTHER).header("location", crate::goog::start(&a, "login")).header("cache-control", "no-store").body(Body::empty()).unwrap();
     }
     if p == "/auth/google/cb" && m == Method::GET {
-        let qv = |k: &str| q.split('&').find_map(|x| x.strip_prefix(&format!("{k}="))).map(|v| v.replace("%2F", "/").replace("%2f", "/")).unwrap_or_default();
+        let qv = |k: &str| query_value(&q, k);
         if !qv("error").is_empty() {
             return page("Google sign-in was cancelled. <a href='/'>Back</a>");
         }
@@ -1143,5 +1157,15 @@ mod t {
         assert_eq!(a.db.jg(x["id"].as_i64().unwrap()).unwrap().d["ext"]["n"], 2);
         let z = rep(&a, &json!({"repo": "o/r", "title": "t", "body": "b", "fp": "sentry:2"})).unwrap();
         assert_ne!(x["id"], z["id"]);
+    }
+
+    #[test]
+    fn google_callback_decodes_encoded_authorization_code() {
+        assert_eq!(query_value("code=a%2Fb%2Bc%3D&state=123", "code"), "a/b+c=");
+        assert_eq!(query_value("code=a+b&state=x%252Fy", "code"), "a b");
+        assert_eq!(query_value("code=a&code=b&state=x", "code"), "a");
+        assert_eq!(query_value("error=access_denied", "code"), "");
+        assert_eq!(query_value("other_code=malicious&code=safe", "code"), "safe");
+        assert_eq!(query_value("state=s%2Bt%3D", "state"), "s+t=");
     }
 }
