@@ -24,7 +24,7 @@
     return d && !Number.isNaN(d.getTime()) ? d.toLocaleTimeString("pt-PT", {hour:"2-digit",minute:"2-digit"}) : "—";
   };
   const html = [
-    '<div class="ao-app" id="aoControlRoom">',
+    '<div class="ao-app" id="aoControlRoom" lang="pt-PT">',
     '  <aside class="ao-sidebar">',
     '    <div class="ao-brand"><span class="ao-logo" aria-hidden="true">A</span><span><strong>Apollo Office</strong><small>Control Center</small></span></div>',
     '    <nav class="ao-navigation" aria-label="Navegação principal">',
@@ -424,20 +424,22 @@
     return {active, done: Math.max(0, Number(counts.done) || 0)};
   };
   const renderMerges = (s) => {
-    const signature = JSON.stringify([s.mg, new Date().toDateString()]);
+    // The Rust backend groups GitHub mergedAt values by UTC date.
+    const now = Date.now();
+    const todayUtc = new Date(now).toISOString().slice(0, 10);
+    const signature = JSON.stringify([s.mg, todayUtc]);
     if (signature === lastMergeSignature) return;
     lastMergeSignature = signature;
     const counts = new Map(safeArray(s.mg).map((item) => [item.d, Number(item.n) || 0]));
     const days = [];
     for (let i=29;i>=0;i--) {
-      const date = new Date(); date.setHours(12,0,0,0); date.setDate(date.getDate()-i);
-      const key = [date.getFullYear(), String(date.getMonth()+1).padStart(2,"0"), String(date.getDate()).padStart(2,"0")].join("-");
+      const key = new Date(now - i * 86400000).toISOString().slice(0, 10);
       days.push({date:key,count:counts.get(key)||0});
     }
     const max = Math.max(1,...days.map((d)=>d.count));
     byId("aoMergeChart").innerHTML = '<div class="ao-merge-graph" role="img" aria-label="Gráfico de integrações dos últimos 30 dias">' +
       days.map((d) => '<span title="' + d.date + ': ' + d.count + ' PRs" style="height:' + Math.max(2,d.count/max*100) + '%" class="' + (d.count?"ao-bar-live":"ao-bar-zero") + '"></span>').join("") +
-      '</div><div class="ao-trend-labels"><span>Há 30 dias</span><span>Hoje</span></div>';
+      '</div><div class="ao-trend-labels"><span>Há 30 dias</span><span>Hoje (UTC)</span></div>';
   };
   const renderMachines = (s) => {
     const signature = JSON.stringify([s.hs, s.hst, s.o?.net, app.classList.contains("ao-data-stale"), Math.floor(Date.now() / 60000)]);
