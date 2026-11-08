@@ -378,6 +378,12 @@
 
   let last = performance.now();
   const frame = () => {
+    // The modern office has its own lightweight animations. Preserve the legacy
+    // canvas for fallback, but avoid drawing hidden pixel art every frame.
+    if (window.AO?.modernRoom) {
+      setTimeout(() => requestAnimationFrame(frame), 1500);
+      return;
+    }
     const t = (performance.now() - t0) / 1000;
     c.imageSmoothingEnabled = false;
     fc.imageSmoothingEnabled = false;
