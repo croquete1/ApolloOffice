@@ -149,7 +149,7 @@
   const stations = byId("aoStations");
   stations.innerHTML = roles.map((role, i) => {
     return '<button class="ao-station" type="button" data-role="' + role + '" data-mode="idle" style="--agent-accent:' + colors[i] + '" aria-label="Ver agente ' + names[role] + '">' +
-      '<span class="ao-monitor"><span class="ao-screen"><i></i><i></i><i></i><i></i></span></span>' +
+      '<span class="ao-monitor"><span class="ao-screen"><i></i><i></i><i></i><i></i></span><span class="ao-result-mark" aria-hidden="true"></span></span>' +
       '<span class="ao-chair"></span><span class="ao-avatar-holder">' + character(i) + '</span>' +
       '<span class="ao-desk"><span class="ao-keyboard"></span></span>' +
       '<span class="ao-station-name">' + names[role] + '</span><span class="ao-station-state">Sem dados</span>' +
@@ -189,6 +189,9 @@
     return w.st === "sleep" ? "sleep" : "idle";
   };
   const statusText = {work:"A trabalhar",idle:"Disponível",sleep:"Em repouso",paused:"Em pausa"};
+  const resultText = {ok:"Último resultado: OK",sad:"Último resultado: problema",err:"Último resultado: erro"};
+  const lastCommands = (worker) => safeArray(worker.cmds).filter((entry) =>
+    Array.isArray(entry) && entry.length >= 2 && typeof entry[1] === "string").slice(-4).reverse();
   const updateAgents = (s) => {
     let working = 0;
     const list = byId("aoAgentList");
@@ -206,8 +209,11 @@
       }
       if (w.job) el.dataset.lastJob = String(w.job);
       el.dataset.mode = state;
+      const result = Object.hasOwn(resultText, w.mood) ? w.mood : "";
+      el.dataset.mood = result;
+      el.querySelector(".ao-result-mark").textContent = result === "ok" ? "✓" : result === "err" ? "!" : result === "sad" ? "!" : "";
       el.querySelector(".ao-station-state").textContent = statusText[state];
-      el.title = names[role] + " · " + statusText[state] + (w.say ? " · " + w.say : "");
+      el.title = [names[role], statusText[state], resultText[result], w.say].filter(Boolean).join(" · ");
       const status = list.querySelector('[data-agent="' + role + '"] .ao-agent-status');
       status.className = "ao-agent-status ao-state-" + state;
       status.textContent = statusText[state];
@@ -330,7 +336,8 @@
     const jobs = safeArray(snapshot.q);
     const job = (w.job != null ? jobs.find((j) => String(j.id) === String(w.job)) : null)
       || jobs.find((j) => workerStages[role]?.includes(j.st));
-    const signature = JSON.stringify([role, stage, w.md, w.tk, w.say, job?.id, job?.title]);
+    const recent = lastCommands(w);
+    const signature = JSON.stringify([role, stage, w.md, w.tk, w.say, w.mood, recent, job?.id, job?.title]);
     if (!focus && signature === lastDetailSignature) return;
     lastDetailSignature = signature;
     const rows = [
@@ -339,12 +346,28 @@
       ["Tokens hoje",formatNum(w.tk)],
       ["Atividade",w.say || "Sem informação adicional"]
     ];
+    if (resultText[w.mood]) rows.push(["Resultado recente",resultText[w.mood].replace("Último resultado: ", "")]);
     if (job) rows.push(["Tarefa",job.title]);
     byId("aoDetailBody").replaceChildren();
     for (const [title,value] of rows) {
       const row = document.createElement("div"), t = document.createElement("span"), v = document.createElement("strong");
       row.className = "ao-detail-row"; t.textContent = title; v.textContent = value;
       row.append(t,v); byId("aoDetailBody").appendChild(row);
+    }
+    if (recent.length) {
+      const section = document.createElement("section"), heading = document.createElement("h3"), list = document.createElement("ol");
+      section.className = "ao-command-section";
+      heading.textContent = "Comandos recentes";
+      list.className = "ao-command-list";
+      for (const [when, cmd] of recent) {
+        const item = document.createElement("li"), time = document.createElement("time"), label = document.createElement("span");
+        time.textContent = datum(when);
+        label.textContent = cmd.slice(0, 160);
+        item.append(time,label);
+        list.appendChild(item);
+      }
+      section.append(heading,list);
+      byId("aoDetailBody").appendChild(section);
     }
     const jb = byId("aoDetailJob"), mb = byId("aoDetailModel");
     jb.hidden = !job || typeof A.job !== "function";
