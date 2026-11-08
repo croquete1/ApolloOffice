@@ -668,6 +668,8 @@
     app.remove();
     legacy.replaceWith(...Array.from(legacy.children));
     document.body.classList.remove("ao-enabled");
+    document.body.classList.add("ao-fallback-no-pixel");
+    A.disablePixelArt = true;
     A.modernRoom = false;
   };
   // Keep legacy onState intact. State subscribers are isolated by o.js.
