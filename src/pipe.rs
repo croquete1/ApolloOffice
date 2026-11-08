@@ -375,7 +375,7 @@ pub fn fails(o: &str) -> Vec<String> {
 }
 
 pub fn bare(t: &str) -> String {
-    t.rsplit(|c| c == ':' || c == '.' || c == '/' || c == '>' || c == ' ').find(|x| !x.trim().is_empty()).unwrap_or(t).trim().to_string()
+    t.rsplit([':', '.', '/', '>', ' ']).find(|x| !x.trim().is_empty()).unwrap_or(t).trim().to_string()
 }
 
 pub const CE: &str = r"error\[E\d+\]|could not compile|error: no test target|no such command|SyntaxError|ModuleNotFoundError|ImportError while|cannot find module|Cannot find module|ERROR collecting|error TS\d{4}|no tests ran|No tests found|build failed|\[setup failed\]|undefined: |command not found|(?m:^[^\n]*\.java:\d+: error:)|ClassNotFoundException|NoClassDefFoundError";
@@ -527,6 +527,7 @@ async fn ci0(a: &Ax, j: &mut Job) -> R<String> {
     j.d["known"] = json!([]);
     let mut ie = 0;
     let mut it = false;
+    let infra_error = Regex::new(r"No space left on device|failed to unpack package|invalid gzip header|corrupt deflate stream|failed to download from|ECONNRESET|ETIMEDOUT|Could not resolve host|EAI_AGAIN").unwrap();
     loop {
         a.say("ci", &format!("{c} running for {}", j.tag()), Some(j.id));
         let t0 = now();
@@ -544,7 +545,7 @@ async fn ci0(a: &Ax, j: &mut Job) -> R<String> {
             return Ok(format!("CI aborted after {} min (timeout)", CIT / 60));
         }
         a.say("ci", &format!("red (exit {ec}) after {m} min"), Some(j.id));
-        let inf = if lost(&o) { Some("connection lost".to_string()) } else { Regex::new(r"No space left on device|failed to unpack package|invalid gzip header|corrupt deflate stream|failed to download from|ECONNRESET|ETIMEDOUT|Could not resolve host|EAI_AGAIN").unwrap().find(&o).map(|m| m.as_str().to_string()) };
+        let inf = if lost(&o) { Some("connection lost".to_string()) } else { infra_error.find(&o).map(|m| m.as_str().to_string()) };
         if let Some(m) = inf {
             if ie < 2 {
                 ie += 1;
@@ -785,6 +786,7 @@ fn fixp(a: &Ax, j: &Job, fb: &str) -> String {
     let ci = rp(a, &j.repo)["ci"].as_str().unwrap_or("").to_string();
     let h = if ci.is_empty() { h } else { format!("{h} The repository's full test command is `{ci}`; your test_cmd runs in a fresh shell from the repo root, so use the same environment (for example the same virtualenv or package manager).") };
     let h = if j.feat() { format!("{h}\n{FEAT}") } else { h };
+    let instructions = format!("{}{}", rules(a, j), crate::quality::context(j));
     format!(
         "{h}\n{}:\n{}\n\n{} (from a previous agent): {}{}{}",
         j.orig(),
@@ -792,7 +794,7 @@ fn fixp(a: &Ax, j: &Job, fb: &str) -> String {
         if j.feat() { "Implementation plan" } else { "Repro result" },
         j.d["repro"],
         if fb.is_empty() { String::new() } else { format!("\n\nYour previous attempt was rejected by the pipeline:\n{fb}\nThe branch still contains your previous commits; fix the problems and make sure there are exactly two commits (test, fix) on top of the base commit.") },
-        format!("{}{}",rules(a, j),crate::quality::context(j))
+        instructions
     )
 }
 
@@ -1744,8 +1746,7 @@ fn mk_hunt(a: &Ax) -> bool {
 
 async fn lane(a: Ax, h: String, k: i64) {
     let key = format!("{h}#{k}");
-    loop {
-        let Some(x) = ho(&a, &h) else { break };
+    while let Some(x) = ho(&a, &h) {
         if !x.on || k > x.ln {
             break;
         }
