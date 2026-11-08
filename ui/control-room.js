@@ -42,7 +42,7 @@
     '    <div class="ao-sidebar-footer"><span class="ao-presence-dot"></span><span id="aoConnection">A estabelecer ligação…</span></div>',
     '  </aside>',
     '  <div class="ao-workspace">',
-    '    <header class="ao-topbar"><div class="ao-top-heading"><strong>Visão geral</strong><span>Operações e agentes em tempo real</span></div>',
+    '    <header class="ao-topbar"><div class="ao-top-heading"><strong>Visão geral</strong><span>Operações e agentes em tempo real · <time id="aoUpdatedAt" aria-label="Último estado recebido">A aguardar dados</time></span></div>',
     '      <div class="ao-top-actions"><span id="aoOfficeStatus" class="ao-status-chip" role="status" aria-live="polite">A ligar…</span><button id="aoPause" type="button" class="ao-outline-button" disabled>Pausar escritório</button></div>',
     '    </header>',
     '    <main class="ao-content" id="aoOverview">',
@@ -218,7 +218,14 @@
     let working = 0;
     const list = byId("aoAgentList");
     if (!list.children.length) {
-      list.innerHTML = roles.map((role, i) => '<button type="button" class="ao-agent-row" data-agent="' + role + '"><span class="ao-agent-color" style="background:' + colors[i] + '"></span><span class="ao-agent-title">' + escapeHTML(names[role]) + '</span><span class="ao-agent-status">Sem dados</span></button>').join("");
+      list.innerHTML = roles.map((role, i) =>
+        '<button type="button" class="ao-agent-row" data-agent="' + role + '">' +
+        '<span class="ao-agent-color" style="background:' + colors[i] + '"></span>' +
+        '<span class="ao-agent-meta"><span class="ao-agent-title">' + escapeHTML(names[role]) +
+        '</span><span class="ao-agent-activity">A aguardar dados</span></span>' +
+        '<span class="ao-agent-end"><span class="ao-agent-status">Sem dados</span>' +
+        '<span class="ao-agent-model"></span></span></button>'
+      ).join("");
     }
     for (let i=0;i<roles.length;i++) {
       const role = roles[i], w = s.w?.[role] || {}, el = stationNodes[role], state = mode(s, role);
@@ -263,9 +270,20 @@
       el.title = [names[role], statusText[state], resultText[result], w.say].filter(Boolean).join(" · ");
       const accessible = ["Ver agente " + names[role], statusText[state], resultText[result]].filter(Boolean).join(". ");
       if (el.getAttribute("aria-label") !== accessible) el.setAttribute("aria-label", accessible);
-      const status = list.querySelector('[data-agent="' + role + '"] .ao-agent-status');
-      status.className = "ao-agent-status ao-state-" + state;
-      status.textContent = statusText[state];
+      const row = list.querySelector('[data-agent="' + role + '"]');
+      const status = row.querySelector(".ao-agent-status");
+      const activity = row.querySelector(".ao-agent-activity");
+      const model = row.querySelector(".ao-agent-model");
+      const current = typeof w.say === "string" ? w.say.trim() : "";
+      const activityText = current || (state === "work" ? "Sem descrição da tarefa" : "Sem atividade registada");
+      const modelText = w.md && role !== "ci" && role !== "submit" && typeof A.mdn === "function"
+        ? String(A.mdn(w.md)) : "";
+      if (status.className !== "ao-agent-status ao-state-" + state) status.className = "ao-agent-status ao-state-" + state;
+      if (status.textContent !== statusText[state]) status.textContent = statusText[state];
+      if (activity.textContent !== activityText) activity.textContent = activityText;
+      if (activity.title !== activityText) activity.title = activityText;
+      if (model.textContent !== modelText) model.textContent = modelText;
+      model.hidden = !modelText;
     }
     byId("aoMetricWorkers").textContent = working + " / " + roles.length;
     byId("aoAgentSummary").textContent = working + " em execução · " + (roles.length - working) + " restantes";
@@ -425,6 +443,10 @@
     if (!s || typeof s !== "object" || s.error) return;
     snapshot = s;
     lastStateAt = Date.now();
+    const serverTime = typeof s.t === "number" && Number.isFinite(s.t) ? s.t : null;
+    const timeLabel = serverTime ? "Atualizado às " + datum(serverTime) : "Atualização recebida";
+    const timeElement = byId("aoUpdatedAt");
+    if (timeElement.textContent !== timeLabel) timeElement.textContent = timeLabel;
     app.classList.remove("ao-data-stale");
     const isPaused = paused(s), isOffline = offline(s), isWarn = !!s.o?.warn;
     const state = byId("aoOfficeStatus");
@@ -556,5 +578,6 @@
     state.className = "ao-status-chip is-paused";
     if (state.textContent !== "Dados desatualizados") state.textContent = "Dados desatualizados";
     byId("aoConnection").textContent = "Sem atualizações recentes";
+    byId("aoUpdatedAt").textContent = "Sem atualização recente";
   }, 5000);
 })();
