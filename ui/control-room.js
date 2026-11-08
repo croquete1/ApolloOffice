@@ -76,8 +76,8 @@
     '        </article>',
     '      </section>',
     '      <section class="ao-operations-grid" aria-label="Operações">',
-    '        <article class="ao-panel" id="aoTasks"><div class="ao-panel-heading"><div><h2>Tarefas em aberto</h2><p>Fluxo de trabalho</p></div></div><div id="aoTasksList" class="ao-list"></div></article>',
-    '        <article class="ao-panel" id="aoPulls"><div class="ao-panel-heading"><div><h2>Pull Requests</h2><p>Revisão e integração</p></div></div><div id="aoPRList" class="ao-list"></div></article>',
+    '        <article class="ao-panel" id="aoTasks" tabindex="-1"><div class="ao-panel-heading"><div><h2>Tarefas em aberto</h2><p>Fluxo de trabalho</p></div></div><div id="aoTasksList" class="ao-list"></div></article>',
+    '        <article class="ao-panel" id="aoPulls" tabindex="-1"><div class="ao-panel-heading"><div><h2>Pull Requests</h2><p>Revisão e integração</p></div></div><div id="aoPRList" class="ao-list"></div></article>',
     '        <article class="ao-panel" id="aoActivity"><div class="ao-panel-heading"><div><h2>Atividade recente</h2><p>Eventos do sistema</p></div></div><div id="aoEventList" class="ao-list"></div></article>',
     '      </section>',
     '      <section class="ao-bottom-grid" aria-label="Métricas adicionais">',
@@ -305,6 +305,16 @@
     const signature = JSON.stringify([selectedRepo, q, prs, safeArray(s.ev).slice(0, 8)]);
     if (signature === lastListSignature) return;
     lastListSignature = signature;
+    // A backend update should not unexpectedly reset keyboard navigation.
+    // Capture only a focused work item, never an unrelated control.
+    const active = document.activeElement;
+    const focusedParent = active?.closest?.("#aoTasksList, #aoPRList");
+    const focusedAttr = focusedParent && active.matches?.("[data-job], [data-pr-url]")
+      ? (active.hasAttribute("data-job") ? "data-job" : "data-pr-url") : null;
+    const focusKey = focusedAttr ? {
+      parent: focusedParent.id, attribute: focusedAttr,
+      value: active.getAttribute(focusedAttr)
+    } : null;
     byId("aoTasksList").innerHTML = q.length ? q.slice(0, 7).map((j) =>
       rowHTML(j.title, j.repo + (j.num ? " · #" + j.num : ""), stageLabels[j.st] || j.st, "data-job", j.id)).join("") :
       '<p class="ao-empty">Sem tarefas em aberto.</p>';
@@ -315,6 +325,13 @@
       '<div class="ao-event"><time>' + datum(e.t) + '</time><span class="ao-event-agent">' + escapeHTML(names[e.w] || e.w) +
       '</span><span class="ao-event-message" title="' + escapeHTML(e.m) + '">' + escapeHTML(e.m) + '</span></div>').join("") ||
       '<p class="ao-empty">Sem atividade recente.</p>';
+    if (focusKey) {
+      const parent = byId(focusKey.parent);
+      const next = Array.from(parent.querySelectorAll("button[" + focusKey.attribute + "]"))
+        .find((node) => node.getAttribute(focusKey.attribute) === focusKey.value);
+      if (next) next.focus({preventScroll:true});
+      else byId(focusKey.parent === "aoTasksList" ? "aoTasks" : "aoPulls").focus({preventScroll:true});
+    }
   };
   const renderRepos = (s) => {
     const repos = [...new Set(safeArray(s.q).concat(safeArray(s.dn), safeArray(s.pr)).map((v) => v.repo).filter(Boolean))].sort();
