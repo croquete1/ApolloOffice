@@ -31,7 +31,7 @@ test("a queued job alone never changes an idle worker into work", () => {
 test("work, idle and sleep reflect the server's exact role state", () => {
   const {mode} = fixture();
   for(const name of ["work","idle","sleep"]) assert.equal(mode(state(name), "fixer"), name);
-  assert.equal(mode(state("unexpected")), "unknown");
+  assert.equal(mode(state("unexpected"), "fixer"), "unknown");
 });
 
 test("explicit holds and office pause override work", () => {
