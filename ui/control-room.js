@@ -47,7 +47,7 @@
     '  </aside>',
     '  <div class="ao-workspace">',
     '    <header class="ao-topbar"><div class="ao-top-heading"><strong>Visão geral</strong><span>Operações e agentes em tempo real</span></div>',
-    '      <div class="ao-top-actions"><span id="aoOfficeStatus" class="ao-status-chip">A ligar…</span><button id="aoPause" type="button" class="ao-outline-button">Pausar escritório</button></div>',
+    '      <div class="ao-top-actions"><span id="aoOfficeStatus" class="ao-status-chip" role="status" aria-live="polite">A ligar…</span><button id="aoPause" type="button" class="ao-outline-button">Pausar escritório</button></div>',
     '    </header>',
     '    <main class="ao-content" id="aoOverview">',
     '      <section class="ao-metrics" aria-label="Indicadores operacionais">',
@@ -157,6 +157,7 @@
   }).join("");
   const stationNodes = Object.fromEntries(roles.map((role) => [role, stations.querySelector('[data-role="' + role + '"]')]));
   let snapshot = null, selected = null, selectedRepo = "", lastFocus = null;
+  let lastRepoSignature = "", lastStateAt = 0;
   let animationsOn = true;
   try { animationsOn = localStorage.getItem("ao.motion") !== "off"; } catch {}
   const motion = byId("aoMotion");
@@ -189,22 +190,27 @@
   const statusText = {work:"A trabalhar",idle:"Disponível",sleep:"Em repouso",paused:"Em pausa"};
   const updateAgents = (s) => {
     let working = 0;
-    const rows = [];
+    const list = byId("aoAgentList");
+    if (!list.children.length) {
+      list.innerHTML = roles.map((role, i) => '<button type="button" class="ao-agent-row" data-agent="' + role + '"><span class="ao-agent-color" style="background:' + colors[i] + '"></span><span class="ao-agent-title">' + escapeHTML(names[role]) + '</span><span class="ao-agent-status">Sem dados</span></button>').join("");
+    }
     for (let i=0;i<roles.length;i++) {
       const role = roles[i], w = s.w?.[role] || {}, el = stationNodes[role], state = mode(s, role);
       if (state === "work") working++;
-      if (el.dataset.mode === "work" && state !== "work" && !paused(s) && animationsOn) {
+      if (el.dataset.mode === "work" && state !== "work" && !paused(s) && animationsOn &&
+          safeArray(s.dn).some((j) => j.st === "done" && String(j.id) === el.dataset.lastJob)) {
         el.classList.remove("ao-celebrate");
         void el.offsetWidth;
         el.classList.add("ao-celebrate");
       }
+      if (w.job) el.dataset.lastJob = String(w.job);
       el.dataset.mode = state;
       el.querySelector(".ao-station-state").textContent = statusText[state];
       el.title = names[role] + " · " + statusText[state] + (w.say ? " · " + w.say : "");
-      rows.push('<button type="button" class="ao-agent-row" data-agent="' + role + '"><span class="ao-agent-color" style="background:' + colors[i] + '"></span><span class="ao-agent-title">' +
-        escapeHTML(names[role]) + '</span><span class="ao-agent-status ao-state-' + state + '">' + statusText[state] + '</span></button>');
+      const status = list.querySelector('[data-agent="' + role + '"] .ao-agent-status');
+      status.className = "ao-agent-status ao-state-" + state;
+      status.textContent = statusText[state];
     }
-    byId("aoAgentList").innerHTML = rows.join("");
     byId("aoMetricWorkers").textContent = working + " / " + roles.length;
     byId("aoAgentSummary").textContent = working + " em execução · " + (roles.length - working) + " restantes";
   };
@@ -233,6 +239,9 @@
   const renderRepos = (s) => {
     const repos = [...new Set(safeArray(s.q).concat(safeArray(s.dn), safeArray(s.pr)).map((v) => v.repo).filter(Boolean))].sort();
     if (selectedRepo && !repos.includes(selectedRepo)) selectedRepo = "";
+    const signature = JSON.stringify([repos, selectedRepo]);
+    if (signature === lastRepoSignature) return;
+    lastRepoSignature = signature;
     const wrap = byId("aoRepos");
     wrap.replaceChildren();
     const all = document.createElement("button");
@@ -288,6 +297,7 @@
   const render = (s) => {
     if (!s || typeof s !== "object" || s.error) return;
     snapshot = s;
+    lastStateAt = Date.now();
     const isPaused = paused(s), isOffline = offline(s);
     const state = byId("aoOfficeStatus");
     state.className = "ao-status-chip" + (isPaused ? " is-paused" : "");
@@ -334,7 +344,17 @@
   byId("aoDetailClose").addEventListener("click", hideAgent);
   overlay.addEventListener("click", (e) => { if (e.target === overlay) hideAgent(); });
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && !overlay.hidden) { e.preventDefault(); hideAgent(); }
+    if (overlay.hidden) return;
+    if (e.key === "Escape") { e.preventDefault(); hideAgent(); return; }
+    if (e.key !== "Tab") return;
+    const items = Array.from(overlay.querySelectorAll("button:not([hidden]):not(:disabled)"));
+    if (!items.length) { e.preventDefault(); return; }
+    const first = items[0], last = items[items.length - 1];
+    if (e.shiftKey && (document.activeElement === first || document.activeElement === overlay.querySelector(".ao-agent-dialog"))) {
+      e.preventDefault(); last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault(); first.focus();
+    }
   });
   const handlers = {repos:"bRepos",hosts:"bHosts",costs:"bCost",settings:"bSet"};
   app.addEventListener("click", (event) => {
@@ -356,4 +376,12 @@
     render(s);
   };
   if (A.S) render(A.S);
+  // Keep the connection label honest if WebSocket and polling stop updating.
+  setInterval(() => {
+    if (!lastStateAt || Date.now() - lastStateAt <= 12000) return;
+    const state = byId("aoOfficeStatus");
+    state.className = "ao-status-chip is-paused";
+    state.textContent = "Dados desatualizados";
+    byId("aoConnection").textContent = "Sem atualizações recentes";
+  }, 5000);
 })();
