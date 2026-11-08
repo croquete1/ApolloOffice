@@ -155,7 +155,7 @@ pub fn dset() -> Value {
         "budday": 0,
         "ntfy": "",
         "discord": "",
-        "updates": true,
+        "updates": false,
         "prov": {}
     })
 }

@@ -5,12 +5,18 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 
-const ID: &str = "15968501883-ivf1d29hmggbn0ei8hks5teo3154045c.apps.googleusercontent.com";
-const SEC: &str = "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";
-
+// This fork must use an explicitly configured OAuth client. Client IDs are
+// public, but embedding an upstream client ID or secret would bind users to
+// credentials they cannot rotate in their own Google Cloud project.
 fn cfg() -> (String, String) {
-    let g = |k: &str, d: &str| std::env::var(k).ok().filter(|v| !v.is_empty()).unwrap_or_else(|| d.to_string());
-    (g("APOLLO_OFFICE_GOOGLE_ID", ID), g("APOLLO_OFFICE_GOOGLE_SECRET", SEC))
+    let value = |name| std::env::var(name)
+        .ok().map(|v| v.trim().to_string()).unwrap_or_default();
+    (value("APOLLO_OFFICE_GOOGLE_ID"), value("APOLLO_OFFICE_GOOGLE_SECRET"))
+}
+
+pub fn available() -> bool {
+    let (id, secret) = cfg();
+    !id.is_empty() && !secret.is_empty()
 }
 
 fn ue(s: &str) -> String {
@@ -46,11 +52,14 @@ pub fn start(a: &Ax, mode: &str) -> String {
 }
 
 pub async fn back(a: &Ax, code: &str, st: &str) -> Result<(String, String, String), String> {
+    let (id, sec) = cfg();
+    if id.is_empty() || sec.is_empty() {
+        return Err("Google sign-in requires your own OAuth client ID and secret from environment; rotate any previously published secret".into());
+    }
     let Some((ve, mode, exp)) = a.oa.lock().unwrap().remove(st) else { return Err("this sign-in attempt is unknown or was already used".into()) };
     if exp < now() {
         return Err("this sign-in attempt expired, start again".into());
     }
-    let (id, sec) = cfg();
     let body = format!("code={}&client_id={}&client_secret={}&redirect_uri={}&grant_type=authorization_code&code_verifier={}", ue(code), ue(&id), ue(&sec), ue(&redir(a)), ue(&ve));
     let r = a.hc.post("https://oauth2.googleapis.com/token").timeout(Duration::from_secs(20)).header("content-type", "application/x-www-form-urlencoded").body(body).send().await.map_err(|e| format!("Google did not answer: {e}"))?;
     let t: Value = r.json().await.map_err(|e| e.to_string())?;

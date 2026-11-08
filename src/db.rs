@@ -177,6 +177,9 @@ impl Db {
         self.jset(j.id, &[("d", j.d.clone())]);
     }
 
+    // Column order deliberately mirrors the jobs table; refactoring this API
+    // would alter numerous pipeline call sites without improving validation.
+    #[expect(clippy::too_many_arguments, reason = "Typed insert mirrors the existing jobs schema")]
     pub fn jnew(&self, repo: &str, num: i64, kind: &str, title: &str, url: &str, st: &str, why: &str, d: Value, pr: Option<i64>, prio: f64) -> i64 {
         let t = now();
         self.run("insert into jobs(repo,num,kind,title,url,st,why,d,pr,prio,t0,t1) values(?,?,?,?,?,?,?,?,?,?,?,?)", crate::pa![repo.to_string(), num, kind.to_string(), title.to_string(), url.to_string(), st.to_string(), why.to_string(), d.to_string(), pr, prio, t, t])

@@ -119,6 +119,21 @@ jobs:
           token: ${{ secrets.APOLLO_OFFICE_TOKEN }}
 ```
 
+## Fork-specific security
+
+This fork has a separate update policy: unattended downloads from the official
+ApolloOffice release channel are disabled, even if an older configuration had
+automatic updates enabled. Only an explicitly configured HTTPS release channel
+with its own Ed25519 signing key may supply updates.
+
+Google account linking now requires credentials belonging to your own Google
+OAuth application, supplied through environment variables. The previously
+embedded client secret must be rotated at its provider; removing it from current
+source does not remove it from Git history.
+
+See [Fork security and configuration](docs/fork-security.md) for the setup
+and manual update procedure.
+
 ## AI disclosure
 
 Every commit carries `Co-Authored-By` trailers for the models that worked on

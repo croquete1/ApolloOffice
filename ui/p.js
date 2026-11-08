@@ -292,8 +292,8 @@
     const keys = cfg.prov.filter((p) => p.key);
     const ol = cfg.prov.find((p) => p.id === "ollama");
     const vg = (x, y) => { const a = String(x || "").replace(/^v/, "").split(".").map(Number), b = String(y || "").replace(/^v/, "").split(".").map(Number); for (let i = 0; i < 3; i++) if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) > (b[i] || 0); return false; };
-    const nu = u.ready && vg(u.ready, A.S?.v);
-    const ust = nu ? `Update ${esc(u.ready)} is downloaded.` : u.err ? `Last check: ${esc(u.err)}` : u.latest ? `Latest release: ${esc(u.latest)}` : "Not checked yet.";
+    const nu = u.configured === true && u.ready && vg(u.ready, A.S?.v);
+    const ust = !u.configured ? "Automatic updates are disabled for this customized fork. Configure a trusted HTTPS release URL and a separate signing key to enable them." : nu ? `Update ${esc(u.ready)} is downloaded.` : u.err ? `Last check: ${esc(u.err)}` : u.latest ? `Latest release: ${esc(u.latest)}` : "Not checked yet.";
     const TB = [["gen", "General"], ["md", "Models"], ["prov", "Providers"], ["ntf", "Notifications"], ["int", "Integrations"], ["sys", "System"]];
     let tb = "gen";
     try { tb = localStorage.getItem("ao.st") || "gen"; } catch {}
@@ -342,7 +342,7 @@
         <div class="hint" style="margin-top:6px">Sentry: add an internal integration with this webhook URL and alert rule actions. GlitchTip: add it as a webhook alert. The office has to be reachable from the internet for this, for example through a tunnel; use that address instead of 127.0.0.1. The same error goes into one report. Senders that can set headers can pass the key as <code>X-Hook-Key</code> instead of in the URL. The key can only create reports; replace the link if it leaks.</div>
         <div class="hint">GitHub Actions: a failed run can report itself with <code>Silvertree2010/ApolloOffice/report</code>, see the README.</div>
         <div class="acts"><button type="button" id="hn">${cfg.hook.on ? "Replace link" : "Create link"}</button>${cfg.hook.on ? `<button type="button" class="dng" id="ho">Revoke</button>` : ""}</div></div></div>
-      <div data-tab="sys" class="sec"><h4>Updates</h4><div class="box">${tg("updates", s.updates, "install updates automatically when the office is idle")}<div class="msg" id="um">${ust}</div><div class="acts"><button type="button" id="uc">Check now</button>${nu ? `<button type="button" class="pri" id="ua">Install and restart</button>` : ""}</div></div></div>
+      <div data-tab="sys" class="sec"><h4>Updates</h4><div class="box">${tg("updates", u.configured && s.updates, "install verified fork updates automatically when the office is idle")}<div class="msg" id="um">${ust}</div><div class="acts">${u.configured ? '<button type="button" id="uc">Check now</button>' : ""}${nu ? `<button type="button" class="pri" id="ua">Install and restart</button>` : ""}</div></div></div>
       <div data-tab="sys" class="sec"><h4>Export and import</h4><div class="box"><div class="ck">Settings, repositories, machines and models as a JSON file. API keys, tokens, logins and notification addresses are not included.</div>
         <div class="acts"><button type="button" id="ex">Export</button><button type="button" id="im">Import…</button><input type="file" id="imf" accept="application/json,.json" hidden></div><div class="msg" id="xm"></div></div></div>
       <div data-tab="sys" class="sec"><h4>This installation</h4><div class="box"><div class="fm" style="margin:0">
@@ -357,6 +357,12 @@
         <div class="dzr"><div><b>Reset settings</b><div class="hint">Models, limits, budgets, notifications and paused workers go back to defaults. Keys, repositories and machines stay.</div></div><button type="button" class="dng" data-dz="reset">Reset settings</button></div>
         <div class="dzr"><div><b>Delete all data</b><div class="hint">Deletes repositories, machines, jobs, pull request history, costs, settings and stored API keys. Nothing on GitHub changes. Type <code>delete</code> to confirm.</div><input type="text" id="dzw" placeholder="delete" autocomplete="off" style="margin-top:6px;max-width:160px"></div><button type="button" class="dng" data-dz="wipe">Delete everything</button></div>
         <div class="msg" id="dzm"></div></div></div>`;
+    // This fork must not advertise an enabled updater without a separate,
+    // trusted release source and signing key.
+    if (!u.configured) {
+      const toggle = B.querySelector('input[name="updates"]');
+      if (toggle) toggle.disabled = true;
+    }
     const stab = (k) => {
       tb = k;
       try { localStorage.setItem("ao.st", k); } catch {}
@@ -448,7 +454,7 @@
     };
     if ($("ho")) $("ho").onclick = async (e) => { if (e.target.dataset.sure !== "1") { e.target.dataset.sure = "1"; e.target.textContent = "Click again to revoke"; return; } await post({ op: "off" }, "/api/hooktok"); settings(); };
     if ($("ao")) $("ao").onclick = async (e) => { if (e.target.dataset.sure !== "1") { e.target.dataset.sure = "1"; e.target.textContent = "Click again to revoke"; return; } await post({ op: "off" }, "/api/apitok"); settings(); };
-    $("uc").onclick = async (e) => { busy(e.target, true, "Checking…"); const r = await post({ op: "check" }, "/api/update"); await settings(); $("um").textContent = r.ok ? (r.r.new ? `Update ${r.r.latest} downloaded.` : `Up to date (latest ${r.r.latest}).`) : r.m; };
+    if ($("uc")) $("uc").onclick = async (e) => { busy(e.target, true, "Checking…"); const r = await post({ op: "check" }, "/api/update"); await settings(); $("um").textContent = r.ok ? (r.r.new ? `Update ${r.r.latest} downloaded.` : `Up to date (latest ${r.r.latest}).`) : r.m; };
     if ($("ua")) $("ua").onclick = async (e) => { busy(e.target, true, "Restarting…"); await post({ op: "apply" }, "/api/update"); setTimeout(() => location.reload(), 6000); };
   };
 
