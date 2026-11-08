@@ -85,7 +85,7 @@ pub async fn call(a: &Ax, r: &Rn, n: &str, g: &Value) -> Result<String, String> 
             Ok(format!("replaced {}", if al { k } else { 1 }))
         }
         "grep" => {
-            let pt = g["path"].as_str().map(|x| q(x)).unwrap_or(".".into());
+            let pt = g["path"].as_str().map(q).unwrap_or(".".into());
             let o = hx(a, &r.h, &format!("cd \"{d}\" && git grep -n -I -E -e {} -- {pt} | head -300", q(&s("pattern"))), 120).await;
             Ok(if o.o.is_empty() { "(no matches)".into() } else { o.o })
         }
