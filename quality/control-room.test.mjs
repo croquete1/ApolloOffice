@@ -166,3 +166,19 @@ test("handoff engine supports explicit unmount disposal", () => {
   assert.match(handoffs, /document\.removeEventListener\?\.\("visibilitychange"/);
   assert.match(handoffs, /A\.stopOfficeMotion = dispose/);
 });
+
+
+test("operational dashboard precedes the secondary virtual office", () => {
+  const iMetrics = modern.indexOf('<section class="ao-metrics"');
+  const iPipeline = modern.indexOf('<section class="ao-panel ao-pipeline-panel"');
+  const iOperations = modern.indexOf('<section class="ao-operations-grid"');
+  const iOffice = modern.indexOf('<section class="ao-primary-grid"');
+  assert.ok(iMetrics >= 0 && iPipeline > iMetrics && iOperations > iPipeline && iOffice > iOperations);
+});
+
+test("approval is not conflated with automated gate and submission", () => {
+  assert.match(modern, /label: "Validação", statuses: \["gate"\]/);
+  assert.match(modern, /label: "Aprovação", statuses: \["approve"\]/);
+  assert.match(modern, /label: "Submissão", statuses: \["submit"\]/);
+  assert.doesNotMatch(modern, /label: "Aprovação", statuses: \["gate", "approve", "submit"\]/);
+});
