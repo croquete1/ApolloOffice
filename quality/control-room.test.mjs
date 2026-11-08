@@ -74,3 +74,39 @@ test("handoffs are grounded and safely cancelled", () => {
   assert.match(handoffs, /animation\.oncancel = finish/);
   assert.match(handoffs, /finish\(\);\s*console\.warn/);
 });
+
+
+test("live events use an isolated subscription channel", () => {
+  assert.match(original, /const stateListeners = new Set\(\)/);
+  assert.match(original, /const notifyState = \(state\)/);
+  assert.match(original, /try \{ listener\(state\); \} catch \(error\)/);
+  assert.match(original, /finally \{\s*notifyState\(s\)/);
+  assert.match(modern, /unsubscribe = A\.subscribeState/);
+  assert.match(handoffs, /const unsubscribe = A\.subscribeState/);
+});
+
+test("actual command and mood telemetry drive visual reactions", () => {
+  assert.match(modern, /w\.cmds/);
+  assert.match(modern, /lastCommands\(w\)/);
+  assert.match(modern, /el\.dataset\.lastCommand !== commandKey/);
+  assert.match(modern, /Object\.hasOwn\(resultText, w\.mood\)/);
+  assert.match(modern, /label\.textContent = cmd\.slice\(0, 160\)/);
+  assert.match(css, /ao-command-sweep/);
+  assert.match(css, /ao-result-mark/);
+});
+
+test("metrics and host connectivity never imply unavailable totals", () => {
+  assert.match(modern, /Até 60 trabalhos em aberto/);
+  assert.match(modern, /Até 40 PRs registados/);
+  assert.match(modern, /Últimos 25 trabalhos terminados/);
+  assert.match(modern, /age < 120_000/);
+  assert.match(modern, /Dados recentes/);
+  assert.match(modern, /Por confirmar/);
+  assert.match(modern, /Serviços externos indisponíveis/);
+});
+
+test("buttons do not offer unavailable PR links", () => {
+  assert.match(modern, /attr === "data-pr-url" && !val/);
+  assert.match(modern, /disabled title="Ligação indisponível"/);
+  assert.match(modern, /aria-expanded/);
+});
