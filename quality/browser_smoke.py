@@ -67,6 +67,58 @@ class Handler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(UI_DIR), **kwargs)
 
     def do_GET(self):
+        if self.path in ("/", "/index.html"):
+            # Inject a browser-only smoke probe; the repository UI is unchanged.
+            html = (UI_DIR / "index.html").read_text(encoding="utf-8")
+            probe = """
+<script>
+(function () {
+  function verify() {
+    var errors = [];
+    function assert(value, message) { if (!value) errors.push(message); }
+    try {
+      var app = document.getElementById("aoControlRoom");
+      var fixer = document.querySelector('.ao-station[data-role="fixer"]');
+      var overlay = document.getElementById("aoAgentOverlay");
+      assert(Boolean(app), "Control Room indisponível");
+      assert(Boolean(fixer), "Personagem Fixer em falta");
+      if (app && fixer && overlay) {
+        fixer.click();
+        assert(!overlay.hidden, "O detalhe do agente não abriu");
+        document.getElementById("aoDetailClose").click();
+        assert(overlay.hidden, "O detalhe do agente não fechou");
+        var toggle = document.getElementById("aoMotion");
+        toggle.checked = false;
+        toggle.dispatchEvent(new Event("change", {bubbles: true}));
+        assert(app.classList.contains("ao-motion-disabled"), "Desativar animações falhou");
+        toggle.checked = true;
+        toggle.dispatchEvent(new Event("change", {bubbles: true}));
+        assert(!app.classList.contains("ao-motion-disabled"), "Reativar animações falhou");
+        var expand = document.getElementById("aoExpand");
+        expand.click();
+        assert(document.getElementById("aoRoomPanel").classList.contains("ao-expanded"),
+               "Ampliar escritório falhou");
+        expand.click();
+        assert(!document.getElementById("aoRoomPanel").classList.contains("ao-expanded"),
+               "Restaurar escritório falhou");
+      }
+    } catch (error) { errors.push(String(error)); }
+    document.documentElement.setAttribute("data-ao-smoke",
+      errors.length ? "FAIL: " + errors.join(" | ") : "PASS");
+  }
+  setTimeout(verify, 2500);
+})();
+</script>
+"""
+            html = html.replace("</body>", probe + "</body>")
+            payload = html.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         if self.path == "/api/state":
             data = json.dumps(self.state).encode("utf-8")
             self.send_response(200)
@@ -116,6 +168,10 @@ def run_case(browser: str, active: bool) -> None:
             if result.returncode != 0:
                 raise AssertionError("Chromium falhou: " + result.stderr[-1800:])
             dom = result.stdout
+            smoke = re.search(r'data-ao-smoke="([^"]+)"', dom)
+            if not smoke or smoke.group(1) != "PASS":
+                raise AssertionError("Interações do navegador falharam: " +
+                                     (smoke.group(1) if smoke else "teste não executado"))
             if 'id="aoControlRoom"' not in dom:
                 raise AssertionError("O Control Room não foi montado. " + dom[-1200:])
             for role in ROLES:
@@ -131,7 +187,7 @@ def run_case(browser: str, active: bool) -> None:
             if "Ações Rápidas" in dom:
                 raise AssertionError("A interface ainda apresenta ações rápidas.")
             label = "trabalho real" if active else "repouso"
-            print(f"PASS: Chrome/Chromium renderizou o cenário de {label}.")
+            print(f"PASS: Chrome/Chromium validou renderização e interações de {label}.")
     finally:
         server.shutdown()
         server.server_close()
