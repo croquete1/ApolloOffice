@@ -151,3 +151,18 @@ test("authoritative worker status wins over unassigned queued jobs", () => {
   assert.match(modern, /if \(!s\?\.w \|\| !Object\.hasOwn\(s\.w, role\)\) return "unknown"/);
   assert.match(modern, /const activeJob = w\.job;/);
 });
+
+
+test("fallback releases global keyboard and visibility listeners", () => {
+  assert.match(modern, /document\.removeEventListener\("keydown", onModalKeydown\)/);
+  assert.match(modern, /document\.removeEventListener\("visibilitychange", onVisibilityChange\)/);
+  assert.match(modern, /A\.stopOfficeMotion\?\.\(\)/);
+  assert.match(modern, /if \(!healthy\) return;\s*\/\/ Keep the connection/);
+});
+
+test("handoff engine supports explicit unmount disposal", () => {
+  assert.match(handoffs, /const dispose = \(\) => \{/);
+  assert.match(handoffs, /motionControl\?\.removeEventListener\?\./);
+  assert.match(handoffs, /document\.removeEventListener\?\.\("visibilitychange"/);
+  assert.match(handoffs, /A\.stopOfficeMotion = dispose/);
+});
