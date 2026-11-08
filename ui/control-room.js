@@ -413,7 +413,7 @@
       const item = pipeline.children[i];
       item.classList.toggle("is-busy", values[i] > 0);
       item.querySelector(".ao-pipeline-value").textContent = formatNum(values[i]);
-      item.setAttribute("aria-label", pipelineSteps[i].label + ": " + formatNum(values[i]) + " tarefas");
+      item.setAttribute("aria-label", pipelineSteps[i].label + ": " + formatNum(values[i]) + (values[i] === 1 ? " tarefa" : " tarefas"));
     }
   };
   const countTotals = (s) => {
