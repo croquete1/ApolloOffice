@@ -34,8 +34,9 @@ test("all ten original agents have distinct live stations", () => {
   }
   assert.match(modern, /const stationNodes =/);
   assert.match(modern, /s\.w\?\.\[role\]/);
-  assert.match(modern, /A\.onState = \(s\)/);
-  assert.match(modern, /originalOnState\(s\)/);
+  assert.match(original, /window\.AO\.subscribeState/);
+  assert.match(modern, /A\.subscribeState\(\(s\)/);
+  assert.match(handoffs, /A\.subscribeState\(\(s\)/);
 });
 
 test("motion can be disabled and stays accessible", () => {
