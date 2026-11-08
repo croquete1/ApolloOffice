@@ -1,0 +1,359 @@
+/* Apollo Office Control Room
+ * Presentation-only enhancement. Reads AO.S; never fabricates work or modifies jobs.
+ */
+(() => {
+  "use strict";
+  const A = window.AO;
+  if (!A || document.querySelector(".ao-app")) return;
+  const byId = (id) => document.getElementById(id);
+  const escapeHTML = (value) => A.esc(value ?? "");
+  const names = A.NM || {};
+  const roles = ["scout", "guard", "vet", "watcher", "hunter", "repro", "fixer", "ci", "reviewer", "submit"];
+  const colors = ["#3ac9b6", "#5e91ef", "#a283e8", "#4dbee4", "#d1aa6c", "#ef7b6b", "#f39963", "#8792a8", "#d77cb3", "#69c97c"];
+  const skins = ["#eab58c", "#bd896c", "#dcac8b", "#d49c77", "#e7b58f", "#b98263", "#f1c5a3", "#d7a082", "#e4b391", "#d4a17f"];
+  const hairColors = ["#58372c", "#242e40", "#342c2a", "#a45635", "#58372b", "#303039", "#4f302b", "#2c3546", "#403045", "#59402d"];
+  const workerStages = {
+    hunter: ["hunt"], repro: ["repro"], fixer: ["fix"], ci: ["ci"],
+    reviewer: ["review"], submit: ["gate", "submit"], vet: ["vet"]
+  };
+  const stageLabels = {
+    ready: "Pendente", vet: "Triagem", hunt: "Pesquisa", repro: "Reprodução",
+    fix: "Correção", ci: "Testes", review: "Revisão", gate: "Validação",
+    approve: "Aprovação", submit: "Submissão", done: "Concluída", drop: "Descartada"
+  };
+  const formatNum = (n) => Number(n || 0).toLocaleString("pt-PT");
+  const safeArray = (v) => Array.isArray(v) ? v : [];
+  const datum = (v) => {
+    const d = v ? new Date(v) : null;
+    return d && !Number.isNaN(d.getTime()) ? d.toLocaleTimeString("pt-PT", {hour:"2-digit",minute:"2-digit"}) : "—";
+  };
+  const html = [
+    '<div class="ao-app" id="aoControlRoom">',
+    '  <aside class="ao-sidebar">',
+    '    <div class="ao-brand"><span class="ao-logo" aria-hidden="true">A</span><span><strong>Apollo Office</strong><small>Control Center</small></span></div>',
+    '    <nav class="ao-navigation" aria-label="Navegação principal">',
+    '      <button class="ao-nav-item is-active" type="button" data-target="aoOverview">Painel</button>',
+    '      <button class="ao-nav-item" type="button" data-target="aoAgents">Agentes</button>',
+    '      <button class="ao-nav-item" type="button" data-target="aoTasks">Tarefas</button>',
+    '      <button class="ao-nav-item" type="button" data-target="aoPulls">Pull Requests</button>',
+    '      <button class="ao-nav-item" type="button" data-open="repos">Repositórios</button>',
+    '      <button class="ao-nav-item" type="button" data-open="hosts">Máquinas</button>',
+    '      <button class="ao-nav-item" type="button" data-open="costs">Custos</button>',
+    '      <button class="ao-nav-item" type="button" data-target="aoActivity">Atividade</button>',
+    '      <button class="ao-nav-item" type="button" data-open="settings">Definições</button>',
+    '    </nav>',
+    '    <div class="ao-sidebar-section"><span>Repositórios em atividade</span><div id="aoRepos" class="ao-repo-list"><div class="ao-muted">A carregar…</div></div></div>',
+    '    <div class="ao-sidebar-footer"><span class="ao-presence-dot"></span><span id="aoConnection">A estabelecer ligação…</span></div>',
+    '  </aside>',
+    '  <div class="ao-workspace">',
+    '    <header class="ao-topbar"><div class="ao-top-heading"><strong>Visão geral</strong><span>Operações e agentes em tempo real</span></div>',
+    '      <div class="ao-top-actions"><span id="aoOfficeStatus" class="ao-status-chip">A ligar…</span><button id="aoPause" type="button" class="ao-outline-button">Pausar escritório</button></div>',
+    '    </header>',
+    '    <main class="ao-content" id="aoOverview">',
+    '      <section class="ao-metrics" aria-label="Indicadores operacionais">',
+    '        <div class="ao-metric"><span>Agentes a trabalhar</span><strong id="aoMetricWorkers">—</strong><small>Estados reais</small></div>',
+    '        <div class="ao-metric"><span>Tarefas em aberto</span><strong id="aoMetricQueue">—</strong><small>Inclui pendentes e aprovações</small></div>',
+    '        <div class="ao-metric"><span>Pull Requests abertos</span><strong id="aoMetricPR">—</strong><small>Em acompanhamento</small></div>',
+    '        <div class="ao-metric"><span>Concluídas recentes</span><strong id="aoMetricDone">—</strong><small>Últimos registos disponíveis</small></div>',
+    '      </section>',
+    '      <section class="ao-primary-grid" aria-label="Escritório e agentes">',
+    '        <article class="ao-panel ao-room-panel" id="aoRoomPanel">',
+    '          <div class="ao-panel-heading"><div><h2>Escritório virtual</h2><p>Personagens animadas · atividade real</p></div>',
+    '            <div class="ao-room-controls"><label class="ao-motion-label" for="aoMotion">Animações</label><input id="aoMotion" type="checkbox" checked aria-label="Ativar animações"><button id="aoExpand" type="button" class="ao-icon-button" aria-label="Ampliar o escritório" title="Ampliar o escritório">⤢</button></div>',
+    '          </div>',
+    '          <div class="ao-office" role="group" aria-label="Dez agentes no escritório virtual">',
+    '            <div class="ao-room-glow" aria-hidden="true"></div>',
+    '            <div class="ao-windows" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>',
+    '            <div class="ao-office-sign" aria-hidden="true"><b>APOLLO</b><span>DEVELOPMENT OFFICE</span></div>',
+    '            <div class="ao-office-lamp ao-lamp-one" aria-hidden="true"></div><div class="ao-office-lamp ao-lamp-two" aria-hidden="true"></div>',
+    '            <div class="ao-office-floor" aria-hidden="true"></div>',
+    '            <div class="ao-stations" id="aoStations"></div>',
+    '          </div>',
+    '        </article>',
+    '        <article class="ao-panel ao-agent-panel" id="aoAgents">',
+    '          <div class="ao-panel-heading"><div><h2>Estado dos agentes</h2><p id="aoAgentSummary">Sem informação</p></div></div>',
+    '          <div id="aoAgentList" class="ao-agent-list"></div>',
+    '        </article>',
+    '      </section>',
+    '      <section class="ao-operations-grid" aria-label="Operações">',
+    '        <article class="ao-panel" id="aoTasks"><div class="ao-panel-heading"><div><h2>Tarefas em aberto</h2><p>Fluxo de trabalho</p></div></div><div id="aoTasksList" class="ao-list"></div></article>',
+    '        <article class="ao-panel" id="aoPulls"><div class="ao-panel-heading"><div><h2>Pull Requests</h2><p>Revisão e integração</p></div></div><div id="aoPRList" class="ao-list"></div></article>',
+    '        <article class="ao-panel" id="aoActivity"><div class="ao-panel-heading"><div><h2>Atividade recente</h2><p>Eventos do sistema</p></div></div><div id="aoEventList" class="ao-list"></div></article>',
+    '      </section>',
+    '      <section class="ao-bottom-grid" aria-label="Métricas adicionais">',
+    '        <article class="ao-panel"><div class="ao-panel-heading"><div><h2>Integrações (30 dias)</h2><p>PRs integrados por dia</p></div></div><div class="ao-trend" id="aoMergeChart"></div></article>',
+    '        <article class="ao-panel"><div class="ao-panel-heading"><div><h2>Máquinas e recursos</h2><p>Dados disponíveis no Apollo Office</p></div></div><div id="aoMachines" class="ao-machines"></div></article>',
+    '      </section>',
+    '    </main>',
+    '  </div>',
+    '  <div class="ao-agent-overlay" id="aoAgentOverlay" hidden>',
+    '    <section class="ao-agent-dialog" role="dialog" aria-modal="true" aria-labelledby="aoDetailTitle" tabindex="-1">',
+    '      <button class="ao-dialog-close" id="aoDetailClose" type="button" aria-label="Fechar detalhes">×</button>',
+    '      <h2 id="aoDetailTitle"></h2><div id="aoDetailBody"></div>',
+    '      <div class="ao-detail-actions"><button id="aoDetailJob" type="button" hidden>Ver tarefa</button><button id="aoDetailModel" type="button" hidden>Configurar modelo</button></div>',
+    '    </section>',
+    '  </div>',
+    '</div>'
+  ].join("\n");
+
+  const legacy = document.createElement("div");
+  legacy.className = "ao-legacy";
+  legacy.setAttribute("aria-hidden", "true");
+  const drawer = byId("dr");
+  for (const node of Array.from(document.body.children)) {
+    if (node.tagName === "SCRIPT" || node === drawer || node.tagName === "LINK") continue;
+    legacy.appendChild(node);
+  }
+  document.body.prepend(legacy);
+  const holder = document.createElement("div");
+  holder.innerHTML = html;
+  const app = holder.firstElementChild;
+  document.body.appendChild(app);
+  if (drawer) document.body.appendChild(drawer);
+  document.body.classList.add("ao-enabled");
+  A.modernRoom = true;
+
+  const hairs = [
+    "M27 45Q24 22 50 18Q68 13 78 32Q86 42 77 49L69 31L61 40L53 28L43 40L35 35Z",
+    "M26 48Q22 17 50 16Q80 15 83 40L78 50L71 29Q50 17 36 39Z",
+    "M24 43Q23 21 45 22Q69 12 83 34L82 50L29 49Z",
+    "M24 49Q19 26 40 18Q66 9 79 25Q87 39 81 57L72 39L37 39Z",
+    "M24 45Q19 16 48 18Q67 11 83 34L79 43L69 28L50 31L31 47Z",
+    "M23 48Q20 24 42 19Q65 11 81 29L81 48Q66 23 33 45Z",
+    "M24 44Q27 19 51 19Q80 19 82 45L71 28L59 35L44 30L31 47Z",
+    "M24 46Q27 21 46 19Q70 14 80 38L81 51L67 31L47 30L29 47Z",
+    "M23 46Q23 25 41 18Q68 9 81 32L84 54L75 48L72 34L30 48Z",
+    "M24 47Q20 23 47 18Q73 17 83 41L80 49L68 31L38 36Z"
+  ];
+  const character = (i) => {
+    const skin = skins[i], color = colors[i], hair = hairColors[i], id = "ao-face-" + i;
+    return '<svg class="ao-person" viewBox="0 0 108 125" aria-hidden="true" focusable="false">' +
+      '<defs><linearGradient id="' + id + '" x1="0" y1="0" x2="1" y2="1"><stop stop-color="' + skin + '"/><stop offset="1" stop-color="#966751"/></linearGradient></defs>' +
+      '<ellipse cx="54" cy="120" rx="30" ry="4" fill="#02060f" opacity=".3"/>' +
+      '<path d="M35 87L28 113H44L52 99L64 113H80L71 87Z" fill="#192434"/>' +
+      '<path d="M25 77Q33 65 48 66H64Q79 67 86 80L82 105H27Z" fill="' + color + '"/>' +
+      '<path d="M46 67L55 86L64 67" fill="#ecf0f5" opacity=".65"/>' +
+      '<path d="M32 80L29 107M77 80L81 107" stroke="#152435" stroke-width="3" opacity=".5"/>' +
+      '<g class="ao-arm ao-arm-left"><path d="M31 81Q18 86 22 103L38 105" fill="none" stroke="' + color + '" stroke-width="14" stroke-linecap="round"/><ellipse cx="39" cy="105" rx="7" ry="5" fill="' + skin + '"/></g>' +
+      '<g class="ao-arm ao-arm-right"><path d="M77 81Q91 87 86 103L70 105" fill="none" stroke="' + color + '" stroke-width="14" stroke-linecap="round"/><ellipse cx="69" cy="105" rx="7" ry="5" fill="' + skin + '"/></g>' +
+      '<path d="M45 61V70Q54 79 64 69V61Z" fill="' + skin + '"/>' +
+      '<ellipse cx="54" cy="42" rx="28" ry="30" fill="url(#' + id + ')"/>' +
+      '<path d="' + hairs[i] + '" fill="' + hair + '"/>' +
+      '<path d="M28 48Q22 47 26 55L30 59M79 48Q85 47 82 55L78 59" stroke="' + skin + '" stroke-width="6" stroke-linecap="round"/>' +
+      '<g class="ao-eyes"><ellipse cx="44" cy="46" rx="2.3" ry="3.3" fill="#172330"/><ellipse cx="65" cy="46" rx="2.3" ry="3.3" fill="#172330"/></g>' +
+      '<path d="M51 55Q55 58 59 55" stroke="#945d52" fill="none" stroke-width="1.8" stroke-linecap="round"/>' +
+      (i % 3 === 1 ? '<path d="M24 41Q20 28 30 25M83 41Q87 27 77 25" stroke="#233449" stroke-width="5" fill="none" stroke-linecap="round"/><rect x="21" y="40" width="7" height="18" rx="4" fill="#37495d"/><rect x="79" y="40" width="7" height="18" rx="4" fill="#37495d"/>' : '') +
+      (i === 2 || i === 9 ? '<path d="M27 31Q54 8 82 32" stroke="' + hair + '" stroke-width="7" fill="none"/>' : '') +
+      '</svg>';
+  };
+  const stations = byId("aoStations");
+  stations.innerHTML = roles.map((role, i) => {
+    return '<button class="ao-station" type="button" data-role="' + role + '" data-mode="idle" style="--agent-accent:' + colors[i] + '" aria-label="Ver agente ' + names[role] + '">' +
+      '<span class="ao-monitor"><span class="ao-screen"><i></i><i></i><i></i><i></i></span></span>' +
+      '<span class="ao-chair"></span><span class="ao-avatar-holder">' + character(i) + '</span>' +
+      '<span class="ao-desk"><span class="ao-keyboard"></span></span>' +
+      '<span class="ao-station-name">' + names[role] + '</span><span class="ao-station-state">Sem dados</span>' +
+      '</button>';
+  }).join("");
+  const stationNodes = Object.fromEntries(roles.map((role) => [role, stations.querySelector('[data-role="' + role + '"]')]));
+  let snapshot = null, selected = null, selectedRepo = "", lastFocus = null;
+  let animationsOn = true;
+  try { animationsOn = localStorage.getItem("ao.motion") !== "off"; } catch {}
+  const motion = byId("aoMotion");
+  motion.checked = animationsOn;
+  const syncMotion = () => app.classList.toggle("ao-motion-disabled", !animationsOn);
+  syncMotion();
+  motion.addEventListener("change", () => {
+    animationsOn = motion.checked;
+    try { localStorage.setItem("ao.motion", animationsOn ? "on" : "off"); } catch {}
+    syncMotion();
+  });
+  byId("aoExpand").addEventListener("click", (e) => {
+    const expanded = byId("aoRoomPanel").classList.toggle("ao-expanded");
+    e.currentTarget.setAttribute("aria-label", expanded ? "Reduzir o escritório" : "Ampliar o escritório");
+    e.currentTarget.textContent = expanded ? "↙" : "⤢";
+  });
+  const offline = (s) => Boolean(s?.o?.off);
+  const paused = (s) => Boolean(s?.o?.man || s?.o?.pause || s?.o?.off);
+  const work = (s, role) => {
+    const worker = s?.w?.[role] || {};
+    return worker.st === "work" ||
+      safeArray(s?.q).some((j) => workerStages[role]?.includes(j.st));
+  };
+  const mode = (s, role) => {
+    const w = s?.w?.[role] || {};
+    if (w.hold || paused(s)) return "paused";
+    if (work(s, role)) return "work";
+    return w.st === "sleep" ? "sleep" : "idle";
+  };
+  const statusText = {work:"A trabalhar",idle:"Disponível",sleep:"Em repouso",paused:"Em pausa"};
+  const updateAgents = (s) => {
+    let working = 0;
+    const rows = [];
+    for (let i=0;i<roles.length;i++) {
+      const role = roles[i], w = s.w?.[role] || {}, el = stationNodes[role], state = mode(s, role);
+      if (state === "work") working++;
+      if (el.dataset.mode === "work" && state !== "work" && !paused(s) && animationsOn) {
+        el.classList.remove("ao-celebrate");
+        void el.offsetWidth;
+        el.classList.add("ao-celebrate");
+      }
+      el.dataset.mode = state;
+      el.querySelector(".ao-station-state").textContent = statusText[state];
+      el.title = names[role] + " · " + statusText[state] + (w.say ? " · " + w.say : "");
+      rows.push('<button type="button" class="ao-agent-row" data-agent="' + role + '"><span class="ao-agent-color" style="background:' + colors[i] + '"></span><span class="ao-agent-title">' +
+        escapeHTML(names[role]) + '</span><span class="ao-agent-status ao-state-' + state + '">' + statusText[state] + '</span></button>');
+    }
+    byId("aoAgentList").innerHTML = rows.join("");
+    byId("aoMetricWorkers").textContent = working + " / " + roles.length;
+    byId("aoAgentSummary").textContent = working + " em execução · " + (roles.length - working) + " restantes";
+  };
+  const rowHTML = (label, caption, badge, attr, val, extraClass = "") => {
+    return '<button class="ao-data-row ' + extraClass + '" type="button" ' + attr + '="' + escapeHTML(val) + '">' +
+      '<span class="ao-row-main"><strong>' + escapeHTML(label) + '</strong><small>' + escapeHTML(caption) + '</small></span>' +
+      '<span class="ao-row-badge">' + escapeHTML(badge) + '</span></button>';
+  };
+  const filtered = (items) => safeArray(items).filter((x) => !selectedRepo || x.repo === selectedRepo);
+  const renderLists = (s) => {
+    const q = filtered(s.q), prs = filtered(s.pr);
+    byId("aoMetricQueue").textContent = formatNum(safeArray(s.q).length);
+    byId("aoMetricPR").textContent = formatNum(safeArray(s.pr).filter((x) => x.st === "open").length);
+    byId("aoMetricDone").textContent = formatNum(safeArray(s.dn).filter((x) => x.st === "done").length);
+    byId("aoTasksList").innerHTML = q.length ? q.slice(0, 7).map((j) =>
+      rowHTML(j.title, j.repo + (j.num ? " · #" + j.num : ""), stageLabels[j.st] || j.st, "data-job", j.id)).join("") :
+      '<p class="ao-empty">Sem tarefas em aberto.</p>';
+    byId("aoPRList").innerHTML = prs.length ? prs.slice(0, 7).map((p) =>
+      rowHTML(p.title, p.repo + " · #" + p.num, p.st === "open" ? "Aberto" : p.st === "merged" ? "Integrado" : "Fechado", "data-pr-url", p.url || "")).join("") :
+      '<p class="ao-empty">Sem pull requests registados.</p>';
+    byId("aoEventList").innerHTML = safeArray(s.ev).slice(0, 8).map((e) =>
+      '<div class="ao-event"><time>' + datum(e.t) + '</time><span class="ao-event-agent">' + escapeHTML(names[e.w] || e.w) +
+      '</span><span class="ao-event-message" title="' + escapeHTML(e.m) + '">' + escapeHTML(e.m) + '</span></div>').join("") ||
+      '<p class="ao-empty">Sem atividade recente.</p>';
+  };
+  const renderRepos = (s) => {
+    const repos = [...new Set(safeArray(s.q).concat(safeArray(s.dn), safeArray(s.pr)).map((v) => v.repo).filter(Boolean))].sort();
+    if (selectedRepo && !repos.includes(selectedRepo)) selectedRepo = "";
+    const wrap = byId("aoRepos");
+    wrap.replaceChildren();
+    const all = document.createElement("button");
+    all.type = "button"; all.className = "ao-repo-item" + (!selectedRepo ? " is-selected" : "");
+    all.textContent = "Todos";
+    all.addEventListener("click", () => { selectedRepo = ""; renderRepos(snapshot); renderLists(snapshot); });
+    wrap.appendChild(all);
+    for (const repo of repos) {
+      const item = document.createElement("button");
+      item.type = "button"; item.className = "ao-repo-item" + (selectedRepo === repo ? " is-selected" : "");
+      item.textContent = repo;
+      item.title = repo;
+      item.addEventListener("click", () => { selectedRepo = repo; renderRepos(snapshot); renderLists(snapshot); });
+      wrap.appendChild(item);
+    }
+    if (!repos.length) {
+      const empty = document.createElement("div");
+      empty.className = "ao-muted"; empty.textContent = "Sem repositórios nos registos atuais.";
+      wrap.appendChild(empty);
+    }
+  };
+  const renderMerges = (s) => {
+    const counts = new Map(safeArray(s.mg).map((item) => [item.d, Number(item.n) || 0]));
+    const days = [];
+    for (let i=29;i>=0;i--) {
+      const date = new Date(); date.setHours(12,0,0,0); date.setDate(date.getDate()-i);
+      const key = [date.getFullYear(), String(date.getMonth()+1).padStart(2,"0"), String(date.getDate()).padStart(2,"0")].join("-");
+      days.push({date:key,count:counts.get(key)||0});
+    }
+    const max = Math.max(1,...days.map((d)=>d.count));
+    byId("aoMergeChart").innerHTML = '<div class="ao-merge-graph" role="img" aria-label="Gráfico de integrações dos últimos 30 dias">' +
+      days.map((d) => '<span title="' + d.date + ': ' + d.count + ' PRs" style="height:' + Math.max(2,d.count/max*100) + '%" class="' + (d.count?"ao-bar-live":"ao-bar-zero") + '"></span>').join("") +
+      '</div><div class="ao-trend-labels"><span>Há 30 dias</span><span>Hoje</span></div>';
+  };
+  const renderMachines = (s) => {
+    const hosts = safeArray(s.hs), live = s.hst || {};
+    if (!hosts.length) { byId("aoMachines").innerHTML = '<p class="ao-empty">Ainda não existem máquinas configuradas.</p>'; return; }
+    byId("aoMachines").innerHTML = hosts.slice(0,4).map((h)=>{
+      const info = live[h.id] || {};
+      const up = s.o?.net?.[h.id] !== false && !!h.on_;
+      let pieces = [];
+      if (Number.isFinite(Number(info.cpu)) && Number(info.cpu)>0) pieces.push(info.cpu + " núcleos");
+      if (Array.isArray(info.mem) && Number(info.mem[0])>0) {
+        const used = (Number(info.mem[0])-Number(info.mem[1]))/1024;
+        pieces.push(used.toFixed(1) + " / " + (Number(info.mem[0])/1024).toFixed(1) + " GB RAM");
+      }
+      if (Array.isArray(info.disk) && Number(info.disk[0])>0) pieces.push(info.disk[1] + " GB livres");
+      return '<div class="ao-machine-row"><span class="ao-host-dot ' + (up?"ao-host-up":"ao-host-down") + '"></span><span><strong>' +
+        escapeHTML(h.id) + '</strong><small>' + escapeHTML(pieces.join(" · ") || "Sem métricas de hardware") + '</small></span><em>' +
+        (up ? "Ativa" : "Inativa") + '</em></div>';
+    }).join("");
+  };
+  const render = (s) => {
+    if (!s || typeof s !== "object" || s.error) return;
+    snapshot = s;
+    const isPaused = paused(s), isOffline = offline(s);
+    const state = byId("aoOfficeStatus");
+    state.className = "ao-status-chip" + (isPaused ? " is-paused" : "");
+    state.textContent = isOffline ? "Sem ligação" : isPaused ? "Escritório em pausa" : "Sistema operacional";
+    byId("aoConnection").textContent = isOffline ? "Ligação indisponível" : "Ligação em tempo real";
+    byId("aoPause").textContent = s.o?.man ? "Retomar escritório" : "Pausar escritório";
+    byId("aoPause").disabled = !s.o;
+    updateAgents(s); renderRepos(s); renderLists(s); renderMerges(s); renderMachines(s);
+    if (selected) showAgent(selected, false);
+  };
+  const overlay = byId("aoAgentOverlay");
+  const showAgent = (role, focus = true) => {
+    if (!snapshot || !roles.includes(role)) return;
+    const w = snapshot.w?.[role] || {}, stage = mode(snapshot,role);
+    selected = role;
+    byId("aoDetailTitle").textContent = names[role];
+    const job = safeArray(snapshot.q).find((j) => j.id === w.job);
+    const rows = [
+      ["Estado",statusText[stage]],
+      ["Modelo",w.md ? A.mdn(w.md) : "Sem modelo atribuído"],
+      ["Tokens hoje",formatNum(w.tk)],
+      ["Atividade",w.say || "Sem informação adicional"]
+    ];
+    if (job) rows.push(["Tarefa",job.title]);
+    byId("aoDetailBody").replaceChildren();
+    for (const [title,value] of rows) {
+      const row = document.createElement("div"), t = document.createElement("span"), v = document.createElement("strong");
+      row.className = "ao-detail-row"; t.textContent = title; v.textContent = value;
+      row.append(t,v); byId("aoDetailBody").appendChild(row);
+    }
+    const jb = byId("aoDetailJob"), mb = byId("aoDetailModel");
+    jb.hidden = !job || typeof A.job !== "function";
+    jb.onclick = () => { overlay.hidden = true; selected = null; A.job(job.id); };
+    mb.hidden = ["ci","submit"].includes(role) || typeof A.role !== "function";
+    mb.onclick = () => { overlay.hidden = true; selected = null; A.role(role); };
+    overlay.hidden = false;
+    if (focus) { lastFocus = document.activeElement; overlay.querySelector(".ao-agent-dialog").focus(); }
+  };
+  const hideAgent = () => {
+    if (overlay.hidden) return;
+    overlay.hidden = true; selected = null;
+    if (lastFocus?.isConnected) lastFocus.focus();
+  };
+  byId("aoDetailClose").addEventListener("click", hideAgent);
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) hideAgent(); });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !overlay.hidden) { e.preventDefault(); hideAgent(); }
+  });
+  const handlers = {repos:"bRepos",hosts:"bHosts",costs:"bCost",settings:"bSet"};
+  app.addEventListener("click", (event) => {
+    const node = event.target.closest("[data-role],[data-agent],[data-job],[data-pr-url],[data-target],[data-open]");
+    if (!node) return;
+    if (node.dataset.role || node.dataset.agent) { showAgent(node.dataset.role || node.dataset.agent); return; }
+    if (node.dataset.job) { A.job?.(Number(node.dataset.job)); return; }
+    if (node.dataset.prUrl) { A.open?.(node.dataset.prUrl); return; }
+    if (node.dataset.open) { byId(handlers[node.dataset.open])?.click(); return; }
+    if (node.dataset.target) {
+      byId(node.dataset.target)?.scrollIntoView({behavior: animationsOn ? "smooth" : "auto",block:"start"});
+      app.querySelectorAll(".ao-nav-item").forEach((n) => n.classList.toggle("is-active", n === node));
+    }
+  });
+  byId("aoPause").addEventListener("click", () => byId("bPause")?.click());
+  const originalOnState = A.onState;
+  A.onState = (s) => {
+    if (typeof originalOnState === "function") originalOnState(s);
+    render(s);
+  };
+  if (A.S) render(A.S);
+})();
