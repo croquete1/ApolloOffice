@@ -546,3 +546,22 @@ body.ao-enabled #dr { color: var(--t1); }
   0%, 100% { transform: rotate(0deg); }
   50% { transform: rotate(-7deg) translateY(3px); }
 }
+
+
+/* A brief monitor sweep marks an observed new command, never an invented event. */
+.ao-screen { position: relative; }
+.ao-station.ao-action-pulse[data-mode="work"] .ao-screen::after {
+  content: "";
+  position: absolute;
+  inset: -40% 0;
+  pointer-events: none;
+  background: linear-gradient(120deg, transparent 34%, #85e6ee52 49%, transparent 64%);
+  animation: ao-command-sweep .65s ease-out 1;
+}
+.ao-motion-disabled .ao-station .ao-screen::after,
+.ao-data-stale .ao-station .ao-screen::after { animation: none !important; display:none; }
+@keyframes ao-command-sweep {
+  from { transform: translateX(-120%); opacity: 0; }
+  30% { opacity: 1; }
+  to { transform: translateX(120%); opacity: 0; }
+}
