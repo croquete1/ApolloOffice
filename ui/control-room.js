@@ -371,11 +371,23 @@
   });
   byId("aoPause").addEventListener("click", () => byId("bPause")?.click());
   const originalOnState = A.onState;
+  let healthy = true;
+  const fallback = (error) => {
+    healthy = false;
+    console.error("Apollo Control Room: reverting to original interface", error);
+    app.remove();
+    legacy.replaceWith(...Array.from(legacy.children));
+    document.body.classList.remove("ao-enabled");
+    A.modernRoom = false;
+  };
   A.onState = (s) => {
     if (typeof originalOnState === "function") originalOnState(s);
-    render(s);
+    if (!healthy) return;
+    try { render(s); } catch (error) { fallback(error); }
   };
-  if (A.S) render(A.S);
+  if (A.S) {
+    try { render(A.S); } catch (error) { fallback(error); }
+  }
   // Keep the connection label honest if WebSocket and polling stop updating.
   setInterval(() => {
     if (!lastStateAt || Date.now() - lastStateAt <= 12000) return;
