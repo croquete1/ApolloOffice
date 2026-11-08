@@ -1,0 +1,107 @@
+/* Apollo Office · Studio 2.5D
+   Premium, legible, no canvas / no pixel art. Visuals remain observational:
+   only actual worker states and job transitions start character actions. */
+
+.ao-app {
+  --ao-surface: #121f30;
+  --ao-border: #304054;
+  --ao-accent: #6dc7d3;
+  background: radial-gradient(ellipse at 44% -22%, #203c58 0%,#0e1928 46%,#091320 100%);
+}
+.ao-sidebar {
+  background: linear-gradient(180deg,#0c1b2b,#0b1522 72%,#0a1420);
+  border-right-color: #304358;
+}
+.ao-panel {
+  background: linear-gradient(170deg,#142338,#101d2d);
+  border-color: #304258;
+  box-shadow: 0 12px 40px #050c1536, inset 0 1px #ffffff08;
+}
+.ao-panel-heading {
+  background: linear-gradient(90deg,#1b2b3e55,#13213315);
+  border-bottom-color: #2c4054;
+}
+.ao-metric { background: linear-gradient(125deg,#15283b,#112032); }
+.ao-room-panel { min-width: 0; }
+.ao-office[data-visual-version="2"] {
+  height: 505px;
+  position: relative;
+  isolation: isolate;
+  background: linear-gradient(180deg,#1a3046 0%,#253448 47%,#202c3d 55%,#172536 100%);
+  border-bottom: 1px solid #50647944;
+  --ao-v2-light: #76c2c8;
+}
+.ao-office[data-visual-version="2"] .ao-room-glow {
+  z-index: 1;
+  background:radial-gradient(ellipse at 46% 29%,#edc28d12,transparent 32%),
+    linear-gradient(90deg,transparent,#6bbdcb08,transparent);
+}
+.ao-office[data-visual-version="2"] .ao-windows,
+.ao-office[data-visual-version="2"] .ao-office-sign,
+.ao-office[data-visual-version="2"] .ao-office-lamp { display:none }
+.ao-office[data-visual-version="2"] .ao-office-floor {
+  z-index: 0;
+  bottom: -1%;left:-2%;right:-2%;height:43%;
+  transform: perspective(700px) rotateX(27deg);
+  background: repeating-linear-gradient(90deg,transparent 0 88px,#d6e0f109 89px 90px),
+    repeating-linear-gradient(0deg,transparent 0 46px,#d6e0f10a 47px 48px),
+    linear-gradient(180deg,#273447,#172638 75%,#0c1828);
+  border-top: 1px solid #7f92ab1c;
+}
+.ao-v2-architecture { position:absolute;inset:0;overflow:hidden;pointer-events:none;z-index:0; }
+.ao-v2-backwall { position:absolute;inset:0 0 41%;background:
+  repeating-linear-gradient(90deg, transparent 0 235px,#a2b7c108 236px 237px),
+  linear-gradient(180deg,#1a2c40 0%,#20364b 78%,#23384a);
+  border-bottom:7px solid #263b4d;
+  box-shadow:inset 0 -13px 18px #0b1c2f4d;
+}
+.ao-v2-backwall::after { content:"";position:absolute;left:0;right:0;bottom:19px;height:2px;
+  background:linear-gradient(90deg,#1e79884d,transparent 36%,#8ab9c938 70%,#e9bb8150);
+}
+.ao-v2-window { position:absolute;top:23px;height:146px;width:22%;max-width:210px;overflow:hidden;
+  border:6px solid #304a61;border-radius:7px;
+  box-shadow:inset 0 0 0 2px #bbd0de36,0 0 0 1px #0b1d2e,0 14px 25px #050d1790;
+  background:linear-gradient(180deg,#172e4a,#245373 69%,#31556e);
+}
+.ao-v2-window-left {left:3%;}
+.ao-v2-window-right {right:3%;}
+.ao-v2-window::before {content:"";position:absolute;inset:0;background:
+  radial-gradient(circle at 77% 21%,#e0bd8eac 0 6px,transparent 7px),
+  linear-gradient(90deg,transparent 48%,#65819b 48% 51%,transparent 51%),
+  linear-gradient(180deg,transparent 52%,#65819b 52% 55%,transparent 55%);
+  z-index:2;pointer-events:none;
+}
+.ao-v2-window::after { content:"";position:absolute;inset:0;pointer-events:none;
+  box-shadow:inset 0 8px 18px #05142790,inset 9px 0 15px #142a3a70;
+  background:linear-gradient(120deg,#f7ffff16,transparent 39%);
+}
+.ao-v2-skyline {position:absolute;left:0;right:0;bottom:0;height:61%;background:
+  linear-gradient(90deg,#112a41 0 7%,transparent 7% 14%,#162d45 14% 21%,transparent 21% 27%,#172a3f 27% 36%,transparent 36% 45%,#182c43 45% 57%,transparent 57% 65%,#152d45 65% 75%,transparent 75% 81%,#16283b 81% 91%,transparent 91%),
+  linear-gradient(to top,#0e2439,#203a52);
+  clip-path:polygon(0 52%,7% 52%,7% 17%,14% 17%,14% 50%,21% 50%,21% 36%,27% 36%,27% 3%,37% 3%,37% 45%,46% 45%,46% 26%,57% 26%,57% 54%,66% 54%,66% 17%,76% 17%,76% 48%,82% 48%,82% 8%,92% 8%,92% 60%,100% 60%,100% 100%,0 100%);
+}
+.ao-v2-panel-light { position:absolute;top:6px;width:13%;height:3px;border-radius:8px;
+  background:#96bcc4;box-shadow:0 4px 20px 4px #c5b9943b,0 15px 46px #c5b99416;opacity:.75;
+}
+.ao-v2-panel-light-left {left:29%}
+.ao-v2-panel-light-right {right:29%}
+.ao-v2-room-label {position:absolute;left:50%;top:41px;transform:translateX(-50%);width:clamp(190px,34%,300px);
+  text-align:center;color:#e4eef5;letter-spacing:.18em;font-size:clamp(14px,1.8vw,22px);font-weight:760;
+  text-shadow:0 3px 22px #060f1db0;white-space:nowrap;
+}
+.ao-v2-room-label em {font-style:normal;color:#84cad4}
+.ao-v2-room-label small {display:block;margin:6px 0 0;color:#9aafc1;letter-spacing:.21em;font-size:8px;font-weight:500}
+.ao-v2-room-label-line {display:block;width:49px;height:2px;border-radius:2px;background:#8cd8d6;box-shadow:0 0 12px #76dee194;margin:0 auto 10px}
+.ao-v2-shelf {position:absolute;right:4%;top:203px;width:85px;height:10px;border-top:5px solid #667b85;border-bottom:4px solid #1a2837;background:#273b4a;box-shadow:0 4px 8px #071222a1;}
+.ao-v2-shelf span {position:absolute;bottom:10px;width:15px;height:26px;border-radius:2px 2px 0 0;background:#809698;}
+.ao-v2-shelf span:first-child {left:13px;height:23px;background:#c19c69}
+.ao-v2-shelf span:nth-child(2) {left:31px;height:33px;background:#57767f}
+.ao-v2-shelf span:nth-child(3) {left:54px;height:19px;background:#7c99a2}
+.ao-v2-plant {position:absolute;bottom:26%;width:66px;height:110px}
+.ao-v2-plant-left{left:1.4%}.ao-v2-plant-right{right:1.1%}
+.ao-v2-plant b {position:absolute;bottom:0;left:20px;width:30px;height:28px;
+  background:linear-gradient(125deg,#826651,#3d4b50);border-radius:4px 4px 9px 9px;border-top:4px solid #b89a79;box-shadow:0 8px 9px #0007}
+.ao-v2-plant i {position:absolute;left:33px;bottom:25px;width:18px;height:54px;
+  background:linear-gradient(90deg,#2f6662,#4d9181);border-radius:100% 0 100% 0;transform-origin:bottom center;box-shadow:0 2px 7px #081a1660}
+.ao-v2-plant i:nth-child(1){transform:rotate(-38deg);height:65px}
+.ao-v2-plant i:nth-child(2){transform:rotate(35deg);height:59px}
