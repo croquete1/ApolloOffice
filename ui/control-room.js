@@ -210,6 +210,19 @@
       }
       if (w.job) el.dataset.lastJob = String(w.job);
       el.dataset.mode = state;
+      // A subtle screen reaction only when a genuinely new command is reported.
+      const latestCommand = lastCommands(w)[0];
+      if (latestCommand) {
+        const commandKey = String(latestCommand[0]) + ":" + latestCommand[1];
+        if (el.dataset.lastCommand && el.dataset.lastCommand !== commandKey &&
+            state === "work" && animationsOn && !document.hidden &&
+            !window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) {
+          el.classList.remove("ao-action-pulse");
+          void el.offsetWidth;
+          el.classList.add("ao-action-pulse");
+        }
+        el.dataset.lastCommand = commandKey;
+      }
       const result = Object.hasOwn(resultText, w.mood) ? w.mood : "";
       el.dataset.mood = result;
       el.querySelector(".ao-result-mark").textContent = result === "ok" ? "✓" : result === "err" ? "!" : result === "sad" ? "!" : "";
