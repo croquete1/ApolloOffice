@@ -383,13 +383,16 @@
   };
   // Unlike the limited queue preview, s.n contains the server's full database counts.
   const pipelineSteps = [
-    {label: "Triagem", statuses: ["vet", "ready"]},
+    {label: "Pendente", statuses: ["ready"]},
+    {label: "Triagem", statuses: ["vet"]},
     {label: "Pesquisa", statuses: ["hunt"]},
     {label: "Reprodução", statuses: ["repro"]},
     {label: "Correção", statuses: ["fix"]},
     {label: "Testes", statuses: ["ci"]},
     {label: "Revisão", statuses: ["review"]},
-    {label: "Aprovação", statuses: ["gate", "approve", "submit"]}
+    {label: "Validação", statuses: ["gate"]},
+    {label: "Aprovação", statuses: ["approve"]},
+    {label: "Submissão", statuses: ["submit"]}
   ];
   const pipeline = byId("aoPipeline");
   pipeline.innerHTML = pipelineSteps.map(({label}, i) =>
