@@ -17,7 +17,13 @@
 
 <p align="center"><a href="https://office.apollonet.dev">Website</a></p>
 
-![The office: a pixel floor with one desk per worker, the queue, pull requests and the log on the right](docs/images/office.png)
+The Control Room dashboard displays real agent states, open work, pull requests,
+host health and workflow stages. Its secondary virtual office uses animated,
+non-pixelated SVG characters. Animations represent observed events, and can be
+disabled. The underlying task and review pipeline remains unchanged.
+
+For the implementation and verification details, see
+[Control Room documentation](docs/control-room.md).
 
 Add any GitHub repository. ApolloOffice picks up its bug reports (or hunts for
 bugs itself), reproduces them, writes a fix with a regression test, proves the
