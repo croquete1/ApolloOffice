@@ -405,7 +405,7 @@
   const frame = () => {
     // The modern office has its own lightweight animations. Preserve the legacy
     // canvas for fallback, but avoid drawing hidden pixel art every frame.
-    if (window.AO?.modernRoom) {
+    if (window.AO?.modernRoom || window.AO?.disablePixelArt) {
       setTimeout(() => requestAnimationFrame(frame), 1500);
       return;
     }
