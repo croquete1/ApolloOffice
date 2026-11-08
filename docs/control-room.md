@@ -21,6 +21,11 @@ Esta versão substitui apenas a apresentação do painel. O Apollo Office manté
 - Limites da API respeitados nas listas de pré-visualização: máximo de 60 tarefas em aberto, 40 PRs recentes e 25 trabalhos terminados recentes. Os totais de trabalhos vêm de `s.n`, não dessas listas. Uma máquina só apresenta medições atuais quando existe telemetria com menos de 120 segundos; em caso contrário mostra a hora da última leitura ou um aviso de indisponibilidade.
 - Filtro por repositórios que aparecem nos registos de tarefas/PRs; não representa necessariamente todos os repositórios configurados.
 - Redução de movimento via preferência do sistema ou interruptor visível. As animações temporárias de celebração e de novos comandos são limpas após a execução, em caso de suspensão e quando os dados ficam desatualizados.
+- A lista de agentes apresenta agora atividade real (`w.say`) e modelo atribuído (`w.md`), incluindo modelos locais Ollama como o Qwen 3 8B.
+- O cabeçalho indica a última atualização do servidor (`s.t`); quando a ligação expira, os estados passam a «Por confirmar» e as métricas de trabalho ativo deixam de ser apresentadas como atuais.
+- Navegação entre postos por setas: cinco colunas em ecrãs amplos e duas colunas até 530 px. Os botões continuam acessíveis por Tab.
+- Foco preservado durante atualizações de tarefas e PRs: mantém-se no elemento equivalente; se este desapareceu, transfere-se para a respetiva secção.
+- A informação das máquinas distingue explicitamente telemetria recente, última leitura histórica e situação por confirmar, incluindo quando o canal de estado deixa de atualizar.
 
 ## Fontes e limitações
 
@@ -33,7 +38,7 @@ Se o renderizador moderno falhar ao processar um estado, a interface original é
 ## Verificação
 
 ```bash
-node --test quality/control-room.test.mjs quality/control-room.pipeline.test.mjs quality/control-room.worker.test.mjs quality/control-room.machines.test.mjs quality/control-room.reactions.test.mjs quality/office-motion.test.mjs quality/state-subscription.test.mjs
+node --test quality/*.test.mjs
 cargo test
 cargo run --release
 ```
