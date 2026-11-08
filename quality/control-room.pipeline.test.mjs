@@ -66,8 +66,8 @@ test("pipeline uses real phase totals independently of the limited queue", () =>
   assert.deepEqual(x.stages.map((s) => s.count), ["1","4","2","0","3","1","2","1","5","1"]);
   assert.deepEqual(x.stages.map((s) => s.active), [true,true,true,false,true,true,true,true,true,true]);
   assert.match(x.stages[8].label, /Aprovação: 5 tarefas/);
-  assert.match(x.stages[7].label, /Validação: 1 tarefas/);
-  assert.match(x.stages[9].label, /Submissão: 1 tarefas/);
+  assert.match(x.stages[7].label, /Validação: 1 tarefa/);
+  assert.match(x.stages[9].label, /Submissão: 1 tarefa/);
 });
 
 test("active and finished metrics derive from the full status map", () => {
