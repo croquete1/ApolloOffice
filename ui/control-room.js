@@ -158,7 +158,7 @@
   const stationNodes = Object.fromEntries(roles.map((role) => [role, stations.querySelector('[data-role="' + role + '"]')]));
   let snapshot = null, selected = null, selectedRepo = "", lastFocus = null;
   let lastRepoSignature = "", lastListSignature = "", lastMergeSignature = "";
-  let lastMachineSignature = "", lastStateAt = 0;
+  let lastMachineSignature = "", lastDetailSignature = "", lastStateAt = 0;
   let animationsOn = true;
   try { animationsOn = localStorage.getItem("ao.motion") !== "off"; } catch {}
   const motion = byId("aoMotion");
@@ -327,7 +327,12 @@
     const w = snapshot.w?.[role] || {}, stage = mode(snapshot,role);
     selected = role;
     byId("aoDetailTitle").textContent = names[role];
-    const job = safeArray(snapshot.q).find((j) => j.id === w.job);
+    const jobs = safeArray(snapshot.q);
+    const job = (w.job != null ? jobs.find((j) => String(j.id) === String(w.job)) : null)
+      || jobs.find((j) => workerStages[role]?.includes(j.st));
+    const signature = JSON.stringify([role, stage, w.md, w.tk, w.say, job?.id, job?.title]);
+    if (!focus && signature === lastDetailSignature) return;
+    lastDetailSignature = signature;
     const rows = [
       ["Estado",statusText[stage]],
       ["Modelo",w.md ? A.mdn(w.md) : "Sem modelo atribuído"],
@@ -378,7 +383,10 @@
     if (node.dataset.prUrl) { A.open?.(node.dataset.prUrl); return; }
     if (node.dataset.open) { byId(handlers[node.dataset.open])?.click(); return; }
     if (node.dataset.target) {
-      byId(node.dataset.target)?.scrollIntoView({behavior: animationsOn ? "smooth" : "auto",block:"start"});
+      const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+      byId(node.dataset.target)?.scrollIntoView({
+        behavior: animationsOn && !reduced ? "smooth" : "auto", block: "start"
+      });
       app.querySelectorAll(".ao-nav-item").forEach((n) => n.classList.toggle("is-active", n === node));
     }
   });
