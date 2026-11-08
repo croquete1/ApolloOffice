@@ -575,13 +575,12 @@
     const jobs = safeArray(snapshot.q);
     const job = w.job != null ? jobs.find((j) => String(j.id) === String(w.job)) : null;
     const recent = lastCommands(w);
-    const signature = JSON.stringify([role, stage, w.md, w.tk, w.say, w.mood, recent, job?.id, job?.title]);
+    const signature = JSON.stringify([role, stage, w.md, w.say, w.mood, recent, job?.id, job?.title]);
     if (!focus && signature === lastDetailSignature) return;
     lastDetailSignature = signature;
     const rows = [
       ["Estado",statusText[stage]],
       ["Modelo",w.md ? A.mdn(w.md) : "Sem modelo atribuído"],
-      ["Tokens hoje",formatNum(w.tk)],
       ["Atividade",w.say || "Sem informação adicional"]
     ];
     if (Object.hasOwn(resultText, w.mood)) rows.push(["Resultado recente", resultText[w.mood].replace("Último resultado: ", "")]);
