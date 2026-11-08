@@ -137,14 +137,14 @@
       '<g class="ao-arm ao-arm-left"><path d="M31 81Q18 86 22 103L38 105" fill="none" stroke="' + color + '" stroke-width="14" stroke-linecap="round"/><ellipse cx="39" cy="105" rx="7" ry="5" fill="' + skin + '"/></g>' +
       '<g class="ao-arm ao-arm-right"><path d="M77 81Q91 87 86 103L70 105" fill="none" stroke="' + color + '" stroke-width="14" stroke-linecap="round"/><ellipse cx="69" cy="105" rx="7" ry="5" fill="' + skin + '"/></g>' +
       '<path d="M45 61V70Q54 79 64 69V61Z" fill="' + skin + '"/>' +
-      '<ellipse cx="54" cy="42" rx="28" ry="30" fill="url(#' + id + ')"/>' +
+      '<g class="ao-head"><ellipse cx="54" cy="42" rx="28" ry="30" fill="url(#' + id + ')"/>' +
       '<path d="' + hairs[i] + '" fill="' + hair + '"/>' +
       '<path d="M28 48Q22 47 26 55L30 59M79 48Q85 47 82 55L78 59" stroke="' + skin + '" stroke-width="6" stroke-linecap="round"/>' +
       '<g class="ao-eyes"><ellipse cx="44" cy="46" rx="2.3" ry="3.3" fill="#172330"/><ellipse cx="65" cy="46" rx="2.3" ry="3.3" fill="#172330"/></g>' +
       '<path d="M51 55Q55 58 59 55" stroke="#945d52" fill="none" stroke-width="1.8" stroke-linecap="round"/>' +
       (i % 3 === 1 ? '<path d="M24 41Q20 28 30 25M83 41Q87 27 77 25" stroke="#233449" stroke-width="5" fill="none" stroke-linecap="round"/><rect x="21" y="40" width="7" height="18" rx="4" fill="#37495d"/><rect x="79" y="40" width="7" height="18" rx="4" fill="#37495d"/>' : '') +
       (i === 2 || i === 9 ? '<path d="M27 31Q54 8 82 32" stroke="' + hair + '" stroke-width="7" fill="none"/>' : '') +
-      '</svg>';
+      '</g></svg>';
   };
   const stations = byId("aoStations");
   stations.innerHTML = roles.map((role, i) => {
@@ -157,7 +157,8 @@
   }).join("");
   const stationNodes = Object.fromEntries(roles.map((role) => [role, stations.querySelector('[data-role="' + role + '"]')]));
   let snapshot = null, selected = null, selectedRepo = "", lastFocus = null;
-  let lastRepoSignature = "", lastStateAt = 0;
+  let lastRepoSignature = "", lastListSignature = "", lastMergeSignature = "";
+  let lastMachineSignature = "", lastStateAt = 0;
   let animationsOn = true;
   try { animationsOn = localStorage.getItem("ao.motion") !== "off"; } catch {}
   const motion = byId("aoMotion");
@@ -225,6 +226,9 @@
     byId("aoMetricQueue").textContent = formatNum(safeArray(s.q).length);
     byId("aoMetricPR").textContent = formatNum(safeArray(s.pr).filter((x) => x.st === "open").length);
     byId("aoMetricDone").textContent = formatNum(safeArray(s.dn).filter((x) => x.st === "done").length);
+    const signature = JSON.stringify([selectedRepo, q, prs, safeArray(s.ev).slice(0, 8)]);
+    if (signature === lastListSignature) return;
+    lastListSignature = signature;
     byId("aoTasksList").innerHTML = q.length ? q.slice(0, 7).map((j) =>
       rowHTML(j.title, j.repo + (j.num ? " · #" + j.num : ""), stageLabels[j.st] || j.st, "data-job", j.id)).join("") :
       '<p class="ao-empty">Sem tarefas em aberto.</p>';
@@ -264,6 +268,9 @@
     }
   };
   const renderMerges = (s) => {
+    const signature = JSON.stringify([s.mg, new Date().toDateString()]);
+    if (signature === lastMergeSignature) return;
+    lastMergeSignature = signature;
     const counts = new Map(safeArray(s.mg).map((item) => [item.d, Number(item.n) || 0]));
     const days = [];
     for (let i=29;i>=0;i--) {
@@ -277,6 +284,9 @@
       '</div><div class="ao-trend-labels"><span>Há 30 dias</span><span>Hoje</span></div>';
   };
   const renderMachines = (s) => {
+    const signature = JSON.stringify([s.hs, s.hst, s.o?.net]);
+    if (signature === lastMachineSignature) return;
+    lastMachineSignature = signature;
     const hosts = safeArray(s.hs), live = s.hst || {};
     if (!hosts.length) { byId("aoMachines").innerHTML = '<p class="ao-empty">Ainda não existem máquinas configuradas.</p>'; return; }
     byId("aoMachines").innerHTML = hosts.slice(0,4).map((h)=>{
@@ -298,11 +308,14 @@
     if (!s || typeof s !== "object" || s.error) return;
     snapshot = s;
     lastStateAt = Date.now();
+    app.classList.remove("ao-data-stale");
     const isPaused = paused(s), isOffline = offline(s), isWarn = !!s.o?.warn;
     const state = byId("aoOfficeStatus");
     state.className = "ao-status-chip" + (isPaused || isWarn ? " is-paused" : "");
-    state.textContent = isOffline ? "Serviços indisponíveis" : isPaused ? "Escritório em pausa" : isWarn ? "Aviso de utilização" : "Ligação ativa";
-    byId("aoConnection").textContent = isOffline ? "Ligação indisponível" : "Ligação em tempo real";
+    const statusLabel = isOffline ? "Serviços indisponíveis" : isPaused ? "Escritório em pausa" : isWarn ? "Aviso de utilização" : "Ligação ativa";
+    if (state.textContent !== statusLabel) state.textContent = statusLabel;
+    const connection = isOffline ? "Ligação indisponível" : "Ligação em tempo real";
+    if (byId("aoConnection").textContent !== connection) byId("aoConnection").textContent = connection;
     byId("aoPause").textContent = s.o?.man ? "Retomar escritório" : "Pausar escritório";
     byId("aoPause").disabled = !s.o;
     updateAgents(s); renderRepos(s); renderLists(s); renderMerges(s); renderMachines(s);
@@ -392,8 +405,9 @@
   setInterval(() => {
     if (!lastStateAt || Date.now() - lastStateAt <= 12000) return;
     const state = byId("aoOfficeStatus");
+    app.classList.add("ao-data-stale");
     state.className = "ao-status-chip is-paused";
-    state.textContent = "Dados desatualizados";
+    if (state.textContent !== "Dados desatualizados") state.textContent = "Dados desatualizados";
     byId("aoConnection").textContent = "Sem atualizações recentes";
   }, 5000);
 })();
