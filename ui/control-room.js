@@ -290,14 +290,18 @@
       '</div><div class="ao-trend-labels"><span>Há 30 dias</span><span>Hoje</span></div>';
   };
   const renderMachines = (s) => {
-    const signature = JSON.stringify([s.hs, s.hst, s.o?.net]);
+    const signature = JSON.stringify([s.hs, s.hst, s.o?.net, Math.floor(Date.now() / 60000)]);
     if (signature === lastMachineSignature) return;
     lastMachineSignature = signature;
     const hosts = safeArray(s.hs), live = s.hst || {};
     if (!hosts.length) { byId("aoMachines").innerHTML = '<p class="ao-empty">Ainda não existem máquinas configuradas.</p>'; return; }
     byId("aoMachines").innerHTML = hosts.slice(0,4).map((h)=>{
       const info = live[h.id] || {};
-      const up = s.o?.net?.[h.id] !== false && !!h.on_;
+      const enabled = !!h.on_;
+      const unavailable = enabled && s.o?.net?.[h.id] === false;
+      const age = Date.now() - Number(info.t || 0);
+      const recent = enabled && !unavailable && age >= 0 && age < 120_000;
+      const status = !enabled ? "Desativada" : unavailable ? "Indisponível" : recent ? "Dados recentes" : "Por confirmar";
       let pieces = [];
       if (Number.isFinite(Number(info.cpu)) && Number(info.cpu)>0) pieces.push(info.cpu + " núcleos");
       if (Array.isArray(info.mem) && Number(info.mem[0])>0) {
@@ -305,9 +309,9 @@
         pieces.push(used.toFixed(1) + " / " + (Number(info.mem[0])/1024).toFixed(1) + " GB RAM");
       }
       if (Array.isArray(info.disk) && Number(info.disk[0])>0) pieces.push(info.disk[1] + " GB livres");
-      return '<div class="ao-machine-row"><span class="ao-host-dot ' + (up?"ao-host-up":"ao-host-down") + '"></span><span><strong>' +
+      return '<div class="ao-machine-row"><span class="ao-host-dot ' + (recent ? "ao-host-up" : "ao-host-down") + '"></span><span><strong>' +
         escapeHTML(h.id) + '</strong><small>' + escapeHTML(pieces.join(" · ") || "Sem métricas de hardware") + '</small></span><em>' +
-        (up ? "Ativa" : "Inativa") + '</em></div>';
+        status + '</em></div>';
     }).join("");
   };
   const render = (s) => {
