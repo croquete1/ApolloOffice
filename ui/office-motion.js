@@ -135,7 +135,7 @@
     previousAt = Date.now();
   }
   const unsubscribe = A.subscribeState((s) => {
-    if (!app.isConnected || !A.modernRoom) { cancel(); unsubscribe(); return; }
+    if (!app.isConnected || !A.modernRoom) { dispose(); return; }
     if (!s || !Array.isArray(s.q)) return;
     const current = new Map(
       s.q.filter(j => j && j.id != null && owners[j.st])
@@ -160,7 +160,19 @@
     if (active && !stateAllowed(s)) cancel();
   });
 
-  motionControl?.addEventListener("change", () => { if (!motionControl.checked) cancel(); });
-  reduceMotion?.addEventListener?.("change", () => { if (reduceMotion.matches) cancel(); });
-  document.addEventListener("visibilitychange", () => { if (document.hidden) cancel(); });
+  const onMotionChange = () => { if (!motionControl.checked) cancel(); };
+  const onReducedMotion = () => { if (reduceMotion.matches) cancel(); };
+  const onVisibilityChange = () => { if (document.hidden) cancel(); };
+  const dispose = () => {
+    cancel();
+    unsubscribe();
+    motionControl?.removeEventListener?.("change", onMotionChange);
+    reduceMotion?.removeEventListener?.("change", onReducedMotion);
+    document.removeEventListener?.("visibilitychange", onVisibilityChange);
+    if (A.stopOfficeMotion === dispose) delete A.stopOfficeMotion;
+  };
+  motionControl?.addEventListener("change", onMotionChange);
+  reduceMotion?.addEventListener?.("change", onReducedMotion);
+  document.addEventListener("visibilitychange", onVisibilityChange);
+  A.stopOfficeMotion = dispose;
 })();
