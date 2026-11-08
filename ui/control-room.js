@@ -346,7 +346,7 @@
       ["Tokens hoje",formatNum(w.tk)],
       ["Atividade",w.say || "Sem informação adicional"]
     ];
-    if (resultText[w.mood]) rows.push(["Resultado recente",resultText[w.mood].replace("Último resultado: ", "")]);
+    if (Object.hasOwn(resultText, w.mood)) rows.push(["Resultado recente", resultText[w.mood].replace("Último resultado: ", "")]);
     if (job) rows.push(["Tarefa",job.title]);
     byId("aoDetailBody").replaceChildren();
     for (const [title,value] of rows) {
