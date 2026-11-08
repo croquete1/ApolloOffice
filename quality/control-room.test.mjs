@@ -54,9 +54,12 @@ test("no fictional GPU data or percentages of task completion", () => {
   assert.doesNotMatch(modern, /Ações Rápidas|Nova tarefa|Executar testes/);
 });
 
-test("original canvas sleeps while hidden and remains available for fallback", () => {
-  assert.match(original, /if \(window\.AO\?\.modernRoom\)/);
+test("retired pixel canvas stays hidden in modern and emergency fallback modes", () => {
+  assert.match(original, /window\.AO\?\.modernRoom \|\| window\.AO\?\.disablePixelArt/);
   assert.match(modern, /A\.modernRoom = false/);
+  assert.match(modern, /A\.disablePixelArt = true/);
+  assert.match(modern, /ao-fallback-no-pixel/);
+  assert.match(css, /body\.ao-fallback-no-pixel #cv/);
   assert.match(modern, /legacy\.replaceWith/);
 });
 
