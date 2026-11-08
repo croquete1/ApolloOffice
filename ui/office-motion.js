@@ -196,6 +196,10 @@
   });
 
   const onMotionChange = () => { if (!motionControl.checked) cancel(); };
+  /**
+   * Cancela deslocações e poses se o sistema pedir movimento reduzido.
+   * Mantém os estados reais dos agentes e os respetivos dados intactos.
+   */
   const onReducedMotion = () => {
     if (reduceMotion.matches) {
       cancel();
