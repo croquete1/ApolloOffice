@@ -22,6 +22,9 @@ jobs:
       - run: cargo test --locked
       - name: Control Room frontend tests (Node.js)
         run: node --test
+      - name: Control Room browser smoke test (Chromium)
+        if: runner.os == 'Linux'
+        run: python3 quality/browser_smoke.py
       - name: Independent acceptance and optional adapter tests
         if: runner.os == 'Linux'
         run: |
