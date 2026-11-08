@@ -396,6 +396,11 @@ body.ao-enabled #dr { color: var(--t1); }
 .ao-station.ao-travelling .ao-avatar-holder {
   opacity: 0;
 }
+.ao-station.ao-receiving {
+  border-color: #5ac6c077 !important;
+  background: #5ac6c012 !important;
+  box-shadow: inset 0 0 28px #42b8b41a;
+}
 .ao-walking-agent {
   position: absolute;
   pointer-events: none;
