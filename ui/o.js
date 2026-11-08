@@ -16,11 +16,21 @@
   // Dedicated, exception-isolated presentation subscriptions. Consumers do not
   // need to wrap the legacy onState callback or perform extra network requests.
   const stateListeners = new Set();
+  /**
+   * Register an independent, exception-isolated observer for server state.
+   * @param {(state:object)=>void} listener
+   * @returns {()=>void} Idempotent unsubscribe callback.
+   */
   window.AO.subscribeState = (listener) => {
     if (typeof listener !== "function") throw new TypeError("State subscriber must be a function");
     stateListeners.add(listener);
     return () => stateListeners.delete(listener);
   };
+  /**
+   * Publish one server snapshot to all independent UI subscribers.
+   * A subscriber failure does not interrupt other consumers.
+   * @param {object} state
+   */
   const notifyState = (state) => {
     for (const listener of stateListeners) {
       try { listener(state); } catch (error) {
@@ -530,6 +540,11 @@
     }
     seen = ids;
   };
+  /**
+   * Apply the authoritative snapshot and notify the modern interface.
+   * Retains legacy callbacks, websocket behavior and error handling.
+   * @param {object} s
+   */
   const apply = (s) => {
     if (!s || s.error) return;
     nt(s); S = s; last = performance.now(); err = 0;
