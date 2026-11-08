@@ -13,9 +13,14 @@ Esta versão substitui apenas a apresentação do painel. O Apollo Office manté
 - Breve reação do monitor a um novo comando real em `w.cmds`; diálogo de agente com os últimos quatro comandos disponíveis.
 - Celebração apenas quando uma tarefa anteriormente associada a um agente surge como concluída (`dn[].st === "done"`).
 - Painéis de tarefas, PRs, eventos, integrações dos últimos 30 dias e informações de máquinas, sem estimativas fictícias de progresso ou GPU.
-- Limites da API respeitados nos indicadores: máximo de 60 tarefas em aberto, 40 PRs recentes e 25 trabalhos terminados recentes. O estado de uma máquina só é apresentado como recente quando existe telemetria com menos de 120 segundos; carregamento e temperatura surgem apenas quando reportados.
+- Pipeline informativo com contagens completas da base de dados para triagem, pesquisa, reprodução, correção, testes, revisão e aprovação. Não contém botões de ações rápidas.
+- Os indicadores de tarefas em aberto e concluídas usam o mapa completo `s.n`, não a lista de pré-visualização limitada. A lista de PRs continua limitada aos últimos 40 registos.
+- As personagens iniciam-se num estado desconhecido, sem simular disponibilidade antes da primeira resposta do servidor.
+- O estado de cada agente vem exclusivamente de `s.w[role].st`; o backend já representa as tarefas persistentes nesse campo. Uma tarefa na fila não constitui prova de que determinado agente a está a executar.
+- As celebrações exigem um identificador de tarefa previamente observado e a respetiva conclusão recente, dentro de 60 segundos da hora do servidor.
+- Limites da API respeitados nas listas de pré-visualização: máximo de 60 tarefas em aberto, 40 PRs recentes e 25 trabalhos terminados recentes. Os totais de trabalhos vêm de `s.n`, não dessas listas. Uma máquina só apresenta medições atuais quando existe telemetria com menos de 120 segundos; em caso contrário mostra a hora da última leitura ou um aviso de indisponibilidade.
 - Filtro por repositórios que aparecem nos registos de tarefas/PRs; não representa necessariamente todos os repositórios configurados.
-- Redução de movimento via preferência do sistema ou interruptor visível.
+- Redução de movimento via preferência do sistema ou interruptor visível. As animações temporárias de celebração e de novos comandos são limpas após a execução, em caso de suspensão e quando os dados ficam desatualizados.
 
 ## Fontes e limitações
 
@@ -28,7 +33,7 @@ Se o renderizador moderno falhar ao processar um estado, a interface original é
 ## Verificação
 
 ```bash
-node --test quality/control-room.test.mjs quality/office-motion.test.mjs quality/state-subscription.test.mjs
+node --test quality/control-room.test.mjs quality/control-room.pipeline.test.mjs quality/control-room.worker.test.mjs quality/control-room.machines.test.mjs quality/control-room.reactions.test.mjs quality/office-motion.test.mjs quality/state-subscription.test.mjs
 cargo test
 cargo run --release
 ```
