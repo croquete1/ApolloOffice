@@ -178,6 +178,10 @@
     stationNodes[roles[next]].focus({preventScroll:true});
   });
   // One-shot visual reactions must not override normal breathing/typing forever.
+  /**
+   * Limpa animações transitórias quando o movimento é suspenso,
+   * o documento fica oculto ou os dados deixam de ser recentes.
+   */
   const clearReactions = () => {
     window.AOOfficeV2?.clearTransitions(stations);
     for (const node of Object.values(stationNodes)) {
