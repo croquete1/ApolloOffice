@@ -5,17 +5,19 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 
-const ID: &str = "15968501883-ivf1d29hmggbn0ei8hks5teo3154045c.apps.googleusercontent.com";
-// A desktop OAuth client ID is public; the client secret is not.
+// This fork must use an explicitly configured OAuth client. Client IDs are
+// public, but embedding an upstream client ID or secret would bind users to
+// credentials they cannot rotate in their own Google Cloud project.
 fn cfg() -> (String, String) {
-    let id = std::env::var("APOLLO_OFFICE_GOOGLE_ID")
-        .ok().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| ID.to_string());
-    let secret = std::env::var("APOLLO_OFFICE_GOOGLE_SECRET")
-        .ok().filter(|v| !v.trim().is_empty()).unwrap_or_default();
-    (id, secret)
+    let value = |name| std::env::var(name)
+        .ok().map(|v| v.trim().to_string()).unwrap_or_default();
+    (value("APOLLO_OFFICE_GOOGLE_ID"), value("APOLLO_OFFICE_GOOGLE_SECRET"))
 }
 
-pub fn available() -> bool { !cfg().1.is_empty() }
+pub fn available() -> bool {
+    let (id, secret) = cfg();
+    !id.is_empty() && !secret.is_empty()
+}
 
 fn ue(s: &str) -> String {
     s.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
@@ -55,8 +57,8 @@ pub async fn back(a: &Ax, code: &str, st: &str) -> Result<(String, String, Strin
         return Err("this sign-in attempt expired, start again".into());
     }
     let (id, sec) = cfg();
-    if sec.is_empty() {
-        return Err("Google sign-in requires APOLLO_OFFICE_GOOGLE_SECRET; rotate the previously published secret".into());
+    if id.is_empty() || sec.is_empty() {
+        return Err("Google sign-in requires a private OAuth client ID and secret from environment; rotate the previously published secret".into());
     }
     let body = format!("code={}&client_id={}&client_secret={}&redirect_uri={}&grant_type=authorization_code&code_verifier={}", ue(code), ue(&id), ue(&sec), ue(&redir(a)), ue(&ve));
     let r = a.hc.post("https://oauth2.googleapis.com/token").timeout(Duration::from_secs(20)).header("content-type", "application/x-www-form-urlencoded").body(body).send().await.map_err(|e| format!("Google did not answer: {e}"))?;
