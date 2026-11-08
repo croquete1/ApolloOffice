@@ -38,6 +38,11 @@
     waves:"M45 52Q40 19 70 18Q96 17 104 41L102 75L95 80L92 44Q82 29 59 38L50 74L42 76Z",
     swept:"M46 50Q40 23 60 20Q84 9 102 32L99 50Q95 32 83 32Q61 39 46 50Z"
   };
+  /**
+   * Desenha acessórios ilustrados associados ao papel de cada agente.
+   * @param {number} i Índice do agente na lista de papéis.
+   * @returns {string} Elementos SVG estáticos e sem dados externos.
+   */
   const accessories = (i) => {
     let html = "";
     if (i === 2 || i === 7) html += '<path d="M50 55h18m5 0h17" stroke="#263446" stroke-width="2"/><rect x="49" y="50" width="19" height="13" rx="5" fill="none" stroke="#24384d" stroke-width="3"/><rect x="73" y="50" width="19" height="13" rx="5" fill="none" stroke="#24384d" stroke-width="3"/>';
@@ -45,6 +50,12 @@
     if (i === 5) html += '<circle cx="92" cy="69" r="3" fill="#efccaa"/>';
     return html;
   };
+  /**
+   * Constrói uma personagem vetorial distinta para um agente conhecido.
+   * Cada gradiente utiliza um identificador único por papel.
+   * @param {number} i Índice da personagem.
+   * @returns {string} SVG completo com articulações animáveis.
+   */
   const character = (i) => {
     const role = roles[i], [skin,hairColor,jacket,trim,hairType] = profiles[i];
     const id = "ao-v2-" + role;
@@ -84,6 +95,12 @@
     '  <div class="ao-v2-room-label"><span class="ao-v2-room-label-line"></span>APOLLO <em>OFFICE</em><small>ESTÚDIO DE DESENVOLVIMENTO</small></div>',
     '</div>'
   ].join("");
+  /**
+   * Instala a arquitetura e os acessórios do escritório uma única vez.
+   * Os ouvintes pertencem aos postos e desaparecem com o respetivo DOM.
+   * @param {HTMLElement} office Elemento da sala ilustrada.
+   * @param {HTMLElement} stations Contentor dos dez postos.
+   */
   function decorate(office, stations) {
     if (!office || !stations || office.dataset.visualVersion === "2") return;
     office.dataset.visualVersion = "2";
@@ -99,6 +116,10 @@
       // A canceled arrival must not erase a newer rise (or vice versa).
       // If a replacement animation with the same name is running, let its
       // own completion clear the class rather than handling the old cancel.
+      /**
+       * Remove apenas a pose terminada, preservando animações posteriores.
+       * @param {AnimationEvent} event Evento de fim ou cancelamento.
+       */
       const stopPose = event => {
         const poseClass = event.animationName === "ao-v2-arrive" ? "ao-v2-arriving"
           : event.animationName === "ao-v2-rise" ? "ao-v2-rising" : null;
@@ -112,6 +133,13 @@
       node.addEventListener("animationcancel", stopPose);
     });
   }
+  /**
+   * Reage exclusivamente a uma mudança real do estado de um agente.
+   * Nunca inicia tarefas nem gera atividade quando faltam dados.
+   * @param {HTMLElement} station Posto do agente.
+   * @param {string} previous Estado anteriormente observado.
+   * @param {string} next Estado agora confirmado.
+   */
   function onAgentState(station, previous, next) {
     if (!station) return;
     const app = station.closest("#aoControlRoom");
@@ -125,6 +153,10 @@
     if (next === "work" && previous !== "work") station.classList.add("ao-v2-arriving");
     else if (previous === "work" && next === "idle") station.classList.add("ao-v2-rising");
   }
+  /**
+   * Limpa poses temporárias ao suspender ou cancelar movimento.
+   * @param {HTMLElement} stations Contentor dos postos do escritório.
+   */
   function clearTransitions(stations) {
     if (!stations) return;
     for (const station of stations.querySelectorAll(".ao-station")) {
