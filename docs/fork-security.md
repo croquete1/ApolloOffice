@@ -28,6 +28,20 @@ A URI de redirecionamento registada no cliente Google deve corresponder a `http:
 
 **A credencial anteriormente incorporada no histórico do Git deve ser considerada exposta e revogada/substituída no fornecedor.** A remoção do código atual não a elimina dos commits antigos. A rotação de credenciais requer acesso ao respetivo projeto Google Cloud, que esta alteração não pode substituir.
 
+### Invalidar o segredo OAuth exposto
+
+Se o cliente OAuth antigo pertencer ao projeto Google Cloud de terceiros (incluindo o projeto oficial), **só o titular desse projeto pode revogar o segredo**. Não tente reutilizar esse cliente: crie um cliente OAuth independente para o fork e contacte em privado o responsável pelo cliente antigo para solicitar a sua revogação.
+
+Se for o titular do projeto afetado, aceda a [Google Auth Platform — Clients](https://console.cloud.google.com/auth/clients), escolha o projeto e o cliente OAuth antigo. Use **Add Secret** para criar um segredo novo, configure-o na instalação e confirme que a autenticação funciona; depois **Disable** e **Delete** no segredo antigo. Para revogação imediata em caso de exposição, a Google também documenta **Reset Secret**, com possível interrupção temporária da autenticação.
+
+A chave antiga continua recuperável no histórico Git, mas deixa de ser utilizável depois de revogada no fornecedor. Não publique os novos valores no GitHub, na documentação, em logs ou nesta conversa. A documentação oficial está em [Manage OAuth Clients](https://support.google.com/cloud/answer/15549257?hl=en).
+
+### Verificação da instalação personalizada
+
+Este fork ainda não publica binários de release próprios. **Não utilize a release do projeto oficial para atualizar esta instalação.** Compile o código deste repositório com `cargo build --release --locked`, pare a instância em execução e preserve uma cópia da pasta de dados e do executável anterior antes de substituir qualquer ficheiro. No reinício, mantenha a mesma configuração de `--data` e as variáveis de ambiente OAuth aplicáveis. Se existir arranque automático, confirme que aponta para o executável personalizado.
+
+Compilar o código no GitHub ou criar um PR **não atualiza o executável que já está instalado no computador**; essa operação exige acesso à máquina.
+
 Sem as credenciais, a autenticação Google fica indisponível com uma mensagem explícita. O comando local `apollo-office login-link` continua a permitir iniciar sessão.
 
 ## Validação
