@@ -7,7 +7,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 pub const V: &str = env!("CARGO_PKG_VERSION");
-pub const WS: &[&str] = &["scout", "guard", "vet", "watcher", "hunter", "repro", "fixer", "ci", "reviewer", "submit"];
+pub const WS: &[&str] = &[
+    "scout", "guard", "vet", "watcher", "hunter", "repro", "fixer", "ci", "reviewer", "submit",
+];
 
 #[derive(Clone, Serialize, Default)]
 pub struct Wk {
@@ -102,7 +104,9 @@ pub enum X {
 impl std::fmt::Display for X {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            X::Drop(s) | X::Back(s) | X::Lim(s) | X::Net(s) | X::E(s) | X::Host(_, s) => write!(f, "{s}"),
+            X::Drop(s) | X::Back(s) | X::Lim(s) | X::Net(s) | X::E(s) | X::Host(_, s) => {
+                write!(f, "{s}")
+            }
         }
     }
 }
@@ -134,11 +138,17 @@ pub fn ddir(o: Option<PathBuf>) -> PathBuf {
 
 pub fn dd0() -> PathBuf {
     if cfg!(windows) {
-        dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("ApolloOffice")
+        dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("ApolloOffice")
     } else if cfg!(target_os = "macos") {
-        dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("ApolloOffice")
+        dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("ApolloOffice")
     } else {
-        dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("apollo-office")
+        dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("apollo-office")
     }
 }
 
@@ -165,7 +175,15 @@ impl App {
         let mut lv = Lv::default();
         let ho = db.kg("hold");
         for w in WS {
-            lv.w.insert(w.to_string(), Wk { st: "idle".into(), hold: ho[*w].as_bool().unwrap_or(false), t: now(), ..Default::default() });
+            lv.w.insert(
+                w.to_string(),
+                Wk {
+                    st: "idle".into(),
+                    hold: ho[*w].as_bool().unwrap_or(false),
+                    t: now(),
+                    ..Default::default()
+                },
+            );
         }
         lv.o.man = db.kg("man").as_bool().unwrap_or(false);
         lv.o.rl = "allowed".into();
@@ -175,7 +193,11 @@ impl App {
             port,
             me,
             lv: Mutex::new(lv),
-            hc: reqwest::Client::builder().user_agent(concat!("ApolloOffice/", env!("CARGO_PKG_VERSION"))).timeout(std::time::Duration::from_secs(30)).build().unwrap(),
+            hc: reqwest::Client::builder()
+                .user_agent(concat!("ApolloOffice/", env!("CARGO_PKG_VERSION")))
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .unwrap(),
             act: Mutex::new(HashSet::new()),
             lk: Mutex::new(HashSet::new()),
             lanes: Mutex::new(HashSet::new()),
@@ -215,17 +237,31 @@ impl App {
 
     pub fn md(&self, w: &str) -> String {
         if crate::routing::enabled(self) {
-            if matches!(w,"fixer"|"repro") {
-                if let Some(md) = self.set()["opencode_authors"].as_array().and_then(|rows| rows.iter()
-                    .filter_map(|v| v.as_str()).find(|md| crate::routing::is_opencode(md))) { return md.to_string(); }
+            if matches!(w, "fixer" | "repro") {
+                if let Some(md) = self.set()["opencode_authors"].as_array().and_then(|rows| {
+                    rows.iter()
+                        .filter_map(|v| v.as_str())
+                        .find(|md| crate::routing::is_opencode(md))
+                }) {
+                    return md.to_string();
+                }
             }
             return crate::routing::FREE[0].into();
         }
-        self.set()["md"][w].as_str().unwrap_or("claude-sonnet-5-5").to_string()
+        self.set()["md"][w]
+            .as_str()
+            .unwrap_or("claude-sonnet-5-5")
+            .to_string()
     }
 
     pub fn say(&self, w: &str, m: &str, j: Option<i64>) {
-        let s: String = m.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(240).collect();
+        let s: String = m
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(240)
+            .collect();
         {
             let mut l = self.lv.lock().unwrap();
             if let Some(x) = l.w.get_mut(w) {
@@ -236,7 +272,10 @@ impl App {
                 }
             }
         }
-        self.db.run("insert into ev(t,w,m,j) values(?,?,?,?)", pa![now(), w.to_string(), s, j]);
+        self.db.run(
+            "insert into ev(t,w,m,j) values(?,?,?,?)",
+            pa![now(), w.to_string(), s, j],
+        );
     }
 
     pub fn st(&self, w: &str, s: &str, j: Option<i64>, mood: &str) {
@@ -270,7 +309,12 @@ impl App {
 
     pub fn flow(&self, a: &str, b: &str, k: &str) {
         let mut l = self.lv.lock().unwrap();
-        l.fl.push(Fl { a: a.into(), b: b.into(), t: now(), k: k.into() });
+        l.fl.push(Fl {
+            a: a.into(),
+            b: b.into(),
+            t: now(),
+            k: k.into(),
+        });
         while l.fl.len() > 40 {
             l.fl.remove(0);
         }
@@ -293,7 +337,15 @@ impl App {
                 return;
             }
             let j = self.lv.lock().unwrap().w.get(w).and_then(|x| x.job);
-            if self.lv.lock().unwrap().w.get(w).map(|x| x.st != "sleep").unwrap_or(false) {
+            if self
+                .lv
+                .lock()
+                .unwrap()
+                .w
+                .get(w)
+                .map(|x| x.st != "sleep")
+                .unwrap_or(false)
+            {
                 self.st(w, "sleep", j, "");
             }
             sl(5000).await;
@@ -303,11 +355,18 @@ impl App {
     pub fn tick(&self) {
         let n = now();
         let td = self.set()["tokday"].as_i64().unwrap_or(0);
-        let used = if td > 0 { self.db.n("select coalesce(sum(tin+tout),0) from tok where day=?", pa![crate::db::day()]) } else { 0 };
+        let used = if td > 0 {
+            self.db.n(
+                "select coalesce(sum(tin+tout),0) from tok where day=?",
+                pa![crate::db::day()],
+            )
+        } else {
+            0
+        };
         let wh = off_hours(&self.set()["wh"]);
         let bd = self.set()["budday"].as_f64().unwrap_or(0.0);
         let bu = if bd > 0.0 { self.db.usd(None) } else { 0.0 };
-        let free_first=crate::routing::enabled(self);
+        let free_first = crate::routing::enabled(self);
         let mut l = self.lv.lock().unwrap();
         let p0 = l.o.pause.clone();
         if l.o.rst > 0 && l.o.rst <= n {
@@ -317,7 +376,12 @@ impl App {
         let lim = l.o.rl != "allowed" && l.o.rl != "allowed_warning" && l.o.rst > n;
         l.o.warn = l.o.rl == "allowed_warning";
         l.o.pause = if lim && !free_first {
-            format!("Claude usage limit reached, paused until {}", chrono::DateTime::from_timestamp_millis(l.o.rst).map(|d| d.with_timezone(&chrono::Local).format("%H:%M").to_string()).unwrap_or_default())
+            format!(
+                "Claude usage limit reached, paused until {}",
+                chrono::DateTime::from_timestamp_millis(l.o.rst)
+                    .map(|d| d.with_timezone(&chrono::Local).format("%H:%M").to_string())
+                    .unwrap_or_default()
+            )
         } else if td > 0 && used >= td {
             "daily token limit reached, paused until midnight".into()
         } else if bd > 0.0 && bu >= bd {
@@ -330,7 +394,11 @@ impl App {
         let p1 = l.o.pause.clone();
         drop_(l);
         if p1 != p0 {
-            self.say("scout", if p1.is_empty() { "office resumed" } else { &p1 }, None);
+            self.say(
+                "scout",
+                if p1.is_empty() { "office resumed" } else { &p1 },
+                None,
+            );
         }
     }
 
@@ -347,11 +415,15 @@ impl App {
     }
 
     pub fn provider_limit(&self, model: &str) -> Option<String> {
-        if !crate::routing::enabled(self) || crate::prov::parse(model).0 != "cc" { return None; }
-        let l=self.lv.lock().unwrap();
-        if l.o.rl!="allowed" && l.o.rl!="allowed_warning" && l.o.rst>now() {
+        if !crate::routing::enabled(self) || crate::prov::parse(model).0 != "cc" {
+            return None;
+        }
+        let l = self.lv.lock().unwrap();
+        if l.o.rl != "allowed" && l.o.rl != "allowed_warning" && l.o.rst > now() {
             Some("Claude usage limit is active; try another configured provider".into())
-        } else { None }
+        } else {
+            None
+        }
     }
 
     pub fn net(&self, k: &str) -> bool {
@@ -382,7 +454,11 @@ pub fn off_hours(w: &Value) -> Option<String> {
     use chrono::Timelike;
     let n = chrono::Local::now();
     let x = n.hour() * 60 + n.minute();
-    let inside = if f < t { x >= f && x < t } else { x >= f || x < t };
+    let inside = if f < t {
+        x >= f && x < t
+    } else {
+        x >= f || x < t
+    };
     if inside {
         None
     } else {
@@ -391,7 +467,9 @@ pub fn off_hours(w: &Value) -> Option<String> {
 }
 
 pub fn fast() -> bool {
-    std::env::var("APOLLO_OFFICE_FAST").map(|v| v == "1").unwrap_or(false)
+    std::env::var("APOLLO_OFFICE_FAST")
+        .map(|v| v == "1")
+        .unwrap_or(false)
 }
 
 pub async fn sl(ms: u64) {
@@ -404,17 +482,24 @@ mod provider_limit_tests {
     use super::*;
     #[test]
     fn claude_limit_does_not_pause_other_free_first_routes_or_remove_owner_limits() {
-        let db=Db::mem();db.ks("set",&json!({"free_first":true,"tokday":0}));
-        let a=App::new(db,std::env::temp_dir(),1,"x".into());
+        let db = Db::mem();
+        db.ks("set", &json!({"free_first":true,"tokday":0}));
+        let a = App::new(db, std::env::temp_dir(), 1, "x".into());
         a.rl(&json!({"status":"rejected","resetsAt":now()/1000+3600}));
         assert!(a.lv.lock().unwrap().o.pause.is_empty());
-        assert!(a.provider_limit("cc:sonnet").is_some());assert!(a.provider_limit("codex:").is_none());
+        assert!(a.provider_limit("cc:sonnet").is_some());
+        assert!(a.provider_limit("codex:").is_none());
         assert!(a.provider_limit("opencode:opencode/beam-free").is_none());
         assert!(!a.hold("fixer"));
-        a.lv.lock().unwrap().o.man=true;assert!(a.hold("fixer"));a.lv.lock().unwrap().o.man=false;
-        a.db.ks("set",&json!({"free_first":true,"tokday":1}));a.tok("fixture",1,0);a.tick();
+        a.lv.lock().unwrap().o.man = true;
+        assert!(a.hold("fixer"));
+        a.lv.lock().unwrap().o.man = false;
+        a.db.ks("set", &json!({"free_first":true,"tokday":1}));
+        a.tok("fixture", 1, 0);
+        a.tick();
         assert!(a.lv.lock().unwrap().o.pause.contains("daily token limit"));
-        a.db.ks("set",&json!({"free_first":false,"tokday":0}));a.tick();
+        a.db.ks("set", &json!({"free_first":false,"tokday":0}));
+        a.tick();
         assert!(a.lv.lock().unwrap().o.pause.contains("Claude usage limit"));
     }
 }

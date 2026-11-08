@@ -1,4 +1,4 @@
-use crate::app::{Ax, X, R};
+use crate::app::{Ax, R, X};
 use serde_json::{json, Value};
 use std::time::Duration;
 
@@ -12,16 +12,86 @@ pub struct Pv {
 }
 
 pub const PV: &[Pv] = &[
-    Pv { id: "opencode", nm: "OpenCode ACP (verified free only)", fmt: "openai", base: "unix://apollo-opencode", key: false, ms: &["opencode/beam-free", "opencode/deepseek-v4.1-flash-free"] },
-    Pv { id: "nvidia", nm: "NVIDIA (approved free route)", fmt: "openai", base: "https://integrate.api.nvidia.com/v1", key: true, ms: &["nvidia/nemotron-3-super-120b-a12b"] },
-    Pv { id: "mistral", nm: "Mistral (approved free tier)", fmt: "openai", base: "https://api.mistral.ai/v1", key: true, ms: &["ministral-14b-latest"] },
-    Pv { id: "groq", nm: "Groq (approved free tier)", fmt: "openai", base: "https://api.groq.com/openai/v1", key: true, ms: &["openai/gpt-oss-120b"] },
-    Pv { id: "cc", nm: "Claude Code (your login)", fmt: "cli", base: "", key: false, ms: &["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"] },
-    Pv { id: "codex", nm: "ChatGPT (Codex CLI login)", fmt: "cli", base: "", key: false, ms: &["gpt-5.6-terra", "gpt-5.6-luna"] },
-    Pv { id: "anthropic", nm: "Claude API", fmt: "anthropic", base: "https://api.anthropic.com", key: true, ms: &["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"] },
-    Pv { id: "openai", nm: "OpenAI API", fmt: "openai", base: "https://api.openai.com/v1", key: true, ms: &["gpt-5.5", "gpt-5.5-mini"] },
-    Pv { id: "gemini", nm: "Gemini API", fmt: "openai", base: "https://generativelanguage.googleapis.com/v1beta/openai", key: true, ms: &["gemini-2.5-pro", "gemini-2.5-flash"] },
-    Pv { id: "ollama", nm: "Ollama (local)", fmt: "ollama", base: "http://127.0.0.1:11434", key: false, ms: &[] },
+    Pv {
+        id: "opencode",
+        nm: "OpenCode ACP (verified free only)",
+        fmt: "openai",
+        base: "unix://apollo-opencode",
+        key: false,
+        ms: &["opencode/beam-free", "opencode/deepseek-v4.1-flash-free"],
+    },
+    Pv {
+        id: "nvidia",
+        nm: "NVIDIA (approved free route)",
+        fmt: "openai",
+        base: "https://integrate.api.nvidia.com/v1",
+        key: true,
+        ms: &["nvidia/nemotron-3-super-120b-a12b"],
+    },
+    Pv {
+        id: "mistral",
+        nm: "Mistral (approved free tier)",
+        fmt: "openai",
+        base: "https://api.mistral.ai/v1",
+        key: true,
+        ms: &["ministral-14b-latest"],
+    },
+    Pv {
+        id: "groq",
+        nm: "Groq (approved free tier)",
+        fmt: "openai",
+        base: "https://api.groq.com/openai/v1",
+        key: true,
+        ms: &["openai/gpt-oss-120b"],
+    },
+    Pv {
+        id: "cc",
+        nm: "Claude Code (your login)",
+        fmt: "cli",
+        base: "",
+        key: false,
+        ms: &["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"],
+    },
+    Pv {
+        id: "codex",
+        nm: "ChatGPT (Codex CLI login)",
+        fmt: "cli",
+        base: "",
+        key: false,
+        ms: &["gpt-5.6-terra", "gpt-5.6-luna"],
+    },
+    Pv {
+        id: "anthropic",
+        nm: "Claude API",
+        fmt: "anthropic",
+        base: "https://api.anthropic.com",
+        key: true,
+        ms: &["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"],
+    },
+    Pv {
+        id: "openai",
+        nm: "OpenAI API",
+        fmt: "openai",
+        base: "https://api.openai.com/v1",
+        key: true,
+        ms: &["gpt-5.5", "gpt-5.5-mini"],
+    },
+    Pv {
+        id: "gemini",
+        nm: "Gemini API",
+        fmt: "openai",
+        base: "https://generativelanguage.googleapis.com/v1beta/openai",
+        key: true,
+        ms: &["gemini-2.5-pro", "gemini-2.5-flash"],
+    },
+    Pv {
+        id: "ollama",
+        nm: "Ollama (local)",
+        fmt: "ollama",
+        base: "http://127.0.0.1:11434",
+        key: false,
+        ms: &[],
+    },
 ];
 
 pub const PX: &[(&str, f64, f64, f64, f64)] = &[
@@ -71,7 +141,9 @@ pub const PX: &[(&str, f64, f64, f64, f64)] = &[
 ];
 
 pub fn px(a: &Ax, md: &str) -> Option<[f64; 4]> {
-    if crate::routing::is_opencode(md) { return Some([0.0; 4]); }
+    if crate::routing::is_opencode(md) {
+        return Some([0.0; 4]);
+    }
     let (p, m) = parse(md);
     if p == "ollama" {
         return Some([0.0; 4]);
@@ -87,7 +159,10 @@ pub fn px(a: &Ax, md: &str) -> Option<[f64; 4]> {
             return Some([x[0], x[1], x[2], x[3]]);
         }
     }
-    PX.iter().filter(|x| m.starts_with(x.0)).max_by_key(|x| x.0.len()).map(|x| [x.1, x.2, x.3, x.4])
+    PX.iter()
+        .filter(|x| m.starts_with(x.0))
+        .max_by_key(|x| x.0.len())
+        .map(|x| [x.1, x.2, x.3, x.4])
 }
 
 pub fn pv(id: &str) -> Option<&'static Pv> {
@@ -104,7 +179,12 @@ pub fn parse(md: &str) -> (&'static str, String) {
 }
 
 pub fn base(a: &Ax, id: &str) -> String {
-    let b = a.set()["prov"][id]["base"].as_str().unwrap_or("").trim().trim_end_matches('/').to_string();
+    let b = a.set()["prov"][id]["base"]
+        .as_str()
+        .unwrap_or("")
+        .trim()
+        .trim_end_matches('/')
+        .to_string();
     if b.is_empty() {
         pv(id).map(|p| p.base.to_string()).unwrap_or_default()
     } else {
@@ -119,7 +199,19 @@ pub fn name(md: &str) -> String {
         "cc" | "anthropic" => crate::ai::mname(&m),
         _ => {
             let s = m.rsplit('/').next().unwrap_or(&m);
-            s.split('-').map(|w| if w.len() <= 3 && w.chars().all(|c| c.is_ascii_alphabetic()) { w.to_uppercase() } else { let mut c = w.chars(); c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default() }).collect::<Vec<_>>().join("-")
+            s.split('-')
+                .map(|w| {
+                    if w.len() <= 3 && w.chars().all(|c| c.is_ascii_alphabetic()) {
+                        w.to_uppercase()
+                    } else {
+                        let mut c = w.chars();
+                        c.next()
+                            .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+                            .unwrap_or_default()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("-")
         }
     }
 }
@@ -159,20 +251,59 @@ async fn hget(a: &Ax, u: &str, h: Vec<(&str, String)>) -> Result<Value, String> 
 }
 
 pub fn hdr(a: &Ax, id: &str) -> Result<Vec<(&'static str, String)>, String> {
-    let k = if pv(id).map(|p| p.key).unwrap_or(false) { crate::vault::get(a, id)? } else { String::new() };
+    let k = if pv(id).map(|p| p.key).unwrap_or(false) {
+        crate::vault::get(a, id)?
+    } else {
+        String::new()
+    };
     if pv(id).map(|p| p.key).unwrap_or(false) && k.is_empty() {
-        return Err(format!("no API key for {} yet, add it in Settings", pv(id).map(|p| p.nm).unwrap_or(id)));
+        return Err(format!(
+            "no API key for {} yet, add it in Settings",
+            pv(id).map(|p| p.nm).unwrap_or(id)
+        ));
     }
-    Ok(if id == "anthropic" { vec![("x-api-key", k), ("anthropic-version", "2023-06-01".into())] } else { vec![("authorization", if k.is_empty() { String::new() } else { format!("Bearer {k}") })] })
+    Ok(if id == "anthropic" {
+        vec![("x-api-key", k), ("anthropic-version", "2023-06-01".into())]
+    } else {
+        vec![(
+            "authorization",
+            if k.is_empty() {
+                String::new()
+            } else {
+                format!("Bearer {k}")
+            },
+        )]
+    })
 }
 
 pub async fn models(a: &Ax, id: &str) -> Result<Vec<String>, String> {
-    let Some(p) = pv(id) else { return Err("unknown provider".into()) };
-    if id == "opencode" { return Ok(p.ms.iter().map(|m| m.to_string()).collect()); }
+    let Some(p) = pv(id) else {
+        return Err("unknown provider".into());
+    };
+    if id == "opencode" {
+        return Ok(p.ms.iter().map(|m| m.to_string()).collect());
+    }
     if id == "codex" {
-        let h = std::env::var_os("CODEX_HOME").map(std::path::PathBuf::from).or_else(|| dirs::home_dir().map(|d| d.join(".codex"))).unwrap_or_default();
-        let v: Value = std::fs::read_to_string(h.join("models_cache.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
-        let mut ms: Vec<(i64, String)> = v["models"].as_array().cloned().unwrap_or_default().iter().filter(|m| m["visibility"] == "list").filter_map(|m| m["slug"].as_str().map(|s| (m["priority"].as_i64().unwrap_or(99), s.to_string()))).collect();
+        let h = std::env::var_os("CODEX_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| dirs::home_dir().map(|d| d.join(".codex")))
+            .unwrap_or_default();
+        let v: Value = std::fs::read_to_string(h.join("models_cache.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or(Value::Null);
+        let mut ms: Vec<(i64, String)> = v["models"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .filter(|m| m["visibility"] == "list")
+            .filter_map(|m| {
+                m["slug"]
+                    .as_str()
+                    .map(|s| (m["priority"].as_i64().unwrap_or(99), s.to_string()))
+            })
+            .collect();
         ms.sort();
         if !ms.is_empty() {
             return Ok(ms.into_iter().map(|x| x.1).collect());
@@ -185,11 +316,31 @@ pub async fn models(a: &Ax, id: &str) -> Result<Vec<String>, String> {
     let b = base(a, id);
     if p.fmt == "ollama" {
         let v = hget(a, &format!("{b}/api/tags"), h).await?;
-        return Ok(v["models"].as_array().cloned().unwrap_or_default().iter().filter_map(|m| m["name"].as_str().map(String::from)).collect());
+        return Ok(v["models"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|m| m["name"].as_str().map(String::from))
+            .collect());
     }
-    let u = if p.fmt == "anthropic" { format!("{b}/v1/models?limit=100") } else { format!("{b}/models") };
+    let u = if p.fmt == "anthropic" {
+        format!("{b}/v1/models?limit=100")
+    } else {
+        format!("{b}/models")
+    };
     let v = hget(a, &u, h).await?;
-    let mut o: Vec<String> = v["data"].as_array().cloned().unwrap_or_default().iter().filter_map(|m| m["id"].as_str().map(|s| s.trim_start_matches("models/").to_string())).collect();
+    let mut o: Vec<String> = v["data"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|m| {
+            m["id"]
+                .as_str()
+                .map(|s| s.trim_start_matches("models/").to_string())
+        })
+        .collect();
     if id == "openai" {
         o.retain(|m| m.starts_with("gpt") || m.starts_with('o'));
     }
@@ -200,12 +351,24 @@ pub async fn models(a: &Ax, id: &str) -> Result<Vec<String>, String> {
 
 pub async fn test(a: &Ax, md: &str) -> R<String> {
     let t0 = std::time::Instant::now();
-    let o = crate::ai::Ask { t: 180, ..crate::ai::Ask::new("test", md.to_string(), "Answer with exactly one word.".into(), "Say: ready".into()) };
+    let o = crate::ai::Ask {
+        t: 180,
+        ..crate::ai::Ask::new(
+            "test",
+            md.to_string(),
+            "Answer with exactly one word.".into(),
+            "Say: ready".into(),
+        )
+    };
     let (t, _) = crate::ai::ask1(a, o).await?;
     if t.trim().is_empty() {
         return Err(X::E("empty answer".into()));
     }
-    Ok(format!("{} ({:.1} s)", crate::sh::head(t.trim(), 60), t0.elapsed().as_secs_f64()))
+    Ok(format!(
+        "{} ({:.1} s)",
+        crate::sh::head(t.trim(), 60),
+        t0.elapsed().as_secs_f64()
+    ))
 }
 
 #[cfg(test)]
@@ -223,7 +386,12 @@ mod t {
         assert_eq!(name("gemini:gemini-2.5-flash"), "Gemini-2.5-Flash");
         assert_eq!(name("anthropic:claude-sonnet-5-5"), "Claude Sonnet 5.5");
         assert_eq!(mail("codex:gpt-5.5"), "noreply@openai.com");
-        let m = |k: &str| PX.iter().filter(|x| k.starts_with(x.0)).max_by_key(|x| x.0.len()).map(|x| x.0);
+        let m = |k: &str| {
+            PX.iter()
+                .filter(|x| k.starts_with(x.0))
+                .max_by_key(|x| x.0.len())
+                .map(|x| x.0)
+        };
         assert_eq!(m("claude-opus-5-5"), Some("claude-opus-5-5"));
         assert_eq!(m("claude-opus-4-1-20250805"), Some("claude-opus-4"));
         assert_eq!(m("gpt-5.4-mini-2026"), Some("gpt-5.4-mini"));

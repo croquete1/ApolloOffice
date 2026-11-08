@@ -22,14 +22,24 @@ fn fresh() -> [u8; 32] {
 
 pub fn key(dd: &Path, has: bool) -> Result<[u8; 32], String> {
     let f = dd.join("vault.key");
-    let nofile = std::env::var("APOLLO_OFFICE_VAULT").map(|v| v == "file").unwrap_or(false);
-    let reset = std::env::var("APOLLO_OFFICE_VAULT_RESET").map(|v| v == "1").unwrap_or(false);
+    let nofile = std::env::var("APOLLO_OFFICE_VAULT")
+        .map(|v| v == "file")
+        .unwrap_or(false);
+    let reset = std::env::var("APOLLO_OFFICE_VAULT_RESET")
+        .map(|v| v == "1")
+        .unwrap_or(false);
     if let Ok(s) = std::fs::read_to_string(&f) {
-        return B.decode(s.trim()).ok().filter(|b| b.len() == 32).map(|b| b.try_into().unwrap()).ok_or_else(|| format!("{} is broken. {LOST}", f.display()));
+        return B
+            .decode(s.trim())
+            .ok()
+            .filter(|b| b.len() == 32)
+            .map(|b| b.try_into().unwrap())
+            .ok_or_else(|| format!("{} is broken. {LOST}", f.display()));
     }
     #[cfg(any(windows, target_os = "macos"))]
     if !nofile {
-        let e = keyring::Entry::new("ApolloOffice", &inst(dd)).map_err(|e| format!("keychain: {e}"))?;
+        let e =
+            keyring::Entry::new("ApolloOffice", &inst(dd)).map_err(|e| format!("keychain: {e}"))?;
         match e.get_password() {
             Ok(s) => {
                 if let Some(b) = B.decode(s.trim()).ok().filter(|b| b.len() == 32) {
@@ -47,7 +57,13 @@ pub fn key(dd: &Path, has: bool) -> Result<[u8; 32], String> {
             Err(x) => return Err(format!("the keychain could not be read ({x}). Unlock it or allow ApolloOffice access, then try again.")),
         }
         let k = fresh();
-        if e.set_password(&B.encode(k)).is_ok() && e.get_password().ok().and_then(|s| B.decode(s.trim()).ok()).as_deref() == Some(&k[..]) {
+        if e.set_password(&B.encode(k)).is_ok()
+            && e.get_password()
+                .ok()
+                .and_then(|s| B.decode(s.trim()).ok())
+                .as_deref()
+                == Some(&k[..])
+        {
             return Ok(k);
         }
     }
@@ -71,7 +87,11 @@ pub fn tight(f: &Path) {
     {
         let u = std::env::var("USERNAME").unwrap_or_default();
         if !u.is_empty() {
-            let _ = std::process::Command::new("icacls").arg(f).args(["/inheritance:r", "/grant:r"]).arg(format!("{u}:F")).output();
+            let _ = std::process::Command::new("icacls")
+                .arg(f)
+                .args(["/inheritance:r", "/grant:r"])
+                .arg(format!("{u}:F"))
+                .output();
         }
     }
 }
@@ -98,7 +118,8 @@ fn vk(a: &App) -> Result<[u8; 32], String> {
     if let Some(k) = *g {
         return Ok(k);
     }
-    let has = a.db.n("select count(*) from kv where k like 'sec:%'", crate::pa![]) > 0;
+    let has =
+        a.db.n("select count(*) from kv where k like 'sec:%'", crate::pa![]) > 0;
     let k = key(&a.dd, has)?;
     *g = Some(k);
     Ok(k)
@@ -106,7 +127,9 @@ fn vk(a: &App) -> Result<[u8; 32], String> {
 
 pub fn get(a: &App, n: &str) -> Result<String, String> {
     let v = a.db.kg(&format!("sec:{n}"));
-    let Some(s) = v.as_str() else { return Ok(String::new()) };
+    let Some(s) = v.as_str() else {
+        return Ok(String::new());
+    };
     let b = B.decode(s).map_err(|_| LOST.to_string())?;
     dec(&vk(a)?, &b).ok_or_else(|| LOST.to_string())
 }

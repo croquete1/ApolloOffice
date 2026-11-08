@@ -24,7 +24,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Parser)]
-#[command(name = "apollo-office", version, about = "AI workers that turn GitHub issues into verified bug-fix pull requests")]
+#[command(
+    name = "apollo-office",
+    version,
+    about = "AI workers that turn GitHub issues into verified bug-fix pull requests"
+)]
 struct A {
     #[arg(long, default_value_t = 47300)]
     port: u16,
@@ -79,15 +83,26 @@ async fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         Some(C::Autostart { on }) => {
-            println!("{}", sys::autostart(on == "on", &me, &dd, a.port).map_err(anyhow::Error::msg)?);
+            println!(
+                "{}",
+                sys::autostart(on == "on", &me, &dd, a.port).map_err(anyhow::Error::msg)?
+            );
             return Ok(());
         }
         Some(C::Status) => {
             let d = open(&dd)?;
             println!("ApolloOffice {}  Data: {}", app::V, dd.display());
-            println!("Repos: {}  Machines: {}", d.n("select count(*) from rp", pa![]), d.n("select count(*) from hs", pa![]));
+            println!(
+                "Repos: {}  Machines: {}",
+                d.n("select count(*) from rp", pa![]),
+                d.n("select count(*) from hs", pa![])
+            );
             println!("Jobs: {} in triage, {} queued, {} running, {} waiting for approval", d.n("select count(*) from jobs where st='vet'", pa![]), d.n("select count(*) from jobs where st='ready'", pa![]), d.n("select count(*) from jobs where st in ('repro','fix','ci','review','gate','submit','hunt')", pa![]), d.n("select count(*) from jobs where st='approve'", pa![]));
-            println!("PRs: {} open, {} merged", d.n("select count(*) from prs where st='open'", pa![]), d.n("select count(*) from prs where st='merged'", pa![]));
+            println!(
+                "PRs: {} open, {} merged",
+                d.n("select count(*) from prs where st='open'", pa![]),
+                d.n("select count(*) from prs where st='merged'", pa![])
+            );
             return Ok(());
         }
         _ => {}
@@ -98,7 +113,10 @@ async fn main() -> anyhow::Result<()> {
     let l = match tokio::net::TcpListener::bind(("127.0.0.1", a.port)).await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("Port {} is taken ({e}). Is ApolloOffice already running? Otherwise pick --port.", a.port);
+            eprintln!(
+                "Port {} is taken ({e}). Is ApolloOffice already running? Otherwise pick --port.",
+                a.port
+            );
             std::process::exit(1);
         }
     };
@@ -111,7 +129,12 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(wk::vet(ax.clone()));
     tokio::spawn(wk::watch(ax.clone()));
     if !a.quiet {
-        println!("\n  ApolloOffice {}\n\n  Open {}\n\n  Data: {}\n  Stop with Ctrl+C\n", app::V, url(&ax.db, a.port), dd.display());
+        println!(
+            "\n  ApolloOffice {}\n\n  Open {}\n\n  Data: {}\n  Stop with Ctrl+C\n",
+            app::V,
+            url(&ax.db, a.port),
+            dd.display()
+        );
     }
     upd::spawn(ax.clone());
     star::spawn(ax.clone());
