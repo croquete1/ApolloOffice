@@ -83,6 +83,7 @@
     visitor.appendChild(copy);
     stage.appendChild(visitor);
     src.classList.add("ao-travelling");
+    dst.classList.add("ao-receiving");
 
     indicator.textContent =
       (names[from] || from) + " → " + (names[to] || to) + " · tarefa #" + id +
@@ -99,6 +100,7 @@
       finished = true;
       visitor.remove();
       src.classList.remove("ao-travelling");
+      dst.classList.remove("ao-receiving");
       indicator.hidden = true;
       if (active?.visitor === visitor) active = null;
     };
