@@ -373,10 +373,11 @@
     if (signature === lastRepoSignature) return;
     lastRepoSignature = signature;
     const wrap = byId("aoRepos");
+    const restoreFocus = wrap.contains(document.activeElement);
     wrap.replaceChildren();
     const all = document.createElement("button");
     all.type = "button"; all.className = "ao-repo-item" + (!selectedRepo ? " is-selected" : "");
-    all.textContent = "Todos";
+    all.textContent = "Todos"; all.dataset.repo = "";
     all.addEventListener("click", () => { selectedRepo = ""; renderRepos(snapshot); renderLists(snapshot); });
     wrap.appendChild(all);
     for (const repo of repos) {
@@ -384,6 +385,7 @@
       item.type = "button"; item.className = "ao-repo-item" + (selectedRepo === repo ? " is-selected" : "");
       item.textContent = repo;
       item.title = repo;
+      item.dataset.repo = repo;
       item.addEventListener("click", () => { selectedRepo = repo; renderRepos(snapshot); renderLists(snapshot); });
       wrap.appendChild(item);
     }
@@ -391,6 +393,11 @@
       const empty = document.createElement("div");
       empty.className = "ao-muted"; empty.textContent = "Sem repositórios nos registos atuais.";
       wrap.appendChild(empty);
+    }
+    if (restoreFocus) {
+      const target = Array.from(wrap.querySelectorAll(".ao-repo-item")).find((node) =>
+        node.dataset.repo === selectedRepo);
+      target?.focus({preventScroll:true});
     }
   };
   // Unlike the limited queue preview, s.n contains the server's full database counts.
