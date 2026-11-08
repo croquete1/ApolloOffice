@@ -156,6 +156,18 @@
       '</button>';
   }).join("");
   const stationNodes = Object.fromEntries(roles.map((role) => [role, stations.querySelector('[data-role="' + role + '"]')]));
+  // One-shot visual reactions must not override normal breathing/typing forever.
+  const clearReactions = () => {
+    for (const node of Object.values(stationNodes)) {
+      node.classList.remove("ao-celebrate", "ao-action-pulse");
+    }
+  };
+  for (const node of Object.values(stationNodes)) {
+    node.addEventListener("animationend", (event) => {
+      if (event.animationName === "ao-celebrate") node.classList.remove("ao-celebrate");
+      if (event.animationName === "ao-command-sweep") node.classList.remove("ao-action-pulse");
+    });
+  }
   let snapshot = null, selected = null, selectedRepo = "", lastFocus = null;
   let lastRepoSignature = "", lastListSignature = "", lastMergeSignature = "", lastPipelineSignature = "";
   let lastMachineSignature = "", lastDetailSignature = "", lastStateAt = 0;
@@ -169,6 +181,10 @@
     animationsOn = motion.checked;
     try { localStorage.setItem("ao.motion", animationsOn ? "on" : "off"); } catch {}
     syncMotion();
+    if (!animationsOn) clearReactions();
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) clearReactions();
   });
   byId("aoExpand").addEventListener("click", (e) => {
     const expanded = byId("aoRoomPanel").classList.toggle("ao-expanded");
@@ -536,6 +552,7 @@
     if (Date.now() - (lastStateAt || startedAt) <= 12000) return;
     const state = byId("aoOfficeStatus");
     app.classList.add("ao-data-stale");
+    clearReactions();
     state.className = "ao-status-chip is-paused";
     if (state.textContent !== "Dados desatualizados") state.textContent = "Dados desatualizados";
     byId("aoConnection").textContent = "Sem atualizações recentes";
