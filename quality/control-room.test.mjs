@@ -96,9 +96,10 @@ test("actual command and mood telemetry drive visual reactions", () => {
 });
 
 test("metrics and host connectivity never imply unavailable totals", () => {
-  assert.match(modern, /Até 60 trabalhos em aberto/);
+  assert.match(modern, /Total registado no sistema/);
   assert.match(modern, /Até 40 PRs registados/);
-  assert.match(modern, /Últimos 25 trabalhos terminados/);
+  assert.match(modern, /countTotals\(s\)/);
+  assert.match(modern, /key !== "done" && key !== "drop"/);
   assert.match(modern, /age < 120_000/);
   assert.match(modern, /Dados recentes/);
   assert.match(modern, /Por confirmar/);
@@ -117,4 +118,27 @@ test("initial loading and fallback do not leave zombie status timers", () => {
   assert.match(modern, /lastStateAt \|\| startedAt/);
   assert.match(modern, /if \(staleTimer !== null\) clearInterval\(staleTimer\)/);
   assert.match(modern, /!healthy \|\| !app\.isConnected/);
+});
+
+
+test("initial agent states are unknown rather than fictitious idle activity", () => {
+  assert.match(modern, /data-mode="unknown"/);
+  assert.match(modern, /A ligar…/);
+  assert.match(css, /data-mode="unknown"/);
+});
+
+test("all pipeline values derive from the server's untruncated status counts", () => {
+  assert.match(modern, /const pipelineSteps = \[/);
+  assert.match(modern, /const renderPipeline = \(s\)/);
+  assert.match(modern, /const counts = s\.n && typeof s\.n === "object" \? s\.n : \{\}/);
+  assert.match(modern, /renderPipeline\(s\)/);
+  assert.match(modern, /lastPipelineSignature/);
+  assert.match(css, /\.ao-pipeline-stage\.is-busy/);
+});
+
+test("celebrations require a recently observed finished job and reduced-motion permission", () => {
+  assert.match(modern, /const activeJob = w\.job \?\?/);
+  assert.match(modern, /String\(j\.id\) === priorJob/);
+  assert.match(modern, /age >= 0 && age <= 60_000/);
+  assert.match(modern, /prefers-reduced-motion: reduce/);
 });
