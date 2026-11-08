@@ -391,21 +391,22 @@
     }
   });
   byId("aoPause").addEventListener("click", () => byId("bPause")?.click());
-  const originalOnState = A.onState;
   let healthy = true;
+  let unsubscribe = () => {};
   const fallback = (error) => {
     healthy = false;
+    unsubscribe();
     console.error("Apollo Control Room: reverting to original interface", error);
     app.remove();
     legacy.replaceWith(...Array.from(legacy.children));
     document.body.classList.remove("ao-enabled");
     A.modernRoom = false;
   };
-  A.onState = (s) => {
-    if (typeof originalOnState === "function") originalOnState(s);
+  // Keep legacy onState intact. State subscribers are isolated by o.js.
+  unsubscribe = A.subscribeState((s) => {
     if (!healthy) return;
     try { render(s); } catch (error) { fallback(error); }
-  };
+  });
   if (A.S) {
     try { render(A.S); } catch (error) { fallback(error); }
   }
