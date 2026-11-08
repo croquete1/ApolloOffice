@@ -13,6 +13,21 @@
     return r.json();
   };
   window.AO = { get, post, esc, $ };
+  // Dedicated, exception-isolated presentation subscriptions. Consumers do not
+  // need to wrap the legacy onState callback or perform extra network requests.
+  const stateListeners = new Set();
+  window.AO.subscribeState = (listener) => {
+    if (typeof listener !== "function") throw new TypeError("State subscriber must be a function");
+    stateListeners.add(listener);
+    return () => stateListeners.delete(listener);
+  };
+  const notifyState = (state) => {
+    for (const listener of stateListeners) {
+      try { listener(state); } catch (error) {
+        console.error("Apollo Office: state subscriber failed", error);
+      }
+    }
+  };
   const open = (u) => { if (/^https:\/\//.test(u || "")) window.open(u, "_blank", "noopener"); };
   window.AO.open = open;
 
@@ -515,7 +530,18 @@
     }
     seen = ids;
   };
-  const apply = (s) => { if (!s || s.error) return; nt(s); S = s; last = performance.now(); err = 0; if (!window.AO.modernRoom) { tiles(); lists(); tip(); } chips(); window.AO.S = s; window.AO.onState && window.AO.onState(s); };
+  const apply = (s) => {
+    if (!s || s.error) return;
+    nt(s); S = s; last = performance.now(); err = 0;
+    if (!window.AO.modernRoom) { tiles(); lists(); tip(); }
+    chips();
+    window.AO.S = s;
+    try {
+      window.AO.onState?.(s);
+    } finally {
+      notifyState(s);
+    }
+  };
   window.AO.apply = apply;
 
   document.addEventListener("change", (e) => {
