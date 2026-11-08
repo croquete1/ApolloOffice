@@ -185,3 +185,10 @@ test("approval is not conflated with automated gate and submission", () => {
   assert.match(modern, /label: "Submissão", statuses: \["submit"\]/);
   assert.doesNotMatch(modern, /label: "Aprovação", statuses: \["gate", "approve", "submit"\]/);
 });
+
+
+test("agent detail never fabricates per-worker token usage absent from Rust state", () => {
+  assert.doesNotMatch(modern, /Tokens hoje/);
+  assert.doesNotMatch(modern, /\bw\.tk\b/);
+  assert.match(modern, /"Comandos recentes"/);
+});
