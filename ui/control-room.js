@@ -47,7 +47,7 @@
     '  </aside>',
     '  <div class="ao-workspace">',
     '    <header class="ao-topbar"><div class="ao-top-heading"><strong>Visão geral</strong><span>Operações e agentes em tempo real</span></div>',
-    '      <div class="ao-top-actions"><span id="aoOfficeStatus" class="ao-status-chip" role="status" aria-live="polite">A ligar…</span><button id="aoPause" type="button" class="ao-outline-button">Pausar escritório</button></div>',
+    '      <div class="ao-top-actions"><span id="aoOfficeStatus" class="ao-status-chip" role="status" aria-live="polite">A ligar…</span><button id="aoPause" type="button" class="ao-outline-button" disabled>Pausar escritório</button></div>',
     '    </header>',
     '    <main class="ao-content" id="aoOverview">',
     '      <section class="ao-metrics" aria-label="Indicadores operacionais">',
