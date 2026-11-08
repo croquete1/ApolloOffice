@@ -303,7 +303,7 @@
       const activity = row.querySelector(".ao-agent-activity");
       const model = row.querySelector(".ao-agent-model");
       const current = typeof w.say === "string" ? w.say.trim() : "";
-      const activityText = current || (state === "work" ? "Sem descrição da tarefa" : "Sem atividade registada");
+      const activityText = current ? (state === "work" ? current : "Último registo: " + current) : (state === "work" ? "Sem descrição da tarefa" : "Sem atividade registada");
       const modelText = w.md && role !== "ci" && role !== "submit" && typeof A.mdn === "function"
         ? String(A.mdn(w.md)) : "";
       if (status.className !== "ao-agent-status ao-state-" + state) status.className = "ao-agent-status ao-state-" + state;
@@ -569,19 +569,21 @@
    */
   const showAgent = (role, focus = true) => {
     if (!snapshot || !roles.includes(role)) return;
-    const w = snapshot.w?.[role] || {}, stage = mode(snapshot,role);
+    const w = snapshot.w?.[role] || {};
+    const stale = app.classList.contains("ao-data-stale");
+    const stage = stale ? "unknown" : mode(snapshot, role);
     selected = role;
     byId("aoDetailTitle").textContent = names[role];
     const jobs = safeArray(snapshot.q);
     const job = w.job != null ? jobs.find((j) => String(j.id) === String(w.job)) : null;
     const recent = lastCommands(w);
-    const signature = JSON.stringify([role, stage, w.md, w.say, w.mood, recent, job?.id, job?.title]);
+    const signature = JSON.stringify([role, stage, stale, w.md, w.say, w.mood, recent, job?.id, job?.title]);
     if (!focus && signature === lastDetailSignature) return;
     lastDetailSignature = signature;
     const rows = [
-      ["Estado",statusText[stage]],
+      ["Estado",stale ? "Por confirmar — dados desatualizados" : statusText[stage]],
       ["Modelo",w.md ? A.mdn(w.md) : "Sem modelo atribuído"],
-      ["Atividade",w.say || "Sem informação adicional"]
+      ["Atividade",w.say ? (stage === "work" ? w.say : "Último registo: " + w.say) : "Sem informação adicional"]
     ];
     if (Object.hasOwn(resultText, w.mood)) rows.push(["Resultado recente", resultText[w.mood].replace("Último resultado: ", "")]);
     if (job) rows.push(["Tarefa",job.title]);
