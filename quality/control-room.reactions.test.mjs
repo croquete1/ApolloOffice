@@ -15,7 +15,7 @@ function fixture(){
   const listeners={};
   const stations={};
   for(const role of ["fixer","reviewer","ci"]){
-    const classes=new Set(["ao-celebrate","ao-action-pulse"]);
+    const classes=new Set(["ao-celebrate","ao-action-pulse","ao-v2-arriving","ao-v2-interacting"]);
     stations[role]={
       classList:{
         remove(...names){for(const name of names)classes.delete(name);},
@@ -24,12 +24,22 @@ function fixture(){
       addEventListener(name,listener){listeners[role+":"+name]=listener;}
     };
   }
+  const scene={querySelectorAll:()=>Object.values(stations)};
+  let studioCleanupCalls=0;
+  const window={AOOfficeV2:{clearTransitions(container){
+    assert.equal(container,scene);
+    studioCleanupCalls++;
+    for(const node of container.querySelectorAll(".ao-station")){
+      node.classList.remove("ao-v2-arriving","ao-v2-rising","ao-v2-interacting");
+    }
+  }}};
   const {clearReactions}=runInNewContext(`(() => {
     const stationNodes=__stations;
+    const stations=__scene;
     ${implementation}
     return {clearReactions};
-  })()`,{__stations:stations});
-  return {clearReactions,stations,listeners};
+  })()`,{__stations:stations,__scene:scene,window});
+  return {clearReactions,stations,listeners,get studioCleanupCalls(){return studioCleanupCalls}};
 }
 
 test("celebration ends without stopping permanent breathing",()=>{
@@ -59,5 +69,8 @@ test("disabling motion removes all transient effects",()=>{
   for(const station of Object.values(h.stations)){
     assert.equal(station.classList.contains("ao-celebrate"),false);
     assert.equal(station.classList.contains("ao-action-pulse"),false);
+    assert.equal(station.classList.contains("ao-v2-arriving"),false);
+    assert.equal(station.classList.contains("ao-v2-interacting"),false);
   }
+  assert.equal(h.studioCleanupCalls,1);
 });
