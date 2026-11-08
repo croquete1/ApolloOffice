@@ -9,6 +9,7 @@ const source = readFileSync(new URL("../ui/office-motion.js", import.meta.url), 
 
 function harness() {
   const listeners = {};
+  let now = 100_000;
   const motion = { checked: true, addEventListener: (name, fn) => { listeners["motion:" + name] = fn; } };
   const prefers = { matches: false, addEventListener: (name, fn) => { listeners["reduced:" + name] = fn; } };
   const app = { isConnected: true, classList: { contains: () => false } };
@@ -77,7 +78,8 @@ function harness() {
   runInNewContext(source, {
     window: { AO, matchMedia: () => prefers },
     document,
-    console
+    console,
+    Date: { now: () => now }
   });
   const send = (q, o = {}) => {
     const state = { q, o };
@@ -85,7 +87,7 @@ function harness() {
     AO.onState(state);
     for (const listener of subscribers) listener(state);
   };
-  return { visits, send, agents, motion, prefers, app, document, listeners, AO, get indicator() { return indicator; }, get oldCalls() { return oldCalls; } };
+  return { visits, send, agents, motion, prefers, app, document, listeners, AO, advance(ms) { now += ms; }, get indicator() { return indicator; }, get oldCalls() { return oldCalls; } };
 }
 
 test("initial state never creates imaginary handoffs", () => {
@@ -193,4 +195,14 @@ test("simultaneous changes never pile several walkers on top of each other", () 
   assert.equal(h.visits.length, 1);
   h.send([{id:1,st:"review"},{id:2,st:"gate"}]);
   assert.equal(h.visits.length, 1);
+});
+
+test("stale transitions after disconnection never look like a fresh handoff", () => {
+  const h = harness();
+  h.send([{ id: 51, st: "fix" }]);
+  h.advance(10_001);
+  h.send([{ id: 51, st: "ci" }]);
+  assert.equal(h.visits.length, 0);
+  h.send([{ id: 51, st: "review" }]);
+  assert.equal(h.visits.length, 1, "following genuinely fresh transition should animate");
 });
