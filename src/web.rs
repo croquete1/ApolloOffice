@@ -215,9 +215,10 @@ fn sets(a: &Ax, b: &Value) {
         s = json!({});
     }
     if let Some(m) = b["md"].as_object() {
+        let valid_model = regex::Regex::new(r"^[A-Za-z0-9._:/\[\]-]{0,120}$").unwrap();
         for (k, v) in m {
             if let Some(x) = v.as_str() {
-                if regex::Regex::new(r"^[A-Za-z0-9._:/\[\]-]{0,120}$").unwrap().is_match(x.trim()) {
+                if valid_model.is_match(x.trim()) {
                     s["md"][k] = json!(x.trim());
                 }
             }
@@ -253,11 +254,12 @@ fn sets(a: &Ax, b: &Value) {
         s["budday"] = json!(x.clamp(0.0, 100_000.0));
     }
     if let Some(o) = b["px"].as_object() {
+        let valid_price_key = regex::Regex::new(r"^[a-z0-9._:/-]{1,100}$").unwrap();
         let mut px = json!({});
         for (k, v) in o.iter().take(100) {
             let k = k.trim().to_lowercase();
             let x: Vec<f64> = v.as_array().map(|v| v.iter().filter_map(|x| x.as_f64()).filter(|x| x.is_finite() && *x >= 0.0 && *x < 10_000.0).collect()).unwrap_or_default();
-            if regex::Regex::new(r"^[a-z0-9._:/-]{1,100}$").unwrap().is_match(&k) && (x.len() == 2 || x.len() == 4) {
+            if valid_price_key.is_match(&k) && (x.len() == 2 || x.len() == 4) {
                 px[k] = json!(x);
             }
         }
