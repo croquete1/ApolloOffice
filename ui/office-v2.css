@@ -240,4 +240,51 @@
 }
 @media (max-width:530px){
   .ao-office[data-visual-version="2"] {height:825px}
-  .ao-office[data-visual-version="2"
+  .ao-office[data-visual-version="2"] .ao-stations {
+    grid-template-columns:repeat(2,minmax(0,1fr));
+    grid-template-rows:repeat(5,minmax(0,1fr));
+    padding:116px 18px 14px;gap:5px 12px;
+  }
+  .ao-office[data-visual-version="2"] .ao-station{height:133px}
+  .ao-office[data-visual-version="2"] .ao-avatar-holder{width:78%;height:110px;left:5%;top:-10px}
+  .ao-office[data-visual-version="2"] .ao-chair{top:19px;height:88px}
+  .ao-office[data-visual-version="2"] .ao-monitor{height:52px;top:4px;right:1%;width:51%}
+  .ao-office[data-visual-version="2"] .ao-desk{bottom:26px}
+  .ao-office[data-visual-version="2"] .ao-station-name{bottom:12px;font-size:10px}
+  .ao-office[data-visual-version="2"] .ao-station-state{bottom:0;font-size:8px}
+  .ao-office[data-visual-version="2"] .ao-v2-notes,
+  .ao-office[data-visual-version="2"] .ao-v2-mug {bottom:42px}
+  .ao-office[data-visual-version="2"] .ao-walking-agent{height:90px;width:57px}
+  .ao-v2-window {width:34%;height:104px;top:13px}
+  .ao-v2-window-left{left:2%}.ao-v2-window-right{right:2%}
+  .ao-v2-room-label{font-size:12px;top:37px;width:44%}
+  .ao-v2-room-label small{font-size:6px;letter-spacing:.1em}
+  .ao-v2-panel-light{display:none}
+  .ao-v2-plant{width:30px;transform:scale(.55);transform-origin:bottom}
+  .ao-v2-plant-left{left:-20px}.ao-v2-plant-right{right:-18px}
+  .ao-v2-shelf{display:none}
+  .ao-expanded .ao-office[data-visual-version="2"]{height:850px}
+}
+.ao-motion-disabled .ao-v2-character,
+.ao-motion-disabled .ao-v2-head,
+.ao-motion-disabled .ao-v2-eyes,
+.ao-motion-disabled .ao-v2-arm,
+.ao-motion-disabled .ao-v2-leg,
+.ao-motion-disabled .ao-v2-legs,
+.ao-motion-disabled .ao-screen i {animation:none!important;transition:none!important}
+@media (prefers-reduced-motion:reduce){
+  .ao-office[data-visual-version="2"] *, .ao-office[data-visual-version="2"] *::before,
+  .ao-office[data-visual-version="2"] *::after{animation:none!important;transition:none!important}
+}
+/* A physical handoff is shown only when a known job moves between roles.
+   The receiving colleague acknowledges it near the walker's arrival. */
+.ao-office[data-visual-version="2"] .ao-station.ao-v2-interacting .ao-v2-arm-right {
+  animation:ao-v2-handoff-wave .55s ease-in-out 2 1.7s;
+}
+@keyframes ao-v2-handoff-wave {
+  0%,100% {transform:rotate(0)}
+  50% {transform:rotate(-30deg) translateY(-5px)}
+}
+.ao-office[data-visual-version="2"] .ao-station.ao-v2-interacting .ao-monitor{
+  box-shadow:inset 0 1px #a8bfd133,0 7px 8px #030b16a3,0 0 18px #6ee0bd58;
+}
