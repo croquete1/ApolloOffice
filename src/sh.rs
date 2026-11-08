@@ -59,13 +59,11 @@ pub fn bash() -> String {
     }
     if cfg!(windows) {
         if let Some(g) = which("git") {
-            for up in [g.parent().and_then(|p| p.parent()), g.parent().and_then(|p| p.parent()).and_then(|p| p.parent())] {
-                if let Some(r) = up {
+            for r in [g.parent().and_then(|p| p.parent()), g.parent().and_then(|p| p.parent()).and_then(|p| p.parent())].into_iter().flatten() {
                     let b = r.join("bin").join("bash.exe");
                     if b.is_file() {
                         return b.display().to_string();
                     }
-                }
             }
         }
         for c in [r"C:\Program Files\Git\bin\bash.exe", r"C:\Program Files (x86)\Git\bin\bash.exe"] {
