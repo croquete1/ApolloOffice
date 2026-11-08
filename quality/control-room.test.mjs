@@ -10,10 +10,12 @@ const html = read("ui/index.html");
 const css = read("ui/control-room.css");
 const modern = read("ui/control-room.js");
 const original = read("ui/o.js");
+const handoffs = read("ui/office-motion.js");
 
 test("frontend scripts parse without extra dependencies", () => {
   assert.doesNotThrow(() => new Script(modern, { filename: "control-room.js" }));
   assert.doesNotThrow(() => new Script(original, { filename: "o.js" }));
+  assert.doesNotThrow(() => new Script(handoffs, { filename: "office-motion.js" }));
 });
 
 test("Control Room is loaded after the original application", () => {
@@ -22,6 +24,8 @@ test("Control Room is loaded after the original application", () => {
   const iP = html.indexOf('src="p.js"');
   const iModern = html.indexOf('src="control-room.js"');
   assert.ok(iO >= 0 && iP > iO && iModern > iP);
+  const iWalk = html.indexOf('src="office-motion.js"');
+  assert.ok(iWalk > iModern, "handoff code must load after the modern dashboard");
 });
 
 test("all ten original agents have distinct live stations", () => {
@@ -53,4 +57,19 @@ test("original canvas sleeps while hidden and remains available for fallback", (
   assert.match(original, /if \(window\.AO\?\.modernRoom\)/);
   assert.match(modern, /A\.modernRoom = false/);
   assert.match(modern, /legacy\.replaceWith/);
+});
+
+
+test("live lists are not rebuilt on identical status updates", () => {
+  assert.match(modern, /lastListSignature/);
+  assert.match(modern, /signature === lastListSignature/);
+  assert.match(modern, /lastDetailSignature/);
+});
+
+test("handoffs are grounded and safely cancelled", () => {
+  assert.match(handoffs, /prior\.stage === next\.stage/);
+  assert.match(handoffs, /previous\.get\(id\)/);
+  assert.match(handoffs, /stateAllowed\(s\)/);
+  assert.match(handoffs, /animation\.oncancel = finish/);
+  assert.match(handoffs, /finish\(\);\s*console\.warn/);
 });
