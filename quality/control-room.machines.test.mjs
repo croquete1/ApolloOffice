@@ -15,8 +15,10 @@ class FixedDate extends Date { static now() { return now; } }
 
 function fixture() {
   const root = {innerHTML:""};
+  const stale = {value:false};
   const api = runInNewContext(`(() => {
     let lastMachineSignature = "";
+    const app = {classList:{contains: () => __stale.value}};
     const byId = (id) => {
       if (id !== "aoMachines") throw Error("unexpected DOM target");
       return __root;
@@ -27,8 +29,8 @@ function fixture() {
     })[c]);
     ${implementation}
     return {renderMachines};
-  })()`, {__root:root, Date:FixedDate});
-  return {root, render:api.renderMachines};
+  })()`, {__root:root, __stale:stale, Date:FixedDate});
+  return {root, render:api.renderMachines, setStale(v){stale.value=v}};
 }
 const base = (age, enabled = 1, available = true) => ({
   hs:[{id:"local",on_:enabled}],
@@ -76,4 +78,19 @@ test("empty inventory displays a neutral status", () => {
   const x=fixture();
   x.render({hs:[],hst:{},o:{net:{}}});
   assert.match(x.root.innerHTML,/Ainda não existem máquinas configuradas/);
+});
+
+
+test("lost state channel immediately invalidates otherwise recent host measurements", () => {
+  const x=fixture(), state=base(30000);
+  x.render(state);
+  assert.match(x.root.innerHTML,/Dados recentes/);
+  x.setStale(true);
+  x.render(state);
+  assert.match(x.root.innerHTML,/Por confirmar/);
+  assert.match(x.root.innerHTML,/Última leitura:/);
+  assert.doesNotMatch(x.root.innerHTML,/62 °C|8 núcleos/);
+  x.setStale(false);
+  x.render(state);
+  assert.match(x.root.innerHTML,/Dados recentes/);
 });
