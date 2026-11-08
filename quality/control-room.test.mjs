@@ -137,8 +137,17 @@ test("all pipeline values derive from the server's untruncated status counts", (
 });
 
 test("celebrations require a recently observed finished job and reduced-motion permission", () => {
-  assert.match(modern, /const activeJob = w\.job \?\?/);
+  assert.match(modern, /const activeJob = w\.job;/);
   assert.match(modern, /String\(j\.id\) === priorJob/);
   assert.match(modern, /age >= 0 && age <= 60_000/);
   assert.match(modern, /prefers-reduced-motion: reduce/);
+});
+
+
+test("authoritative worker status wins over unassigned queued jobs", () => {
+  assert.match(modern, /if \(w\.st === "work"\) return "work"/);
+  assert.doesNotMatch(modern, /safeArray\(s\?\.q\)\.some/);
+  assert.doesNotMatch(modern, /workerStages\[role\]/);
+  assert.match(modern, /if \(!s\?\.w \|\| !Object\.hasOwn\(s\.w, role\)\) return "unknown"/);
+  assert.match(modern, /const activeJob = w\.job;/);
 });
