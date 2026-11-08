@@ -113,6 +113,10 @@
     const direction = dx < 0 ? -1 : 1;
     // Travel via the central aisle so walkers do not pass through workstations.
     const corridorY = Math.max(18, Math.min(roomBox.height - 45, roomBox.height * .56)) - fromY;
+    // On narrow screens the desks form five rows: use the vertical central
+    // aisle instead of walking through a horizontal row of workstations.
+    const narrow = window.matchMedia?.("(max-width: 530px)")?.matches;
+    const corridorX = Math.max(12, Math.min(roomBox.width - 30, roomBox.width * .5)) - fromX;
     let finished = false;
     const finish = () => {
       if (finished) return;
@@ -127,20 +131,17 @@
     if (typeof visitor.animate !== "function") { finish(); return; }
     let animation;
     try {
-      animation = visitor.animate(
-        [
-          { transform: "translate(0px, 0px) scaleX(" + direction + ")", offset: 0 },
-          { transform: "translate(0px," + corridorY + "px) scaleX(" + direction + ")", offset: .16 },
-          { transform: "translate(" + dx * .55 + "px," + corridorY + "px) scaleX(" + direction + ")", offset: .33 },
-          { transform: "translate(" + dx + "px," + corridorY + "px) scaleX(" + direction + ")", offset: .44 },
-          { transform: "translate(" + dx + "px," + dy + "px) scaleX(" + direction + ")", offset: .54 },
-          { transform: "translate(" + dx + "px," + dy + "px) scaleX(" + -direction + ")", offset: .65 },
-          { transform: "translate(" + dx + "px," + corridorY + "px) scaleX(" + -direction + ")", offset: .75 },
-          { transform: "translate(" + dx * .45 + "px," + corridorY + "px) scaleX(" + -direction + ")", offset: .88 },
-          { transform: "translate(0px,0px) scaleX(" + -direction + ")", offset: 1 }
-        ],
-        { duration: 3900, easing: "ease-in-out", fill: "forwards" }
-      );
+      const route = narrow
+        ? [[0, 0], [corridorX, 0], [corridorX, dy * .5], [corridorX, dy],
+           [dx, dy], [dx, dy], [corridorX, dy], [corridorX, 0], [0, 0]]
+        : [[0, 0], [0, corridorY], [dx * .55, corridorY], [dx, corridorY],
+           [dx, dy], [dx, dy], [dx, corridorY], [dx * .45, corridorY], [0, 0]];
+      const offsets = [0, .16, .33, .44, .54, .65, .75, .88, 1];
+      const frames = route.map(([x, y], i) => ({
+        transform: "translate(" + x + "px," + y + "px) scaleX(" + (i < 5 ? direction : -direction) + ")",
+        offset: offsets[i]
+      }));
+      animation = visitor.animate(frames, { duration: 3900, easing: "ease-in-out", fill: "forwards" });
     } catch (error) {
       // A failed animation must never leave the agent invisible.
       finish();
