@@ -97,11 +97,13 @@ test("same job moving from Fixer to CI triggers one walk and cleans up", () => {
   assert.equal(walker.options.duration, 2800);
   assert.equal(walker.frames.length, 5);
   assert.equal(h.agents.fixer.classList.contains("ao-travelling"), true);
+  assert.equal(h.agents.ci.classList.contains("ao-receiving"), true);
   assert.match(h.indicator.textContent, /Fixer → CI · tarefa #12/);
   assert.equal(h.indicator.hidden, false);
   walker.animation.onfinish();
   assert.equal(walker.removed, true);
   assert.equal(h.agents.fixer.classList.contains("ao-travelling"), false);
+  assert.equal(h.agents.ci.classList.contains("ao-receiving"), false);
   assert.equal(h.indicator.hidden, true);
   assert.equal(h.oldCalls, 2);
 });
@@ -158,4 +160,30 @@ test("hidden tabs never animate transitions", () => {
   h.document.visibilityState = "hidden";
   h.send([{ id: 1, st: "ci" }]);
   assert.equal(h.visits.length, 0);
+});
+
+
+test("failing Web Animations API restores both agents without aborting updates", () => {
+  const h = harness();
+  const create = h.document.createElement;
+  h.document.createElement = (...args) => {
+    const element = create(...args);
+    element.animate = () => { throw new Error("animation unavailable"); };
+    return element;
+  };
+  h.send([{ id: 5, st: "fix" }]);
+  h.send([{ id: 5, st: "ci" }]);
+  assert.equal(h.visits.length, 1);
+  assert.equal(h.visits[0].removed, true);
+  assert.equal(h.agents.fixer.classList.contains("ao-travelling"), false);
+  assert.equal(h.agents.ci.classList.contains("ao-receiving"), false);
+});
+
+test("simultaneous changes never pile several walkers on top of each other", () => {
+  const h = harness();
+  h.send([{id:1,st:"fix"},{id:2,st:"ci"}]);
+  h.send([{id:1,st:"ci"},{id:2,st:"review"}]);
+  assert.equal(h.visits.length, 1);
+  h.send([{id:1,st:"review"},{id:2,st:"gate"}]);
+  assert.equal(h.visits.length, 1);
 });
