@@ -1,4 +1,4 @@
-use crate::app::{sl, Ax, X, R};
+use crate::app::{sl, Ax, R, X};
 use crate::db::now;
 use crate::sh::{gh, ho, hosts, hraw};
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -13,7 +13,10 @@ fn hw(o: &str) -> serde_json::Value {
     let mut v = serde_json::json!({"t": now()});
     for l in o.lines() {
         let (k, x) = l.split_once(' ').unwrap_or((l, ""));
-        let ns: Vec<f64> = x.split_whitespace().filter_map(|n| n.parse().ok()).collect();
+        let ns: Vec<f64> = x
+            .split_whitespace()
+            .filter_map(|n| n.parse().ok())
+            .collect();
         match k {
             "os" | "up" => v[k] = serde_json::json!(x.trim()),
             "cpu" | "load" | "temp" if !ns.is_empty() => v[k] = serde_json::json!(ns[0]),
@@ -25,23 +28,34 @@ fn hw(o: &str) -> serde_json::Value {
 }
 
 static LAST: AtomicI64 = AtomicI64::new(0);
-static FAIL: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, u32>>> = std::sync::LazyLock::new(Default::default);
+static FAIL: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, u32>>> =
+    std::sync::LazyLock::new(Default::default);
 
 async fn ck(a: &Ax, k: &str) -> bool {
     match k {
-        "gh" => gh(&["api", "rate_limit", "--jq", ".rate.remaining"], 30).await.is_ok(),
+        "gh" => gh(&["api", "rate_limit", "--jq", ".rate.remaining"], 30)
+            .await
+            .is_ok(),
         "an" if crate::routing::enabled(a) => true,
-        "an" => a.hc.get("https://api.anthropic.com/").timeout(std::time::Duration::from_secs(15)).send().await.is_ok(),
-        h => match ho(a, h) {
-            Some(x) => {
-                let o = hraw(&x, &format!("{{ {HW}; }} 2>/dev/null; {}", if x.dk { "docker inspect -f '{{.State.Status}}' apollo-office | grep -qx running" } else { "true" }), 45).await;
-                if o.c == 0 {
-                    a.lv.lock().unwrap().hst.insert(h.to_string(), hw(&o.o));
+        "an" => {
+            a.hc.get("https://api.anthropic.com/")
+                .timeout(std::time::Duration::from_secs(15))
+                .send()
+                .await
+                .is_ok()
+        }
+        h => {
+            match ho(a, h) {
+                Some(x) => {
+                    let o = hraw(&x, &format!("{{ {HW}; }} 2>/dev/null; {}", if x.dk { "docker inspect -f '{{.State.Status}}' apollo-office | grep -qx running" } else { "true" }), 45).await;
+                    if o.c == 0 {
+                        a.lv.lock().unwrap().hst.insert(h.to_string(), hw(&o.o));
+                    }
+                    o.c == 0
                 }
-                o.c == 0
+                None => false,
             }
-            None => false,
-        },
+        }
     }
 }
 
@@ -50,7 +64,11 @@ pub async fn probe(a: &Ax, ks: &[String]) {
     let mut l = a.lv.lock().unwrap();
     let mut f = FAIL.lock().unwrap();
     for (k, ok) in ks.iter().zip(v) {
-        let n = if ok { 0 } else { f.get(k).copied().unwrap_or(0) + 1 };
+        let n = if ok {
+            0
+        } else {
+            f.get(k).copied().unwrap_or(0) + 1
+        };
         f.insert(k.clone(), n);
         if l.o.net.insert(k.clone(), n < 2) == Some(false) && n == 0 && k != "gh" && k != "an" {
             let (a2, id) = (a.clone(), k.clone());
@@ -74,7 +92,11 @@ pub async fn all(a: &Ax) {
 
 pub async fn need(a: &Ax, w: &str, ks: &[&str]) -> R<()> {
     let mut b = 30_000u64;
-    let ks: Vec<String> = ks.iter().filter(|k| !k.is_empty()).map(|k| k.to_string()).collect();
+    let ks: Vec<String> = ks
+        .iter()
+        .filter(|k| !k.is_empty())
+        .map(|k| k.to_string())
+        .collect();
     loop {
         if now() - LAST.load(Ordering::Relaxed) > 20_000 || ks.iter().any(|k| !a.net(k)) {
             probe(a, &ks).await;
@@ -88,7 +110,15 @@ pub async fn need(a: &Ax, w: &str, ks: &[&str]) -> R<()> {
                 return Err(X::Back(format!("{k} left the office")));
             }
         }
-        a.say(w, &format!("offline: {} unreachable, retry in {} s", miss.join(", "), b / 1000), None);
+        a.say(
+            w,
+            &format!(
+                "offline: {} unreachable, retry in {} s",
+                miss.join(", "),
+                b / 1000
+            ),
+            None,
+        );
         sl(b).await;
         b = (b * 2).min(300_000);
     }
