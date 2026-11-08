@@ -103,8 +103,8 @@ test("same job moving from Fixer to CI triggers one walk and cleans up", () => {
   h.send([{ id: 12, st: "ci", title: "Corrigir subtract" }]);
   assert.equal(h.visits.length, 1);
   const walker = h.visits[0];
-  assert.equal(walker.options.duration, 2800);
-  assert.equal(walker.frames.length, 5);
+  assert.equal(walker.options.duration, 3900);
+  assert.equal(walker.frames.length, 9);
   assert.equal(h.agents.fixer.classList.contains("ao-travelling"), true);
   assert.equal(h.agents.ci.classList.contains("ao-receiving"), true);
   assert.match(h.indicator.textContent, /Fixer → CI · tarefa #12/);
