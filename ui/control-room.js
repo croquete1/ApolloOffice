@@ -416,7 +416,7 @@
       '</div><div class="ao-trend-labels"><span>Há 30 dias</span><span>Hoje</span></div>';
   };
   const renderMachines = (s) => {
-    const signature = JSON.stringify([s.hs, s.hst, s.o?.net, Math.floor(Date.now() / 60000)]);
+    const signature = JSON.stringify([s.hs, s.hst, s.o?.net, app.classList.contains("ao-data-stale"), Math.floor(Date.now() / 60000)]);
     if (signature === lastMachineSignature) return;
     lastMachineSignature = signature;
     const hosts = safeArray(s.hs), live = s.hst || {};
@@ -426,7 +426,7 @@
       const enabled = !!h.on_;
       const unavailable = enabled && s.o?.net?.[h.id] === false;
       const age = Date.now() - Number(info.t || 0);
-      const recent = enabled && !unavailable && age >= 0 && age < 120_000;
+      const recent = enabled && !unavailable && !app.classList.contains("ao-data-stale") && age >= 0 && age < 120_000;
       const status = !enabled ? "Desativada" : unavailable ? "Indisponível" : recent ? "Dados recentes" : "Por confirmar";
       let pieces = [];
       if (Number.isFinite(Number(info.cpu)) && Number(info.cpu) > 0) pieces.push(info.cpu + " núcleos");
@@ -455,6 +455,26 @@
         escapeHTML(h.id) + '</strong><small>' + escapeHTML(description) + '</small></span><em>' +
         status + '</em></div>';
     }).join("");
+  };
+  const markStale = () => {
+    app.classList.add("ao-data-stale");
+    clearReactions();
+    // Preserve the last task records, but never claim a worker is still active.
+    for (const role of roles) {
+      const desk = stationNodes[role];
+      desk.dataset.mode = "unknown";
+      desk.querySelector(".ao-station-state").textContent = "Por confirmar";
+      desk.setAttribute("aria-label", "Ver agente " + names[role] + ". Estado por confirmar");
+      const row = byId("aoAgentList").querySelector('[data-agent="' + role + '"]');
+      const status = row?.querySelector(".ao-agent-status");
+      if (status) {
+        status.textContent = "Por confirmar";
+        status.className = "ao-agent-status ao-state-unknown";
+      }
+    }
+    byId("aoMetricWorkers").textContent = "—";
+    byId("aoAgentSummary").textContent = "Sem atualização recente";
+    if (snapshot) renderMachines(snapshot);
   };
   const render = (s) => {
     if (!s || typeof s !== "object" || s.error) return;
@@ -590,8 +610,7 @@
     if (!healthy || !app.isConnected) { clearInterval(staleTimer); return; }
     if (Date.now() - (lastStateAt || startedAt) <= 12000) return;
     const state = byId("aoOfficeStatus");
-    app.classList.add("ao-data-stale");
-    clearReactions();
+    if (!app.classList.contains("ao-data-stale")) markStale();
     state.className = "ao-status-chip is-paused";
     if (state.textContent !== "Dados desatualizados") state.textContent = "Dados desatualizados";
     byId("aoConnection").textContent = "Sem atualizações recentes";
