@@ -110,3 +110,11 @@ test("buttons do not offer unavailable PR links", () => {
   assert.match(modern, /disabled title="Ligação indisponível"/);
   assert.match(modern, /aria-expanded/);
 });
+
+
+test("initial loading and fallback do not leave zombie status timers", () => {
+  assert.match(modern, /const startedAt = Date\.now\(\)/);
+  assert.match(modern, /lastStateAt \|\| startedAt/);
+  assert.match(modern, /if \(staleTimer !== null\) clearInterval\(staleTimer\)/);
+  assert.match(modern, /!healthy \|\| !app\.isConnected/);
+});
