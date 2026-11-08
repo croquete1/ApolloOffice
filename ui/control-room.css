@@ -115,7 +115,7 @@ body.ao-enabled #dr { color: var(--t1); }
 .ao-pipeline-panel { padding-bottom: 3px; }
 .ao-pipeline { 
   display: grid;
-  grid-template-columns: repeat(7, minmax(100px, 1fr));
+  grid-template-columns: repeat(10, minmax(105px, 1fr));
   gap: 7px;
   padding: 12px 16px 16px;
   overflow-x: auto;
@@ -160,7 +160,7 @@ body.ao-enabled #dr { color: var(--t1); }
 }
 .ao-pipeline-stage.is-busy .ao-pipeline-value { color: #88ddc4; }
 @media (max-width:1200px) {
-  .ao-pipeline { grid-template-columns: repeat(7,minmax(123px,1fr)); }
+  .ao-pipeline { grid-template-columns: repeat(10,minmax(115px,1fr)); }
 }
 .ao-primary-grid { display:grid; grid-template-columns:minmax(0,2.4fr) minmax(275px,.8fr); gap: 15px; align-items: stretch; }
 .ao-panel { min-width:0; border-radius:13px; border:1px solid var(--ao-border); overflow:hidden; background: #101b2a; box-shadow: 0 12px 30px #04091328; }
