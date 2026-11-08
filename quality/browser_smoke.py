@@ -106,7 +106,18 @@ class Handler(SimpleHTTPRequestHandler):
     document.documentElement.setAttribute("data-ao-smoke",
       errors.length ? "FAIL: " + errors.join(" | ") : "PASS");
   }
-  setTimeout(verify, 2500);
+  // Poll until the new UI has a real state snapshot. A fixed sleep can
+  // incorrectly fail on slower CI runners. Stop within Chromium's 4500 ms
+  // virtual-time budget; verify() will report a useful failure if not ready.
+  var started = Date.now();
+  (function waitForDashboard() {
+    var ready = document.getElementById("aoControlRoom") &&
+      document.querySelector('.ao-station[data-role="fixer"]') &&
+      document.getElementById("aoMetricWorkers") &&
+      /\\d+\\s*\\/\\s*10/.test(document.getElementById("aoMetricWorkers").textContent);
+    if (ready || Date.now() - started >= 3500) verify();
+    else setTimeout(waitForDashboard, 100);
+  })();
 })();
 </script>
 """
