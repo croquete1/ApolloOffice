@@ -206,3 +206,30 @@ test("stale transitions after disconnection never look like a fresh handoff", ()
   h.send([{ id: 51, st: "review" }]);
   assert.equal(h.visits.length, 1, "following genuinely fresh transition should animate");
 });
+
+
+test("unmount cancels active animation and unregisters its state subscriber", () => {
+  const h = harness();
+  h.send([{id:12,st:"fix"}]);
+  h.send([{id:12,st:"ci"}]);
+  assert.equal(h.visits.length, 1);
+  const walker = h.visits[0];
+  h.app.isConnected = false;
+  h.send([{id:12,st:"review"}]);
+  assert.equal(walker.removed, true);
+  assert.equal(h.agents.fixer.classList.contains("ao-travelling"), false);
+  assert.equal(h.agents.ci.classList.contains("ao-receiving"), false);
+  assert.equal(h.AO.stopOfficeMotion, undefined);
+  h.send([{id:12,st:"gate"}]);
+  assert.equal(h.visits.length, 1, "no new movement after unmount");
+});
+
+test("explicit motion disposal unregisters the animation controller", () => {
+  const h = harness();
+  assert.equal(typeof h.AO.stopOfficeMotion, "function");
+  h.AO.stopOfficeMotion();
+  assert.equal(h.AO.stopOfficeMotion, undefined);
+  h.send([{id:8,st:"fix"}]);
+  h.send([{id:8,st:"ci"}]);
+  assert.equal(h.visits.length, 0);
+});
