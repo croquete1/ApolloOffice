@@ -67,17 +67,24 @@ function harness() {
     }
   };
   let oldCalls = 0;
+  const subscribers = new Set();
   const AO = {
     modernRoom: true,
     NM: { fixer: "Fixer", ci: "CI", reviewer: "Reviewer", submit: "Submit" },
-    onState: () => { oldCalls++; }
+    onState: () => { oldCalls++; },
+    subscribeState: (fn) => { subscribers.add(fn); return () => subscribers.delete(fn); }
   };
   runInNewContext(source, {
     window: { AO, matchMedia: () => prefers },
     document,
     console
   });
-  const send = (q, o = {}) => AO.onState({ q, o });
+  const send = (q, o = {}) => {
+    const state = { q, o };
+    AO.S = state;
+    AO.onState(state);
+    for (const listener of subscribers) listener(state);
+  };
   return { visits, send, agents, motion, prefers, app, document, listeners, AO, get indicator() { return indicator; }, get oldCalls() { return oldCalls; } };
 }
 
