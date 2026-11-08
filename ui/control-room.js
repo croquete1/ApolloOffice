@@ -52,9 +52,9 @@
     '    <main class="ao-content" id="aoOverview">',
     '      <section class="ao-metrics" aria-label="Indicadores operacionais">',
     '        <div class="ao-metric"><span>Agentes a trabalhar</span><strong id="aoMetricWorkers">—</strong><small>Estados reais</small></div>',
-    '        <div class="ao-metric"><span>Tarefas em aberto</span><strong id="aoMetricQueue">—</strong><small>Inclui pendentes e aprovações</small></div>',
-    '        <div class="ao-metric"><span>Pull Requests abertos</span><strong id="aoMetricPR">—</strong><small>Em acompanhamento</small></div>',
-    '        <div class="ao-metric"><span>Concluídas recentes</span><strong id="aoMetricDone">—</strong><small>Últimos registos disponíveis</small></div>',
+    '        <div class="ao-metric"><span>Tarefas apresentadas</span><strong id="aoMetricQueue">—</strong><small>Até 60 trabalhos em aberto</small></div>',
+    '        <div class="ao-metric"><span>PRs abertos (recentes)</span><strong id="aoMetricPR">—</strong><small>Até 40 PRs registados</small></div>',
+    '        <div class="ao-metric"><span>Concluídas recentes</span><strong id="aoMetricDone">—</strong><small>Últimos 25 trabalhos terminados</small></div>',
     '      </section>',
     '      <section class="ao-primary-grid" aria-label="Escritório e agentes">',
     '        <article class="ao-panel ao-room-panel" id="aoRoomPanel">',
@@ -346,9 +346,9 @@
     const isPaused = paused(s), isOffline = offline(s), isWarn = !!s.o?.warn;
     const state = byId("aoOfficeStatus");
     state.className = "ao-status-chip" + (isPaused || isWarn ? " is-paused" : "");
-    const statusLabel = isOffline ? "Serviços indisponíveis" : isPaused ? "Escritório em pausa" : isWarn ? "Aviso de utilização" : "Ligação ativa";
+    const statusLabel = isOffline ? "Serviços externos indisponíveis" : isPaused ? "Escritório em pausa" : isWarn ? "Aviso de utilização" : "Ligação ativa";
     if (state.textContent !== statusLabel) state.textContent = statusLabel;
-    const connection = isOffline ? "Ligação indisponível" : "Ligação em tempo real";
+    const connection = isOffline ? "Problema em serviços externos" : "Dados em tempo real";
     if (byId("aoConnection").textContent !== connection) byId("aoConnection").textContent = connection;
     byId("aoPause").textContent = s.o?.man ? "Retomar escritório" : "Pausar escritório";
     byId("aoPause").disabled = !s.o;
