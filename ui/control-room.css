@@ -290,6 +290,19 @@ body.ao-enabled #dr { color: var(--t1); }
 .ao-station[data-mode="sleep"] .ao-screen {filter:brightness(.37);}
 .ao-station[data-mode="paused"] .ao-screen {filter:grayscale(.7) brightness(.32);}
 .ao-station.ao-celebrate .ao-person {animation:ao-celebrate 1.2s ease-in-out 1;}
+/* Live worker descriptions remain readable without expanding the entire dashboard. */
+.ao-agent-list { overflow-y:auto; max-height:440px; }
+.ao-agent-row { min-height:42px; gap:9px; }
+.ao-agent-meta, .ao-agent-end { display:flex; min-width:0; flex-direction:column; justify-content:center; gap:3px; }
+.ao-agent-meta { flex:1; }
+.ao-agent-end { align-items:flex-end; max-width:42%; flex-shrink:0; }
+.ao-agent-activity, .ao-agent-model {
+  display:block; font-size:10px; line-height:1.2; color:#8fa6be;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%;
+}
+.ao-agent-model { color:#a4bee0; }
+.ao-agent-model[hidden] { display:none !important; }
+.ao-top-heading time { font-size:11px; color:#81bad4; font-weight:500; }
 .ao-agent-panel {display:flex;flex-direction:column;}
 .ao-agent-list {padding:6px 10px 12px;display:flex;flex-direction:column;justify-content:space-evenly;flex:1;}
 .ao-agent-row {
