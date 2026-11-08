@@ -112,5 +112,11 @@
     if (next === "work" && previous !== "work") station.classList.add("ao-v2-arriving");
     else if (previous === "work" && next === "idle") station.classList.add("ao-v2-rising");
   }
-  window.AOOfficeV2 = Object.freeze({character, decorate, onAgentState});
+  function clearTransitions(stations) {
+    if (!stations) return;
+    for (const station of stations.querySelectorAll(".ao-station")) {
+      station.classList.remove("ao-v2-arriving", "ao-v2-rising", "ao-v2-interacting");
+    }
+  }
+  window.AOOfficeV2 = Object.freeze({character, decorate, onAgentState, clearTransitions});
 })();
