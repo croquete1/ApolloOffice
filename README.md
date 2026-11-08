@@ -6,9 +6,6 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Silvertree2010/ApolloOffice/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Silvertree2010/ApolloOffice/ci.yml?branch=main&amp;label=CI" alt="CI"></a>
-  <a href="https://github.com/Silvertree2010/ApolloOffice/releases/latest"><img src="https://img.shields.io/github/v/release/Silvertree2010/ApolloOffice" alt="Latest release"></a>
-  <a href="https://github.com/Silvertree2010/ApolloOffice/releases"><img src="https://img.shields.io/github/downloads/Silvertree2010/ApolloOffice/total" alt="Downloads"></a>
   <img src="https://img.shields.io/badge/Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-supported-2b2b2b" alt="Windows, macOS and Linux">
   <img src="https://img.shields.io/badge/status-beta-cc785c" alt="Status: beta">
   <img src="https://img.shields.io/badge/Rust-single%20binary-B7410E?logo=rust&amp;logoColor=white" alt="Rust, single binary">
@@ -78,11 +75,19 @@ You need `git` (on Windows: Git for Windows), the [GitHub CLI][gh] logged in
 with `gh auth login`, and at least one provider: [Claude Code][cc] or Codex
 logged in, an API key, or Ollama. Docker is recommended.
 
-Download the binary for your system from the [latest release][rel] and run it:
+**Customized fork installation:** this repository does not currently publish release binaries. Do **not** install the official ApolloOffice release over this fork: it would replace our customizations. Compile this fork instead, using a Rust toolchain with Cargo:
 
 ```sh
-apollo-office
+git clone https://github.com/croquete1/ApolloOffice.git
+cd ApolloOffice
+cargo build --release --locked
 ```
+
+Start the compiled executable from this repository: `./target/release/apollo-office` on Linux/macOS or `.\\target\\release\\apollo-office.exe` in Windows PowerShell.
+
+For an existing installation, **first stop the running application and back up its data directory**. Keep the previous executable until the customized build has been verified; preserve any existing `--data` path, OAuth environment variables and autostart configuration. Replacing only the binary does not revoke an exposed Google OAuth credential.
+
+See [Fork security and configuration](docs/fork-security.md) for safe updates and OAuth credential rotation.
 
 It prints a one-time login link. Open it and follow the setup: add a machine,
 add a repository, check its test command.
@@ -146,4 +151,3 @@ always on: many projects require it, and hiding it can get you banned.
 
 [gh]: https://cli.github.com
 [cc]: https://claude.com/claude-code
-[rel]: https://github.com/Silvertree2010/ApolloOffice/releases/latest
