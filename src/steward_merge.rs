@@ -73,7 +73,9 @@ fn candidate(listed: &Value, assessed: &Value) -> Result<(i64, String), &'static
 /// O modo local exige os mesmos bloqueios de conflito, Draft, duplicação e sensibilidade,
 /// mas substitui os checks GitHub por provas locais do ApolloOffice do mesmo conteúdo.
 fn local_candidate(listed: &Value, assessed: &Value) -> Result<(i64, String), &'static str> {
-    if assessed["overlaps"].as_array().is_none_or(|x| !x.is_empty())
+    if assessed["overlaps"]
+        .as_array()
+        .is_none_or(|x| !x.is_empty())
         || assessed["possible_duplicates"]
             .as_array()
             .is_none_or(|x| !x.is_empty())
@@ -85,7 +87,10 @@ fn local_candidate(listed: &Value, assessed: &Value) -> Result<(i64, String), &'
     if listed["isDraft"] != false || listed["mergeStateStatus"] != "CLEAN" {
         return Err("PR Draft ou sem merge limpo");
     }
-    let n = listed["number"].as_i64().filter(|n| *n > 0).ok_or("número inválido")?;
+    let n = listed["number"]
+        .as_i64()
+        .filter(|n| *n > 0)
+        .ok_or("número inválido")?;
     let sha = listed["headRefOid"].as_str().ok_or("SHA ausente")?;
     if sha.len() != 40 || !sha.bytes().all(|c| c.is_ascii_hexdigit()) {
         return Err("SHA inválido");
@@ -100,9 +105,7 @@ fn local_proof(job: &Value, head: &str, base: &str, tree: &str, ci: &str) -> boo
     let reviewed_by = d["last_review"]["model"].as_str().unwrap_or("");
     let author = d["author"].as_str().unwrap_or("");
     job["st"] == "done"
-        && (job["kind"] == "fix"
-            || job["kind"] == "review"
-            || job["kind"] == "mergecheck")
+        && (job["kind"] == "fix" || job["kind"] == "review" || job["kind"] == "mergecheck")
         && d["published_sha"] == head
         && d["base"] == base
         && d["ci_tree"] == tree
@@ -277,14 +280,16 @@ async fn merge_mode(
         )
         .await?;
         let required = &rules["required_status_checks"]["contexts"];
-        return Ok(if required
-            .as_array()
-            .is_some_and(|contexts| !contexts.is_empty())
-        {
-            MergeMode::Protected
-        } else {
-            MergeMode::Blocked
-        });
+        return Ok(
+            if required
+                .as_array()
+                .is_some_and(|contexts| !contexts.is_empty())
+            {
+                MergeMode::Protected
+            } else {
+                MergeMode::Blocked
+            },
+        );
     }
     // Só aceitar a ausência EXPLÍCITA de proteção, e nunca um 403/valor omitido.
     Ok(if branch["protected"] == false && local_enabled {
@@ -296,14 +301,7 @@ async fn merge_mode(
 
 /// Agenda apenas uma revalidação pendente por repositório.
 /// Sem provas não há merge: o worker executará testes reais e Reviewer no HEAD.
-fn queue_recheck(
-    a: &Ax,
-    repo: &str,
-    number: i64,
-    head: &str,
-    base: &str,
-    detail: &Value,
-) -> bool {
+fn queue_recheck(a: &Ax, repo: &str, number: i64, head: &str, base: &str, detail: &Value) -> bool {
     if a.hold("watcher") {
         return false;
     }
@@ -342,7 +340,10 @@ fn queue_recheck(
         pa![
             repo.to_string(),
             number,
-            detail["title"].as_str().unwrap_or("Revalidar PR").to_string(),
+            detail["title"]
+                .as_str()
+                .unwrap_or("Revalidar PR")
+                .to_string(),
             detail["html_url"].as_str().unwrap_or("").to_string(),
             data.to_string(),
             number,
@@ -514,11 +515,7 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
             return Ok(false);
         }
 
-        let commit = ghj(
-            &["api", &format!("repos/{repo}/git/commits/{head}")],
-            45,
-        )
-        .await?;
+        let commit = ghj(&["api", &format!("repos/{repo}/git/commits/{head}")], 45).await?;
         let Some(tree) = commit["tree"]["sha"].as_str() else {
             return Ok(false);
         };
@@ -683,10 +680,9 @@ mod tests {
             ),
             1
         );
-        let job = a
-            .db
-            .one("select * from jobs where kind='mergecheck'", pa![])
-            .unwrap();
+        let job =
+            a.db.one("select * from jobs where kind='mergecheck'", pa![])
+                .unwrap();
         assert_eq!(job["d"]["expected_head"], head);
         assert_eq!(job["d"]["expected_base"], base);
     }
@@ -758,19 +754,28 @@ mod tests {
         let empty = json!({"total_count":0,"check_runs":[]});
         let statuses = json!({"statuses":[]});
         assert!(remote_checks_clean(&empty, &statuses));
-        assert!(!remote_checks_clean(&json!({
-            "total_count":1,"check_runs":[{
-                "name":"CodeRabbit","status":"completed","conclusion":"failure"
-            }]
-        }), &statuses));
-        assert!(!remote_checks_clean(&json!({
-            "total_count":1,"check_runs":[{
-                "name":"CodeRabbit","status":"in_progress","conclusion":null
-            }]
-        }), &statuses));
+        assert!(!remote_checks_clean(
+            &json!({
+                "total_count":1,"check_runs":[{
+                    "name":"CodeRabbit","status":"completed","conclusion":"failure"
+                }]
+            }),
+            &statuses
+        ));
+        assert!(!remote_checks_clean(
+            &json!({
+                "total_count":1,"check_runs":[{
+                    "name":"CodeRabbit","status":"in_progress","conclusion":null
+                }]
+            }),
+            &statuses
+        ));
         let sha = "0123456789012345678901234567890123456789";
         assert!(no_outstanding_reviews(&json!([]), sha));
-        assert!(!no_outstanding_reviews(&json!([{"state":"CHANGES_REQUESTED"}]), sha));
+        assert!(!no_outstanding_reviews(
+            &json!([{"state":"CHANGES_REQUESTED"}]),
+            sha
+        ));
         let requested = json!({"state":"CHANGES_REQUESTED","commit_id":sha,
             "user":{"login":"bot"},"submitted_at":"2026-11-09T13:00:00Z"});
         let approved = json!({"state":"APPROVED","commit_id":sha,
