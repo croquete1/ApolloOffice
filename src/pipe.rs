@@ -2143,7 +2143,8 @@ async fn mkbody(a: &Ax, j: &mut Job) -> R<()> {
             a.st("submit", "work", Some(j.id), "");
         }
     }
-    j.d["pt"] = json!(pr_title(None, &f, &j.title)?);
+    let title = pr_title(None, &f, &j.title)?;
+    j.d["pt"] = json!(title);
     j.d["pb"] = json!(b);
     j.d["df"] = json!(ok(
         a,
@@ -2174,7 +2175,8 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
         );
         let f = j.d["f"].clone();
         let ci = rp(a, &j.repo)["ci"].as_str().unwrap_or("").to_string();
-        j.d["pt"] = json!(pr_title(j.d["pt"].as_str(), &f, &j.title)?);
+        let title = pr_title(j.d["pt"].as_str(), &f, &j.title)?;
+        j.d["pt"] = json!(title);
         j.d["pb"] = json!(body_lang(j, &f, &ci, fo(a, j), pr_pt(a, j)));
         let tip = if j.s("br").is_empty() {
             "HEAD".to_string()
@@ -3616,6 +3618,48 @@ mod t {
         .contains("fails with the feature"));
         assert!(judgef(&ts, 0, "", 0, "").contains("already passes"));
         assert!(judgef(&ts, 101, "t_empty FAILED", 1, "boom").contains("with the feature"));
+    }
+
+    #[test]
+    fn conventional_commit_subject_is_distinct_from_pull_request_title() {
+        let portuguese = "Rejeitar datas civis inválidas nas entregas RMA";
+        let subject = commit_subject(portuguese, false).unwrap();
+        assert_eq!(subject, "fix: Rejeitar datas civis inválidas nas entregas RMA");
+        // PR titles remain human-readable and do not acquire a forced prefix.
+        assert_eq!(portuguese, "Rejeitar datas civis inválidas nas entregas RMA");
+        assert_eq!(
+            commit_subject("fix(rma): validar datas civis", false).unwrap(),
+            "fix(rma): validar datas civis"
+        );
+        assert_eq!(
+            commit_subject("Adicionar avisos de RMA", true).unwrap(),
+            "feat: Adicionar avisos de RMA"
+        );
+        assert_eq!(
+            commit_subject("Corrigir falha\nMSG\ncomando inesperado", false).unwrap(),
+            "fix: Corrigir falha"
+        );
+        assert!(commit_subject("   \n ", false).is_err());
+        let long = "x".repeat(200);
+        assert_eq!(commit_subject(&long, false).unwrap().chars().count(), 120);
+    }
+
+    #[test]
+    fn pull_request_title_falls_back_when_generated_title_is_blank() {
+        let description = json!({"title": "   "});
+        assert_eq!(
+            pr_title(None, &description, "Datas de RMA inválidas").unwrap(),
+            "Datas de RMA inválidas"
+        );
+        assert_eq!(
+            pr_title(Some("Título aprovado"), &description, "Outro").unwrap(),
+            "Título aprovado"
+        );
+        assert_eq!(
+            pr_title(None, &json!({"title": "  Linha útil\nMSG"}), "").unwrap(),
+            "Linha útil"
+        );
+        assert!(pr_title(None, &json!({"title": ""}), "  ").is_err());
     }
 
     #[test]
