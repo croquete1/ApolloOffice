@@ -2832,21 +2832,19 @@ async fn mergecheck(a: &Ax, j: &mut Job) -> R<()> {
     let head = j.s("expected_head");
     let base = j.s("expected_base");
     let branch = j.s("branch");
-    let valid_sha = |s: &str| {
-        s.len() == 40 && s.bytes().all(|c| c.is_ascii_hexdigit())
-    };
-    if !valid_sha(&head) || !valid_sha(&base) || branch.is_empty()
-        || j.pr.is_none() || j.s("author").is_empty()
+    let valid_sha = |s: &str| s.len() == 40 && s.bytes().all(|c| c.is_ascii_hexdigit());
+    if !valid_sha(&head)
+        || !valid_sha(&base)
+        || branch.is_empty()
+        || j.pr.is_none()
+        || j.s("author").is_empty()
     {
         return drop("provas insuficientes para revalidar PR");
     }
     let number = j.pr.unwrap_or(0);
-    let before = ghj(
-        &["api", &format!("repos/{}/pulls/{number}", j.repo)],
-        45,
-    )
-    .await
-    .map_err(X::E)?;
+    let before = ghj(&["api", &format!("repos/{}/pulls/{number}", j.repo)], 45)
+        .await
+        .map_err(X::E)?;
     if before["head"]["sha"] != head
         || before["base"]["sha"] != base
         || before["head"]["ref"] != branch
@@ -2859,9 +2857,7 @@ async fn mergecheck(a: &Ax, j: &mut Job) -> R<()> {
 
     prep(a, j).await?;
     let actual_head = ok(a, j, "git rev-parse HEAD", 60).await?;
-    let main = crate::gh::meta(a, &j.repo)
-        .await
-        .map_err(X::E)?["main"]
+    let main = crate::gh::meta(a, &j.repo).await.map_err(X::E)?["main"]
         .as_str()
         .unwrap_or("main")
         .to_string();
@@ -2876,7 +2872,10 @@ async fn mergecheck(a: &Ax, j: &mut Job) -> R<()> {
     a.db.jd(j);
     let ci_result = ci(a, j).await?;
     if !ci_result.is_empty() {
-        return drop(format!("CI reprovada na revalidação: {}", crate::sh::head(&ci_result, 700)));
+        return drop(format!(
+            "CI reprovada na revalidação: {}",
+            crate::sh::head(&ci_result, 700)
+        ));
     }
     let mut report = json!({
         "title":j.title,
@@ -2887,17 +2886,17 @@ async fn mergecheck(a: &Ax, j: &mut Job) -> R<()> {
     });
     let feedback = review(a, j, &mut report).await?;
     if !feedback.is_empty() {
-        return drop(format!("Reviewer reprovou: {}", crate::sh::head(&feedback, 700)));
+        return drop(format!(
+            "Reviewer reprovou: {}",
+            crate::sh::head(&feedback, 700)
+        ));
     }
 
     let actual_head = ok(a, j, "git rev-parse HEAD", 60).await?;
     let tree = ok(a, j, "git rev-parse HEAD^{tree}", 60).await?;
-    let fresh = ghj(
-        &["api", &format!("repos/{}/pulls/{number}", j.repo)],
-        45,
-    )
-    .await
-    .map_err(X::E)?;
+    let fresh = ghj(&["api", &format!("repos/{}/pulls/{number}", j.repo)], 45)
+        .await
+        .map_err(X::E)?;
     if actual_head != head
         || j.d["ci_tree"] != tree
         || fresh["head"]["sha"] != head
@@ -2914,12 +2913,18 @@ async fn mergecheck(a: &Ax, j: &mut Job) -> R<()> {
         j.id,
         &[
             ("st", json!("done")),
-            ("why", json!("revalidação local concluída; aguarda gate de merge")),
+            (
+                "why",
+                json!("revalidação local concluída; aguarda gate de merge"),
+            ),
         ],
     );
     a.say(
         "reviewer",
-        &format!("{}#{number}: CI e revisão independente aprovadas no HEAD atual", j.repo),
+        &format!(
+            "{}#{number}: CI e revisão independente aprovadas no HEAD atual",
+            j.repo
+        ),
         Some(j.id),
     );
     clean(a, j).await;
