@@ -1044,6 +1044,14 @@ async fn ci0(a: &Ax, j: &mut Job) -> R<String> {
         a.db.jd(j);
         let m = (now() - t0) / 60000;
         if ec == 0 {
+            // A prova local de integração vincula testes à árvore concreta,
+            // não ao SHA que muda quando se faz squash dos commits da PR.
+            let tree = ok(a, j, "git rev-parse HEAD^{tree}", 60).await?;
+            if !tree.is_empty() {
+                j.d["ci_tree"] = json!(tree);
+                j.d["ci_verified_at"] = json!(now());
+                a.db.jd(j);
+            }
             a.st("ci", "idle", None, "ok");
             a.say("ci", &format!("green after {m} min"), Some(j.id));
             return Ok(String::new());
@@ -2267,6 +2275,11 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
         a.db.jd(j);
     }
     let sha = ok(a, j, "git rev-parse HEAD", 60).await?;
+    // Prova de publicação: árvore da PR final e commit explícitos.
+    // É necessário que o CI tenha executado nesta mesma árvore.
+    let publish_tree = ok(a, j, "git rev-parse HEAD^{tree}", 60).await?;
+    j.d["publish_tree"] = json!(publish_tree);
+    a.db.jd(j);
     let pb = j.d["pb"].as_str().map(String::from).unwrap_or_else(|| {
         body_lang(
             j,
@@ -2445,6 +2458,9 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
     if r2 != sha {
         return e("push did not arrive");
     }
+    // Apenas o SHA confirmado no GitHub pode ser usado por um futuro merge.
+    j.d["published_sha"] = json!(sha);
+    a.db.jd(j);
     let pn = j.pr.unwrap_or(0);
     if j.kind == "rebase" || j.kind == "review" {
         let u = format!("https://github.com/{}/pull/{pn}", j.repo);
