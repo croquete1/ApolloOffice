@@ -20,10 +20,27 @@ fn allowed_file(path: &str) -> bool {
         return false;
     }
     ![
-        "money", "monetary", "finance", "fiscal", "saft", "tax", "iva",
-        "billing", "invoice", "treasury", "payment", "accounting",
-        "permission", "rbac", "security", "auth", "credential",
-        "idempotency", "migration", "secret", "policy-access",
+        "money",
+        "monetary",
+        "finance",
+        "fiscal",
+        "saft",
+        "tax",
+        "iva",
+        "billing",
+        "invoice",
+        "treasury",
+        "payment",
+        "accounting",
+        "permission",
+        "rbac",
+        "security",
+        "auth",
+        "credential",
+        "idempotency",
+        "migration",
+        "secret",
+        "policy-access",
     ]
     .iter()
     .any(|word| p.contains(word))
@@ -42,7 +59,10 @@ fn candidate(listed: &Value, assessed: &Value) -> Result<(i64, String), &'static
     if listed["reviewDecision"] != "APPROVED" {
         return Err("revisão independente não aprovada pelo GitHub");
     }
-    let number = listed["number"].as_i64().filter(|n| *n > 0).ok_or("número inválido")?;
+    let number = listed["number"]
+        .as_i64()
+        .filter(|n| *n > 0)
+        .ok_or("número inválido")?;
     let head = listed["headRefOid"].as_str().ok_or("SHA ausente")?;
     if head.len() != 40 || !head.bytes().all(|c| c.is_ascii_hexdigit()) {
         return Err("SHA inválido");
@@ -69,10 +89,7 @@ fn reviewed(reviews: &Value, author: &str, head: &str) -> bool {
             continue;
         };
         let t = r["user"]["type"].as_str().unwrap_or("");
-        if !login.eq_ignore_ascii_case(author)
-            && t != "Bot"
-            && !login.ends_with("[bot]")
-        {
+        if !login.eq_ignore_ascii_case(author) && t != "Bot" && !login.ends_with("[bot]") {
             approved = true;
         }
     }
@@ -87,15 +104,17 @@ fn ci_verified(checks: &Value, status: &Value) -> bool {
     if count == 0 || count != runs.len() as u64 || count > 100 {
         return false;
     }
-    if !runs.iter().all(|r| r["status"] == "completed" && r["conclusion"] == "success") {
+    if !runs
+        .iter()
+        .all(|r| r["status"] == "completed" && r["conclusion"] == "success")
+    {
         return false;
     }
     let Some(contexts) = status["statuses"].as_array() else {
         return false;
     };
     contexts.is_empty()
-        || (status["state"] == "success"
-            && contexts.iter().all(|r| r["state"] == "success"))
+        || (status["state"] == "success" && contexts.iter().all(|r| r["state"] == "success"))
 }
 
 async fn review_threads_resolved(repo: &str, number: i64) -> Result<bool, String> {
@@ -105,9 +124,16 @@ async fn review_threads_resolved(repo: &str, number: i64) -> Result<bool, String
     let query = r#"query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved}pageInfo{hasNextPage}}}}}"#;
     let data = ghj(
         &[
-            "api", "graphql", "-f", &format!("query={query}"),
-            "-F", &format!("owner={owner}"), "-F", &format!("name={name}"),
-            "-F", &format!("number={number}"),
+            "api",
+            "graphql",
+            "-f",
+            &format!("query={query}"),
+            "-F",
+            &format!("owner={owner}"),
+            "-F",
+            &format!("name={name}"),
+            "-F",
+            &format!("number={number}"),
         ],
         45,
     )
@@ -138,7 +164,9 @@ async fn branch_protection_verified(repo: &str, base: &str, sha: &str) -> Result
     .await?;
     // Exigir pelo menos um check obrigatório publicado pela proteção.
     let required = &rules["required_status_checks"]["contexts"];
-    Ok(required.as_array().is_some_and(|contexts| !contexts.is_empty()))
+    Ok(required
+        .as_array()
+        .is_some_and(|contexts| !contexts.is_empty()))
 }
 
 async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result<bool, String> {
@@ -177,7 +205,10 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
         return Ok(false);
     }
     let files = ghj(
-        &["api", &format!("repos/{repo}/pulls/{number}/files?per_page=100")],
+        &[
+            "api",
+            &format!("repos/{repo}/pulls/{number}/files?per_page=100"),
+        ],
         45,
     )
     .await?;
@@ -185,14 +216,17 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
         return Ok(false);
     };
     if paths.len() as u64 != changed
-        || !paths.iter().all(|p| {
-            p["filename"].as_str().is_some_and(allowed_file)
-        })
+        || !paths
+            .iter()
+            .all(|p| p["filename"].as_str().is_some_and(allowed_file))
     {
         return Ok(false);
     }
     let checks = ghj(
-        &["api", &format!("repos/{repo}/commits/{head}/check-runs?per_page=100")],
+        &[
+            "api",
+            &format!("repos/{repo}/commits/{head}/check-runs?per_page=100"),
+        ],
         45,
     )
     .await?;
@@ -201,19 +235,28 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
         return Ok(false);
     }
     let reviews = ghj(
-        &["api", &format!("repos/{repo}/pulls/{number}/reviews?per_page=100")],
+        &[
+            "api",
+            &format!("repos/{repo}/pulls/{number}/reviews?per_page=100"),
+        ],
         45,
     )
     .await?;
-    if !reviewed(&reviews, detail["user"]["login"].as_str().unwrap_or(""), &head)
-        || !review_threads_resolved(repo, number).await?
+    if !reviewed(
+        &reviews,
+        detail["user"]["login"].as_str().unwrap_or(""),
+        &head,
+    ) || !review_threads_resolved(repo, number).await?
     {
         return Ok(false);
     }
 
     // Reconfirmar a configuração e os SHAs imediatamente antes de um ato mutável.
     if a.hold("watcher")
-        || a.db.n("select auto_merge from rp where full=? and on_=1", pa![repo.to_string()]) != 1
+        || a.db.n(
+            "select auto_merge from rp where full=? and on_=1",
+            pa![repo.to_string()],
+        ) != 1
     {
         return Ok(false);
     }
@@ -232,8 +275,14 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
     // sha=HEAD impede integrar um commit que foi alterado entretanto.
     let merged = ghj(
         &[
-            "api", "-X", "PUT", &format!("repos/{repo}/pulls/{number}/merge"),
-            "-f", "merge_method=squash", "-f", &format!("sha={head}"),
+            "api",
+            "-X",
+            "PUT",
+            &format!("repos/{repo}/pulls/{number}/merge"),
+            "-f",
+            "merge_method=squash",
+            "-f",
+            &format!("sha={head}"),
         ],
         90,
     )
@@ -243,13 +292,19 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
     }
     let confirm = ghj(&["api", &format!("repos/{repo}/pulls/{number}")], 40).await?;
     if confirm["merged"] != true {
-        return Err(format!("Merge de {repo}#{number} não confirmado por leitura"));
+        return Err(format!(
+            "Merge de {repo}#{number} não confirmado por leitura"
+        ));
     }
     a.db.run(
         "update prs set st='merged',merged=? where repo=? and num=?",
         pa![chrono::Utc::now().to_rfc3339(), repo.to_string(), number],
     );
-    a.say("submit", &format!("PR integrada e verificada: {repo}#{number}"), None);
+    a.say(
+        "submit",
+        &format!("PR integrada e verificada: {repo}#{number}"),
+        None,
+    );
     a.note(
         "PR integrada",
         &format!("GitHub confirmou merge ordinário de {repo}#{number}; HEAD da PR {head}"),
@@ -260,7 +315,11 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
 
 /// No máximo um merge por repositório e leitura, para reavaliar a nova main.
 pub async fn run(a: &Ax, repo: &str, listed: &[Value], assessed: &[Value]) {
-    if a.db.n("select auto_merge from rp where full=? and on_=1", pa![repo.to_string()]) != 1 {
+    if a.db.n(
+        "select auto_merge from rp where full=? and on_=1",
+        pa![repo.to_string()],
+    ) != 1
+    {
         return;
     }
     for (pr, status) in listed.iter().zip(assessed.iter()) {
@@ -303,8 +362,11 @@ mod tests {
     #[test]
     fn sensitive_changes_are_not_eligible() {
         for path in [
-            ".github/workflows/ci.yml", "shared/money.ts", "server/routes/billing.ts",
-            "src/views/treasury/TreasuryForm.tsx", "supabase/schema.sql",
+            ".github/workflows/ci.yml",
+            "shared/money.ts",
+            "server/routes/billing.ts",
+            "src/views/treasury/TreasuryForm.tsx",
+            "supabase/schema.sql",
             "src/services/permissions.ts",
         ] {
             assert!(!allowed_file(path), "{path}");
@@ -321,7 +383,11 @@ mod tests {
         }]);
         assert!(reviewed(&good, "author", head));
         assert!(!reviewed(&good, "reviewer", head));
-        assert!(!reviewed(&good, "author", "ffffffffffffffffffffffffffffffffffffffff"));
+        assert!(!reviewed(
+            &good,
+            "author",
+            "ffffffffffffffffffffffffffffffffffffffff"
+        ));
         let changed = json!([{
             "state":"APPROVED","commit_id":head,
             "user":{"login":"reviewer","type":"User"}
@@ -335,7 +401,10 @@ mod tests {
     #[test]
     fn missing_or_failed_checks_never_pass() {
         let status = json!({"statuses":[]});
-        assert!(!ci_verified(&json!({"total_count":0,"check_runs":[]}), &status));
+        assert!(!ci_verified(
+            &json!({"total_count":0,"check_runs":[]}),
+            &status
+        ));
         assert!(!ci_verified(
             &json!({"total_count":1,"check_runs":[{"status":"completed","conclusion":"failure"}]}),
             &status
