@@ -565,7 +565,6 @@
       const rows = report?.prs || [];
       const at = report?.at ? new Date(report.at).toLocaleString("pt-PT") : "sem leitura";
       const mode = report?.merge_enabled ? "Integração ativada com verificações rigorosas" : "Apenas auditoria — integrações desativadas";
-      const mergeError = report?.merge_enabled && error?.error ? " · Falha de sincronização" : "";
       return `<div class="sec"><h4>${esc(repo)}</h4><div class="box">
         <div class="msg">${rows.length} PRs abertas · ${esc(at)} · ${esc(mode)}${error?.error ? " · Último erro: " + esc(error.error) : ""}</div>
         ${!report || report.error ? '<div class="warn">Sem diagnóstico completo. Não é possível concluir que alguma PR esteja pronta.</div>' : ""}
