@@ -485,45 +485,113 @@
    * @param {object} s Server state with hosts, telemetry and connectivity.
    */
   const renderMachines = (s) => {
-    const signature = JSON.stringify([s.hs, s.hst, s.o?.net, app.classList.contains("ao-data-stale"), Math.floor(Date.now() / 60000)]);
+    const now = Date.now();
+    const hosts = safeArray(s.hs);
+    const jobs = safeArray(s.q);
+    const signature = JSON.stringify([
+      s.hs, s.hst, s.o?.net,
+      jobs.map((j) => [j.id, j.h, j.st]),
+      app.classList.contains("ao-data-stale"), Math.floor(now / 60_000)
+    ]);
     if (signature === lastMachineSignature) return;
     lastMachineSignature = signature;
-    const hosts = safeArray(s.hs), live = s.hst || {};
-    if (!hosts.length) { byId("aoMachines").innerHTML = '<p class="ao-empty">Ainda não existem máquinas configuradas.</p>'; return; }
-    byId("aoMachines").innerHTML = hosts.slice(0,4).map((h)=>{
-      const info = live[h.id] || {};
-      const enabled = !!h.on_;
-      const unavailable = enabled && s.o?.net?.[h.id] === false;
-      const age = Date.now() - Number(info.t || 0);
-      const recent = enabled && !unavailable && !app.classList.contains("ao-data-stale") && age >= 0 && age < 120_000;
-      const status = !enabled ? "Desativada" : unavailable ? "Indisponível" : recent ? "Dados recentes" : "Por confirmar";
-      let pieces = [];
-      if (Number.isFinite(Number(info.cpu)) && Number(info.cpu) > 0) pieces.push(info.cpu + " núcleos");
-      if (info.load != null && Number.isFinite(Number(info.load)) && Number(info.load) >= 0) {
-        pieces.push("Carga " + Number(info.load).toLocaleString("pt-PT", {maximumFractionDigits:2}));
-      }
-      if (info.temp != null && Number.isFinite(Number(info.temp))) {
-        pieces.push(Number(info.temp).toLocaleString("pt-PT", {maximumFractionDigits:1}) + " °C");
-      }
-      if (Array.isArray(info.mem) && Number(info.mem[0])>0) {
-        const used = (Number(info.mem[0])-Number(info.mem[1]))/1024;
-        pieces.push(used.toFixed(1) + " / " + (Number(info.mem[0])/1024).toFixed(1) + " GB RAM");
-      }
-      if (Array.isArray(info.disk) && Number(info.disk[0])>0) pieces.push(info.disk[1] + " GB livres");
-      // Never present old CPU/RAM/temperature readings as if they were live.
-      const lastSeen = Number(info.t);
-      const timestamp = Number.isFinite(lastSeen) && lastSeen > 0
-        ? new Date(lastSeen).toLocaleString("pt-PT", {
-            day:"2-digit", month:"2-digit", hour:"2-digit", minute:"2-digit"
+    const target = byId("aoMachines");
+    if (!hosts.length) {
+      target.innerHTML = '<p class="ao-empty">Ainda não existem máquinas configuradas.</p>';
+      return;
+    }
+    const valid = (value) => {
+      if (value == null || value === "") return null;
+      const n = Number(value);
+      return Number.isFinite(n) ? n : null;
+    };
+    const number = (value, digits = 1) =>
+      value.toLocaleString("pt-PT", {maximumFractionDigits: digits});
+    const percent = (used, total) =>
+      Math.round(Math.max(0, Math.min(100, used / total * 100)));
+    const metric = (label, value, detail, usage = null) => {
+      const progress = usage == null ? "" :
+        '<span class="ao-machine-progress" role="progressbar" aria-label="' +
+        escapeHTML("Ocupação de " + label) +
+        '" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + usage +
+        '"><span style="width:' + usage + '%"></span></span>';
+      return '<div class="ao-machine-metric"><span class="ao-machine-label">' +
+        escapeHTML(label) + '</span><strong>' + escapeHTML(value) +
+        '</strong><small>' + escapeHTML(detail) + '</small>' + progress + '</div>';
+    };
+    const activeStages = new Set(["repro", "fix", "ci", "review", "gate", "submit"]);
+    const rows = hosts.slice(0, 4).map((host) => {
+      const info = s.hst?.[host.id] || {};
+      const enabled = host.on_ === true || host.on_ === 1;
+      const disconnected = s.o?.net?.[host.id] === false;
+      const timestamp = valid(info.t);
+      const age = timestamp == null ? NaN : now - timestamp;
+      const fresh = enabled && !disconnected && !app.classList.contains("ao-data-stale") &&
+        Number.isFinite(age) && age >= 0 && age < 120_000;
+      const status = !enabled ? "Desativada" :
+        disconnected ? "Sem ligação" : fresh ? "Online" : "Por confirmar";
+      const timeLabel = timestamp != null && timestamp > 0
+        ? "Última leitura: " + new Date(timestamp).toLocaleString("pt-PT", {
+            day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"
           })
-        : null;
-      const description = recent
-        ? (pieces.join(" · ") || "Sem métricas de hardware")
-        : timestamp ? "Última leitura: " + timestamp : "Sem leituras recentes";
-      return '<div class="ao-machine-row"><span class="ao-host-dot ' + (recent ? "ao-host-up" : "ao-host-down") + '"></span><span><strong>' +
-        escapeHTML(h.id) + '</strong><small>' + escapeHTML(description) + '</small></span><em>' +
-        status + '</em></div>';
-    }).join("");
+        : "Sem leituras registadas";
+      const running = fresh ? jobs.filter((j) => j.h === host.id && activeStages.has(j.st)).length : 0;
+      const capacity = valid(host.ln);
+      const workLabel = fresh && capacity != null && capacity > 0
+        ? running + " / " + capacity + " postos ocupados"
+        : "Ocupação por confirmar";
+      const metrics = [];
+      if (fresh) {
+        const cpu = valid(info.cpu), load = valid(info.load);
+        if (cpu != null && cpu > 0) {
+          const loadText = load != null && load >= 0
+            ? "Carga média: " + number(load, 2) + " (não é percentagem de CPU)"
+            : "Carga média indisponível";
+          metrics.push(metric("Processador", number(cpu, 0) + " núcleos", loadText));
+        }
+        const mem = Array.isArray(info.mem) ? info.mem : [];
+        const totalMem = valid(mem[0]), availableMem = valid(mem[1]);
+        if (totalMem != null && totalMem > 0 && availableMem != null &&
+            availableMem >= 0 && availableMem <= totalMem) {
+          const used = totalMem - availableMem;
+          const usage = percent(used, totalMem);
+          metrics.push(metric("RAM", number(used / 1024) + " / " +
+            number(totalMem / 1024) + " GiB", usage + "% ocupados", usage));
+        }
+        const disk = Array.isArray(info.disk) ? info.disk : [];
+        const totalDisk = valid(disk[0]), freeDisk = valid(disk[1]);
+        if (totalDisk != null && totalDisk > 0 && freeDisk != null &&
+            freeDisk >= 0 && freeDisk <= totalDisk) {
+          const usage = percent(totalDisk - freeDisk, totalDisk);
+          metrics.push(metric("Disco", number(freeDisk, 0) + " GB livres",
+            "de " + number(totalDisk, 0) + " GB · " + usage + "% ocupados", usage));
+        }
+        const temperature = valid(info.temp);
+        if (temperature != null) {
+          metrics.push(metric("Temperatura", number(temperature) + " °C",
+            "Sensor não identificado"));
+        }
+      }
+      return '<article class="ao-machine-card" data-telemetry-fresh="' +
+        (fresh ? "true" : "false") + '">' +
+        '<div class="ao-machine-heading"><span class="ao-host-dot ' +
+          (fresh ? "ao-host-up" : "ao-host-down") + '"></span>' +
+        '<div><strong>' + escapeHTML(host.id === "local" ? "Este computador" : host.id) +
+        '</strong><small>' + escapeHTML(host.dk ? "Docker" : "Sem Docker") +
+        ' · ' + escapeHTML(workLabel) + '</small></div>' +
+        '<span class="ao-machine-state">' + escapeHTML(status) + '</span></div>' +
+        (fresh
+          ? '<div class="ao-machine-metrics">' +
+            (metrics.join("") || '<p class="ao-machine-unavailable">Sem métricas de hardware disponíveis.</p>') +
+            '</div>'
+          : '<p class="ao-machine-unavailable">Telemetria indisponível ou desatualizada. ' +
+            'Não são apresentados valores históricos como atuais.</p>') +
+        '<div class="ao-machine-updated">' + escapeHTML(timeLabel) + '</div>' +
+        '</article>';
+    });
+    target.innerHTML = rows.join("") +
+      (hosts.length > 4 ? '<p class="ao-machine-more">' +
+        escapeHTML("Mais " + (hosts.length - 4) + " máquinas não apresentadas.") + '</p>' : "");
   };
   const markStale = () => {
     app.classList.add("ao-data-stale");
