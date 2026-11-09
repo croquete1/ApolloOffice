@@ -332,6 +332,37 @@ fn fo(a: &Ax, j: &Job) -> &'static str {
     }
 }
 
+fn pr_title(preferred: Option<&str>, f: &Value, fallback: &str) -> R<String> {
+    for candidate in [preferred, f["title"].as_str(), Some(fallback)] {
+        if let Some(title) = candidate
+            .and_then(|value| value.lines().find(|line| !line.trim().is_empty()))
+        {
+            return Ok(title.trim().to_string());
+        }
+    }
+    e("cannot publish a pull request without a title")
+}
+
+fn commit_subject(title: &str, feature: bool) -> R<String> {
+    let title = title.lines().find(|line| !line.trim().is_empty()).unwrap_or("").trim();
+    if title.is_empty() {
+        return e("cannot create a commit without a subject");
+    }
+    // A PR title is not necessarily a Conventional Commit subject. FixFlow
+    // enforces Conventional Commits in its commit-msg hook. Do not disable hooks.
+    let conventional = Regex::new(
+        r"^(?:feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(?:\([A-Za-z0-9_.-]+\))?!?:\s+\S",
+    )
+    .unwrap();
+    let subject = if conventional.is_match(title) {
+        title.to_string()
+    } else {
+        format!("{}: {title}", if feature { "feat" } else { "fix" })
+    };
+    // The FixFlow commitlint configuration enforces a 120-character header.
+    Ok(subject.chars().take(120).collect::<String>().trim_end().to_string())
+}
+
 fn kill(a: &Ax, j: &Job) -> R<()> {
     if a.db
         .kg(&format!("kill:{}", j.id))
@@ -2112,7 +2143,7 @@ async fn mkbody(a: &Ax, j: &mut Job) -> R<()> {
             a.st("submit", "work", Some(j.id), "");
         }
     }
-    j.d["pt"] = json!(f["title"].as_str().unwrap_or(&j.title));
+    j.d["pt"] = json!(pr_title(None, &f, &j.title)?);
     j.d["pb"] = json!(b);
     j.d["df"] = json!(ok(
         a,
@@ -2143,7 +2174,7 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
         );
         let f = j.d["f"].clone();
         let ci = rp(a, &j.repo)["ci"].as_str().unwrap_or("").to_string();
-        j.d["pt"] = json!(f["title"].as_str().unwrap_or(&j.title));
+        j.d["pt"] = json!(pr_title(j.d["pt"].as_str(), &f, &j.title)?);
         j.d["pb"] = json!(body_lang(j, &f, &ci, fo(a, j), pr_pt(a, j)));
         let tip = if j.s("br").is_empty() {
             "HEAD".to_string()
@@ -2172,11 +2203,7 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
     let f = j.d["f"].clone();
     let ft = fo(a, j);
     let tr = trs(j);
-    let ti = j.d["pt"]
-        .as_str()
-        .map(String::from)
-        .filter(|x| !x.trim().is_empty())
-        .unwrap_or(f["title"].as_str().unwrap_or(&j.title).to_string());
+    let ti = pr_title(j.d["pt"].as_str(), &f, &j.title)?;
     if j.kind == "fix" && !j.d["sq"].as_bool().unwrap_or(false) {
         let rf = if j.ext() {
             (if pr_pt(a, j) {
@@ -2195,11 +2222,12 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
             // Keep the GitHub auto-close keyword intact in every language.
             format!("Fixes #{}", j.num)
         };
+        let subject = commit_subject(&ti, j.feat())?;
         ok(
             a,
             j,
             &format!(
-                "git reset -q --soft {} && git commit -q -F - <<'MSG'\n{ti}\n\n{rf}\n\n{}\nMSG",
+                "git reset -q --soft {} && git commit -q -F - <<'MSG'\n{subject}\n\n{rf}\n\n{}\nMSG",
                 j.s("base"),
                 tr.join("\n")
             ),
