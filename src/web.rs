@@ -491,7 +491,7 @@ fn import(a: &Ax, b: &Value) -> Result<String, String> {
                     let t = if *k == "mode" && t != "auto" {
                         "ask".to_string()
                     } else if *k == "lang" {
-                        if t == "pt-PT" { "pt-PT" } else { "en" }.to_string()
+                        (if t == "pt-PT" { "pt-PT" } else { "en" }).to_string()
                     } else {
                         crate::sh::head(t.trim(), 4000)
                     };
