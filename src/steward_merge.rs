@@ -645,6 +645,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn revalidation_jobs_are_singleton_per_pr_and_head() {
+        let db = crate::db::Db::mem();
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::env::temp_dir(),
+            47300,
+            "apollo-office".into(),
+        ));
+        let repo = "croquete1/FixFlow-novo";
+        let head = "0123456789012345678901234567890123456789";
+        let base = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        a.db.jnew(
+            repo,
+            1,
+            "fix",
+            "Correção existente",
+            "",
+            "done",
+            "",
+            json!({"author":"codex:gpt-5.6-luna"}),
+            Some(42),
+            0.0,
+        );
+        let detail = json!({
+            "title":"Corrigir problema",
+            "html_url":"https://github.com/croquete1/FixFlow-novo/pull/42",
+            "head":{"ref":"fix/repro"},
+            "body":"Teste de regressão"
+        });
+        assert!(queue_recheck(&a, repo, 42, head, base, &detail));
+        assert!(!queue_recheck(&a, repo, 42, head, base, &detail));
+        assert_eq!(
+            a.db.n(
+                "select count(*) from jobs where repo=? and kind='mergecheck'",
+                pa![repo.to_string()]
+            ),
+            1
+        );
+        let job = a
+            .db
+            .one("select * from jobs where kind='mergecheck'", pa![])
+            .unwrap();
+        assert_eq!(job["d"]["expected_head"], head);
+        assert_eq!(job["d"]["expected_base"], base);
+    }
+
+    #[test]
     fn local_candidate_rejects_overlaps_failures_and_drafts() {
         let mut pr = json!({
             "number":9,"headRefOid":"0123456789012345678901234567890123456789",
