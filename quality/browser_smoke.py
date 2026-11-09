@@ -67,7 +67,7 @@ class Handler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(UI_DIR), **kwargs)
 
     def do_GET(self):
-        if self.path in ("/", "/index.html"):
+        if self.path.split("?", 1)[0] in ("/", "/index.html"):
             # Inject a browser-only smoke probe; the repository UI is unchanged.
             html = (UI_DIR / "index.html").read_text(encoding="utf-8")
             probe = """
@@ -132,6 +132,24 @@ class Handler(SimpleHTTPRequestHandler):
 })();
 </script>
 """
+            if "ui=modern" not in self.path:
+                probe = """
+<script>
+(function () {
+  var errors = [];
+  var canvas = document.getElementById("cv");
+  if (!canvas) errors.push("Canvas pixelizado indisponível");
+  if (document.getElementById("aoControlRoom"))
+    errors.push("Control Room montado sem opção explícita");
+  if (window.AO?.modernRoom === true)
+    errors.push("Vista moderna ativada por omissão");
+  if (canvas && getComputedStyle(canvas).display === "none")
+    errors.push("Canvas pixelizado oculto");
+  document.documentElement.setAttribute("data-ao-smoke",
+    errors.length ? "FAIL: " + errors.join(" | ") : "PASS");
+})();
+</script>
+"""
             html = html.replace("</body>", probe + "</body>")
             payload = html.encode("utf-8")
             self.send_response(200)
@@ -170,13 +188,13 @@ def choose_browser() -> str:
     raise RuntimeError("Chrome/Chromium não está instalado neste ambiente.")
 
 
-def run_case(browser: str, active: bool) -> None:
+def run_case(browser: str, active: bool, modern: bool = True) -> None:
     """Render a complete frontend page and verify real DOM and agent state."""
     Handler.state = fixture(active)
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    url = f"http://127.0.0.1:{server.server_port}/"
+    url = f"http://127.0.0.1:{server.server_port}/" + ("?ui=modern" if modern else "")
     try:
         with tempfile.TemporaryDirectory(prefix="apollo-browser-") as profile:
             command = [
@@ -194,22 +212,29 @@ def run_case(browser: str, active: bool) -> None:
             if not smoke or smoke.group(1) != "PASS":
                 raise AssertionError("Interações do navegador falharam: " +
                                      (smoke.group(1) if smoke else "teste não executado"))
-            if 'id="aoControlRoom"' not in dom:
-                raise AssertionError("O Control Room não foi montado. " + dom[-1200:])
-            for role in ROLES:
-                if f'data-role="{role}"' not in dom:
-                    raise AssertionError("Posto em falta: " + role)
-            if len(re.findall(r'class="ao-pipeline-stage\b', dom)) != 10:
-                raise AssertionError("O pipeline não apresenta as dez fases reais.")
-            expected = "1 / 10" if active else "0 / 10"
-            if not re.search(r'id="aoMetricWorkers"[^>]*>\s*' + re.escape(expected), dom):
-                raise AssertionError("Contagem incorreta de agentes ativos: " + expected)
-            if active and "qwen3:8b" not in dom:
-                raise AssertionError("O modelo local Qwen 3 8B não aparece no dashboard.")
-            if "Ações Rápidas" in dom:
-                raise AssertionError("A interface ainda apresenta ações rápidas.")
-            label = "trabalho real" if active else "repouso"
-            print(f"PASS: Chrome/Chromium validou renderização e interações de {label}.")
+            if modern:
+                if 'id="aoControlRoom"' not in dom:
+                    raise AssertionError("O Control Room não foi montado. " + dom[-1200:])
+                for role in ROLES:
+                    if f'data-role="{role}"' not in dom:
+                        raise AssertionError("Posto em falta: " + role)
+                if len(re.findall(r'class="ao-pipeline-stage\b', dom)) != 10:
+                    raise AssertionError("O pipeline não apresenta as dez fases reais.")
+                expected = "1 / 10" if active else "0 / 10"
+                if not re.search(r'id="aoMetricWorkers"[^>]*>\s*' + re.escape(expected), dom):
+                    raise AssertionError("Contagem incorreta de agentes ativos: " + expected)
+                if active and "qwen3:8b" not in dom:
+                    raise AssertionError("O modelo local Qwen 3 8B não aparece no dashboard.")
+                if "Ações Rápidas" in dom:
+                    raise AssertionError("A interface ainda apresenta ações rápidas.")
+                label = "trabalho real" if active else "repouso"
+                print(f"PASS: Chrome/Chromium validou renderização e interações de {label}.")
+            else:
+                if 'id="aoControlRoom"' in dom:
+                    raise AssertionError("Vista moderna ativada sem autorização.")
+                if 'id="cv"' not in dom:
+                    raise AssertionError("Canvas pixelizado não encontrado.")
+                print("PASS: Chrome/Chromium validou o escritório pixelizado predefinido.")
     finally:
         server.shutdown()
         server.server_close()
@@ -222,9 +247,10 @@ def main() -> int:
         raise RuntimeError("Os ficheiros reais da interface estão em falta.")
     browser = choose_browser()
     print("Browser:", browser)
-    run_case(browser, active=False)
-    run_case(browser, active=True)
-    print("PASS: 2 cenários de navegador, 10 agentes e pipeline de 10 fases.")
+    run_case(browser, active=False, modern=False)
+    run_case(browser, active=False, modern=True)
+    run_case(browser, active=True, modern=True)
+    print("PASS: 3 cenários de navegador: pixel por omissão e duas vistas modernas opcionais.")
     return 0
 
 
