@@ -143,11 +143,29 @@ fn remote_checks_clean(checks: &Value, status: &Value) -> bool {
         || (status["state"] == "success" && contexts.iter().all(|r| r["state"] == "success"))
 }
 
-fn no_outstanding_reviews(reviews: &Value) -> bool {
-    reviews.as_array().is_some_and(|rs| {
-        rs.len() < 100
-            && !rs.iter().any(|r| r["state"] == "CHANGES_REQUESTED")
-    })
+fn no_outstanding_reviews(reviews: &Value, head: &str) -> bool {
+    let Some(rows) = reviews.as_array() else {
+        return false;
+    };
+    if rows.len() >= 100 {
+        return false;
+    }
+    rows.iter()
+        .filter(|r| r["state"] == "CHANGES_REQUESTED")
+        .all(|request| {
+            let Some(author) = request["user"]["login"].as_str() else {
+                return false;
+            };
+            let Some(at) = request["submitted_at"].as_str() else {
+                return false;
+            };
+            rows.iter().any(|r| {
+                r["user"]["login"] == author
+                    && (r["state"] == "APPROVED" || r["state"] == "DISMISSED")
+                    && r["commit_id"] == head
+                    && r["submitted_at"].as_str().is_some_and(|t| t > at)
+            })
+        })
 }
 
 fn reviewed(reviews: &Value, author: &str, head: &str) -> bool {
@@ -452,7 +470,7 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
                 detail["user"]["login"].as_str().unwrap_or(""),
                 &head,
             ))
-        || (mode == MergeMode::Local && !no_outstanding_reviews(&reviews))
+        || (mode == MergeMode::Local && !no_outstanding_reviews(&reviews, &head))
     {
         return Ok(false);
     }
@@ -467,7 +485,7 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
         .await?;
         if ancestry["status"] != "ahead" && ancestry["status"] != "identical" {
             if ancestry["status"] == "diverged" {
-                let updated = ghj(
+                match ghj(
                     &[
                         "api",
                         "-X",
@@ -478,13 +496,19 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
                     ],
                     90,
                 )
-                .await?;
-                if updated["message"].is_string() {
-                    a.say(
+                .await
+                {
+                    Ok(_) => a.say(
                         "watcher",
                         &format!("{repo}#{number}: branch atualizada; CI terá de correr novamente"),
                         None,
-                    );
+                    ),
+                    Err(error) => {
+                        a.db.ks(
+                            &format!("steward:update_error:{repo}#{number}"),
+                            &json!({"head":head,"error":crate::sh::head(&error,500)}),
+                        );
+                    }
                 }
             }
             return Ok(false);
@@ -697,8 +721,14 @@ mod tests {
                 "name":"CodeRabbit","status":"in_progress","conclusion":null
             }]
         }), &statuses));
-        assert!(no_outstanding_reviews(&json!([])));
-        assert!(!no_outstanding_reviews(&json!([{"state":"CHANGES_REQUESTED"}])));
+        let sha = "0123456789012345678901234567890123456789";
+        assert!(no_outstanding_reviews(&json!([]), sha));
+        assert!(!no_outstanding_reviews(&json!([{"state":"CHANGES_REQUESTED"}]), sha));
+        let requested = json!({"state":"CHANGES_REQUESTED","commit_id":sha,
+            "user":{"login":"bot"},"submitted_at":"2026-11-09T13:00:00Z"});
+        let approved = json!({"state":"APPROVED","commit_id":sha,
+            "user":{"login":"bot"},"submitted_at":"2026-11-09T14:00:00Z"});
+        assert!(no_outstanding_reviews(&json!([requested, approved]), sha));
     }
 
     #[test]
