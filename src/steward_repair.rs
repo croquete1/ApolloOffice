@@ -13,7 +13,7 @@ fn actionable_request(
     comments: &[Value],
     head: &str,
     author: &str,
-) -> Option<(i64, String)> {
+) -> Option<(i64, String, i64)> {
     let last = reviews
         .iter()
         .filter(|r| r["state"] == "CHANGES_REQUESTED" && r["commit_id"] == head)
@@ -36,8 +36,11 @@ fn actionable_request(
                     && (other["state"] == "APPROVED" || other["state"] == "DISMISSED")
             })
         })
-        .max_by_key(|r| r["submitted_at"].as_str().unwrap_or(""))?;
+        .max_by(|a, b| a["submitted_at"].as_str().cmp(&b["submitted_at"].as_str()))?;
     let id = last["id"].as_i64().filter(|id| *id > 0)?;
+    let since = chrono::DateTime::parse_from_rfc3339(last["submitted_at"].as_str()?)
+        .ok()?
+        .timestamp_millis();
     let reviewer = last["user"]["login"].as_str()?;
     let mut parts = Vec::new();
     if let Some(body) = last["body"].as_str().filter(|s| !s.trim().is_empty()) {
@@ -56,7 +59,7 @@ fn actionable_request(
     if parts.is_empty() {
         return None;
     }
-    Some((id, crate::sh::head(&parts.join("\n\n"), 6000)))
+    Some((id, crate::sh::head(&parts.join("\n\n"), 6000), since))
 }
 
 fn eligible(pr: &Value, assessed: &Value) -> bool {
@@ -94,6 +97,8 @@ async fn enqueue(a: &Ax, repo: &str, pr: &Value, assessed: &Value, me: &str) -> 
         .as_str()
         .unwrap_or("");
     if head != pr["headRefOid"].as_str().unwrap_or("")
+        || detail["user"]["login"].as_str() != Some(me)
+        || detail["base"]["repo"]["full_name"] != repo
         || detail["state"] != "open"
         || detail["draft"] != false
         || detail["head"]["repo"]["full_name"] != repo
@@ -110,7 +115,7 @@ async fn enqueue(a: &Ax, repo: &str, pr: &Value, assessed: &Value, me: &str) -> 
     if reviews.len() >= 100 || comments.len() >= 100 {
         return Ok(false); // Não tomar decisões com feedback incompleto.
     }
-    let Some((rid, request)) = actionable_request(&reviews, &comments, head, me) else {
+    let Some((rid, request, since)) = actionable_request(&reviews, &comments, head, me) else {
         return Ok(false);
     };
     let key = format!("steward:repair:{repo}#{number}:{head}:{rid}");
@@ -159,7 +164,7 @@ async fn enqueue(a: &Ax, repo: &str, pr: &Value, assessed: &Value, me: &str) -> 
          select ?,?,'review',?,?,'ready',?,?,?,-1.0,?,?
          where not exists (
            select 1 from jobs where repo=? and pr=? and kind='review'
-             and (st not in ('done','drop') or json_extract(d,'$.steward_review_id')=?)
+             and (st not in ('done','drop') or t0 >= ?)
          )",
         pa![
             repo.to_string(),
@@ -173,7 +178,7 @@ async fn enqueue(a: &Ax, repo: &str, pr: &Value, assessed: &Value, me: &str) -> 
             now(),
             repo.to_string(),
             number,
-            rid
+            since
         ],
     ) == 1;
     if inserted {
@@ -247,7 +252,7 @@ mod tests {
         let comments = json!([{"pull_request_review_id":91,"user":{"login":"reviewer"},
             "path":"src/form.ts","body":"Adicionar teste de regressão"}]);
         let req = actionable_request(&[review.clone()], comments.as_array().unwrap(), head, "author");
-        assert!(req.as_ref().is_some_and(|(id,text)| *id == 91
+        assert!(req.as_ref().is_some_and(|(id,text,_)| *id == 91
             && text.contains("null") && text.contains("src/form.ts")));
         assert!(actionable_request(&[review.clone()], &[], head, "reviewer").is_none());
         assert!(actionable_request(&[review.clone()], &[], "outro-head", "author").is_none());
