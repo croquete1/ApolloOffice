@@ -27,6 +27,15 @@ fn actionable_request(
                 && r["user"]["type"] != "Bot"
                 && !user.ends_with("[bot]")
         })
+        // Não reutilizar uma objeção se o mesmo revisor a aprovou/revogou depois.
+        .filter(|r| {
+            !reviews.iter().any(|other| {
+                other["user"]["login"] == r["user"]["login"]
+                    && other["submitted_at"].as_str().unwrap_or("")
+                        > r["submitted_at"].as_str().unwrap_or("")
+                    && (other["state"] == "APPROVED" || other["state"] == "DISMISSED")
+            })
+        })
         .max_by_key(|r| r["submitted_at"].as_str().unwrap_or(""))?;
     let id = last["id"].as_i64().filter(|id| *id > 0)?;
     let reviewer = last["user"]["login"].as_str()?;
@@ -245,6 +254,13 @@ mod tests {
         let mut outsider = review;
         outsider["author_association"] = json!("NONE");
         assert!(actionable_request(&[outsider], &[], head, "author").is_none());
+        let mut newer = review.clone();
+        newer["state"] = json!("APPROVED");
+        newer["submitted_at"] = json!("2026-11-09T13:00:00Z");
+        assert!(
+            actionable_request(&[review, newer], &[], head, "author").is_none(),
+            "uma aprovação posterior torna a objeção obsoleta"
+        );
     }
 
     #[test]
