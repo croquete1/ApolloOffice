@@ -3602,7 +3602,8 @@ mod t {
         assert!(b.ends_with(FOOT));
         assert!(!body_lang(&j, &f, "cargo test", "", false).contains(FOOT));
         assert!(
-            body_lang(&j, &f, "cargo test", FOOT0, false).ends_with(FOOT0) && !FOOT0.contains("ApolloOffice")
+            body_lang(&j, &f, "cargo test", FOOT0, false).ends_with(FOOT0)
+                && !FOOT0.contains("ApolloOffice")
         );
         let h = Job::of(
             json!({"id": 6, "repo": "o/r", "num": 0, "kind": "fix", "title": "T", "d": {"mn": "main", "hunt": {"where": "a.rs:3", "title": "x"}}}),
