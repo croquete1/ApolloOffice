@@ -112,9 +112,7 @@ fn local_proof(job: &Value, head: &str, base: &str, tree: &str, ci: &str) -> boo
         && d["publish_tree"] == tree
         && d["ci_evidence"]["exit"] == 0
         && d["ci_evidence"]["command"] == ci
-        && d["ci_evidence"]["candidate"]
-            .as_str()
-            .is_some_and(|s| s.len() == 40 && s.bytes().all(|c| c.is_ascii_hexdigit()))
+        && d["ci_evidence"]["candidate"] == head
         && d["ci_verified_at"].as_i64().is_some_and(|v| v > 0)
         && d["last_review"]["t"]
             .as_i64()
@@ -730,6 +728,13 @@ mod tests {
             }
         });
         assert!(local_proof(&job, sha, base, tree, ci));
+        job["d"]["ci_evidence"]["candidate"] =
+            json!("ffffffffffffffffffffffffffffffffffffffff");
+        assert!(!local_proof(&job, sha, base, tree, ci));
+        job["d"]["ci_evidence"]["candidate"] = json!(sha);
+        job["d"]["ci_evidence"].as_object_mut().unwrap().remove("candidate");
+        assert!(!local_proof(&job, sha, base, tree, ci));
+        job["d"]["ci_evidence"]["candidate"] = json!(sha);
         job["d"]["published_sha"] = json!("ffffffffffffffffffffffffffffffffffffffff");
         assert!(!local_proof(&job, sha, base, tree, ci));
         job["d"]["published_sha"] = json!(sha);
