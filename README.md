@@ -89,24 +89,6 @@ For an existing installation, **first stop the running application and back up i
 
 See [Fork security and configuration](docs/fork-security.md) for safe updates and OAuth credential rotation.
 
-### Pull Requests em português (FixFlow)
-
-Em **Repos → croquete1/FixFlow-novo**, escolher **PR language →
-Português de Portugal (PT-PT)** e gravar. O idioma é uma definição de cada
-repositório, persistida e incluída na exportação/importação de configurações.
-O valor predefinido para os restantes repositórios continua a ser inglês.
-
-Em PT-PT, o ApolloOffice usa secções de PR em português, traduz o aviso de
-assistência de IA sem o remover e instrui o modelo a produzir título e textos
-em português europeu. As palavras-chave técnicas `Fixes #N`/`Closes #N`
-e `Co-Authored-By` mantêm-se para integração com GitHub. O modelo da PR
-do FixFlow, quando existir, deve ter secções em PT-PT; uma resposta do modelo
-com cabeçalhos ingleses é rejeitada a favor do corpo determinístico.
-
-A geração por modelos não garante a deteção de todas as expressões inglesas
-em prosa: rever sempre o conteúdo final quando a língua for um requisito
-contratual. Nenhuma alteração neste fluxo autoriza `merge` ou `deploy`.
-
 
 It prints a one-time login link. Open it and follow the setup: add a machine,
 add a repository, check its test command.
@@ -170,3 +152,21 @@ always on: many projects require it, and hiding it can get you banned.
 
 [gh]: https://cli.github.com
 [cc]: https://claude.com/claude-code
+
+### Pull Requests em português (FixFlow)
+
+Em **Repos → croquete1/FixFlow-novo**, escolher **PR language →
+Português de Portugal (PT-PT)** e gravar. O idioma é uma definição de cada
+repositório, persistida e incluída na exportação/importação de configurações.
+O valor predefinido para os restantes repositórios continua a ser inglês.
+
+Em PT-PT, o ApolloOffice usa secções de PR em português, traduz o aviso de
+assistência de IA sem o remover e instrui o modelo a produzir título e textos
+em português europeu. As palavras-chave técnicas `Fixes #N`/`Closes #N`
+e `Co-Authored-By` mantêm-se para integração com GitHub. O modelo da PR
+do FixFlow, quando existir, deve ter secções em PT-PT; uma resposta do modelo
+com cabeçalhos ingleses é rejeitada a favor do corpo determinístico.
+
+A geração por modelos não garante a deteção de todas as expressões inglesas
+em prosa: rever sempre o conteúdo final quando a língua for um requisito
+contratual. Nenhuma alteração neste fluxo autoriza `merge` ou `deploy`.
