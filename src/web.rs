@@ -1436,6 +1436,20 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                 Err(e) => js(json!({"ok": false, "m": crate::wk::errm(&e)})),
             }
         }
+        ("GET", "/api/steward") => js(json!({
+            "read_only": true,
+            "repos": a.db.all("select full from rp where on_=1 order by full", pa![])
+                .iter()
+                .map(|row| {
+                    let repo = row["full"].as_str().unwrap_or("");
+                    json!({
+                        "repo": repo,
+                        "report": a.db.kg(&format!("steward:{repo}")),
+                        "error": a.db.kg(&format!("steward:error:{repo}"))
+                    })
+                })
+                .collect::<Vec<Value>>()
+        })),
         ("GET", "/api/cost") => js(costs(a)),
         ("GET", "/api/health") => js(health(a, qv("f") == "1").await),
         ("GET", "/api/export") => js(export(a)),
