@@ -100,7 +100,9 @@ fn local_proof(job: &Value, head: &str, base: &str, tree: &str, ci: &str) -> boo
     let reviewed_by = d["last_review"]["model"].as_str().unwrap_or("");
     let author = d["author"].as_str().unwrap_or("");
     job["st"] == "done"
-        && (job["kind"] == "fix" || job["kind"] == "review")
+        && (job["kind"] == "fix"
+            || job["kind"] == "review"
+            || job["kind"] == "mergecheck")
         && d["published_sha"] == head
         && d["base"] == base
         && d["ci_tree"] == tree
@@ -274,6 +276,78 @@ async fn merge_mode(
     })
 }
 
+/// Agenda apenas uma revalidação pendente por repositório.
+/// Sem provas não há merge: o worker executará testes reais e Reviewer no HEAD.
+fn queue_recheck(
+    a: &Ax,
+    repo: &str,
+    number: i64,
+    head: &str,
+    base: &str,
+    detail: &Value,
+) -> bool {
+    if a.hold("watcher") {
+        return false;
+    }
+    let original = a.db.one(
+        "select d from jobs where repo=? and pr=? and kind='fix' and st='done' order by id desc limit 1",
+        pa![repo.to_string(), number],
+    );
+    let author = original
+        .as_ref()
+        .and_then(|x| x["d"]["author"].as_str())
+        .unwrap_or("");
+    let branch = detail["head"]["ref"].as_str().unwrap_or("");
+    if author.is_empty() || branch.is_empty() {
+        return false;
+    }
+    let data = json!({
+        "head":repo,
+        "branch":branch,
+        "expected_head":head,
+        "expected_base":base,
+        "author":author,
+        "body":detail["body"]
+    });
+    let t = crate::db::now();
+    let inserted = a.db.ch(
+        "insert into jobs(repo,num,kind,title,url,st,why,d,pr,prio,t0,t1)
+         select ?,?,'mergecheck',?,?,'ready','Revalidar CI e Reviewer antes de merge',?,?,-5.0,?,?
+         where not exists (
+             select 1 from jobs where repo=? and kind='mergecheck' and st not in ('done','drop')
+         )
+         and not exists (
+             select 1 from jobs where repo=? and pr=? and kind='mergecheck'
+               and json_extract(d,'$.expected_head')=?
+               and json_extract(d,'$.expected_base')=?
+         )",
+        pa![
+            repo.to_string(),
+            number,
+            detail["title"].as_str().unwrap_or("Revalidar PR").to_string(),
+            detail["html_url"].as_str().unwrap_or("").to_string(),
+            data.to_string(),
+            number,
+            t,
+            t,
+            repo.to_string(),
+            repo.to_string(),
+            number,
+            head.to_string(),
+            base.to_string()
+        ],
+    ) == 1;
+    if inserted {
+        a.say(
+            "watcher",
+            &format!("{repo}#{number}: agendada revalidação gratuita com CI e Reviewer"),
+            None,
+        );
+        a.sw.notify_one();
+    }
+    inserted
+}
+
 async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result<bool, String> {
     let local_enabled = a.db.n(
         "select local_merge from rp where full=? and on_=1 and auto_merge=1",
@@ -400,13 +474,14 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
             return Ok(false);
         }
         let proven = a.db.all(
-            "select kind,st,d from jobs where repo=? and pr=? and kind in ('fix','review') and st='done'",
+            "select kind,st,d from jobs where repo=? and pr=? and kind in ('fix','review','mergecheck') and st='done'",
             pa![repo.to_string(), number],
         );
         if !proven
             .iter()
             .any(|job| local_proof(job, &head, base_sha, tree, &command))
         {
+            queue_recheck(a, repo, number, &head, base_sha, &detail);
             return Ok(false);
         }
     }
