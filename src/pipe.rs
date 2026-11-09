@@ -3629,10 +3629,11 @@ mod t {
     #[test]
     fn conventional_commit_subject_is_distinct_from_pull_request_title() {
         let portuguese = "Rejeitar datas civis inválidas nas entregas RMA";
-        let subject = commit_subject(portuguese, false).unwrap();
+        let title = pr_title(None, &json!({"title": portuguese}), "outra causa").unwrap();
+        let subject = commit_subject(&title, false).unwrap();
         assert_eq!(subject, "fix: Rejeitar datas civis inválidas nas entregas RMA");
         // PR titles remain human-readable and do not acquire a forced prefix.
-        assert_eq!(portuguese, "Rejeitar datas civis inválidas nas entregas RMA");
+        assert_eq!(title, portuguese);
         assert_eq!(
             commit_subject("fix(rma): validar datas civis", false).unwrap(),
             "fix(rma): validar datas civis"
