@@ -560,7 +560,7 @@
     const reports = data.repos || [];
     B.innerHTML = `<div class="sec"><div class="box">
       <b>PR Steward — análise automática</b>
-      <div class="hint">Consulta o GitHub periodicamente. Identifica duplicações, conflitos, testes e revisões pendentes. A integração é opcional, por repositório, e exige gates independentes; por omissão não altera PRs.</div>
+      <div class="hint">Consulta o GitHub periodicamente. Identifica duplicações, conflitos, checks e revisões pendentes. O estado «CI: aprovado» não dispensa provas de testes completos nem as regras de proteção da branch. CodeRabbit isolado não é CI. A integração é opcional e fica desligada por omissão.</div>
       <div class="acts"><button id="steRefresh" type="button">Atualizar painel</button></div>
     </div></div>
     ${reports.map(({ repo, report, error, merge_error, repair_error }) => {
