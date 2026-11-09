@@ -2012,13 +2012,13 @@ async fn mkbody(a: &Ax, j: &mut Job) -> R<()> {
                     if wrong_language {
                         a.say("submit", "modelo de PR com secções em inglês; usado o corpo PT-PT determinístico", Some(j.id));
                     } else {
-                    b = s.trim().to_string();
-                    if j.own() {
-                        b = san(&b);
-                    }
-                    if !b.contains(ft) {
-                        b = format!("{b}\n\n{ft}");
-                    }
+                        b = s.trim().to_string();
+                        if j.own() {
+                            b = san(&b);
+                        }
+                        if !b.contains(ft) {
+                            b = format!("{b}\n\n{ft}");
+                        }
                     }
                 }
             }
