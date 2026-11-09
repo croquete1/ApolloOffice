@@ -17,9 +17,7 @@ fn actionable_request(
     let last = reviews
         .iter()
         .filter(|r| r["state"] == "CHANGES_REQUESTED" && r["commit_id"] == head)
-        .filter(|r| {
-            ALLOWED_REVIEWERS.contains(&r["author_association"].as_str().unwrap_or(""))
-        })
+        .filter(|r| ALLOWED_REVIEWERS.contains(&r["author_association"].as_str().unwrap_or("")))
         .filter(|r| {
             let user = r["user"]["login"].as_str().unwrap_or("");
             !user.is_empty()
@@ -72,7 +70,13 @@ fn eligible(pr: &Value, assessed: &Value) -> bool {
             .is_some_and(Vec::is_empty)
 }
 
-async fn enqueue(a: &Ax, repo: &str, pr: &Value, assessed: &Value, me: &str) -> Result<bool, String> {
+async fn enqueue(
+    a: &Ax,
+    repo: &str,
+    pr: &Value,
+    assessed: &Value,
+    me: &str,
+) -> Result<bool, String> {
     if !eligible(pr, assessed) || a.hold("watcher") {
         return Ok(false);
     }
@@ -104,14 +108,17 @@ async fn enqueue(a: &Ax, repo: &str, pr: &Value, assessed: &Value, me: &str) -> 
         || detail["head"]["repo"]["full_name"] != repo
         || !owner.eq_ignore_ascii_case(me)
         || branch.is_empty()
-        || !branch.bytes().all(|c| {
-            c.is_ascii_alphanumeric() || matches!(c, b'/' | b'-' | b'_' | b'.')
-        })
+        || !branch
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'/' | b'-' | b'_' | b'.'))
     {
         return Ok(false);
     }
     let reviews = apip(&format!("repos/{repo}/pulls/{number}/reviews?per_page=100")).await?;
-    let comments = apip(&format!("repos/{repo}/pulls/{number}/comments?per_page=100")).await?;
+    let comments = apip(&format!(
+        "repos/{repo}/pulls/{number}/comments?per_page=100"
+    ))
+    .await?;
     if reviews.len() >= 100 || comments.len() >= 100 {
         return Ok(false); // Não tomar decisões com feedback incompleto.
     }
@@ -231,7 +238,8 @@ mod tests {
     #[test]
     fn denies_draft_overlaps_and_unrequested_changes() {
         let mut pr = json!({"isDraft":false,"reviewDecision":"CHANGES_REQUESTED"});
-        let mut assessment = json!({"state":"revisao_pendente","overlaps":[],"possible_duplicates":[]});
+        let mut assessment =
+            json!({"state":"revisao_pendente","overlaps":[],"possible_duplicates":[]});
         assert!(eligible(&pr, &assessment));
         pr["isDraft"] = json!(true);
         assert!(!eligible(&pr, &assessment));
@@ -251,9 +259,15 @@ mod tests {
             "user":{"login":"reviewer","type":"User"},"body":"Rever tratamento de null"});
         let comments = json!([{"pull_request_review_id":91,"user":{"login":"reviewer"},
             "path":"src/form.ts","body":"Adicionar teste de regressão"}]);
-        let req = actionable_request(&[review.clone()], comments.as_array().unwrap(), head, "author");
-        assert!(req.as_ref().is_some_and(|(id,text,_)| *id == 91
-            && text.contains("null") && text.contains("src/form.ts")));
+        let req = actionable_request(
+            &[review.clone()],
+            comments.as_array().unwrap(),
+            head,
+            "author",
+        );
+        assert!(req.as_ref().is_some_and(|(id, text, _)| *id == 91
+            && text.contains("null")
+            && text.contains("src/form.ts")));
         assert!(actionable_request(&[review.clone()], &[], head, "reviewer").is_none());
         assert!(actionable_request(&[review.clone()], &[], "outro-head", "author").is_none());
         let mut outsider = review.clone();
