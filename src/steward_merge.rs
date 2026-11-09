@@ -654,8 +654,7 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
             40,
         )
         .await?;
-        let statuses =
-            ghj(&["api", &format!("repos/{repo}/commits/{head}/status")], 40).await?;
+        let statuses = ghj(&["api", &format!("repos/{repo}/commits/{head}/status")], 40).await?;
         let branch = ghj(&["api", &format!("repos/{repo}/branches/{base}")], 40).await?;
         let pr = ghj(&["api", &format!("repos/{repo}/pulls/{number}")], 40).await?;
         Ok(FinalReads {
