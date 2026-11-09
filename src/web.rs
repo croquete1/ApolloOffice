@@ -1274,6 +1274,7 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                         ("nm", 0),
                         ("on_", 0),
                         ("auto_merge", 0),
+                        ("steward_repair", 0),
                         ("maxo", 1),
                         ("maxd", 1),
                         ("bud", 3),
@@ -1446,7 +1447,8 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                         "repo": repo,
                         "report": a.db.kg(&format!("steward:{repo}")),
                         "error": a.db.kg(&format!("steward:error:{repo}")),
-                        "merge_error": a.db.kg(&format!("steward:merge_error:{repo}"))
+                        "merge_error": a.db.kg(&format!("steward:merge_error:{repo}")),
+                        "repair_error": a.db.kg(&format!("steward:repair_error:{repo}"))
                     })
                 })
                 .collect::<Vec<Value>>()
