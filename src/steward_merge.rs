@@ -513,6 +513,87 @@ mod tests {
     use super::*;
 
     #[test]
+    fn local_candidate_rejects_overlaps_failures_and_drafts() {
+        let mut pr = json!({
+            "number":9,"headRefOid":"0123456789012345678901234567890123456789",
+            "isDraft":false,"mergeStateStatus":"CLEAN","reviewDecision":"APPROVED"
+        });
+        let mut assessment = json!({
+            "state":"ci_pendente","overlaps":[],"possible_duplicates":[],"checks":"nao_verificado"
+        });
+        assert!(local_candidate(&pr, &assessment).is_ok());
+        assessment["overlaps"] = json!([12]);
+        assert!(local_candidate(&pr, &assessment).is_err());
+        assessment["overlaps"] = json!([]);
+        assessment["possible_duplicates"] = json!([16]);
+        assert!(local_candidate(&pr, &assessment).is_err());
+        assessment["possible_duplicates"] = json!([]);
+        assessment["checks"] = json!("falhou");
+        assert!(local_candidate(&pr, &assessment).is_err());
+        assessment["checks"] = json!("nao_verificado");
+        pr["reviewDecision"] = json!("CHANGES_REQUESTED");
+        assert!(local_candidate(&pr, &assessment).is_err());
+        pr["reviewDecision"] = json!("APPROVED");
+        pr["isDraft"] = json!(true);
+        assert!(local_candidate(&pr, &assessment).is_err());
+    }
+
+    #[test]
+    fn local_proof_requires_same_published_sha_base_tree_and_independent_review() {
+        let sha = "0123456789012345678901234567890123456789";
+        let base = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let tree = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let ci = "npm test && npm run build";
+        let mut job = json!({
+            "st":"done","kind":"fix",
+            "d":{
+                "base":base,"published_sha":sha,"ci_tree":tree,"publish_tree":tree,
+                "author":"codex:luna",
+                "ci_evidence":{"exit":0,"command":ci,"candidate":sha},
+                "ci_verified_at":200,
+                "last_review":{"model":"codex:sol","t":201,"verdict":{"ok":true}}
+            }
+        });
+        assert!(local_proof(&job, sha, base, tree, ci));
+        job["d"]["published_sha"] = json!("ffffffffffffffffffffffffffffffffffffffff");
+        assert!(!local_proof(&job, sha, base, tree, ci));
+        job["d"]["published_sha"] = json!(sha);
+        job["d"]["publish_tree"] = json!("ffffffffffffffffffffffffffffffffffffffff");
+        assert!(!local_proof(&job, sha, base, tree, ci));
+        job["d"]["publish_tree"] = json!(tree);
+        job["d"]["last_review"]["model"] = json!("codex:luna");
+        assert!(!local_proof(&job, sha, base, tree, ci));
+        job["d"]["last_review"]["model"] = json!("codex:sol");
+        job["d"]["ci_evidence"]["exit"] = json!(1);
+        assert!(!local_proof(&job, sha, base, tree, ci));
+        job["d"]["ci_evidence"]["exit"] = json!(0);
+        job["d"]["last_review"]["verdict"]["ok"] = json!(false);
+        assert!(!local_proof(&job, sha, base, tree, ci));
+        job["d"]["last_review"]["verdict"]["ok"] = json!(true);
+        assert!(!local_proof(&job, sha, "different-base", tree, ci));
+        assert!(!local_proof(&job, sha, base, tree, "different-ci"));
+    }
+
+    #[test]
+    fn local_mode_requires_remote_checks_clear_and_no_change_requests() {
+        let empty = json!({"total_count":0,"check_runs":[]});
+        let statuses = json!({"statuses":[]});
+        assert!(remote_checks_clean(&empty, &statuses));
+        assert!(!remote_checks_clean(&json!({
+            "total_count":1,"check_runs":[{
+                "name":"CodeRabbit","status":"completed","conclusion":"failure"
+            }]
+        }), &statuses));
+        assert!(!remote_checks_clean(&json!({
+            "total_count":1,"check_runs":[{
+                "name":"CodeRabbit","status":"in_progress","conclusion":null
+            }]
+        }), &statuses));
+        assert!(no_outstanding_reviews(&json!([])));
+        assert!(!no_outstanding_reviews(&json!([{"state":"CHANGES_REQUESTED"}])));
+    }
+
+    #[test]
     fn never_merge_draft_conflict_or_missing_review() {
         let mut p = json!({
             "number": 9,"headRefOid":"0123456789012345678901234567890123456789",
