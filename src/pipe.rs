@@ -3631,7 +3631,10 @@ mod t {
         let portuguese = "Rejeitar datas civis inválidas nas entregas RMA";
         let title = pr_title(None, &json!({"title": portuguese}), "outra causa").unwrap();
         let subject = commit_subject(&title, false).unwrap();
-        assert_eq!(subject, "fix: Rejeitar datas civis inválidas nas entregas RMA");
+        assert_eq!(
+            subject,
+            "fix: Rejeitar datas civis inválidas nas entregas RMA"
+        );
         // PR titles remain human-readable and do not acquire a forced prefix.
         assert_eq!(title, portuguese);
         assert_eq!(
