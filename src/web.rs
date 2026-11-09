@@ -411,7 +411,7 @@ fn sets(a: &Ax, b: &Value) {
 
 const RPF: &[&str] = &[
     "iss", "hunt", "feat", "nm", "on_", "maxo", "maxd", "bud", "ci", "setup", "rules", "mode",
-    "skl",
+    "skl", "lang",
 ];
 const HSF: &[&str] = &["id", "ssh", "dk", "ln", "ci", "gb", "raw", "no", "cpu"];
 
@@ -487,9 +487,11 @@ fn import(a: &Ax, b: &Value) -> Result<String, String> {
                         pa![n.as_f64().unwrap_or(0.0).clamp(0.0, 100_000.0), f.clone()],
                     );
                 }
-                Value::String(t) if ["ci", "setup", "rules", "mode"].contains(k) => {
+                Value::String(t) if ["ci", "setup", "rules", "mode", "lang"].contains(k) => {
                     let t = if *k == "mode" && t != "auto" {
                         "ask".to_string()
+                    } else if *k == "lang" {
+                        if t == "pt-PT" { "pt-PT" } else { "en" }.to_string()
                     } else {
                         crate::sh::head(t.trim(), 4000)
                     };
@@ -1271,6 +1273,7 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                         ("rules", 2),
                         ("mode", 2),
                         ("skl", 2),
+                        ("lang", 2),
                     ] {
                         let v = &b[k];
                         if v.is_null() {
@@ -1307,6 +1310,9 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                                 let mut s = v.as_str().unwrap_or("").trim().to_string();
                                 if k == "mode" && s != "auto" {
                                     s = "ask".into();
+                                }
+                                if k == "lang" && s != "pt-PT" {
+                                    s = "en".into();
                                 }
                                 s = crate::sh::head(&s, 4000);
                                 a.db.run(
