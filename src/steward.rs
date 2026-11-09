@@ -246,6 +246,14 @@ pub async fn scan(a: &Ax, repo: &str) -> Result<(), String> {
     Ok(())
 }
 
+// A revalidação aprovada deve antecipar a próxima reconciliação, sem dispensar gates.
+async fn wait_for_next_scan(a: &Ax) {
+    tokio::select! {
+        _ = sl(300_000) => {},
+        _ = a.steward_wake.notified() => {},
+    }
+}
+
 pub async fn run(a: Ax) {
     loop {
         if !a.hold("watcher") && !a.drain.load(std::sync::atomic::Ordering::Relaxed) {
@@ -266,13 +274,31 @@ pub async fn run(a: Ax) {
                 }
             }
         }
-        sl(300_000).await;
+        wait_for_next_scan(&a).await;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn validacao_concluida_acorda_steward_sem_esperar_cinco_minutos() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            47300,
+            "apollo-office".into(),
+        ));
+        // Notify guarda a notificação recebida entre a validação e a espera.
+        a.steward_wake.notify_one();
+        tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            wait_for_next_scan(&a),
+        )
+        .await
+        .expect("a revalidação deve antecipar a leitura");
+    }
 
     fn sample(n: i64, path: &str, issue: &str) -> Value {
         json!({
