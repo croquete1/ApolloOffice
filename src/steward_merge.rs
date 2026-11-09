@@ -104,6 +104,10 @@ fn ci_verified(checks: &Value, status: &Value) -> bool {
     if count == 0 || count != runs.len() as u64 || count > 100 {
         return false;
     }
+    // Um check de revisão automatizada isolado não comprova testes.
+    if !runs.iter().any(crate::steward::is_test_check) {
+        return false;
+    }
     if !runs
         .iter()
         .all(|r| r["status"] == "completed" && r["conclusion"] == "success")
@@ -399,6 +403,16 @@ mod tests {
     }
 
     #[test]
+    fn bot_approval_is_not_independent_human_review() {
+        let head = "0123456789012345678901234567890123456789";
+        let bot = json!([{
+            "state":"APPROVED","commit_id":head,
+            "user":{"login":"coderabbitai[bot]","type":"Bot"}
+        }]);
+        assert!(!reviewed(&bot, "author", head));
+    }
+
+    #[test]
     fn missing_or_failed_checks_never_pass() {
         let status = json!({"statuses":[]});
         assert!(!ci_verified(
@@ -409,8 +423,18 @@ mod tests {
             &json!({"total_count":1,"check_runs":[{"status":"completed","conclusion":"failure"}]}),
             &status
         ));
+        assert!(!ci_verified(
+            &json!({"total_count":1,"check_runs":[{
+                "name":"CodeRabbit","status":"completed","conclusion":"success",
+                "app":{"slug":"coderabbitai"}
+            }]}),
+            &status
+        ));
         assert!(ci_verified(
-            &json!({"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}),
+            &json!({"total_count":1,"check_runs":[{
+                "name":"test-suite","status":"completed","conclusion":"success",
+                "app":{"slug":"ci-service"}
+            }]}),
             &status
         ));
     }
