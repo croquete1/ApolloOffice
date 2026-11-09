@@ -315,7 +315,8 @@ fn trs(j: &Job) -> Vec<String> {
 pub const FOOT: &str = "🤖 Generated with AI by [ApolloOffice](https://github.com/Silvertree2010/ApolloOffice), see the Co-Authored-By trailers for the models";
 pub const FOOT0: &str = "🤖 Generated with AI, see the Co-Authored-By trailers for the models";
 pub const FOOT_PT: &str = "🤖 Gerado com assistência de IA pelo [ApolloOffice](https://github.com/Silvertree2010/ApolloOffice); modelos identificados nos trailers Co-Authored-By.";
-pub const FOOT0_PT: &str = "🤖 Gerado com assistência de IA; modelos identificados nos trailers Co-Authored-By.";
+pub const FOOT0_PT: &str =
+    "🤖 Gerado com assistência de IA; modelos identificados nos trailers Co-Authored-By.";
 
 fn pr_pt(a: &Ax, j: &Job) -> bool {
     rp(a, &j.repo)["lang"].as_str() == Some("pt-PT")
@@ -1197,7 +1198,11 @@ pub fn body(j: &Job, f: &Value, ci: &str, ft: &str) -> String {
 fn body_lang(j: &Job, f: &Value, ci: &str, ft: &str, pt: bool) -> String {
     let g = |k: &str| {
         let s = f[k].as_str().unwrap_or("").to_string();
-        if j.own() { san(&s) } else { s }
+        if j.own() {
+            san(&s)
+        } else {
+            s
+        }
     };
     let ts: Vec<String> = f["tests"]
         .as_array()
@@ -1219,17 +1224,27 @@ fn body_lang(j: &Job, f: &Value, ci: &str, ft: &str, pt: bool) -> String {
     if j.kind == "fix" {
         if j.hunt() {
             v.push(if pt {
-                format!("Encontrado durante os testes de `{}` (sem Issue existente): {}.",
+                format!(
+                    "Encontrado durante os testes de `{}` (sem Issue existente): {}.",
                     j.d["hunt"]["where"].as_str().unwrap_or(""),
-                    j.d["hunt"]["title"].as_str().unwrap_or(""))
+                    j.d["hunt"]["title"].as_str().unwrap_or("")
+                )
             } else {
-                format!("Found while testing `{}` (no existing issue): {}.",
+                format!(
+                    "Found while testing `{}` (no existing issue): {}.",
                     j.d["hunt"]["where"].as_str().unwrap_or(""),
-                    j.d["hunt"]["title"].as_str().unwrap_or(""))
+                    j.d["hunt"]["title"].as_str().unwrap_or("")
+                )
             });
         } else if j.ext() {
-            v.push((if pt { "Reportado diretamente (sem Issue existente)." }
-                    else { "Reported to us directly (no existing issue)." }).into());
+            v.push(
+                (if pt {
+                    "Reportado diretamente (sem Issue existente)."
+                } else {
+                    "Reported to us directly (no existing issue)."
+                })
+                .into(),
+            );
         } else if j.feat() {
             v.push(format!("Closes #{}", j.num));
         } else {
@@ -1239,23 +1254,56 @@ fn body_lang(j: &Job, f: &Value, ci: &str, ft: &str, pt: bool) -> String {
     }
     let fe = j.feat();
     v.extend([
-        (if pt { if fe { "## Motivo" } else { "## Causa" } }
-              else if fe { "## Why" } else { "## Cause" }).into(),
+        (if pt {
+            if fe {
+                "## Motivo"
+            } else {
+                "## Causa"
+            }
+        } else if fe {
+            "## Why"
+        } else {
+            "## Cause"
+        })
+        .into(),
         g("cause"),
         String::new(),
-        (if pt { if fe { "## Alterações" } else { "## Correção" } }
-              else if fe { "## Change" } else { "## Fix" }).into(),
+        (if pt {
+            if fe {
+                "## Alterações"
+            } else {
+                "## Correção"
+            }
+        } else if fe {
+            "## Change"
+        } else {
+            "## Fix"
+        })
+        .into(),
         g("fix"),
         String::new(),
         (if pt { "## Validação" } else { "## Verified" }).into(),
     ]);
     if !ts.is_empty() {
-        let names = ts.iter().map(|t| format!("`{t}`")).collect::<Vec<_>>().join(", ");
+        let names = ts
+            .iter()
+            .map(|t| format!("`{t}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
         if pt {
             v.push(format!(
                 "- {} {names}: {} em `{mn}` sem a alteração e {} com ela (`{}`).",
-                if fe { if pl { "Testes" } else { "Teste" } }
-                else if pl { "Testes de regressão" } else { "Teste de regressão" },
+                if fe {
+                    if pl {
+                        "Testes"
+                    } else {
+                        "Teste"
+                    }
+                } else if pl {
+                    "Testes de regressão"
+                } else {
+                    "Teste de regressão"
+                },
                 if pl { "falham" } else { "falha" },
                 if pl { "passam" } else { "passa" },
                 f["test_cmd"].as_str().unwrap_or("")
@@ -1273,10 +1321,17 @@ fn body_lang(j: &Job, f: &Value, ci: &str, ft: &str, pt: bool) -> String {
         }
     }
     if kn.is_empty() {
-        v.push(if pt { format!("- `{ci}`: aprovado.") }
-               else { format!("- `{ci}` passes.") });
+        v.push(if pt {
+            format!("- `{ci}`: aprovado.")
+        } else {
+            format!("- `{ci}` passes.")
+        });
     } else {
-        let names = kn.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ");
+        let names = kn
+            .iter()
+            .map(|n| format!("`{n}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
         v.push(if pt {
             format!("- `{ci}`: aprovado, exceto {names}, que também falham em `{mn}` sem esta alteração.")
         } else {
@@ -1286,9 +1341,20 @@ fn body_lang(j: &Job, f: &Value, ci: &str, ft: &str, pt: bool) -> String {
     }
     let u = g("untouched");
     if !u.trim().is_empty() {
-        v.extend([String::new(), (if pt { "## Fora do âmbito" } else { "## Not changed" }).into(), u]);
+        v.extend([
+            String::new(),
+            (if pt {
+                "## Fora do âmbito"
+            } else {
+                "## Not changed"
+            })
+            .into(),
+            u,
+        ]);
     }
-    if !ft.is_empty() { v.extend([String::new(), ft.into()]); }
+    if !ft.is_empty() {
+        v.extend([String::new(), ft.into()]);
+    }
     v.join("\n").trim().to_string()
 }
 
@@ -2001,17 +2067,39 @@ async fn mkbody(a: &Ax, j: &mut Job) -> R<()> {
             } else {
                 "Fill in this repository's pull request template for the change below. Keep the template's headings and checklist structure. Tick a checkbox only when the facts below prove it (tests added, tests pass, CI command passes, linked issue). Remove instructions and HTML comments that are meant for the author. Put the facts into the matching sections; if a fact has no section, keep it in a section at the end. Use only the facts given, never invent. Answer only with JSON with key 'body' and Markdown string value."
             };
-            let mut o = Ask::new("submit", md, P("desc"), format!("{instructions}\n\n{}\n\nFacts (our PR text):\n{}", wrap("template", &crate::sh::head(&t, 8000)), body_lang(j, &f, &ci, "", pr_pt(a, j))));
+            let mut o = Ask::new(
+                "submit",
+                md,
+                P("desc"),
+                format!(
+                    "{instructions}\n\n{}\n\nFacts (our PR text):\n{}",
+                    wrap("template", &crate::sh::head(&t, 8000)),
+                    body_lang(j, &f, &ci, "", pr_pt(a, j))
+                ),
+            );
             o.job = Some(j.id);
             o.ef = Some("low");
             if let Ok((_, js)) = ask(a, o).await {
                 if let Some(s) = js["body"].as_str().filter(|s| s.len() > 40) {
                     // A template model must not silently reintroduce English headings.
                     let wrong_language = pr_pt(a, j)
-                        && ["## Cause", "## Fix", "## Verified", "## Not changed", "## Why", "## Change"]
-                            .iter().any(|heading| s.contains(heading));
-                    let missing_reference = j.kind == "fix" && !j.own()
-                        && !s.contains(&format!("{} #{}", if j.feat() { "Closes" } else { "Fixes" }, j.num));
+                        && [
+                            "## Cause",
+                            "## Fix",
+                            "## Verified",
+                            "## Not changed",
+                            "## Why",
+                            "## Change",
+                        ]
+                        .iter()
+                        .any(|heading| s.contains(heading));
+                    let missing_reference = j.kind == "fix"
+                        && !j.own()
+                        && !s.contains(&format!(
+                            "{} #{}",
+                            if j.feat() { "Closes" } else { "Fixes" },
+                            j.num
+                        ));
                     if wrong_language || missing_reference {
                         a.say("submit", "modelo de PR rejeitado por idioma ou referência em falta; usado o corpo estruturado", Some(j.id));
                     } else {
@@ -2095,7 +2183,12 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
         .unwrap_or(f["title"].as_str().unwrap_or(&j.title).to_string());
     if j.kind == "fix" && !j.d["sq"].as_bool().unwrap_or(false) {
         let rf = if j.ext() {
-            (if pr_pt(a, j) { "Reportado diretamente" } else { "Reported to us directly" }).to_string()
+            (if pr_pt(a, j) {
+                "Reportado diretamente"
+            } else {
+                "Reported to us directly"
+            })
+            .to_string()
         } else if j.hunt() || j.num == 0 {
             if pr_pt(a, j) {
                 format!("Encontrado durante os testes de {}", j.wh())
@@ -2141,10 +2234,15 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
         a.db.jd(j);
     }
     let sha = ok(a, j, "git rev-parse HEAD", 60).await?;
-    let pb = j.d["pb"]
-        .as_str()
-        .map(String::from)
-        .unwrap_or_else(|| body_lang(j, &f, rp(a, &j.repo)["ci"].as_str().unwrap_or(""), ft, pr_pt(a, j)));
+    let pb = j.d["pb"].as_str().map(String::from).unwrap_or_else(|| {
+        body_lang(
+            j,
+            &f,
+            rp(a, &j.repo)["ci"].as_str().unwrap_or(""),
+            ft,
+            pr_pt(a, j),
+        )
+    });
     let msg = ok(a, j, "git log -1 --format=%B", 60).await?;
     if Regex::new(r"#0\b").unwrap().is_match(&pb) || Regex::new(r"#0\b").unwrap().is_match(&msg) {
         return drop("PR text or commit still references #0, not pushing");
@@ -2611,7 +2709,9 @@ async fn desc(a: &Ax, j: &mut Job) -> R<Value> {
     .await?;
     let locale = if pr_pt(a, j) {
         "Idioma obrigatório: português de Portugal (PT-PT). O título, a causa, a correção e o texto fora do âmbito devem estar integralmente em PT-PT. Preservar comandos, nomes técnicos, identificadores dos testes e as chaves JSON. Não traduzir código.\n\n"
-    } else { "" };
+    } else {
+        ""
+    };
     let mut o = Ask::new("fixer", a.md("reviewer"), P("desc"), format!("{locale}Repository {}. {}\n\nProof lines from the verification run:\n{}\n\nCommits:\n{lg}\n\nDiff:\n{df}\n\nAnswer with {{\"title\": \"PR title, imperative, max 72 chars\", \"cause\": \"root cause, 1-3 sentences\", \"fix\": \"what changed, 1-3 sentences\", \"untouched\": \"\", \"tests\": [\"exact names of the regression tests added in the diff\"], \"test_cmd\": \"exact shell command from the repo root that runs only those tests\"}}", j.repo, wrap("issue", &format!("{}\n\n{}", j.title, crate::sh::head(&j.s("body"), 3000))), j.d["proof"]));
     o.job = Some(j.id);
     o.ef = Some("medium");
