@@ -728,8 +728,8 @@ mod tests {
             }
         });
         assert!(local_proof(&job, sha, base, tree, ci));
-        job["d"]["ci_evidence"]["candidate"] =
-            json!("ffffffffffffffffffffffffffffffffffffffff");
+        let wrong_head = "ffffffffffffffffffffffffffffffffffffffff";
+        job["d"]["ci_evidence"]["candidate"] = json!(wrong_head);
         assert!(!local_proof(&job, sha, base, tree, ci));
         job["d"]["ci_evidence"]["candidate"] = json!(sha);
         job["d"]["ci_evidence"].as_object_mut().unwrap().remove("candidate");
