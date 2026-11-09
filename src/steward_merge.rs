@@ -233,26 +233,58 @@ async fn review_threads_resolved(repo: &str, number: i64) -> Result<bool, String
     Ok(nodes.iter().all(|n| n["isResolved"] == true))
 }
 
-async fn branch_protection_verified(repo: &str, base: &str, sha: &str) -> Result<bool, String> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MergeMode {
+    Blocked,
+    Protected,
+    Local,
+}
+
+async fn merge_mode(
+    repo: &str,
+    base: &str,
+    sha: &str,
+    local_enabled: bool,
+) -> Result<MergeMode, String> {
     let branch = ghj(&["api", &format!("repos/{repo}/branches/{base}")], 40).await?;
-    // O modo sem proteção fica bloqueado: não presumir ausência de regras num 403.
-    if branch["protected"] != true || branch["commit"]["sha"] != sha {
-        return Ok(false);
+    if branch["commit"]["sha"] != sha {
+        return Ok(MergeMode::Blocked);
     }
-    let rules = ghj(
-        &["api", &format!("repos/{repo}/branches/{base}/protection")],
-        40,
-    )
-    .await?;
-    // Exigir pelo menos um check obrigatório publicado pela proteção.
-    let required = &rules["required_status_checks"]["contexts"];
-    Ok(required
-        .as_array()
-        .is_some_and(|contexts| !contexts.is_empty()))
+    if branch["protected"] == true {
+        let rules = ghj(
+            &["api", &format!("repos/{repo}/branches/{base}/protection")],
+            40,
+        )
+        .await?;
+        let required = &rules["required_status_checks"]["contexts"];
+        return Ok(if required
+            .as_array()
+            .is_some_and(|contexts| !contexts.is_empty())
+        {
+            MergeMode::Protected
+        } else {
+            MergeMode::Blocked
+        });
+    }
+    // Só aceitar a ausência EXPLÍCITA de proteção, e nunca um 403/valor omitido.
+    Ok(if branch["protected"] == false && local_enabled {
+        MergeMode::Local
+    } else {
+        MergeMode::Blocked
+    })
 }
 
 async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result<bool, String> {
-    let (number, head) = match candidate(listed, assessed) {
+    let local_enabled = a.db.n(
+        "select local_merge from rp where full=? and on_=1 and auto_merge=1",
+        pa![repo.to_string()],
+    ) == 1;
+    // A triagem local NÃO considera um check CodeRabbit prova de testes.
+    let (number, head) = match if local_enabled {
+        local_candidate(listed, assessed)
+    } else {
+        candidate(listed, assessed)
+    } {
         Ok(c) => c,
         Err(_) => return Ok(false),
     };
@@ -279,8 +311,21 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
     if metadata["default_branch"] != base || metadata["archived"] == true {
         return Ok(false);
     }
-    if !branch_protection_verified(repo, base, base_sha).await? {
+    let mode = merge_mode(repo, base, base_sha, local_enabled).await?;
+    if mode == MergeMode::Blocked
+        || (mode == MergeMode::Protected && candidate(listed, assessed).is_err())
+    {
         return Ok(false);
+    }
+    if mode == MergeMode::Local {
+        // Nunca usar o modo livre para integrar PRs de terceiros nem branches externas.
+        let me = crate::gh::login(a).await;
+        if me.is_empty()
+            || detail["user"]["login"] != me
+            || detail["head"]["repo"]["full_name"] != repo
+        {
+            return Ok(false);
+        }
     }
     let changed = detail["changed_files"].as_u64().unwrap_or(u64::MAX);
     if changed == 0 || changed >= 100 {
@@ -313,7 +358,9 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
     )
     .await?;
     let statuses = ghj(&["api", &format!("repos/{repo}/commits/{head}/status")], 45).await?;
-    if !ci_verified(&checks, &statuses) {
+    if (mode == MergeMode::Protected && !ci_verified(&checks, &statuses))
+        || (mode == MergeMode::Local && !remote_checks_clean(&checks, &statuses))
+    {
         return Ok(false);
     }
     let reviews = ghj(
@@ -324,13 +371,44 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
         45,
     )
     .await?;
-    if !reviewed(
-        &reviews,
-        detail["user"]["login"].as_str().unwrap_or(""),
-        &head,
-    ) || !review_threads_resolved(repo, number).await?
+    if !review_threads_resolved(repo, number).await?
+        || (mode == MergeMode::Protected
+            && !reviewed(
+                &reviews,
+                detail["user"]["login"].as_str().unwrap_or(""),
+                &head,
+            ))
+        || (mode == MergeMode::Local && !no_outstanding_reviews(&reviews))
     {
         return Ok(false);
+    }
+    if mode == MergeMode::Local {
+        let commit = ghj(
+            &["api", &format!("repos/{repo}/git/commits/{head}")],
+            45,
+        )
+        .await?;
+        let Some(tree) = commit["tree"]["sha"].as_str() else {
+            return Ok(false);
+        };
+        let command = crate::pipe::rp(a, repo)["ci"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if command.is_empty() {
+            return Ok(false);
+        }
+        let proven = a.db.all(
+            "select kind,st,d from jobs where repo=? and pr=? and kind in ('fix','review') and st='done'",
+            pa![repo.to_string(), number],
+        );
+        if !proven
+            .iter()
+            .any(|job| local_proof(job, &head, base_sha, tree, &command))
+        {
+            return Ok(false);
+        }
     }
 
     // Reconfirmar a configuração e os SHAs imediatamente antes de um ato mutável.
@@ -339,6 +417,11 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
             "select auto_merge from rp where full=? and on_=1",
             pa![repo.to_string()],
         ) != 1
+        || (mode == MergeMode::Local
+            && a.db.n(
+                "select local_merge from rp where full=? and on_=1",
+                pa![repo.to_string()],
+            ) != 1)
     {
         return Ok(false);
     }
@@ -353,8 +436,14 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
         return Ok(false);
     }
 
-    // PUT /merge do GitHub respeita a proteção, sem --admin nem force.
-    // sha=HEAD impede integrar um commit que foi alterado entretanto.
+    // O modo local NÃO protege a branch de pushes externos. Reduzir a janela:
+    // base e HEAD são revalidados imediatamente antes do PUT, sem --admin/force.
+    // O GitHub só oferece o campo sha para validar o HEAD da PR, não a base.
+    let latest = ghj(&["api", &format!("repos/{repo}/branches/{base}")], 40).await?;
+    if latest["commit"]["sha"] != base_sha {
+        return Ok(false);
+    }
+    // sha=HEAD impede integrar um commit da PR que tenha sido alterado.
     let merged = ghj(
         &[
             "api",
