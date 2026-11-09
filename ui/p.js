@@ -124,6 +124,8 @@
         <div class="hint">Runs before every job, after checkout.</div>
         <label>PR language</label><select name="lang"><option value="en" ${r.lang !== "pt-PT" ? "selected" : ""}>English</option><option value="pt-PT" ${r.lang === "pt-PT" ? "selected" : ""}>Português de Portugal (PT-PT)</option></select>
         <label>Pull requests</label><select name="mode"><option value="ask" ${r.mode !== "auto" ? "selected" : ""}>wait for my approval</option><option value="auto" ${r.mode === "auto" ? "selected" : ""}>submit automatically</option></select>
+        <label>Encaminhar revisões para correção</label>${tg("steward_repair", r.steward_repair, "Criar trabalhos de revisão apenas para PRs próprias com pedidos humanos validados")}
+        <div class="hint">Desligado por defeito. Requer pedido CHANGES_REQUESTED no HEAD atual, autor com permissões, Guard aprovado, ausência de duplicações e de trabalho de revisão pendente. Encaminha para o Fixer e os gates habituais; não faz merge.</div>
         <label>Integração automática (restrita)</label>${tg("auto_merge", r.auto_merge, "Integrar PRs elegíveis depois de revisão externa e CI comprovados")}
         <div class="warn">Desligado por defeito. Só funciona em branches protegidas, com checks GitHub obrigatórios, revisão humana independente no SHA final, sem comentários pendentes nem conflitos. PRs Draft, ficheiros sensíveis e sobreposições nunca são integrados automaticamente. Não altera a opção de publicar PRs.</div>
         <label>Limits</label><div class="lm"><span>open</span><input type="number" name="maxo" min="0" max="10000" value="${r.maxo}"><span>new per day</span><input type="number" name="maxd" min="0" max="10000" value="${r.maxd}"><span>USD per day</span><input type="number" name="bud" min="0" step="0.01" value="${r.bud || 0}"></div>
@@ -561,19 +563,22 @@
       <div class="hint">Consulta o GitHub periodicamente. Identifica duplicações, conflitos, testes e revisões pendentes. A integração é opcional, por repositório, e exige gates independentes; por omissão não altera PRs.</div>
       <div class="acts"><button id="steRefresh" type="button">Atualizar painel</button></div>
     </div></div>
-    ${reports.map(({ repo, report, error, merge_error }) => {
-      const rows = report?.prs || [];
+    ${reports.map(({ repo, report, error, merge_error, repair_error }) => {
+      const rows = [...(report?.prs || [])].sort((a,b) => (Number(a.priority ?? 9) - Number(b.priority ?? 9)) || (Number(b.number) - Number(a.number)));
       const at = report?.at ? new Date(report.at).toLocaleString("pt-PT") : "sem leitura";
       const mode = report?.merge_enabled ? "Integração ativada com verificações rigorosas" : "Apenas auditoria — integrações desativadas";
+      const repairs = report?.repair_enabled ? "Encaminhamento de revisões ativo (só PRs próprias)" : "Encaminhamento de revisões desativado";
       return `<div class="sec"><h4>${esc(repo)}</h4><div class="box">
-        <div class="msg">${rows.length} PRs abertas · ${esc(at)} · ${esc(mode)}${error?.error ? " · Último erro: " + esc(error.error) : ""}</div>
+        <div class="msg">${rows.length} PRs abertas · ${esc(at)} · ${esc(mode)} · ${esc(repairs)}${error?.error ? " · Último erro: " + esc(error.error) : ""}</div>
+        ${repair_error?.error ? `<div class="warn">Revisão não encaminhada: ${esc(repair_error.error)}</div>` : ""}
         ${merge_error?.reason ? `<div class="warn">Integração bloqueada: ${esc(merge_error.reason)}</div>` : ""}
         ${!report || report.error ? '<div class="warn">Sem diagnóstico completo. Não é possível concluir que alguma PR esteja pronta.</div>' : ""}
         ${rows.length ? rows.map((p) => `<div class="ck" style="margin:5px 0;align-items:flex-start;gap:8px">
           <span class="pill">${esc(String(p.number))}</span>
           <div style="flex:1;min-width:0">
             <a href="${esc(p.url || "#")}" target="_blank" rel="noopener noreferrer"><b>${esc(p.title || "PR")}</b></a>
-            <div class="hint">Estado: ${esc(p.state)} · CI: ${esc(p.checks)} · Revisão: ${esc(p.review || "não verificada")}</div>
+            <div class="hint">Prioridade P${esc(String(p.priority ?? 9))} · Estado: ${esc(p.state)} · CI: ${esc(p.checks)} · Revisão: ${esc(p.review || "não verificada")}</div>
+            <div class="hint">Próximo passo: ${esc(p.next_action || "Rever PR")}</div>
             ${p.overlaps?.length ? `<div class="hint bad2">Ficheiros em comum com: #${p.overlaps.map(Number).join(", #")}</div>` : ""}
             ${p.possible_duplicates?.length ? `<div class="hint bad2">Possível duplicação da mesma issue: #${p.possible_duplicates.map(Number).join(", #")}</div>` : ""}
           </div>
