@@ -109,6 +109,24 @@ test("metrics and host connectivity never imply unavailable totals", () => {
   assert.match(modern, /Serviços externos indisponíveis/);
 });
 
+test("machine cards show only recent real telemetry in European Portuguese", () => {
+  assert.match(modern, /const renderMachines = \(s\) =>/);
+  assert.match(modern, /data-telemetry-fresh/);
+  assert.match(modern, /age < 120_000/);
+  assert.match(modern, /if \(fresh\) \{/);
+  assert.match(modern, /if \(totalMem != null/);
+  assert.match(modern, /availableMem <= totalMem/);
+  assert.match(modern, /freeDisk <= totalDisk/);
+  assert.match(modern, /Carga média:/);
+  assert.match(modern, /não é percentagem de CPU/);
+  assert.match(modern, /Sensor não identificado/);
+  assert.match(modern, /Telemetria indisponível ou desatualizada/);
+  assert.match(modern, /escapeHTML\(host.id === "local"/);
+  assert.match(css, /\.ao-machine-metrics/);
+  assert.match(css, /\.ao-machine-progress/);
+  assert.match(css, /\.ao-machine-card\[data-telemetry-fresh="false"\]/);
+});
+
 test("buttons do not offer unavailable PR links", () => {
   assert.match(modern, /attr === "data-pr-url" && !val/);
   assert.match(modern, /disabled title="Ligação indisponível"/);
