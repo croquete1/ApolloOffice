@@ -260,7 +260,7 @@ mod tests {
         let comments = json!([{"pull_request_review_id":91,"user":{"login":"reviewer"},
             "path":"src/form.ts","body":"Adicionar teste de regressão"}]);
         let req = actionable_request(
-            &[review.clone()],
+            std::slice::from_ref(&review),
             comments.as_array().unwrap(),
             head,
             "author",
@@ -268,8 +268,8 @@ mod tests {
         assert!(req.as_ref().is_some_and(|(id, text, _)| *id == 91
             && text.contains("null")
             && text.contains("src/form.ts")));
-        assert!(actionable_request(&[review.clone()], &[], head, "reviewer").is_none());
-        assert!(actionable_request(&[review.clone()], &[], "outro-head", "author").is_none());
+        assert!(actionable_request(std::slice::from_ref(&review), &[], head, "reviewer").is_none());
+        assert!(actionable_request(std::slice::from_ref(&review), &[], "outro-head", "author").is_none());
         let mut outsider = review.clone();
         outsider["author_association"] = json!("NONE");
         assert!(actionable_request(&[outsider], &[], head, "author").is_none());
