@@ -113,7 +113,23 @@ pub fn assess(prs: &[Value]) -> Vec<Value> {
             } else {
                 "revisao_final_necessaria"
             };
+            let (priority, action) = match state {
+                "revisao_pendente" if review == "CHANGES_REQUESTED" => {
+                    (0, "Analisar alterações solicitadas; encaminhar apenas PRs próprias")
+                }
+                "ci_falhou" => (1, "Investigar a primeira falha de CI"),
+                "conflito" => (2, "Resolver conflitos e repetir validação"),
+                "duplicado_possivel" => (3, "Comparar as PRs da mesma issue"),
+                "sobreposicao" => (4, "Rever a sobreposição de ficheiros"),
+                "revisao_final_necessaria" => (5, "Revalidar gates antes de integrar"),
+                "ci_pendente" => (6, "Aguardar ou investigar testes pendentes"),
+                "revisao_pendente" => (7, "Solicitar revisão independente"),
+                "draft" => (8, "Concluir alterações e testes da Draft"),
+                _ => (9, "Investigar estado da PR"),
+            };
             json!({
+                "priority": priority,
+                "next_action": action,
                 "number": number,
                 "title": p["title"],
                 "url": p["url"],
@@ -162,7 +178,13 @@ pub async fn scan(a: &Ax, repo: &str) -> Result<(), String> {
         "select auto_merge from rp where full=? and on_=1",
         pa![repo.to_string()],
     ) == 1;
+    let repair_enabled = a.db.n(
+        "select steward_repair from rp where full=? and on_=1",
+        pa![repo.to_string()],
+    ) == 1;
     let summary = json!({
+        "review_requested": report.iter().filter(|p| p["review"] == "CHANGES_REQUESTED").count(),
+        "ci_failed": report.iter().filter(|p| p["checks"] == "falhou").count(),
         "total": report.len(),
         "draft": report.iter().filter(|p| p["state"] == "draft").count(),
         "overlap": report.iter().filter(|p| p["state"] == "sobreposicao" || p["state"] == "duplicado_possivel").count(),
@@ -178,9 +200,13 @@ pub async fn scan(a: &Ax, repo: &str) -> Result<(), String> {
             "summary": summary,
             "prs": report.clone(),
             "read_only": !merge_enabled,
-            "merge_enabled": merge_enabled
+            "merge_enabled": merge_enabled,
+            "repair_enabled": repair_enabled
         }),
     );
+    if repair_enabled {
+        crate::steward_repair::run(a, repo, list, &report).await;
+    }
     if merge_enabled {
         crate::steward_merge::run(a, repo, list, &report).await;
     }
