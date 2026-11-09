@@ -89,7 +89,6 @@ For an existing installation, **first stop the running application and back up i
 
 See [Fork security and configuration](docs/fork-security.md) for safe updates and OAuth credential rotation.
 
-
 It prints a one-time login link. Open it and follow the setup: add a machine,
 add a repository, check its test command.
 
