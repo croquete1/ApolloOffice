@@ -10,6 +10,19 @@ use std::collections::BTreeSet;
 
 const PAGE_LIMIT: &str = "200";
 
+/// Uma aprovação de um bot de revisão não é execução dos testes da aplicação.
+/// Exigir pelo menos um check não pertencente ao CodeRabbit, com nome explícito.
+pub(crate) fn is_test_check(check: &Value) -> bool {
+    let name = check["name"]
+        .as_str()
+        .or_else(|| check["context"].as_str())
+        .unwrap_or("");
+    let app = check["app"]["slug"].as_str().unwrap_or("");
+    !name.trim().is_empty()
+        && !name.to_ascii_lowercase().contains("coderabbit")
+        && !app.to_ascii_lowercase().contains("coderabbit")
+}
+
 fn work_files(pr: &Value) -> BTreeSet<String> {
     pr["files"]
         .as_array()
@@ -48,7 +61,11 @@ fn check_state(pr: &Value) -> &'static str {
     if checks.is_empty() {
         return "nao_verificado";
     }
-    if checks.iter().any(|c| {
+    let test_checks: Vec<_> = checks.iter().filter(|c| is_test_check(c)).collect();
+    if test_checks.is_empty() {
+        return "nao_verificado";
+    }
+    if test_checks.iter().any(|c| {
         c["conclusion"] == "FAILURE"
             || c["conclusion"] == "CANCELLED"
             || c["conclusion"] == "TIMED_OUT"
@@ -57,7 +74,7 @@ fn check_state(pr: &Value) -> &'static str {
     }) {
         return "falhou";
     }
-    if checks
+    if test_checks
         .iter()
         .all(|c| c["conclusion"] == "SUCCESS" || c["state"] == "SUCCESS")
     {
@@ -263,7 +280,7 @@ mod tests {
             "baseRefName":"main",
             "mergeStateStatus":"CLEAN",
             "reviewDecision":"APPROVED",
-            "statusCheckRollup":[{"conclusion":"SUCCESS"}],
+            "statusCheckRollup":[{"name":"test-suite","conclusion":"SUCCESS"}],
             "files":[{"path":path}]
         })
     }
@@ -299,6 +316,32 @@ mod tests {
         let rows = assess(&[draft, missing]);
         assert_eq!(rows[0]["state"], "draft");
         assert_eq!(rows[1]["state"], "ci_pendente");
+    }
+
+    #[test]
+    fn coderabbit_only_does_not_validate_ci() {
+        let mut pr = sample(12, "src/a.ts", "12");
+        pr["statusCheckRollup"] = json!([{
+            "name":"CodeRabbit","conclusion":"SUCCESS",
+            "app":{"slug":"coderabbitai"}
+        }]);
+        let rows = assess(&[pr.clone()]);
+        assert_eq!(rows[0]["checks"], "nao_verificado");
+        assert_eq!(rows[0]["state"], "ci_pendente");
+        pr["statusCheckRollup"] = json!([
+            {"name":"CodeRabbit","conclusion":"SUCCESS","app":{"slug":"coderabbitai"}},
+            {"name":"test-suite","conclusion":"SUCCESS","app":{"slug":"ci-service"}}
+        ]);
+        let rows = assess(&[pr]);
+        assert_eq!(rows[0]["checks"], "aprovado");
+        assert_eq!(rows[0]["state"], "revisao_final_necessaria");
+    }
+
+    #[test]
+    fn nameless_statuses_do_not_claim_ci_success() {
+        let mut pr = sample(13, "src/b.ts", "13");
+        pr["statusCheckRollup"] = json!([{"conclusion":"SUCCESS"}]);
+        assert_eq!(assess(&[pr])[0]["checks"], "nao_verificado");
     }
 
     #[test]
