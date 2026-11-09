@@ -1029,7 +1029,14 @@ async fn ci(a: &Ax, j: &mut Job) -> R<String> {
 
 // A evidência mantém a identidade do mesmo commit, incluindo nas reexecuções
 // para excluir testes instáveis. Um mergecheck não tem proof.fix_commit.
-fn ci_evidence(kind: &str, data: &Value, command: &str, exit: i32, output: &str, rerun: bool) -> Value {
+fn ci_evidence(
+    kind: &str,
+    data: &Value,
+    command: &str,
+    exit: i32,
+    output: &str,
+    rerun: bool,
+) -> Value {
     let candidate = if kind == "mergecheck" {
         data["expected_head"].clone()
     } else {
@@ -3678,14 +3685,31 @@ mod t {
     fn mergecheck_retry_preserves_head_sha_and_negative_ci_evidence() {
         let head = "0123456789abcdef0123456789abcdef01234567";
         let data = json!({"expected_head":head, "proof":{"fix_commit":null}});
-        let first = ci_evidence("mergecheck", &data, "node --test", 1, "not ok 1\n# fail 1", false);
-        let retry = ci_evidence("mergecheck", &data, "node --test", 1, "not ok 1\n# fail 1", true);
+        let first = ci_evidence(
+            "mergecheck",
+            &data,
+            "node --test",
+            1,
+            "not ok 1\n# fail 1",
+            false,
+        );
+        let retry = ci_evidence(
+            "mergecheck",
+            &data,
+            "node --test",
+            1,
+            "not ok 1\n# fail 1",
+            true,
+        );
         assert_eq!(first["candidate"], json!(head));
         assert_eq!(retry["candidate"], json!(head));
         assert_eq!(retry["exit"], 1);
         assert_eq!(retry["command"], "node --test");
         assert_eq!(retry["rerun"], true);
-        assert!(retry["output_tail"].as_str().unwrap().contains("# fail 1"));
+        assert!(retry["output_tail"]
+            .as_str()
+            .unwrap()
+            .contains("# fail 1"));
     }
 
     #[test]
