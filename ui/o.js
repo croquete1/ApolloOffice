@@ -642,7 +642,7 @@
     let text = '<div class="th"><b>' + esc(h.h === "local" ? "este computador" : h.h) +
       '</b><span>' + (x.dk ? "Docker" : "sem Docker") + '</span></div>' +
       tr("estado", '<span class="' + (recent ? "ok2" : "bad2") + '">' + status +
-        '</span>' + (recent ? ' · ' + jobs.length + ' tarefa(s) visível(is)' : ''));
+        '</span>' + (recent ? ' · ' + jobs.length + (jobs.length === 1 ? ' tarefa visível' : ' tarefas visíveis') : ''));
     if (recent && m) {
       const cores = metric(m.cpu), load = metric(m.load);
       if (cores != null && cores > 0) {
