@@ -114,9 +114,10 @@ pub fn assess(prs: &[Value]) -> Vec<Value> {
                 "revisao_final_necessaria"
             };
             let (priority, action) = match state {
-                "revisao_pendente" if review == "CHANGES_REQUESTED" => {
-                    (0, "Analisar alterações solicitadas; encaminhar apenas PRs próprias")
-                }
+                "revisao_pendente" if review == "CHANGES_REQUESTED" => (
+                    0,
+                    "Analisar alterações solicitadas; encaminhar apenas PRs próprias",
+                ),
                 "ci_falhou" => (1, "Investigar a primeira falha de CI"),
                 "conflito" => (2, "Resolver conflitos e repetir validação"),
                 "duplicado_possivel" => (3, "Comparar as PRs da mesma issue"),
