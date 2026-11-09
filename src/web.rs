@@ -1273,6 +1273,7 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                         ("feat", 0),
                         ("nm", 0),
                         ("on_", 0),
+                        ("auto_merge", 0),
                         ("maxo", 1),
                         ("maxd", 1),
                         ("bud", 3),
@@ -1437,7 +1438,6 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
             }
         }
         ("GET", "/api/steward") => js(json!({
-            "read_only": true,
             "repos": a.db.all("select full from rp where on_=1 order by full", pa![])
                 .iter()
                 .map(|row| {
@@ -1445,7 +1445,8 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                     json!({
                         "repo": repo,
                         "report": a.db.kg(&format!("steward:{repo}")),
-                        "error": a.db.kg(&format!("steward:error:{repo}"))
+                        "error": a.db.kg(&format!("steward:error:{repo}")),
+                        "merge_error": a.db.kg(&format!("steward:merge_error:{repo}"))
                     })
                 })
                 .collect::<Vec<Value>>()
