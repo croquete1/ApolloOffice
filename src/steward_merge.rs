@@ -457,6 +457,39 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
         return Ok(false);
     }
     if mode == MergeMode::Local {
+        // A árvore testada tem de já conter a main atual como ancestral.
+        // Caso contrário, o update-branch cria um commit normal (sem force-push),
+        // e a PR será novamente testada e revista no próximo ciclo.
+        let ancestry = ghj(
+            &["api", &format!("repos/{repo}/compare/{base_sha}...{head}")],
+            45,
+        )
+        .await?;
+        if ancestry["status"] != "ahead" && ancestry["status"] != "identical" {
+            if ancestry["status"] == "diverged" {
+                let updated = ghj(
+                    &[
+                        "api",
+                        "-X",
+                        "PUT",
+                        &format!("repos/{repo}/pulls/{number}/update-branch"),
+                        "-f",
+                        &format!("expected_head_sha={head}"),
+                    ],
+                    90,
+                )
+                .await?;
+                if updated["message"].is_string() {
+                    a.say(
+                        "watcher",
+                        &format!("{repo}#{number}: branch atualizada; CI terá de correr novamente"),
+                        None,
+                    );
+                }
+            }
+            return Ok(false);
+        }
+
         let commit = ghj(
             &["api", &format!("repos/{repo}/git/commits/{head}")],
             45,
