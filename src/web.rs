@@ -410,7 +410,11 @@ fn sets(a: &Ax, b: &Value) {
 }
 
 fn pr_lang(value: &str) -> &'static str {
-    if value == "pt-PT" { "pt-PT" } else { "en" }
+    if value == "pt-PT" {
+        "pt-PT"
+    } else {
+        "en"
+    }
 }
 
 const RPF: &[&str] = &[
