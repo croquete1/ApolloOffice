@@ -286,7 +286,8 @@ mod tests {
     fn empty_review_is_not_a_task() {
         let head = "0123456789012345678901234567890123456789";
         let review = json!({"id":91,"state":"CHANGES_REQUESTED","commit_id":head,
-            "author_association":"OWNER","user":{"login":"maintainer","type":"User"},"body":""});
+            "submitted_at":"2026-11-09T12:00:00Z","author_association":"OWNER",
+            "user":{"login":"maintainer","type":"User"},"body":""});
         assert!(actionable_request(&[review], &[], head, "author").is_none());
     }
 }
