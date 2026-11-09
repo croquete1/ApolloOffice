@@ -326,16 +326,28 @@ mod tests {
     #[test]
     fn pull_request_language_persists_with_english_as_default() {
         let db = Db::mem();
-        db.run("insert into rp(full) values(?)", crate::pa!["o/r".to_string()]);
+        db.run(
+            "insert into rp(full) values(?)",
+            crate::pa!["o/r".to_string()],
+        );
         assert_eq!(
-            db.one("select lang from rp where full=?", crate::pa!["o/r".to_string()])
-                .unwrap()["lang"],
+            db.one(
+                "select lang from rp where full=?",
+                crate::pa!["o/r".to_string()]
+            )
+            .unwrap()["lang"],
             "en"
         );
-        db.run("update rp set lang=? where full=?", crate::pa!["pt-PT".to_string(), "o/r".to_string()]);
+        db.run(
+            "update rp set lang=? where full=?",
+            crate::pa!["pt-PT".to_string(), "o/r".to_string()],
+        );
         assert_eq!(
-            db.one("select lang from rp where full=?", crate::pa!["o/r".to_string()])
-                .unwrap()["lang"],
+            db.one(
+                "select lang from rp where full=?",
+                crate::pa!["o/r".to_string()]
+            )
+            .unwrap()["lang"],
             "pt-PT"
         );
     }
