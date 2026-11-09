@@ -1274,6 +1274,7 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                         ("nm", 0),
                         ("on_", 0),
                         ("auto_merge", 0),
+                        ("local_merge", 0),
                         ("steward_repair", 0),
                         ("maxo", 1),
                         ("maxd", 1),
