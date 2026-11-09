@@ -626,19 +626,63 @@
       + (q ? `<div class="tf">click to open the job</div>` : "");
   };
   const htip = (h) => {
-    const x = (S.hs || []).find((y) => y.id === h.h) || {}, m = S.hst?.[h.h], down = S.o.net?.[h.h] === false;
-    const js = S.q.filter((q) => q.h === h.h && ["repro", "fix", "ci", "review", "gate", "submit"].includes(q.st));
-    let r = `<div class="th"><b>${esc(h.h === "local" ? "this computer" : h.h)}</b><span>${x.dk ? "Docker" : "no Docker"}</span></div>`
-      + tr("status", down ? `<span class="bad2">offline</span>` : `<span class="ok2">online</span> · ${js.length}/${x.ln || 0} lanes busy`);
-    if (m) {
-      if (m.cpu) r += tr("cpu", `${m.cpu} cores · load ${m.load ?? "?"}${m.load != null ? bar(m.load, m.cpu) : ""}`);
-      if (m.mem) r += tr("ram", `${gb(m.mem[0] - m.mem[1])} / ${gb(m.mem[0])} GB${bar(m.mem[0] - m.mem[1], m.mem[0])}`);
-      if (m.disk) r += tr("disk", `${m.disk[1]} GB free of ${m.disk[0]}${bar(m.disk[0] - m.disk[1], m.disk[0])}`);
-      if (m.temp != null) r += tr("temp", `<span class="${m.temp >= 85 ? "bad2" : ""}">${m.temp} °C</span>`);
-      if (m.up) r += tr("up", esc(m.up) + ` <span class="k">· seen ${ago(m.t)} ago</span>`);
-    } else r += tr("", `<span class="k">no hardware data yet</span>`);
-    if (js.length) r += `<div class="tc">${js.map((q) => `<div><span class="k">${esc(q.st)}</span><span>${esc(rn(q))} · ${esc(q.title)}</span></div>`).join("")}</div>`;
-    return r + `<div class="tf">click to edit machines</div>`;
+    const x = (S.hs || []).find((y) => y.id === h.h) || {};
+    const m = S.hst?.[h.h];
+    const disabled = x.on_ === false || x.on_ === 0;
+    const down = S.o.net?.[h.h] === false;
+    const metric = (value) => value != null && value !== "" && Number.isFinite(Number(value))
+      ? Number(value) : null;
+    const lastSeen = metric(m?.t);
+    const age = lastSeen == null ? Infinity : Date.now() - lastSeen;
+    const recent = !disabled && !down && age >= 0 && age < 120000;
+    const jobs = S.q.filter((q) =>
+      q.h === h.h && ["repro", "fix", "ci", "review", "gate", "submit"].includes(q.st));
+    const status = disabled ? "desativada" : down ? "sem ligação" :
+      recent ? "online" : "por confirmar";
+    let text = '<div class="th"><b>' + esc(h.h === "local" ? "este computador" : h.h) +
+      '</b><span>' + (x.dk ? "Docker" : "sem Docker") + '</span></div>' +
+      tr("estado", '<span class="' + (recent ? "ok2" : "bad2") + '">' + status +
+        '</span>' + (recent ? ' · ' + jobs.length + ' tarefa(s) visível(is)' : ''));
+    if (recent && m) {
+      const cores = metric(m.cpu), load = metric(m.load);
+      if (cores != null && cores > 0) {
+        const label = cores.toLocaleString("pt-PT") + " núcleos" +
+          (load != null && load >= 0 ? " · carga média " +
+            load.toLocaleString("pt-PT", {maximumFractionDigits: 2}) : "");
+        text += tr("CPU", esc(label));
+      }
+      if (Array.isArray(m.mem)) {
+        const total = metric(m.mem[0]), available = metric(m.mem[1]);
+        if (total != null && total > 0 && available != null && available >= 0 && available <= total) {
+          const used = total - available;
+          text += tr("RAM", gb(used) + ' / ' + gb(total) + ' GiB' + bar(used, total));
+        }
+      }
+      if (Array.isArray(m.disk)) {
+        const total = metric(m.disk[0]), free = metric(m.disk[1]);
+        if (total != null && total > 0 && free != null && free >= 0 && free <= total) {
+          text += tr("disco", esc(free.toLocaleString("pt-PT")) + ' GB livres de ' +
+            esc(total.toLocaleString("pt-PT")) + bar(total - free, total));
+        }
+      }
+      const temp = metric(m.temp);
+      if (temp != null) {
+        text += tr("temp.", esc(temp.toLocaleString("pt-PT", {maximumFractionDigits: 1})) +
+          ' °C <span class="k">· sensor não identificado</span>');
+      }
+    } else {
+      text += tr("dados", '<span class="k">sem telemetria recente</span>');
+    }
+    if (m?.up) text += tr("ativo", esc(m.up));
+    if (lastSeen != null && lastSeen > 0) {
+      text += tr("leitura", '<span class="k">' + esc(ago(lastSeen)) + ' atrás</span>');
+    }
+    if (jobs.length) {
+      text += '<div class="tc">' + jobs.map((q) =>
+        '<div><span class="k">' + esc(q.st) + '</span><span>' +
+        esc(rn(q)) + ' · ' + esc(q.title) + '</span></div>').join("") + '</div>';
+    }
+    return text + '<div class="tf">clique para configurar as máquinas</div>';
   };
   const tip = () => {
     const el = $("tip"), h = hov && hits.find((x) => x.k === hov);
