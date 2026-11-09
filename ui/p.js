@@ -568,7 +568,11 @@
     ${reports.map(({ repo, report, error, merge_error, repair_error }) => {
       const rows = [...(report?.prs || [])].sort((a,b) => (Number(a.priority ?? 9) - Number(b.priority ?? 9)) || (Number(b.number) - Number(a.number)));
       const at = report?.at ? new Date(report.at).toLocaleString("pt-PT") : "sem leitura";
-      const mode = report?.merge_enabled ? "Integração ativada com verificações rigorosas" : "Apenas auditoria — integrações desativadas";
+      const mode = !report?.merge_enabled
+        ? "Apenas auditoria — integrações desativadas"
+        : report?.local_merge_enabled
+          ? "Integração local com provas obrigatórias (sem proteção GitHub)"
+          : "Integração com proteção GitHub obrigatória";
       const repairs = report?.repair_enabled ? "Encaminhamento de revisões ativo (só PRs próprias)" : "Encaminhamento de revisões desativado";
       return `<div class="sec"><h4>${esc(repo)}</h4><div class="box">
         <div class="msg">${rows.length} PRs abertas · ${esc(at)} · ${esc(mode)} · ${esc(repairs)}${error?.error ? " · Último erro: " + esc(error.error) : ""}</div>
