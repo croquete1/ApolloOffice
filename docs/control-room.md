@@ -28,6 +28,48 @@ Esta versão substitui apenas a apresentação do painel. O Apollo Office manté
 - Foco preservado durante atualizações de tarefas e PRs: mantém-se no elemento equivalente; se este desapareceu, transfere-se para a respetiva secção.
 - A informação das máquinas distingue explicitamente telemetria recente, última leitura histórica e situação por confirmar, incluindo quando o canal de estado deixa de atualizar.
 
+## Máquina e telemetria — revisão PT-PT
+
+O painel **Máquinas e recursos** apresenta cartões com as leituras disponibilizadas
+pelo backend, sem chamadas adicionais ao sistema operativo e sem introduzir
+gráficos ou personagens da interface original:
+
+- **Processador:** número de núcleos e carga média reportados. A carga média
+  **não é apresentada como percentagem de utilização instantânea da CPU**.
+- **Memória e disco:** usados/livres com barras percentuais, apenas quando
+  os valores são numéricos e consistentes.
+- **Temperatura:** valor do sensor reportado, sem presumir que se trata da
+  CPU ou GPU. O backend não identifica qual o sensor.
+- **Atividade:** número de tarefas atribuídas que constam da lista recebida.
+  Essa lista é uma pré-visualização e **não prova a ocupação total dos postos**.
+- **Validade dos dados:** telemetria com menos de 120 segundos, host ativo,
+  ligação não declarada indisponível e estado do servidor recente. Fora desses
+  critérios são mostrados apenas o estado e a última leitura, **sem representar
+  métricas antigas como atuais**.
+
+A UI personalizada foi preservada. O projeto usa os ficheiros
+`ui/control-room.js`, `ui/control-room.css`, `ui/office-v2.js` e
+`ui/office-v2.css`; a interface pixelizada permanece apenas como código de
+compatibilidade. Uma captura da sala pixelizada não prova que o fork original
+tenha sido instalado: pode indicar um binário antigo ou que o Control Room
+não foi carregado.
+
+Para verificar **a instância que está realmente aberta** no browser,
+abra a consola de desenvolvimento e execute:
+
+```js
+({
+  personalizado: Boolean(document.getElementById("aoControlRoom")),
+  versaoModernaAtiva: window.AO?.modernRoom === true,
+  fallback: document.body.classList.contains("ao-fallback-no-pixel")
+})
+```
+
+Um resultado com `personalizado: false` exige verificar o executável em
+execução e o carregamento de `control-room.js`, sem instalar uma release
+oficial por cima do fork. A aplicação incorpora os ficheiros `ui/` no binário:
+uma mudança de código remoto **não atualiza** automaticamente a UI local.
+
 ## Fontes e limitações
 
 Os movimentos mostram os estados que o Apollo Office disponibiliza, não o conteúdo interno do raciocínio ou dos modelos. As personagens são ilustrações 2.5D construídas com SVG e CSS, e não modelos 3D com animação esquelética. O nome do modelo apresentado em cada agente vem do respetivo estado; a interface não altera a configuração do Qwen/Ollama.
