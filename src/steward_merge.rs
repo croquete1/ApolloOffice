@@ -759,6 +759,139 @@ pub async fn run(a: &Ax, repo: &str, listed: &[Value], assessed: &[Value]) {
 mod tests {
     use super::*;
 
+    fn sample_expected() -> ExpectedMerge<'static> {
+        ExpectedMerge {
+            repo: "croquete1/repo-e2e",
+            base: "main",
+            base_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            head: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            author: "croquete1",
+            mode: MergeMode::Local,
+        }
+    }
+
+    fn sample_final_reads() -> FinalReads {
+        let e = sample_expected();
+        FinalReads {
+            pr: json!({
+                "state":"open","draft":false,"mergeable":true,
+                "mergeable_state":"clean","user":{"login":e.author},
+                "head":{"sha":e.head,"repo":{"full_name":e.repo}},
+                "base":{"ref":e.base,"sha":e.base_sha,"repo":{"full_name":e.repo}}
+            }),
+            branch: json!({"commit":{"sha":e.base_sha}}),
+            reviews: json!([]),
+            threads_resolved: true,
+            checks: json!({"total_count":0,"check_runs":[]}),
+            statuses: json!({"statuses":[]}),
+        }
+    }
+
+    #[test]
+    fn head_or_base_changed_during_review_never_authorizes_merge() {
+        let e = sample_expected();
+        assert!(final_gate(Ok(sample_final_reads()), &e).unwrap());
+
+        let mut snapshot = sample_final_reads();
+        snapshot.pr["head"]["sha"] = json!("cccccccccccccccccccccccccccccccccccccccc");
+        assert!(!final_gate(Ok(snapshot), &e).unwrap());
+
+        let mut snapshot = sample_final_reads();
+        snapshot.pr["base"]["sha"] = json!("cccccccccccccccccccccccccccccccccccccccc");
+        assert!(!final_gate(Ok(snapshot), &e).unwrap());
+
+        let mut snapshot = sample_final_reads();
+        snapshot.branch["commit"]["sha"] =
+            json!("cccccccccccccccccccccccccccccccccccccccc");
+        assert!(!final_gate(Ok(snapshot), &e).unwrap());
+
+        let mut snapshot = sample_final_reads();
+        snapshot.pr["mergeable_state"] = json!("dirty");
+        assert!(!final_gate(Ok(snapshot), &e).unwrap());
+    }
+
+    #[test]
+    fn late_negative_review_and_unresolved_thread_block_merge() {
+        let e = sample_expected();
+        let mut snapshot = sample_final_reads();
+        snapshot.reviews = json!([{
+            "state":"CHANGES_REQUESTED",
+            "user":{"login":"maintainer"},
+            "submitted_at":"2026-11-09T23:00:00Z",
+            "commit_id":e.head
+        }]);
+        assert!(!final_gate(Ok(snapshot), &e).unwrap());
+
+        let mut snapshot = sample_final_reads();
+        snapshot.threads_resolved = false;
+        assert!(!final_gate(Ok(snapshot), &e).unwrap());
+
+        let mut snapshot = sample_final_reads();
+        snapshot.pr["draft"] = json!(true);
+        assert!(!final_gate(Ok(snapshot), &e).unwrap());
+    }
+
+    #[test]
+    fn missing_or_failed_github_api_data_fails_closed() {
+        let e = sample_expected();
+        assert!(final_gate(Err("GitHub HTTP 503".to_string()), &e).is_err());
+        assert!(final_gate(Err("GitHub timeout".to_string()), &e).is_err());
+
+        let mut snapshot = sample_final_reads();
+        snapshot.pr = json!({});
+        assert!(!final_gate(Ok(snapshot), &e).unwrap());
+
+        let mut snapshot = sample_final_reads();
+        snapshot.reviews = json!(null);
+        assert!(!final_gate(Ok(snapshot), &e).unwrap());
+
+        let mut snapshot = sample_final_reads();
+        snapshot.checks = json!(null);
+        assert!(!final_gate(Ok(snapshot), &e).unwrap());
+
+        let mut snapshot = sample_final_reads();
+        snapshot.branch = json!({});
+        assert!(!final_gate(Ok(snapshot), &e).unwrap());
+    }
+
+    #[test]
+    fn remote_ci_turning_red_before_merge_blocks_it() {
+        let e = sample_expected();
+        let mut snapshot = sample_final_reads();
+        snapshot.checks = json!({
+            "total_count":1,
+            "check_runs":[{"status":"completed","conclusion":"failure"}]
+        });
+        assert!(!final_gate(Ok(snapshot), &e).unwrap());
+
+        let mut snapshot = sample_final_reads();
+        snapshot.statuses = json!({
+            "state":"failure","statuses":[{"state":"failure"}]
+        });
+        assert!(!final_gate(Ok(snapshot), &e).unwrap());
+    }
+
+    #[test]
+    fn concurrent_scans_share_a_per_repo_merge_permit() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            47301,
+            "apollo-office".into(),
+        ));
+        let permit = MergePermit::acquire(&a, "croquete1/repo-e2e").unwrap();
+        let other = a.clone();
+        let denied = std::thread::spawn(move || {
+            MergePermit::acquire(&other, "croquete1/repo-e2e").is_none()
+        })
+        .join()
+        .unwrap();
+        assert!(denied);
+        assert!(MergePermit::acquire(&a, "croquete1/outro-repo").is_some());
+        drop(permit);
+        assert!(MergePermit::acquire(&a, "croquete1/repo-e2e").is_some());
+    }
+
     #[test]
     fn revalidation_jobs_are_singleton_per_pr_and_head() {
         let db = crate::db::Db::mem();
