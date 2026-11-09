@@ -831,6 +831,47 @@ mod tests {
     }
 
     #[test]
+    fn protected_mode_requires_current_human_approval_and_green_ci() {
+        let mut e = sample_expected();
+        e.mode = MergeMode::Protected;
+        let mut snapshot = sample_final_reads();
+        snapshot.checks = json!({
+            "total_count":1,
+            "check_runs":[{
+                "name":"test-suite",
+                "status":"completed",
+                "conclusion":"success",
+                "app":{"slug":"ci-service"}
+            }]
+        });
+        let valid_checks = snapshot.checks.clone();
+        snapshot.reviews = json!([{
+            "state":"APPROVED",
+            "commit_id":e.head,
+            "user":{"login":"maintainer","type":"User"}
+        }]);
+        assert!(final_gate(Ok(snapshot), &e).unwrap());
+
+        let mut snapshot = sample_final_reads();
+        snapshot.checks = valid_checks.clone();
+        snapshot.reviews = json!([{
+            "state":"APPROVED",
+            "commit_id":"cccccccccccccccccccccccccccccccccccccccc",
+            "user":{"login":"maintainer","type":"User"}
+        }]);
+        assert!(!final_gate(Ok(snapshot), &e).unwrap());
+
+        let mut snapshot = sample_final_reads();
+        snapshot.checks = valid_checks;
+        snapshot.reviews = json!([{
+            "state":"CHANGES_REQUESTED",
+            "commit_id":e.head,
+            "user":{"login":"maintainer","type":"User"}
+        }]);
+        assert!(!final_gate(Ok(snapshot), &e).unwrap());
+    }
+
+    #[test]
     fn missing_or_failed_github_api_data_fails_closed() {
         let e = sample_expected();
         assert!(final_gate(Err("GitHub HTTP 503".to_string()), &e).is_err());
