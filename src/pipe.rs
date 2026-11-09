@@ -1228,8 +1228,8 @@ fn body_lang(j: &Job, f: &Value, ci: &str, ft: &str, pt: bool) -> String {
                     j.d["hunt"]["title"].as_str().unwrap_or(""))
             });
         } else if j.ext() {
-            v.push(if pt { "Reportado diretamente (sem Issue existente)." }
-                   else { "Reported to us directly (no existing issue)." }.into());
+            v.push((if pt { "Reportado diretamente (sem Issue existente)." }
+                    else { "Reported to us directly (no existing issue)." }).into());
         } else if j.feat() {
             v.push(format!("Closes #{}", j.num));
         } else {
