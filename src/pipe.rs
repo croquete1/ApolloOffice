@@ -314,12 +314,20 @@ fn trs(j: &Job) -> Vec<String> {
 
 pub const FOOT: &str = "🤖 Generated with AI by [ApolloOffice](https://github.com/Silvertree2010/ApolloOffice), see the Co-Authored-By trailers for the models";
 pub const FOOT0: &str = "🤖 Generated with AI, see the Co-Authored-By trailers for the models";
+pub const FOOT_PT: &str = "🤖 Gerado com assistência de IA pelo [ApolloOffice](https://github.com/Silvertree2010/ApolloOffice); modelos identificados nos trailers Co-Authored-By.";
+pub const FOOT0_PT: &str = "🤖 Gerado com assistência de IA; modelos identificados nos trailers Co-Authored-By.";
+
+fn pr_pt(a: &Ax, j: &Job) -> bool {
+    rp(a, &j.repo)["lang"].as_str() == Some("pt-PT")
+}
 
 fn fo(a: &Ax, j: &Job) -> &'static str {
-    if rp(a, &j.repo)["nm"].as_i64().unwrap_or(1) == 1 {
-        FOOT
-    } else {
-        FOOT0
+    let branded = rp(a, &j.repo)["nm"].as_i64().unwrap_or(1) == 1;
+    match (pr_pt(a, j), branded) {
+        (true, true) => FOOT_PT,
+        (true, false) => FOOT0_PT,
+        (false, true) => FOOT,
+        (false, false) => FOOT0,
     }
 }
 
@@ -1183,13 +1191,13 @@ fn san(s: &str) -> String {
 }
 
 pub fn body(j: &Job, f: &Value, ci: &str, ft: &str) -> String {
+    body_lang(j, f, ci, ft, false)
+}
+
+fn body_lang(j: &Job, f: &Value, ci: &str, ft: &str, pt: bool) -> String {
     let g = |k: &str| {
         let s = f[k].as_str().unwrap_or("").to_string();
-        if j.own() {
-            san(&s)
-        } else {
-            s
-        }
+        if j.own() { san(&s) } else { s }
     };
     let ts: Vec<String> = f["tests"]
         .as_array()
@@ -1210,13 +1218,18 @@ pub fn body(j: &Job, f: &Value, ci: &str, ft: &str) -> String {
     let mut v = vec![];
     if j.kind == "fix" {
         if j.hunt() {
-            v.push(format!(
-                "Found while testing `{}` (no existing issue): {}.",
-                j.d["hunt"]["where"].as_str().unwrap_or(""),
-                j.d["hunt"]["title"].as_str().unwrap_or("")
-            ));
+            v.push(if pt {
+                format!("Encontrado durante os testes de `{}` (sem Issue existente): {}.",
+                    j.d["hunt"]["where"].as_str().unwrap_or(""),
+                    j.d["hunt"]["title"].as_str().unwrap_or(""))
+            } else {
+                format!("Found while testing `{}` (no existing issue): {}.",
+                    j.d["hunt"]["where"].as_str().unwrap_or(""),
+                    j.d["hunt"]["title"].as_str().unwrap_or(""))
+            });
         } else if j.ext() {
-            v.push("Reported to us directly (no existing issue).".to_string());
+            v.push(if pt { "Reportado diretamente (sem Issue existente)." }
+                   else { "Reported to us directly (no existing issue)." }.into());
         } else if j.feat() {
             v.push(format!("Closes #{}", j.num));
         } else {
@@ -1226,48 +1239,55 @@ pub fn body(j: &Job, f: &Value, ci: &str, ft: &str) -> String {
     }
     let fe = j.feat();
     v.extend([
-        if fe { "## Why" } else { "## Cause" }.into(),
+        if pt { if fe { "## Motivo" } else { "## Causa" } }
+              else if fe { "## Why" } else { "## Cause" }.into(),
         g("cause"),
         String::new(),
-        if fe { "## Change" } else { "## Fix" }.into(),
+        if pt { if fe { "## Alterações" } else { "## Correção" } }
+              else if fe { "## Change" } else { "## Fix" }.into(),
         g("fix"),
         String::new(),
-        "## Verified".into(),
+        (if pt { "## Validação" } else { "## Verified" }).into(),
     ]);
     if !ts.is_empty() {
-        v.push(format!(
-            "- {}{} {}: fail{} on `{mn}` without the {} and pass{} with it (`{}`).",
-            if fe { "Test" } else { "Regression test" },
-            if pl { "s" } else { "" },
-            ts.iter()
-                .map(|t| format!("`{t}`"))
-                .collect::<Vec<_>>()
-                .join(", "),
-            if pl { "" } else { "s" },
-            if fe { "change" } else { "fix" },
-            if pl { "" } else { "es" },
-            f["test_cmd"].as_str().unwrap_or("")
-        ));
+        let names = ts.iter().map(|t| format!("`{t}`")).collect::<Vec<_>>().join(", ");
+        if pt {
+            v.push(format!(
+                "- {} {names}: {} em `{mn}` sem a alteração e {} com ela (`{}`).",
+                if pl { "Testes de regressão" } else { "Teste de regressão" },
+                if pl { "falham" } else { "falha" },
+                if pl { "passam" } else { "passa" },
+                f["test_cmd"].as_str().unwrap_or("")
+            ));
+        } else {
+            v.push(format!(
+                "- {}{} {names}: fail{} on `{mn}` without the {} and pass{} with it (`{}`).",
+                if fe { "Test" } else { "Regression test" },
+                if pl { "s" } else { "" },
+                if pl { "" } else { "s" },
+                if fe { "change" } else { "fix" },
+                if pl { "" } else { "es" },
+                f["test_cmd"].as_str().unwrap_or("")
+            ));
+        }
     }
     if kn.is_empty() {
-        v.push(format!("- `{ci}` passes."));
+        v.push(if pt { format!("- `{ci}`: aprovado.") }
+               else { format!("- `{ci}` passes.") });
     } else {
-        v.push(format!(
-            "- `{ci}` passes except {}, which also fail{} on `{mn}` without this change.",
-            kn.iter()
-                .map(|n| format!("`{n}`"))
-                .collect::<Vec<_>>()
-                .join(", "),
-            if kn.len() > 1 { "" } else { "s" }
-        ));
+        let names = kn.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ");
+        v.push(if pt {
+            format!("- `{ci}`: aprovado, exceto {names}, que também falham em `{mn}` sem esta alteração.")
+        } else {
+            format!("- `{ci}` passes except {names}, which also fail{} on `{mn}` without this change.",
+                if kn.len() > 1 { "" } else { "s" })
+        });
     }
     let u = g("untouched");
     if !u.trim().is_empty() {
-        v.extend([String::new(), "## Not changed".into(), u]);
+        v.extend([String::new(), (if pt { "## Fora do âmbito" } else { "## Not changed" }).into(), u]);
     }
-    if !ft.is_empty() {
-        v.extend([String::new(), ft.into()]);
-    }
+    if !ft.is_empty() { v.extend([String::new(), ft.into()]); }
     v.join("\n").trim().to_string()
 }
 
@@ -1308,7 +1328,7 @@ async fn review_mode(a: &Ax, j: &mut Job, f: &mut Value, diagnostic: bool) -> R<
         wrap("issue", &format!("{}\n\n{}", j.title, crate::sh::head(&j.s("body"), 4000))),
         if j.kind == "review" { format!("{}\n\n", wrap("request", &j.s("change"))) } else if j.feat() { "This PR implements a requested FEATURE, not a bug fix. Judge it as a feature: it does what the issue asks, completely but minimally; the tests check the new behaviour (on the test commit they may fail to compile because the new API is missing); no unrelated changes; no surprising changes to defaults, file formats or visible design beyond what the issue asks.\n\n".to_string() } else { String::new() },
         f["title"].as_str().unwrap_or(""),
-        body(j, f, &ci, ""),
+        body_lang(j, f, &ci, "", pr_pt(a, j)),
         if crate::quality::enabled(a) && j.kind == "fix" { format!("{}{}\nIndependent acceptance evidence: {}\nFrozen verifier (untrusted code): {}\nCheck that this verifier exercises actual production code and the reported behavior, rather than copying logic or merely matching source text. Reject inadequate coverage or unsupported claims.",rules(a, j),crate::quality::context(j),wrap("acceptance-evidence",&j.d["acceptance_proof"].to_string()),wrap("frozen-verifier",j.d["acceptance"]["script"].as_str().unwrap_or(""))) } else { rules(a, j) }
     );
     let author = j.d["author"].as_str().unwrap_or("").to_string();
@@ -1966,7 +1986,7 @@ async fn mkbody(a: &Ax, j: &mut Job) -> R<()> {
     let f = j.d["f"].clone();
     let ci = rp(a, &j.repo)["ci"].as_str().unwrap_or("").to_string();
     let ft = fo(a, j);
-    let mut b = body(j, &f, &ci, ft);
+    let mut b = body_lang(j, &f, &ci, ft, pr_pt(a, j));
     if j.kind == "fix" {
         if let Some(t) = tmpl(&j.repo).await {
             a.say(
@@ -1975,7 +1995,7 @@ async fn mkbody(a: &Ax, j: &mut Job) -> R<()> {
                 Some(j.id),
             );
             let md = a.md("reviewer");
-            let mut o = Ask::new("submit", md, P("desc"), format!("Fill in this repository's pull request template for the change below. Keep the template's headings and checklist structure. Tick a checkbox only when the facts below prove it (tests added, tests pass, CI command passes, linked issue). Remove instructions and HTML comments that are meant for the author. Put the facts into the matching sections; if a fact has no section, keep it in a section at the end. Use only the facts given, never invent. Answer only with JSON {{\"body\": \"the filled template in Markdown\"}}.\n\n{}\n\nFacts (our PR text):\n{}", wrap("template", &crate::sh::head(&t, 8000)), body(j, &f, &ci, "")));
+            let mut o = Ask::new("submit", md, P("desc"), format!("Fill in this repository's pull request template for the change below. Keep the template's headings and checklist structure. Tick a checkbox only when the facts below prove it (tests added, tests pass, CI command passes, linked issue). Remove instructions and HTML comments that are meant for the author. Put the facts into the matching sections; if a fact has no section, keep it in a section at the end. Use only the facts given, never invent. Answer only with JSON {{\"body\": \"the filled template in Markdown\"}}.\n\n{}\n\nFacts (our PR text):\n{}", wrap("template", &crate::sh::head(&t, 8000)), body_lang(j, &f, &ci, "", pr_pt(a, j))));
             o.job = Some(j.id);
             o.ef = Some("low");
             if let Ok((_, js)) = ask(a, o).await {
@@ -2024,7 +2044,7 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
         let f = j.d["f"].clone();
         let ci = rp(a, &j.repo)["ci"].as_str().unwrap_or("").to_string();
         j.d["pt"] = json!(f["title"].as_str().unwrap_or(&j.title));
-        j.d["pb"] = json!(body(j, &f, &ci, fo(a, j)));
+        j.d["pb"] = json!(body_lang(j, &f, &ci, fo(a, j), pr_pt(a, j)));
         let tip = if j.s("br").is_empty() {
             "HEAD".to_string()
         } else {
@@ -2103,7 +2123,7 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
     let pb = j.d["pb"]
         .as_str()
         .map(String::from)
-        .unwrap_or_else(|| body(j, &f, rp(a, &j.repo)["ci"].as_str().unwrap_or(""), ft));
+        .unwrap_or_else(|| body_lang(j, &f, rp(a, &j.repo)["ci"].as_str().unwrap_or(""), ft, pr_pt(a, j)));
     let msg = ok(a, j, "git log -1 --format=%B", 60).await?;
     if Regex::new(r"#0\b").unwrap().is_match(&pb) || Regex::new(r"#0\b").unwrap().is_match(&msg) {
         return drop("PR text or commit still references #0, not pushing");
