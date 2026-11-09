@@ -1254,7 +1254,8 @@ fn body_lang(j: &Job, f: &Value, ci: &str, ft: &str, pt: bool) -> String {
         if pt {
             v.push(format!(
                 "- {} {names}: {} em `{mn}` sem a alteração e {} com ela (`{}`).",
-                if pl { "Testes de regressão" } else { "Teste de regressão" },
+                if fe { if pl { "Testes" } else { "Teste" } }
+                else if pl { "Testes de regressão" } else { "Teste de regressão" },
                 if pl { "falham" } else { "falha" },
                 if pl { "passam" } else { "passa" },
                 f["test_cmd"].as_str().unwrap_or("")
@@ -2009,8 +2010,10 @@ async fn mkbody(a: &Ax, j: &mut Job) -> R<()> {
                     let wrong_language = pr_pt(a, j)
                         && ["## Cause", "## Fix", "## Verified", "## Not changed", "## Why", "## Change"]
                             .iter().any(|heading| s.contains(heading));
-                    if wrong_language {
-                        a.say("submit", "modelo de PR com secções em inglês; usado o corpo PT-PT determinístico", Some(j.id));
+                    let missing_reference = j.kind == "fix" && !j.own()
+                        && !s.contains(&format!("{} #{}", if j.feat() { "Closes" } else { "Fixes" }, j.num));
+                    if wrong_language || missing_reference {
+                        a.say("submit", "modelo de PR rejeitado por idioma ou referência em falta; usado o corpo estruturado", Some(j.id));
                     } else {
                         b = s.trim().to_string();
                         if j.own() {
