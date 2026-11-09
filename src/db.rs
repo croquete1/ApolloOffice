@@ -38,6 +38,8 @@ fn mig(c: &Connection) {
     let _ = c.execute("alter table rp add column auto_merge int default 0", []);
     // O encaminhamento de revisões é opt-in; nunca inicia trabalho após uma migração.
     let _ = c.execute("alter table rp add column steward_repair int default 0", []);
+    // Modo sem proteção nativa: exige provas locais e autorização explícita.
+    let _ = c.execute("alter table rp add column local_merge int default 0", []);
 }
 
 pub type P = Vec<Box<dyn ToSql + Send>>;
