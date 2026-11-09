@@ -53,8 +53,9 @@ def fixture(active: bool) -> dict:
               "net": {"local": True, "gh": True, "an": True}},
         "w": workers, "q": jobs, "dn": [], "pr": [],
         "mg": [], "ev": [], "n": counts, "fl": [], "ln": {}, "cil": {},
-        "hs": [{"id": "local", "on_": 1}],
-        "hst": {"local": {"t": stamp, "cpu": 8, "mem": [16384, 8192]}},
+        "hs": [{"id": "local", "on_": 1, "ln": 1, "dk": 1}],
+        "hst": {"local": {"t": stamp, "cpu": 8, "load": 5.93,
+                          "mem": [16384, 8192], "disk": [100, 57], "temp": 83}},
         "lm": None, "star": None,
     }
 
@@ -82,6 +83,18 @@ class Handler(SimpleHTTPRequestHandler):
       var overlay = document.getElementById("aoAgentOverlay");
       assert(Boolean(app), "Control Room indisponível");
       assert(Boolean(fixer), "Personagem Fixer em falta");
+      var machine = document.querySelector('.ao-machine-card[data-telemetry-fresh="true"]');
+      assert(Boolean(machine), "Métricas recentes da máquina não apresentadas");
+      if (machine) {
+        assert(machine.textContent.includes("Este computador"), "Nome da máquina não localizado");
+        assert(machine.textContent.includes("Carga média: 5,93"),
+               "Carga média inexistente ou apresentada como percentagem de CPU");
+        assert(machine.textContent.includes("Sensor não identificado"),
+               "A temperatura não esclarece a origem desconhecida do sensor");
+        assert(machine.textContent.includes("57 GB livres"), "Espaço livre não apresentado");
+        assert(machine.querySelectorAll('[role="progressbar"]').length === 2,
+               "RAM e disco devem ser as únicas métricas percentuais");
+      }
       var room = document.querySelector(".ao-office");
       assert(room && room.dataset.visualVersion === "2",
              "O escritório 2.5D premium não está ativo");
