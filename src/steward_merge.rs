@@ -70,6 +70,84 @@ fn candidate(listed: &Value, assessed: &Value) -> Result<(i64, String), &'static
     Ok((number, head.to_string()))
 }
 
+/// O modo local exige os mesmos bloqueios de conflito, Draft, duplicação e sensibilidade,
+/// mas substitui os checks GitHub por provas locais do ApolloOffice do mesmo conteúdo.
+fn local_candidate(listed: &Value, assessed: &Value) -> Result<(i64, String), &'static str> {
+    if assessed["overlaps"].as_array().is_none_or(|x| !x.is_empty())
+        || assessed["possible_duplicates"]
+            .as_array()
+            .is_none_or(|x| !x.is_empty())
+        || assessed["checks"] == "falhou"
+        || listed["reviewDecision"] == "CHANGES_REQUESTED"
+    {
+        return Err("conflitos, checks falhados, duplicação ou revisão com alterações pedidas");
+    }
+    if listed["isDraft"] != false || listed["mergeStateStatus"] != "CLEAN" {
+        return Err("PR Draft ou sem merge limpo");
+    }
+    let n = listed["number"].as_i64().filter(|n| *n > 0).ok_or("número inválido")?;
+    let sha = listed["headRefOid"].as_str().ok_or("SHA ausente")?;
+    if sha.len() != 40 || !sha.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return Err("SHA inválido");
+    }
+    Ok((n, sha.to_string()))
+}
+
+/// Provas são recolhidas na CI e review do próprio ApolloOffice antes da publicação.
+/// A árvore Git é estável durante squash, ao contrário do SHA do commit.
+fn local_proof(job: &Value, head: &str, base: &str, tree: &str, ci: &str) -> bool {
+    let d = &job["d"];
+    let reviewed_by = d["last_review"]["model"].as_str().unwrap_or("");
+    let author = d["author"].as_str().unwrap_or("");
+    job["st"] == "done"
+        && (job["kind"] == "fix" || job["kind"] == "review")
+        && d["published_sha"] == head
+        && d["base"] == base
+        && d["ci_tree"] == tree
+        && d["publish_tree"] == tree
+        && d["ci_evidence"]["exit"] == 0
+        && d["ci_evidence"]["command"] == ci
+        && d["ci_evidence"]["candidate"]
+            .as_str()
+            .is_some_and(|s| s.len() == 40 && s.bytes().all(|c| c.is_ascii_hexdigit()))
+        && d["ci_verified_at"].as_i64().is_some_and(|v| v > 0)
+        && d["last_review"]["t"]
+            .as_i64()
+            .is_some_and(|v| v >= d["ci_verified_at"].as_i64().unwrap_or(i64::MAX))
+        && d["last_review"]["verdict"]["ok"] == true
+        && !author.is_empty()
+        && !reviewed_by.is_empty()
+        && author != reviewed_by
+}
+
+fn remote_checks_clean(checks: &Value, status: &Value) -> bool {
+    let Some(runs) = checks["check_runs"].as_array() else {
+        return false;
+    };
+    let count = checks["total_count"].as_u64().unwrap_or(u64::MAX);
+    if count > 100 || count != runs.len() as u64 {
+        return false;
+    }
+    if !runs
+        .iter()
+        .all(|r| r["status"] == "completed" && r["conclusion"] == "success")
+    {
+        return false;
+    }
+    let Some(contexts) = status["statuses"].as_array() else {
+        return false;
+    };
+    contexts.is_empty()
+        || (status["state"] == "success" && contexts.iter().all(|r| r["state"] == "success"))
+}
+
+fn no_outstanding_reviews(reviews: &Value) -> bool {
+    reviews.as_array().is_some_and(|rs| {
+        rs.len() < 100
+            && !rs.iter().any(|r| r["state"] == "CHANGES_REQUESTED")
+    })
+}
+
 fn reviewed(reviews: &Value, author: &str, head: &str) -> bool {
     let Some(rows) = reviews.as_array() else {
         return false;
