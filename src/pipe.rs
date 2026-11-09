@@ -3226,7 +3226,18 @@ async fn pick(a: &Ax, h: &str) -> Option<i64> {
         if !pin && j["kind"] == "fix" {
             let mo = rr["maxo"].as_i64().unwrap_or(3);
             let md = rr["maxd"].as_i64().unwrap_or(5);
-            if crate::gh::opened(a, &r).await + a.db.n("select count(*) from jobs where repo=? and kind='fix' and st in ('repro','fix','ci','review','gate','submit')", pa![r.clone()]) >= mo || crate::gh::today(a, &r).await >= md {
+            // Zero disables the respective PR quota without disabling the queue gates.
+            let open_full = mo > 0
+                && pr_quota_hit(
+                    mo,
+                    crate::gh::opened(a, &r).await
+                        + a.db.n(
+                            "select count(*) from jobs where repo=? and kind='fix' and st in ('repro','fix','ci','review','gate','submit')",
+                            pa![r.clone()],
+                        ),
+                );
+            let daily_full = md > 0 && pr_quota_hit(md, crate::gh::today(a, &r).await);
+            if open_full || daily_full {
                 continue;
             }
         }
@@ -3242,6 +3253,10 @@ async fn pick(a: &Ax, h: &str) -> Option<i64> {
         return Some(id);
     }
     None
+}
+
+fn pr_quota_hit(limit: i64, used: i64) -> bool {
+    limit > 0 && used >= limit
 }
 
 pub fn bl(a: &Ax, r: &str) -> i64 {
@@ -3625,6 +3640,20 @@ mod t {
         .contains("fails with the feature"));
         assert!(judgef(&ts, 0, "", 0, "").contains("already passes"));
         assert!(judgef(&ts, 101, "t_empty FAILED", 1, "boom").contains("with the feature"));
+    }
+
+    #[test]
+    fn pr_quota_zero_means_unlimited() {
+        // A missing cap does not block either new PRs or work already in flight.
+        assert!(!pr_quota_hit(0, 0));
+        assert!(!pr_quota_hit(0, 2));
+        assert!(!pr_quota_hit(0, 1_000_000));
+        // Positive caps retain the existing inclusive boundary.
+        assert!(!pr_quota_hit(2, 1));
+        assert!(pr_quota_hit(2, 2));
+        assert!(pr_quota_hit(2, 3));
+        assert!(!pr_quota_hit(5, 4));
+        assert!(pr_quota_hit(5, 5));
     }
 
     #[test]
