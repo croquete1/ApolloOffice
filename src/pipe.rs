@@ -1239,12 +1239,12 @@ fn body_lang(j: &Job, f: &Value, ci: &str, ft: &str, pt: bool) -> String {
     }
     let fe = j.feat();
     v.extend([
-        if pt { if fe { "## Motivo" } else { "## Causa" } }
-              else if fe { "## Why" } else { "## Cause" }.into(),
+        (if pt { if fe { "## Motivo" } else { "## Causa" } }
+              else if fe { "## Why" } else { "## Cause" }).into(),
         g("cause"),
         String::new(),
-        if pt { if fe { "## Alterações" } else { "## Correção" } }
-              else if fe { "## Change" } else { "## Fix" }.into(),
+        (if pt { if fe { "## Alterações" } else { "## Correção" } }
+              else if fe { "## Change" } else { "## Fix" }).into(),
         g("fix"),
         String::new(),
         (if pt { "## Validação" } else { "## Verified" }).into(),
@@ -1995,17 +1995,30 @@ async fn mkbody(a: &Ax, j: &mut Job) -> R<()> {
                 Some(j.id),
             );
             let md = a.md("reviewer");
-            let mut o = Ask::new("submit", md, P("desc"), format!("Fill in this repository's pull request template for the change below. Keep the template's headings and checklist structure. Tick a checkbox only when the facts below prove it (tests added, tests pass, CI command passes, linked issue). Remove instructions and HTML comments that are meant for the author. Put the facts into the matching sections; if a fact has no section, keep it in a section at the end. Use only the facts given, never invent. Answer only with JSON {{\"body\": \"the filled template in Markdown\"}}.\n\n{}\n\nFacts (our PR text):\n{}", wrap("template", &crate::sh::head(&t, 8000)), body_lang(j, &f, &ci, "", pr_pt(a, j))));
+            let instructions = if pr_pt(a, j) {
+                "Preencha o modelo de Pull Request com a informação abaixo. Preserve a estrutura e os títulos em PT-PT. Todo o texto narrativo deve estar em português de Portugal, incluindo títulos e listas. Assinale uma checkbox apenas quando os factos provarem o respetivo resultado. Remova instruções e comentários HTML do modelo. Nunca invente testes ou aprovações. Preserve identificadores técnicos, comandos e a referência 'Fixes #N'. Responda apenas com JSON de chave 'body' e valor Markdown."
+            } else {
+                "Fill in this repository's pull request template for the change below. Keep the template's headings and checklist structure. Tick a checkbox only when the facts below prove it (tests added, tests pass, CI command passes, linked issue). Remove instructions and HTML comments that are meant for the author. Put the facts into the matching sections; if a fact has no section, keep it in a section at the end. Use only the facts given, never invent. Answer only with JSON with key 'body' and Markdown string value."
+            };
+            let mut o = Ask::new("submit", md, P("desc"), format!("{instructions}\n\n{}\n\nFacts (our PR text):\n{}", wrap("template", &crate::sh::head(&t, 8000)), body_lang(j, &f, &ci, "", pr_pt(a, j))));
             o.job = Some(j.id);
             o.ef = Some("low");
             if let Ok((_, js)) = ask(a, o).await {
                 if let Some(s) = js["body"].as_str().filter(|s| s.len() > 40) {
+                    // A template model must not silently reintroduce English headings.
+                    let wrong_language = pr_pt(a, j)
+                        && ["## Cause", "## Fix", "## Verified", "## Not changed", "## Why", "## Change"]
+                            .iter().any(|heading| s.contains(heading));
+                    if wrong_language {
+                        a.say("submit", "modelo de PR com secções em inglês; usado o corpo PT-PT determinístico", Some(j.id));
+                    } else {
                     b = s.trim().to_string();
                     if j.own() {
                         b = san(&b);
                     }
                     if !b.contains(ft) {
                         b = format!("{b}\n\n{ft}");
+                    }
                     }
                 }
             }
@@ -2588,7 +2601,10 @@ async fn desc(a: &Ax, j: &mut Job) -> R<Value> {
         60,
     )
     .await?;
-    let mut o = Ask::new("fixer", a.md("reviewer"), P("desc"), format!("Repository {}. {}\n\nProof lines from the verification run:\n{}\n\nCommits:\n{lg}\n\nDiff:\n{df}\n\nAnswer with {{\"title\": \"PR title, imperative, max 72 chars\", \"cause\": \"root cause, 1-3 sentences\", \"fix\": \"what changed, 1-3 sentences\", \"untouched\": \"\", \"tests\": [\"exact names of the regression tests added in the diff\"], \"test_cmd\": \"exact shell command from the repo root that runs only those tests\"}}", j.repo, wrap("issue", &format!("{}\n\n{}", j.title, crate::sh::head(&j.s("body"), 3000))), j.d["proof"]));
+    let locale = if pr_pt(a, j) {
+        "Idioma obrigatório: português de Portugal (PT-PT). O título, a causa, a correção e o texto fora do âmbito devem estar integralmente em PT-PT. Preservar comandos, nomes técnicos, identificadores dos testes e as chaves JSON. Não traduzir código.\n\n"
+    } else { "" };
+    let mut o = Ask::new("fixer", a.md("reviewer"), P("desc"), format!("{locale}Repository {}. {}\n\nProof lines from the verification run:\n{}\n\nCommits:\n{lg}\n\nDiff:\n{df}\n\nAnswer with {{\"title\": \"PR title, imperative, max 72 chars\", \"cause\": \"root cause, 1-3 sentences\", \"fix\": \"what changed, 1-3 sentences\", \"untouched\": \"\", \"tests\": [\"exact names of the regression tests added in the diff\"], \"test_cmd\": \"exact shell command from the repo root that runs only those tests\"}}", j.repo, wrap("issue", &format!("{}\n\n{}", j.title, crate::sh::head(&j.s("body"), 3000))), j.d["proof"]));
     o.job = Some(j.id);
     o.ef = Some("medium");
     let (_, js) = ask(a, o).await?;
@@ -3503,6 +3519,25 @@ mod t {
         assert!(b.starts_with("Closes #9"));
         assert!(b.contains("## Why") && b.contains("## Change") && !b.contains("## Cause"));
         assert!(b.contains("Test `t1`: fails on `main` without the change"));
+    }
+
+    #[test]
+    fn portuguese_pr_body_preserves_github_linkage_and_disclosure() {
+        let j = Job::of(
+            json!({"id": 50, "repo": "o/r", "num": 42, "kind": "fix", "title": "T",
+                "d": {"mn": "main", "known": []}}),
+        );
+        let f = json!({"cause": "A causa.", "fix": "A correção.", "tests": ["teste_repro"],
+            "test_cmd": "npm test", "untouched": "Sem alterações financeiras."});
+        let b = body_lang(&j, &f, "npm run test:smoke", FOOT_PT, true);
+        assert!(b.starts_with("Fixes #42"));
+        assert!(b.contains("## Causa\nA causa."));
+        assert!(b.contains("## Correção\nA correção."));
+        assert!(b.contains("## Validação"));
+        assert!(b.contains("Teste de regressão `teste_repro`: falha em `main`"));
+        assert!(b.contains("## Fora do âmbito"));
+        assert!(b.ends_with(FOOT_PT));
+        assert!(!b.contains("## Verified"));
     }
 
     #[test]
