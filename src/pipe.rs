@@ -2928,6 +2928,9 @@ async fn mergecheck(a: &Ax, j: &mut Job) -> R<()> {
         Some(j.id),
     );
     clean(a, j).await;
+    // Só acorda o Steward depois de persistir CI, revisão e job concluído.
+    // A decisão de merge continua a passar por todos os gates do try_one().
+    a.steward_wake.notify_one();
     Ok(())
 }
 
