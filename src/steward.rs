@@ -1,6 +1,6 @@
-//! Reconciliação de PRs em modo estritamente consultivo.
-//! Nunca faz merge, fecha PRs ou altera branches. O futuro modo de integração
-//! exige provas independentes e uma autorização separada, não um simples verdict AI.
+//! Reconciliação periódica e diagnóstico consultivo das PRs.
+//! O merge é opt-in por repositório, sujeito aos gates conservadores definidos
+//! em steward_merge; a triagem nunca fecha PRs nem altera branches.
 use crate::app::{sl, Ax};
 use crate::db::now;
 use crate::pa;
