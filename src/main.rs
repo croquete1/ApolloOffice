@@ -13,6 +13,7 @@ mod routing;
 mod sh;
 mod star;
 mod steward;
+mod steward_merge;
 mod sys;
 mod upd;
 mod vault;
