@@ -36,6 +36,8 @@ fn mig(c: &Connection) {
     let _ = c.execute("alter table rp add column lang text default 'en'", []);
     // Nunca ativar merge automático em instalações existentes por migração.
     let _ = c.execute("alter table rp add column auto_merge int default 0", []);
+    // O encaminhamento de revisões é opt-in; nunca inicia trabalho após uma migração.
+    let _ = c.execute("alter table rp add column steward_repair int default 0", []);
 }
 
 pub type P = Vec<Box<dyn ToSql + Send>>;
