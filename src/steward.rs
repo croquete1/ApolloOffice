@@ -200,6 +200,10 @@ pub async fn scan(a: &Ax, repo: &str) -> Result<(), String> {
         "select steward_repair from rp where full=? and on_=1",
         pa![repo.to_string()],
     ) == 1;
+    let local_merge_enabled = a.db.n(
+        "select local_merge from rp where full=? and on_=1 and auto_merge=1",
+        pa![repo.to_string()],
+    ) == 1;
     let summary = json!({
         "review_requested": report.iter().filter(|p| p["review"] == "CHANGES_REQUESTED").count(),
         "ci_failed": report.iter().filter(|p| p["checks"] == "falhou").count(),
@@ -219,6 +223,7 @@ pub async fn scan(a: &Ax, repo: &str) -> Result<(), String> {
             "prs": report.clone(),
             "read_only": !merge_enabled,
             "merge_enabled": merge_enabled,
+            "local_merge_enabled": local_merge_enabled,
             "repair_enabled": repair_enabled
         }),
     );
