@@ -125,7 +125,7 @@
         <label>PR language</label><select name="lang"><option value="en" ${r.lang !== "pt-PT" ? "selected" : ""}>English</option><option value="pt-PT" ${r.lang === "pt-PT" ? "selected" : ""}>Português de Portugal (PT-PT)</option></select>
         <label>Pull requests</label><select name="mode"><option value="ask" ${r.mode !== "auto" ? "selected" : ""}>wait for my approval</option><option value="auto" ${r.mode === "auto" ? "selected" : ""}>submit automatically</option></select>
         <label>Limits</label><div class="lm"><span>open</span><input type="number" name="maxo" min="0" max="10000" value="${r.maxo}"><span>new per day</span><input type="number" name="maxd" min="0" max="10000" value="${r.maxd}"><span>USD per day</span><input type="number" name="bud" min="0" step="0.01" value="${r.bud || 0}"></div>
-        <div class="hint">Most open PRs at once and new PRs per day. The daily budget counts API keys only, 0 = no limit.</div>
+        <div class="hint">Set open or new per day to 0 for unlimited PRs. Queue capacity, CI and review still apply. The daily budget counts API keys only; 0 = no limit.</div>
         <label>PR footer</label>${tg("nm", r.nm ?? 1, "mention ApolloOffice with a link")}
         <div class="hint">The AI note and the Co-Authored-By trailers are always added.</div>
         <label>Your rules</label><textarea name="rules" placeholder="optional, e.g. never touch the plugin API">${esc(r.rules)}</textarea>
