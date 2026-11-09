@@ -89,6 +89,22 @@ For an existing installation, **first stop the running application and back up i
 
 See [Fork security and configuration](docs/fork-security.md) for safe updates and OAuth credential rotation.
 
+### Worker com Node.js 24 (FixFlow)
+
+Este fork fixa Node.js **24.22.2** na definição da imagem Docker do ApolloOffice e verifica
+o arquivo através dos SHA-256 oficiais. Não depende do Node 20 do Debian.
+
+Após compilar e instalar **a versão deste fork que contém a correção**, termine primeiro
+os jobs em curso. No painel **Machines → This computer**, grave novamente as definições
+do worker Docker. A alteração à definição da imagem muda o seu identificador e obriga
+à reconstrução e recriação do contentor `apollo-office`. Os volumes nomeados
+`apollo-office-work` e `apollo-office-cargo` são preservados; as alterações feitas
+manualmente **dentro do contentor** não são preservadas.
+
+Confirme com `sudo docker exec apollo-office node -v` e `npm -v`, que devem indicar
+Node `v24.22.2` e npm incluído no Node 24. **Não reconstrua com jobs ativos.**
+
+
 It prints a one-time login link. Open it and follow the setup: add a machine,
 add a repository, check its test command.
 
