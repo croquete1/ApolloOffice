@@ -318,3 +318,25 @@ pub fn day0() -> i64 {
         .map(|d| d.timestamp_millis())
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pull_request_language_persists_with_english_as_default() {
+        let db = Db::mem();
+        db.run("insert into rp(full) values(?)", crate::pa!["o/r".to_string()]);
+        assert_eq!(
+            db.one("select lang from rp where full=?", crate::pa!["o/r".to_string()])
+                .unwrap()["lang"],
+            "en"
+        );
+        db.run("update rp set lang=? where full=?", crate::pa!["pt-PT".to_string(), "o/r".to_string()]);
+        assert_eq!(
+            db.one("select lang from rp where full=?", crate::pa!["o/r".to_string()])
+                .unwrap()["lang"],
+            "pt-PT"
+        );
+    }
+}
