@@ -409,6 +409,10 @@ fn sets(a: &Ax, b: &Value) {
     }
 }
 
+fn pr_lang(value: &str) -> &'static str {
+    if value == "pt-PT" { "pt-PT" } else { "en" }
+}
+
 const RPF: &[&str] = &[
     "iss", "hunt", "feat", "nm", "on_", "maxo", "maxd", "bud", "ci", "setup", "rules", "mode",
     "skl", "lang",
@@ -491,7 +495,7 @@ fn import(a: &Ax, b: &Value) -> Result<String, String> {
                     let t = if *k == "mode" && t != "auto" {
                         "ask".to_string()
                     } else if *k == "lang" {
-                        (if t == "pt-PT" { "pt-PT" } else { "en" }).to_string()
+                        pr_lang(t).to_string()
                     } else {
                         crate::sh::head(t.trim(), 4000)
                     };
@@ -1311,8 +1315,8 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                                 if k == "mode" && s != "auto" {
                                     s = "ask".into();
                                 }
-                                if k == "lang" && s != "pt-PT" {
-                                    s = "en".into();
+                                if k == "lang" {
+                                    s = pr_lang(&s).into();
                                 }
                                 s = crate::sh::head(&s, 4000);
                                 a.db.run(
@@ -1829,6 +1833,14 @@ mod t {
         )
         .unwrap();
         assert_ne!(x["id"], z["id"]);
+    }
+
+    #[test]
+    fn pull_request_language_has_a_strict_fallback() {
+        assert_eq!(pr_lang("pt-PT"), "pt-PT");
+        for invalid in ["", "pt", "pt-BR", "en-US", "../pt-PT"] {
+            assert_eq!(pr_lang(invalid), "en");
+        }
     }
 
     #[test]
