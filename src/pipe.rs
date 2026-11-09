@@ -1191,10 +1191,6 @@ fn san(s: &str) -> String {
         .to_string()
 }
 
-pub fn body(j: &Job, f: &Value, ci: &str, ft: &str) -> String {
-    body_lang(j, f, ci, ft, false)
-}
-
 fn body_lang(j: &Job, f: &Value, ci: &str, ft: &str, pt: bool) -> String {
     let g = |k: &str| {
         let s = f[k].as_str().unwrap_or("").to_string();
@@ -3600,22 +3596,23 @@ mod t {
             json!({"id": 5, "repo": "o/r", "num": 12, "kind": "fix", "title": "T", "d": {"mn": "main", "known": []}}),
         );
         let f = json!({"cause": "c", "fix": "f", "tests": ["t1"], "test_cmd": "cargo test t1", "untouched": ""});
-        let b = body(&j, &f, "cargo test", FOOT);
+        let b = body_lang(&j, &f, "cargo test", FOOT, false);
         assert!(b.starts_with("Fixes #12"));
         assert!(b.contains("`t1`: fails on `main`"));
         assert!(b.ends_with(FOOT));
-        assert!(!body(&j, &f, "cargo test", "").contains(FOOT));
+        assert!(!body_lang(&j, &f, "cargo test", "", false).contains(FOOT));
         assert!(
-            body(&j, &f, "cargo test", FOOT0).ends_with(FOOT0) && !FOOT0.contains("ApolloOffice")
+            body_lang(&j, &f, "cargo test", FOOT0, false).ends_with(FOOT0) && !FOOT0.contains("ApolloOffice")
         );
         let h = Job::of(
             json!({"id": 6, "repo": "o/r", "num": 0, "kind": "fix", "title": "T", "d": {"mn": "main", "hunt": {"where": "a.rs:3", "title": "x"}}}),
         );
-        let b = body(
+        let b = body_lang(
             &h,
             &json!({"cause": "Fixes #0. c", "fix": "f", "tests": ["a", "b"], "test_cmd": "t"}),
             "make test",
             FOOT,
+            false,
         );
         assert!(b.starts_with("Found while testing `a.rs:3`"));
         assert!(!b.contains("#0"));
@@ -3623,7 +3620,7 @@ mod t {
         let fj = Job::of(
             json!({"id": 7, "repo": "o/r", "num": 9, "kind": "fix", "title": "T", "d": {"mn": "main", "feat": true}}),
         );
-        let b = body(&fj, &f, "cargo test", "");
+        let b = body_lang(&fj, &f, "cargo test", "", false);
         assert!(b.starts_with("Closes #9"));
         assert!(b.contains("## Why") && b.contains("## Change") && !b.contains("## Cause"));
         assert!(b.contains("Test `t1`: fails on `main` without the change"));
