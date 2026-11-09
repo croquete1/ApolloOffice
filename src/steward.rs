@@ -155,6 +155,10 @@ pub async fn scan(a: &Ax, repo: &str) -> Result<(), String> {
         return Err(format!("{repo}: lista de PRs truncada"));
     }
     let report = assess(list);
+    let merge_enabled = a.db.n(
+        "select auto_merge from rp where full=? and on_=1",
+        pa![repo.to_string()],
+    ) == 1;
     let summary = json!({
         "total": report.len(),
         "draft": report.iter().filter(|p| p["state"] == "draft").count(),
@@ -167,10 +171,13 @@ pub async fn scan(a: &Ax, repo: &str) -> Result<(), String> {
         "at": now(),
         "repo": repo,
         "summary": summary,
-        "prs": report,
-        "read_only": true,
-        "merge_enabled": false
+        "prs": report.clone(),
+        "read_only": !merge_enabled,
+        "merge_enabled": merge_enabled
     }));
+    if merge_enabled {
+        crate::steward_merge::run(a, repo, list, &report).await;
+    }
     if prev["summary"] != summary {
         a.say(
             "watcher",
