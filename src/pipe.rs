@@ -2092,10 +2092,15 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
         .unwrap_or(f["title"].as_str().unwrap_or(&j.title).to_string());
     if j.kind == "fix" && !j.d["sq"].as_bool().unwrap_or(false) {
         let rf = if j.ext() {
-            "Reported to us directly".to_string()
+            (if pr_pt(a, j) { "Reportado diretamente" } else { "Reported to us directly" }).to_string()
         } else if j.hunt() || j.num == 0 {
-            format!("Found while testing {}", j.wh())
+            if pr_pt(a, j) {
+                format!("Encontrado durante os testes de {}", j.wh())
+            } else {
+                format!("Found while testing {}", j.wh())
+            }
         } else {
+            // Keep the GitHub auto-close keyword intact in every language.
             format!("Fixes #{}", j.num)
         };
         ok(
