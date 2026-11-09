@@ -538,8 +538,10 @@
       const running = fresh ? jobs.filter((j) => j.h === host.id && activeStages.has(j.st)).length : 0;
       const capacity = valid(host.ln);
       const workLabel = fresh && capacity != null && capacity > 0
-        ? running + " / " + capacity + " postos ocupados"
-        : "Ocupação por confirmar";
+        ? running + (running === 1 ? " tarefa visível" : " tarefas visíveis") +
+          " · " + number(capacity, 0) +
+          (capacity === 1 ? " posto configurado" : " postos configurados")
+        : "Atividade por confirmar";
       const metrics = [];
       if (fresh) {
         const cpu = valid(info.cpu), load = valid(info.load);
