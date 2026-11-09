@@ -57,7 +57,10 @@ fn check_state(pr: &Value) -> &'static str {
     }) {
         return "falhou";
     }
-    if checks.iter().all(|c| c["conclusion"] == "SUCCESS" || c["state"] == "SUCCESS") {
+    if checks
+        .iter()
+        .all(|c| c["conclusion"] == "SUCCESS" || c["state"] == "SUCCESS")
+    {
         return "aprovado";
     }
     "pendente"
@@ -167,14 +170,17 @@ pub async fn scan(a: &Ax, repo: &str) -> Result<(), String> {
     });
     let key = format!("steward:{repo}");
     let prev = a.db.kg(&key);
-    a.db.ks(&key, &json!({
-        "at": now(),
-        "repo": repo,
-        "summary": summary,
-        "prs": report.clone(),
-        "read_only": !merge_enabled,
-        "merge_enabled": merge_enabled
-    }));
+    a.db.ks(
+        &key,
+        &json!({
+            "at": now(),
+            "repo": repo,
+            "summary": summary,
+            "prs": report.clone(),
+            "read_only": !merge_enabled,
+            "merge_enabled": merge_enabled
+        }),
+    );
     if merge_enabled {
         crate::steward_merge::run(a, repo, list, &report).await;
     }
@@ -194,10 +200,8 @@ pub async fn scan(a: &Ax, repo: &str) -> Result<(), String> {
 pub async fn run(a: Ax) {
     loop {
         if !a.hold("watcher") && !a.drain.load(std::sync::atomic::Ordering::Relaxed) {
-            let repos = a.db.all(
-                "select full from rp where on_=1 order by full",
-                pa![],
-            );
+            let repos =
+                a.db.all("select full from rp where on_=1 order by full", pa![]);
             for row in repos {
                 if a.hold("watcher") {
                     break;
