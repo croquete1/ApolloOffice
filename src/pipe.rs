@@ -1040,7 +1040,12 @@ async fn ci0(a: &Ax, j: &mut Job) -> R<String> {
         a.say("ci", &format!("{c} running for {}", j.tag()), Some(j.id));
         let t0 = now();
         let (ec, o) = cirun(a, j, None).await;
-        j.d["ci_evidence"] = json!({"command":c,"exit":ec,"output_tail":crate::sh::last(&o,4000),"candidate":j.d["proof"]["fix_commit"]});
+        let candidate = if j.kind == "mergecheck" {
+            j.d["expected_head"].clone()
+        } else {
+            j.d["proof"]["fix_commit"].clone()
+        };
+        j.d["ci_evidence"] = json!({"command":c,"exit":ec,"output_tail":crate::sh::last(&o,4000),"candidate":candidate});
         a.db.jd(j);
         let m = (now() - t0) / 60000;
         if ec == 0 {
@@ -1433,7 +1438,7 @@ async fn review_mode(a: &Ax, j: &mut Job, f: &mut Value, diagnostic: bool) -> R<
     let p = format!(
         "Repository {}, {}.\n\n{}\n\n{}Commit messages:\n{lg}\n\nPR title: {}\nPR body:\n{}\n\nDiff:\n{df}{}",
         j.repo,
-        if j.own() { "no GitHub issue (the PR must not reference any issue number)".to_string() } else { format!("issue #{}", j.num) },
+        if j.kind == "mergecheck" { format!("PR #{} — validação para possível merge", j.pr.unwrap_or(0)) } else if j.own() { "no GitHub issue (the PR must not reference any issue number)".to_string() } else { format!("issue #{}", j.num) },
         wrap("issue", &format!("{}\n\n{}", j.title, crate::sh::head(&j.s("body"), 4000))),
         if j.kind == "review" { format!("{}\n\n", wrap("request", &j.s("change"))) } else if j.feat() { "This PR implements a requested FEATURE, not a bug fix. Judge it as a feature: it does what the issue asks, completely but minimally; the tests check the new behaviour (on the test commit they may fail to compile because the new API is missing); no unrelated changes; no surprising changes to defaults, file formats or visible design beyond what the issue asks.\n\n".to_string() } else { String::new() },
         f["title"].as_str().unwrap_or(""),
@@ -2821,6 +2826,106 @@ fn idle_all(a: &Ax, id: i64) {
     }
 }
 
+/// Revalidação de uma PR existente, sem criar commits nem publicar alterações.
+/// Usa o mesmo worker e a mesma CI do pipeline normal.
+async fn mergecheck(a: &Ax, j: &mut Job) -> R<()> {
+    let head = j.s("expected_head");
+    let base = j.s("expected_base");
+    let branch = j.s("branch");
+    let valid_sha = |s: &str| {
+        s.len() == 40 && s.bytes().all(|c| c.is_ascii_hexdigit())
+    };
+    if !valid_sha(&head) || !valid_sha(&base) || branch.is_empty()
+        || j.pr.is_none() || j.s("author").is_empty()
+    {
+        return drop("provas insuficientes para revalidar PR");
+    }
+    let number = j.pr.unwrap_or(0);
+    let before = ghj(
+        &["api", &format!("repos/{}/pulls/{number}", j.repo)],
+        45,
+    )
+    .await
+    .map_err(X::E)?;
+    if before["head"]["sha"] != head
+        || before["base"]["sha"] != base
+        || before["head"]["ref"] != branch
+        || before["head"]["repo"]["full_name"] != j.repo
+        || before["state"] != "open"
+        || before["draft"] != false
+    {
+        return drop("PR mudou antes de executar testes locais");
+    }
+
+    prep(a, j).await?;
+    let actual_head = ok(a, j, "git rev-parse HEAD", 60).await?;
+    let main = crate::gh::meta(a, &j.repo)
+        .await
+        .map_err(X::E)?["main"]
+        .as_str()
+        .unwrap_or("main")
+        .to_string();
+    let actual_base = ok(a, j, &format!("git rev-parse origin/{}", q(&main)), 60).await?;
+    if actual_head != head || actual_base != base {
+        return drop("checkout da PR ou da main difere dos SHAs esperados");
+    }
+
+    // A comparação para o Reviewer deve usar a main, não o HEAD da própria PR.
+    j.d["base"] = json!(base);
+    j.d["body"] = before["body"].clone();
+    a.db.jd(j);
+    let ci_result = ci(a, j).await?;
+    if !ci_result.is_empty() {
+        return drop(format!("CI reprovada na revalidação: {}", crate::sh::head(&ci_result, 700)));
+    }
+    let mut report = json!({
+        "title":j.title,
+        "tests":[],
+        "test_cmd":rp(a, &j.repo)["ci"],
+        "cause":"Revisão de integração existente",
+        "fix":"Código existente sob revisão"
+    });
+    let feedback = review(a, j, &mut report).await?;
+    if !feedback.is_empty() {
+        return drop(format!("Reviewer reprovou: {}", crate::sh::head(&feedback, 700)));
+    }
+
+    let actual_head = ok(a, j, "git rev-parse HEAD", 60).await?;
+    let tree = ok(a, j, "git rev-parse HEAD^{tree}", 60).await?;
+    let fresh = ghj(
+        &["api", &format!("repos/{}/pulls/{number}", j.repo)],
+        45,
+    )
+    .await
+    .map_err(X::E)?;
+    if actual_head != head
+        || j.d["ci_tree"] != tree
+        || fresh["head"]["sha"] != head
+        || fresh["base"]["sha"] != base
+        || fresh["state"] != "open"
+        || fresh["draft"] != false
+    {
+        return drop("PR mudou entre testes, revisão e revalidação final");
+    }
+    j.d["published_sha"] = json!(head);
+    j.d["publish_tree"] = json!(tree);
+    a.db.jd(j);
+    a.db.jset(
+        j.id,
+        &[
+            ("st", json!("done")),
+            ("why", json!("revalidação local concluída; aguarda gate de merge")),
+        ],
+    );
+    a.say(
+        "reviewer",
+        &format!("{}#{number}: CI e revisão independente aprovadas no HEAD atual", j.repo),
+        Some(j.id),
+    );
+    clean(a, j).await;
+    Ok(())
+}
+
 async fn go(a: &Ax, id: i64, h: &str) {
     let Some(mut j) = a.db.jg(id) else { return };
     let rs = j.d["rs"].as_bool().unwrap_or(false);
@@ -2831,6 +2936,10 @@ async fn go(a: &Ax, id: i64, h: &str) {
     }
     a.say("repro", &format!("[{h}] takes {}", j.tag()), Some(id));
     let r: R<()> = async {
+        if j.kind == "mergecheck" {
+            mergecheck(a, &mut j).await?;
+            return Ok(());
+        }
         if j.st == "submit" {
             ok(a, &j, &format!("git checkout -q {}", q(&j.s("br"))), 120).await?;
             stage(a, "submit", || {
