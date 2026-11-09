@@ -333,7 +333,10 @@ fn fo(a: &Ax, j: &Job) -> &'static str {
 }
 
 fn pr_title(preferred: Option<&str>, f: &Value, fallback: &str) -> R<String> {
-    for value in [preferred, f["title"].as_str(), Some(fallback)].into_iter().flatten() {
+    for value in [preferred, f["title"].as_str(), Some(fallback)]
+        .into_iter()
+        .flatten()
+    {
         if let Some(title) = value.lines().find(|line| !line.trim().is_empty()) {
             return Ok(title.trim().to_string());
         }
