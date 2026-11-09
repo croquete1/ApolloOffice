@@ -33,6 +33,7 @@ fn mig(c: &Connection) {
     let _ = c.execute("alter table rp add column bud real default 0", []);
     let _ = c.execute("alter table rp add column feat int default 0", []);
     let _ = c.execute("alter table rp add column skl text default ''", []);
+    let _ = c.execute("alter table rp add column lang text default 'en'", []);
 }
 
 pub type P = Vec<Box<dyn ToSql + Send>>;
