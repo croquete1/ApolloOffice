@@ -549,7 +549,39 @@
     $("bp").onclick = repos;
   };
 
+  const steward = async () => {
+    show("Gestão de PRs · diagnóstico", "steward");
+    B.innerHTML = '<div class="msg">A consultar a fila de revisão…</div>';
+    const data = await get("/api/steward");
+    const reports = data.repos || [];
+    B.innerHTML = `<div class="sec"><div class="box">
+      <b>PR Steward — análise automática</b>
+      <div class="hint">Consulta o GitHub periodicamente. Identifica possíveis duplicações, conflitos, verificações e revisões pendentes. Não fecha nem integra PRs.</div>
+      <div class="acts"><button id="steRefresh" type="button">Atualizar painel</button></div>
+    </div></div>
+    ${reports.map(({ repo, report, error }) => {
+      const rows = report?.prs || [];
+      const at = report?.at ? new Date(report.at).toLocaleString("pt-PT") : "sem leitura";
+      return `<div class="sec"><h4>${esc(repo)}</h4><div class="box">
+        <div class="msg">${rows.length} PRs abertas · ${esc(at)}${error?.error ? " · Último erro: " + esc(error.error) : ""}</div>
+        ${!report || report.error ? '<div class="warn">Sem diagnóstico completo. Não é possível concluir que alguma PR esteja pronta.</div>' : ""}
+        ${rows.length ? rows.map((p) => `<div class="ck" style="margin:5px 0;align-items:flex-start;gap:8px">
+          <span class="pill">${esc(String(p.number))}</span>
+          <div style="flex:1;min-width:0">
+            <a href="${esc(p.url || "#")}" target="_blank" rel="noopener noreferrer"><b>${esc(p.title || "PR")}</b></a>
+            <div class="hint">Estado: ${esc(p.state)} · CI: ${esc(p.checks)} · Revisão: ${esc(p.review || "não verificada")}</div>
+            ${p.overlaps?.length ? `<div class="hint bad2">Ficheiros em comum com: #${p.overlaps.map(Number).join(", #")}</div>` : ""}
+            ${p.possible_duplicates?.length ? `<div class="hint bad2">Possível duplicação da mesma issue: #${p.possible_duplicates.map(Number).join(", #")}</div>` : ""}
+          </div>
+        </div>`).join("") : '<div class="empty">Não foram identificadas PRs nesta leitura.</div>'}
+      </div></div>`;
+    }).join("") || '<div class="empty">Não existem repositórios ativos.</div>'}`;
+    B.querySelector("#steRefresh").onclick = steward;
+  };
+  A.steward = steward;
+
   $("bRepos").onclick = repos;
+  $("bSteward").onclick = steward;
   $("bCost").onclick = costs;
   $("bHosts").onclick = hosts;
   A.hosts = hosts;
