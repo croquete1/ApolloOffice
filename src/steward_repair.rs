@@ -251,7 +251,7 @@ mod tests {
             && text.contains("null") && text.contains("src/form.ts")));
         assert!(actionable_request(&[review.clone()], &[], head, "reviewer").is_none());
         assert!(actionable_request(&[review.clone()], &[], "outro-head", "author").is_none());
-        let mut outsider = review;
+        let mut outsider = review.clone();
         outsider["author_association"] = json!("NONE");
         assert!(actionable_request(&[outsider], &[], head, "author").is_none());
         let mut newer = review.clone();
