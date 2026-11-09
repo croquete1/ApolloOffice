@@ -365,6 +365,96 @@ fn queue_recheck(a: &Ax, repo: &str, number: i64, head: &str, base: &str, detail
     inserted
 }
 
+// A reconciliação normal é sequencial. O guard protege também chamadas
+// concorrentes ao Steward dentro do mesmo processo (e é libertado no cancelamento).
+struct MergePermit {
+    app: Ax,
+    repo: String,
+}
+
+impl MergePermit {
+    fn acquire(app: &Ax, repo: &str) -> Option<Self> {
+        let mut active = app.merge_in_progress.lock().ok()?;
+        if !active.insert(repo.to_string()) {
+            return None;
+        }
+        Some(Self {
+            app: app.clone(),
+            repo: repo.to_string(),
+        })
+    }
+}
+
+impl Drop for MergePermit {
+    fn drop(&mut self) {
+        if let Ok(mut active) = self.app.merge_in_progress.lock() {
+            active.remove(&self.repo);
+        }
+    }
+}
+
+struct ExpectedMerge<'a> {
+    repo: &'a str,
+    base: &'a str,
+    base_sha: &'a str,
+    head: &'a str,
+    author: &'a str,
+    mode: MergeMode,
+}
+
+fn pr_current(pr: &Value, expected: &ExpectedMerge<'_>) -> bool {
+    pr["state"] == "open"
+        && pr["draft"] == false
+        && pr["head"]["sha"] == expected.head
+        && pr["base"]["sha"] == expected.base_sha
+        && pr["base"]["ref"] == expected.base
+        && pr["base"]["repo"]["full_name"] == expected.repo
+        && pr["user"]["login"] == expected.author
+        && pr["mergeable"] == true
+        && pr["mergeable_state"] == "clean"
+        && (expected.mode != MergeMode::Local
+            || pr["head"]["repo"]["full_name"] == expected.repo)
+}
+
+fn review_gate(reviews: &Value, expected: &ExpectedMerge<'_>) -> bool {
+    match expected.mode {
+        MergeMode::Blocked => false,
+        MergeMode::Protected => reviewed(reviews, expected.author, expected.head),
+        MergeMode::Local => no_outstanding_reviews(reviews, expected.head),
+    }
+}
+
+fn check_gate(checks: &Value, statuses: &Value, mode: MergeMode) -> bool {
+    match mode {
+        MergeMode::Blocked => false,
+        MergeMode::Protected => ci_verified(checks, statuses),
+        MergeMode::Local => remote_checks_clean(checks, statuses),
+    }
+}
+
+struct FinalReads {
+    pr: Value,
+    branch: Value,
+    reviews: Value,
+    threads_resolved: bool,
+    checks: Value,
+    statuses: Value,
+}
+
+// Avaliação do mesmo conjunto de leituras realmente usado antes do PUT.
+// Erros da API não produzem permissão de merge.
+fn final_gate(
+    reads: Result<FinalReads, String>,
+    expected: &ExpectedMerge<'_>,
+) -> Result<bool, String> {
+    let r = reads?;
+    Ok(pr_current(&r.pr, expected)
+        && r.branch["commit"]["sha"] == expected.base_sha
+        && r.threads_resolved
+        && review_gate(&r.reviews, expected)
+        && check_gate(&r.checks, &r.statuses, expected.mode))
+}
+
 async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result<bool, String> {
     let local_enabled = a.db.n(
         "select local_merge from rp where full=? and on_=1 and auto_merge=1",
@@ -449,9 +539,7 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
     )
     .await?;
     let statuses = ghj(&["api", &format!("repos/{repo}/commits/{head}/status")], 45).await?;
-    if (mode == MergeMode::Protected && !ci_verified(&checks, &statuses))
-        || (mode == MergeMode::Local && !remote_checks_clean(&checks, &statuses))
-    {
+    if !check_gate(&checks, &statuses, mode) {
         return Ok(false);
     }
     let reviews = ghj(
@@ -462,15 +550,15 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
         45,
     )
     .await?;
-    if !review_threads_resolved(repo, number).await?
-        || (mode == MergeMode::Protected
-            && !reviewed(
-                &reviews,
-                detail["user"]["login"].as_str().unwrap_or(""),
-                &head,
-            ))
-        || (mode == MergeMode::Local && !no_outstanding_reviews(&reviews, &head))
-    {
+    let expected = ExpectedMerge {
+        repo,
+        base,
+        base_sha,
+        head: &head,
+        author: detail["user"]["login"].as_str().unwrap_or(""),
+        mode,
+    };
+    if !review_threads_resolved(repo, number).await? || !review_gate(&reviews, &expected) {
         return Ok(false);
     }
     if mode == MergeMode::Local {
@@ -552,22 +640,51 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
     {
         return Ok(false);
     }
-    let fresh = ghj(&["api", &format!("repos/{repo}/pulls/{number}")], 40).await?;
-    if fresh["head"]["sha"] != head
-        || fresh["base"]["sha"] != base_sha
-        || fresh["draft"] != false
-        || fresh["mergeable"] != true
-        || fresh["mergeable_state"] != "clean"
-        || fresh["state"] != "open"
-    {
+    // Ler novamente revisões, threads, checks, base e PR antes do PUT.
+    // Uma resposta incompleta ou erro da API aborta o merge.
+    let read: Result<FinalReads, String> = async {
+        let reviews = ghj(
+            &["api", &format!("repos/{repo}/pulls/{number}/reviews?per_page=100")],
+            40,
+        )
+        .await?;
+        let threads_resolved = review_threads_resolved(repo, number).await?;
+        let checks = ghj(
+            &["api", &format!("repos/{repo}/commits/{head}/check-runs?per_page=100")],
+            40,
+        )
+        .await?;
+        let statuses =
+            ghj(&["api", &format!("repos/{repo}/commits/{head}/status")], 40).await?;
+        let branch = ghj(&["api", &format!("repos/{repo}/branches/{base}")], 40).await?;
+        let pr = ghj(&["api", &format!("repos/{repo}/pulls/{number}")], 40).await?;
+        Ok(FinalReads {
+            pr,
+            branch,
+            reviews,
+            threads_resolved,
+            checks,
+            statuses,
+        })
+    }
+    .await;
+    if !final_gate(read, &expected)? {
         return Ok(false);
     }
-
-    // O modo local NÃO protege a branch de pushes externos. Reduzir a janela:
-    // base e HEAD são revalidados imediatamente antes do PUT, sem --admin/force.
-    // O GitHub só oferece o campo sha para validar o HEAD da PR, não a base.
-    let latest = ghj(&["api", &format!("repos/{repo}/branches/{base}")], 40).await?;
-    if latest["commit"]["sha"] != base_sha {
+    // O modo local NÃO garante atomicidade face a outros processos:
+    // a API de merge só tem compare-and-swap para o HEAD da PR.
+    // A base é reconfirmada imediatamente antes da escrita.
+    if a.hold("watcher")
+        || a.db.n(
+            "select auto_merge from rp where full=? and on_=1",
+            pa![repo.to_string()],
+        ) != 1
+        || (mode == MergeMode::Local
+            && a.db.n(
+                "select local_merge from rp where full=? and on_=1",
+                pa![repo.to_string()],
+            ) != 1)
+    {
         return Ok(false);
     }
     // sha=HEAD impede integrar um commit da PR que tenha sido alterado.
@@ -620,6 +737,9 @@ pub async fn run(a: &Ax, repo: &str, listed: &[Value], assessed: &[Value]) {
     {
         return;
     }
+    let Some(_permit) = MergePermit::acquire(a, repo) else {
+        return;
+    };
     for (pr, status) in listed.iter().zip(assessed.iter()) {
         match try_one(a, repo, pr, status).await {
             Ok(true) => return,
