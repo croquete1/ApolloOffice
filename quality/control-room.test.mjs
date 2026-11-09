@@ -18,6 +18,24 @@ test("frontend scripts parse without extra dependencies", () => {
   assert.doesNotThrow(() => new Script(handoffs, { filename: "office-motion.js" }));
 });
 
+test("pixel-art office stays the default, modern dashboard requires explicit opt-in", () => {
+  assert.match(modern, /new URLSearchParams\(window\.location\.search\)\.get\("ui"\)/);
+  assert.match(modern, /if \(requestedUi !== "modern"\) return/);
+  assert.match(original, /requestAnimationFrame\(frame\)/);
+  assert.match(html, /<canvas id="cv"><\/canvas>/);
+});
+
+test("pixel machine tooltip does not misrepresent CPU load, temperature or stale data", () => {
+  assert.match(original, /carga média/);
+  assert.doesNotMatch(original, /load.*bar\(m\.load, m\.cpu\)/);
+  assert.match(original, /sensor não identificado/);
+  assert.match(original, /age < 120000/);
+  assert.match(original, /sem telemetria recente/);
+  assert.match(original, /available <= total/);
+  assert.match(original, /free <= total/);
+  assert.match(original, /clique para configurar as máquinas/);
+});
+
 test("Control Room is loaded after the original application", () => {
   assert.match(html, /href="control-room\.css"/);
   const iO = html.indexOf('src="o.js"');
