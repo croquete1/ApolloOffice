@@ -576,10 +576,30 @@ pub async fn hx(a: &App, id: &str, s: &str, t: u64) -> Out {
 pub const DF: &str = r#"FROM rust:1-trixie
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev clang cmake git curl ca-certificates procps xz-utils unzip libxdo-dev mesa-vulkan-drivers \
-    python3 python3-pip python3-venv python3-dev nodejs npm golang-go \
+    python3 python3-pip python3-venv python3-dev golang-go \
     libasound2-dev libfontconfig1-dev libfreetype-dev libgl1-mesa-dev libgtk-3-dev libwayland-dev \
     libx11-dev libxcursor-dev libxi-dev libxkbcommon-dev libxrandr-dev libudev-dev xvfb \
     && rm -rf /var/lib/apt/lists/*
+# Debian/Trixie provides Node 20; FixFlow requires >=24.22.1 <25.
+# Changing this Dockerfile also changes im(), forcing a new worker image.
+ARG NODE_VERSION=24.22.2
+RUN set -eu; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) node_arch=x64 ;; \
+      arm64) node_arch=arm64 ;; \
+      *) echo "Unsupported Node.js architecture" >&2; exit 1 ;; \
+    esac; \
+    archive="node-v${NODE_VERSION}-linux-${node_arch}.tar.xz"; \
+    url="https://nodejs.org/dist/v${NODE_VERSION}"; \
+    curl -fsSL --retry 3 -o "/tmp/${archive}" "${url}/${archive}"; \
+    curl -fsSL --retry 3 -o /tmp/SHASUMS256.txt "${url}/SHASUMS256.txt"; \
+    cd /tmp; \
+    grep -F "  ${archive}" SHASUMS256.txt | sha256sum -c -; \
+    mkdir -p /opt/node; \
+    tar -xJf "${archive}" -C /opt/node --strip-components=1; \
+    rm -f "${archive}" SHASUMS256.txt; \
+    test "$(/opt/node/bin/node --version)" = "v${NODE_VERSION}"
+ENV PATH="/opt/node/bin:${PATH}"
 RUN rustup component add rustfmt clippy && rustup target add wasm32-unknown-unknown && npm install -g pnpm yarn && pip3 install --break-system-packages pytest
 ENV CARGO_TERM_COLOR=never CARGO_INCREMENTAL=0 PIP_BREAK_SYSTEM_PACKAGES=1
 WORKDIR /work
@@ -735,6 +755,16 @@ fn api_pages(output: &str) -> Result<Vec<Value>, String> {
 #[cfg(test)]
 mod t {
     use super::*;
+
+    #[test]
+    fn worker_image_uses_verified_node24_instead_of_debian_node20() {
+        assert!(DF.contains("ARG NODE_VERSION=24.22.2"));
+        assert!(!DF.contains("nodejs npm"));
+        assert!(DF.contains("sha256sum -c -"));
+        assert!(DF.contains("ENV PATH=\"/opt/node/bin:${PATH}\""));
+        assert!(DF.contains("amd64) node_arch=x64"));
+        assert!(DF.contains("arm64) node_arch=arm64"));
+    }
 
     #[cfg(unix)]
     #[tokio::test]
