@@ -1027,6 +1027,39 @@ async fn ci(a: &Ax, j: &mut Job) -> R<String> {
     ci0(a, j).await
 }
 
+// A evidência mantém a identidade do mesmo commit, incluindo nas reexecuções
+// para excluir testes instáveis. Um mergecheck não tem proof.fix_commit.
+fn ci_evidence(kind: &str, data: &Value, command: &str, exit: i32, output: &str, rerun: bool) -> Value {
+    let candidate = if kind == "mergecheck" {
+        data["expected_head"].clone()
+    } else {
+        data["proof"]["fix_commit"].clone()
+    };
+    let mut result = json!({
+        "command": command,
+        "exit": exit,
+        "output_tail": crate::sh::last(output, 4000),
+        "candidate": candidate,
+    });
+    if rerun {
+        result["rerun"] = json!(true);
+    }
+    result
+}
+
+// A CI positiva, incluindo a repetição após um possível teste instável,
+// precisa da mesma prova de árvore e instante para os gates posteriores.
+async fn record_ci_success(a: &Ax, j: &mut Job) -> R<()> {
+    let tree = ok(a, j, "git rev-parse HEAD^{tree}", 60).await?;
+    if tree.is_empty() {
+        return drop("CI sem árvore Git verificável");
+    }
+    j.d["ci_tree"] = json!(tree);
+    j.d["ci_verified_at"] = json!(now());
+    a.db.jd(j);
+    Ok(())
+}
+
 async fn ci0(a: &Ax, j: &mut Job) -> R<String> {
     a.db.jset(j.id, &[("st", json!("ci"))]);
     a.st("ci", "work", Some(j.id), "");
@@ -1040,23 +1073,13 @@ async fn ci0(a: &Ax, j: &mut Job) -> R<String> {
         a.say("ci", &format!("{c} running for {}", j.tag()), Some(j.id));
         let t0 = now();
         let (ec, o) = cirun(a, j, None).await;
-        let candidate = if j.kind == "mergecheck" {
-            j.d["expected_head"].clone()
-        } else {
-            j.d["proof"]["fix_commit"].clone()
-        };
-        j.d["ci_evidence"] = json!({"command":c,"exit":ec,"output_tail":crate::sh::last(&o,4000),"candidate":candidate});
+        j.d["ci_evidence"] = ci_evidence(&j.kind, &j.d, &c, ec, &o, false);
         a.db.jd(j);
         let m = (now() - t0) / 60000;
         if ec == 0 {
             // A prova local de integração vincula testes à árvore concreta,
             // não ao SHA que muda quando se faz squash dos commits da PR.
-            let tree = ok(a, j, "git rev-parse HEAD^{tree}", 60).await?;
-            if !tree.is_empty() {
-                j.d["ci_tree"] = json!(tree);
-                j.d["ci_verified_at"] = json!(now());
-                a.db.jd(j);
-            }
+            record_ci_success(a, j).await?;
             a.st("ci", "idle", None, "ok");
             a.say("ci", &format!("green after {m} min"), Some(j.id));
             return Ok(String::new());
@@ -1169,9 +1192,10 @@ async fn ci0(a: &Ax, j: &mut Job) -> R<String> {
                     Some(j.id),
                 );
                 let (e2, o2) = cirun(a, j, None).await;
-                j.d["ci_evidence"] = json!({"command":c,"exit":e2,"output_tail":crate::sh::last(&o2,4000),"candidate":j.d["proof"]["fix_commit"],"rerun":true});
+                j.d["ci_evidence"] = ci_evidence(&j.kind, &j.d, &c, e2, &o2, true);
                 a.db.jd(j);
                 if e2 == 0 {
+                    record_ci_success(a, j).await?;
                     a.st("ci", "idle", None, "ok");
                     a.say("ci", "green on rerun (flaky test)", Some(j.id));
                     return Ok(String::new());
@@ -3649,6 +3673,33 @@ pub async fn guard(a: Ax) {
 #[cfg(test)]
 mod t {
     use super::*;
+
+    #[test]
+    fn mergecheck_retry_preserves_head_sha_and_negative_ci_evidence() {
+        let head = "0123456789abcdef0123456789abcdef01234567";
+        let data = json!({"expected_head":head, "proof":{"fix_commit":null}});
+        let first = ci_evidence("mergecheck", &data, "node --test", 1, "not ok 1\n# fail 1", false);
+        let retry = ci_evidence("mergecheck", &data, "node --test", 1, "not ok 1\n# fail 1", true);
+        assert_eq!(first["candidate"], json!(head));
+        assert_eq!(retry["candidate"], json!(head));
+        assert_eq!(retry["exit"], 1);
+        assert_eq!(retry["command"], "node --test");
+        assert_eq!(retry["rerun"], true);
+        assert!(retry["output_tail"].as_str().unwrap().contains("# fail 1"));
+    }
+
+    #[test]
+    fn own_fix_ci_evidence_keeps_its_fix_commit_and_green_retry_sha() {
+        let fix = "fedcba9876543210fedcba9876543210fedcba98";
+        let data = json!({"expected_head":null,"proof":{"fix_commit":fix}});
+        let initial = ci_evidence("fix", &data, "npm test", 1, "failure", false);
+        let retry = ci_evidence("fix", &data, "npm test", 0, "success", true);
+        assert_eq!(initial["candidate"], json!(fix));
+        assert_eq!(retry["candidate"], json!(fix));
+        assert_eq!(retry["exit"], 0);
+        assert_eq!(retry["rerun"], true);
+        assert!(initial.get("rerun").is_none());
+    }
 
     #[cfg(unix)]
     #[tokio::test]
