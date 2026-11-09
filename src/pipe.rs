@@ -334,17 +334,21 @@ fn fo(a: &Ax, j: &Job) -> &'static str {
 
 fn pr_title(preferred: Option<&str>, f: &Value, fallback: &str) -> R<String> {
     for candidate in [preferred, f["title"].as_str(), Some(fallback)] {
-        if let Some(title) = candidate
-            .and_then(|value| value.lines().find(|line| !line.trim().is_empty()))
-        {
-            return Ok(title.trim().to_string());
+        if let Some(value) = candidate {
+            if let Some(title) = value.lines().find(|line| !line.trim().is_empty()) {
+                return Ok(title.trim().to_string());
+            }
         }
     }
     e("cannot publish a pull request without a title")
 }
 
 fn commit_subject(title: &str, feature: bool) -> R<String> {
-    let title = title.lines().find(|line| !line.trim().is_empty()).unwrap_or("").trim();
+    let title = title
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .trim();
     if title.is_empty() {
         return e("cannot create a commit without a subject");
     }
@@ -354,13 +358,15 @@ fn commit_subject(title: &str, feature: bool) -> R<String> {
         r"^(?:feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(?:\([A-Za-z0-9_.-]+\))?!?:\s+\S",
     )
     .unwrap();
+    let kind = if feature { "feat" } else { "fix" };
     let subject = if conventional.is_match(title) {
         title.to_string()
     } else {
-        format!("{}: {title}", if feature { "feat" } else { "fix" })
+        format!("{kind}: {title}")
     };
     // The FixFlow commitlint configuration enforces a 120-character header.
-    Ok(subject.chars().take(120).collect::<String>().trim_end().to_string())
+    let header = subject.chars().take(120).collect::<String>();
+    Ok(header.trim_end().to_string())
 }
 
 fn kill(a: &Ax, j: &Job) -> R<()> {
