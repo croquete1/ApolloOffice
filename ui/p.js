@@ -561,12 +561,13 @@
       <div class="hint">Consulta o GitHub periodicamente. Identifica duplicações, conflitos, testes e revisões pendentes. A integração é opcional, por repositório, e exige gates independentes; por omissão não altera PRs.</div>
       <div class="acts"><button id="steRefresh" type="button">Atualizar painel</button></div>
     </div></div>
-    ${reports.map(({ repo, report, error }) => {
+    ${reports.map(({ repo, report, error, merge_error }) => {
       const rows = report?.prs || [];
       const at = report?.at ? new Date(report.at).toLocaleString("pt-PT") : "sem leitura";
       const mode = report?.merge_enabled ? "Integração ativada com verificações rigorosas" : "Apenas auditoria — integrações desativadas";
       return `<div class="sec"><h4>${esc(repo)}</h4><div class="box">
         <div class="msg">${rows.length} PRs abertas · ${esc(at)} · ${esc(mode)}${error?.error ? " · Último erro: " + esc(error.error) : ""}</div>
+        ${merge_error?.reason ? `<div class="warn">Integração bloqueada: ${esc(merge_error.reason)}</div>` : ""}
         ${!report || report.error ? '<div class="warn">Sem diagnóstico completo. Não é possível concluir que alguma PR esteja pronta.</div>' : ""}
         ${rows.length ? rows.map((p) => `<div class="ck" style="margin:5px 0;align-items:flex-start;gap:8px">
           <span class="pill">${esc(String(p.number))}</span>
