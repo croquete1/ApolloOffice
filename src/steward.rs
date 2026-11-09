@@ -57,7 +57,10 @@ fn check_state(pr: &Value) -> &'static str {
     }) {
         return "falhou";
     }
-    if checks.iter().all(|c| c["conclusion"] == "SUCCESS" || c["state"] == "SUCCESS") {
+    if checks
+        .iter()
+        .all(|c| c["conclusion"] == "SUCCESS" || c["state"] == "SUCCESS")
+    {
         return "aprovado";
     }
     "pendente"
@@ -187,10 +190,8 @@ pub async fn scan(a: &Ax, repo: &str) -> Result<(), String> {
 pub async fn run(a: Ax) {
     loop {
         if !a.hold("watcher") && !a.drain.load(std::sync::atomic::Ordering::Relaxed) {
-            let repos = a.db.all(
-                "select full from rp where on_=1 order by full",
-                pa![],
-            );
+            let repos =
+                a.db.all("select full from rp where on_=1 order by full", pa![]);
             for row in repos {
                 if a.hold("watcher") {
                     break;
