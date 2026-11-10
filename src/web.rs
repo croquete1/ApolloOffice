@@ -1127,6 +1127,7 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
     };
     match (m.as_str(), p) {
         ("GET", "/api/state") => js(state(a)),
+        ("GET", "/api/codex/limits") => js(crate::codex_usage::read(a).await),
         ("GET", "/api/cfg") => js(cfg(a)),
         ("GET", "/api/check") => js(checks(a).await),
         ("GET", "/api/report") => match repdetail(a, qv("id").parse().unwrap_or(0)) {
