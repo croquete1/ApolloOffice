@@ -55,14 +55,30 @@ def fixture(active: bool, telemetry: str = "", quota: str = "normal") -> dict:
         "status": "ok", "updated_at": stamp,
         "five_hour": {"remaining": 88, "resets_at": stamp // 1000 + 1800},
         "weekly": {"remaining": 59, "resets_at": stamp // 1000 + 400_000},
+        "weekly_forecast": {"status":"insufficient", "observed_hours":0, "estimated":True},
     }
+    if quota in ("forecast_risk", "forecast_on_track", "forecast_near", "forecast_low"):
+        mapping = {
+            "forecast_risk":"at_risk", "forecast_on_track":"on_track",
+            "forecast_near":"near_limit", "forecast_low":"low_use",
+        }
+        codex["weekly_forecast"] = {
+            "status": mapping[quota], "observed_hours": 12,
+            "projected_exhaust_at": stamp // 1000 + 72_000,
+            "estimated": True,
+        }
     if quota == "unavailable":
         codex = {"status": "unavailable"}
     elif quota == "weekly_only":
         codex["five_hour"] = None
-    elif quota == "stale":
+    elif quota in ("stale", "forecast_stale"):
         codex["status"] = "stale"
         codex["updated_at"] = stamp - 30 * 60_000
+        if quota == "forecast_stale":
+            codex["weekly_forecast"] = {
+                "status":"at_risk", "observed_hours":12,
+                "projected_exhaust_at":stamp // 1000 + 7200,
+            }
     return {
         "t": stamp, "v": "smoke-fixture", "nr": 1,
         "o": {"off": False, "man": False, "pause": "", "warn": False,
@@ -139,6 +155,9 @@ class Handler(SimpleHTTPRequestHandler):
       else if (quotaMode === "stale")
         assert(quota && quota.querySelector("#codexQuotaStatus")?.textContent.includes("Dados anteriores"),
                "Leitura anterior apresentada como atual");
+      else if (quotaMode === "forecast_risk")
+        assert(quota?.querySelector("#codexWeeklyForecast")?.textContent.includes("Risco de esgotamento"),
+               "Previsão de esgotamento em falta no dashboard moderno");
       var room = document.querySelector(".ao-office");
       assert(room && room.dataset.visualVersion === "2",
              "O escritório 2.5D premium não está ativo");
@@ -277,6 +296,26 @@ class Handler(SimpleHTTPRequestHandler):
     if (quotaMode === "stale" &&
         (!quota || !quota.querySelector("#codexQuotaStatus")?.textContent.includes("Dados anteriores")))
       errors.push("Quota antiga apresentada como atual");
+    var forecast = quota?.querySelector("#codexWeeklyForecast");
+    if (!forecast) errors.push("Nota de previsão semanal em falta");
+    if (quotaMode === "forecast_risk" &&
+        (!forecast?.textContent.includes("Risco de esgotamento") ||
+         forecast.dataset.risk !== "risk"))
+      errors.push("Risco de esgotamento não foi sinalizado");
+    if (quotaMode === "forecast_near" &&
+        !forecast?.textContent.includes("Previsão próxima da reposição"))
+      errors.push("Risco próximo da reposição não foi sinalizado");
+    if (quotaMode === "forecast_on_track" &&
+        (!forecast?.textContent.includes("não deverá esgotar") ||
+         !forecast?.textContent.includes("Estimativa, não garantia")))
+      errors.push("Previsão sustentável apresentada sem ressalva");
+    if (quotaMode === "forecast_low" &&
+        !forecast?.textContent.includes("Consumo pouco significativo"))
+      errors.push("Consumo pouco significativo apresentado incorretamente");
+    if (quotaMode === "forecast_stale" &&
+        (!forecast?.textContent.includes("Previsão suspensa") ||
+         forecast?.dataset.risk === "risk"))
+      errors.push("Previsão antiga foi apresentada como risco atual");
     try {
       if (!painted(canvas)) errors.push("O escritório pixelizado não desenhou nenhum frame");
       inspectTelemetry(canvas, errors);
@@ -423,7 +462,11 @@ def main() -> int:
     for condition in ("unavailable", "weekly_only", "stale"):
         run_case(browser, active=False, modern=False, quota=condition)
     run_case(browser, active=False, modern=True, quota="unavailable")
-    print("PASS: 15 cenários de navegador: pixel/modern, Codex, telemetria e RAF.")
+    for condition in ("forecast_risk", "forecast_on_track", "forecast_near",
+                      "forecast_low", "forecast_stale"):
+        run_case(browser, active=False, modern=False, quota=condition)
+    run_case(browser, active=False, modern=True, quota="forecast_risk")
+    print("PASS: 21 cenários: pixel/modern, quotas, previsões, telemetria e RAF.")
     return 0
 
 
