@@ -1,7 +1,7 @@
 mod ai;
 mod app;
-mod db;
 mod codex_usage;
+mod db;
 mod gh;
 mod goog;
 mod mcp;
