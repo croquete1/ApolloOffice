@@ -185,7 +185,7 @@ pub async fn watch(a: Ax) {
             Ok(mut value) => {
                 crate::codex_forecast::update(&a.db, &mut value);
                 value
-            },
+            }
             Err(message) => {
                 let previous = a
                     .codex_usage
