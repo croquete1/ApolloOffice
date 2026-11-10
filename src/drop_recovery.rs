@@ -59,6 +59,17 @@ fn has_related_pr(prs: &[Value], number: i64) -> bool {
         .any(|pr| crate::steward::issue_refs(pr).contains(&issue))
 }
 
+/// Atualiza a cache do HEAD remoto sem apagar marcadores CI válidos.
+fn cache_default_head(a: &Ax, repo: &str, head: &Value) -> Result<(), String> {
+    let sha = head["s"].as_str().ok_or("HEAD remoto sem SHA")?;
+    if sha.len() != 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("HEAD remoto com SHA inválido".into());
+    }
+    crate::gh::cs(a, &format!("head:{repo}"), head);
+    Ok(())
+}
+
+/// Só recoloca uma issue após confirmar o estado do GitHub e o HEAD real.
 pub async fn retry_manual(a: &Ax, id: i64) -> Result<bool, String> {
     let job = a.db.jg(id).ok_or("Trabalho inexistente")?;
     if !eligible(&job, false) {
@@ -94,6 +105,11 @@ pub async fn retry_manual(a: &Ax, id: i64) -> Result<bool, String> {
             return Err("Já existe uma PR aberta para esta issue".into());
         }
     }
+    // Evita que uma cache anterior bloqueie uma nova tentativa depois de a
+    // branch principal mudar. Mantém as provas cired que ainda correspondem.
+    let path = format!("repos/{}/commits/HEAD", job.repo);
+    let head = ghj(&["api", &path, "--jq", "{s: .sha}"], 60).await?;
+    cache_default_head(a, &job.repo, &head)?;
     retry(a, id, false).map_err(|error| error.to_string())
 }
 
@@ -104,7 +120,7 @@ pub fn retry(a: &Ax, id: i64, automatic: bool) -> Result<bool, &'static str> {
     if !eligible(&j, automatic) {
         return Err("Drop não elegível para recuperação segura");
     }
-    if a.hold("watcher") || a.drain.load(std::sync::atomic::Ordering::Relaxed) {
+    if (automatic && a.hold("watcher")) || a.drain.load(std::sync::atomic::Ordering::Relaxed) {
         return Err("Apollo Office em pausa ou manutenção");
     }
     let repo =
@@ -408,6 +424,29 @@ mod tests {
         let j = a.db.jg(id).unwrap();
         assert_eq!(j.st, "vet");
         assert!(j.d["br"].is_null());
+    }
+
+    #[test]
+    fn manual_recovery_queues_safely_while_office_is_paused() {
+        let a = setup();
+        a.lv.lock().unwrap().o.man = true;
+        let manual = dropped(&a, "machine kept failing: timed out", json!({}));
+        assert_eq!(retry(&a, manual, false), Ok(true));
+        assert_eq!(a.db.jg(manual).unwrap().st, "ready");
+        let automatic = dropped(&a, "machine kept failing: timed out", json!({}));
+        assert_eq!(retry(&a, automatic, true), Err("Apollo Office em pausa ou manutenção"));
+    }
+
+    #[test]
+    fn default_branch_refresh_keeps_markers_and_rejects_bad_sha() {
+        let a = setup();
+        a.db.ks("cired:org/repo", &json!({"sha":"a".repeat(40)}));
+        let good = json!({"s":"a".repeat(40)});
+        assert!(cache_default_head(&a, "org/repo", &good).is_ok());
+        assert_eq!(crate::gh::cg(&a, "head:org/repo", 60_000), Some(good.clone()));
+        assert_eq!(a.db.kg("cired:org/repo")["sha"], "a".repeat(40));
+        assert!(cache_default_head(&a, "org/repo", &json!({"s":"invalid"})).is_err());
+        assert_eq!(crate::gh::cg(&a, "head:org/repo", 60_000), Some(good));
     }
 
     #[test]
