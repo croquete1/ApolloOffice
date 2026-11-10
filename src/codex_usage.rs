@@ -13,6 +13,7 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(15);
 const FIVE_HOURS: u64 = 300;
 const WEEK: u64 = 10_080;
 
+/// Valida uma janela Codex pela duração e percentagem de utilização.
 fn window(w: &Value, mins: u64) -> Option<Value> {
     if w["windowDurationMins"].as_u64()? != mins {
         return None;
@@ -28,6 +29,7 @@ fn window(w: &Value, mins: u64) -> Option<Value> {
     }))
 }
 
+/// Extrai apenas a quota principal Codex, sem confundir outros buckets.
 fn parse_limits(response: &Value, at: i64) -> Result<Value, &'static str> {
     // Os outros limit_ids podem representar modelos ou funcionalidades
     // diferentes. Nunca apresentar esses limites como quota Codex geral.
@@ -61,6 +63,7 @@ fn parse_limits(response: &Value, at: i64) -> Result<Value, &'static str> {
     }))
 }
 
+/// Escreve um pedido JSON-RPC e confirma que foi enviado.
 async fn write_rpc(input: &mut tokio::process::ChildStdin, v: Value) -> Result<(), String> {
     input
         .write_all(v.to_string().as_bytes())
@@ -77,6 +80,7 @@ async fn write_rpc(input: &mut tokio::process::ChildStdin, v: Value) -> Result<(
     Ok(())
 }
 
+/// Aguarda pelo ID RPC solicitado e ignora notificações intercalares.
 async fn answer(
     lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
     id: i64,
@@ -110,6 +114,7 @@ async fn answer(
     Err("Demasiadas mensagens Codex antes da resposta".into())
 }
 
+/// Consulta a quota através de um subprocesso Codex de curta duração.
 async fn request(bin: &str) -> Result<Value, String> {
     // Execução sem shell, exclusivamente leitura da quota. Não abrir sessões,
     // não iniciar turns e nunca aceder ao ficheiro auth.json.
@@ -146,9 +151,14 @@ async fn request(bin: &str) -> Result<Value, String> {
     )
     .await?;
     let result = answer(&mut lines, 2).await?;
+    drop(input);
+    // Encerrar e recolher o subprocesso após a leitura. O kill_on_drop
+    // continua a proteger os caminhos de erro ou timeout.
+    let _ = child.kill().await;
     Ok(result)
 }
 
+/// Executa a consulta oficial com timeout e validação da resposta.
 async fn fetch() -> Result<Value, String> {
     let bin = crate::sh::tool("codex");
     let response = tokio::time::timeout(RPC_TIMEOUT, request(&bin))
@@ -157,12 +167,13 @@ async fn fetch() -> Result<Value, String> {
     parse_limits(&response, now()).map_err(str::to_string)
 }
 
+/// Atualiza a quota em segundo plano, sem bloquear o servidor HTTP.
 pub async fn watch(a: Ax) {
     loop {
         let next = match fetch().await {
             Ok(value) => value,
             Err(message) => {
-                let previous = a.codex_usage.lock().unwrap().clone();
+                let previous = a.codex_usage.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 if previous["updated_at"].as_i64().is_some() {
                     let mut stale = previous;
                     stale["status"] = json!("stale");
@@ -173,7 +184,7 @@ pub async fn watch(a: Ax) {
                 }
             }
         };
-        *a.codex_usage.lock().unwrap() = next;
+        *a.codex_usage.lock().unwrap_or_else(|e| e.into_inner()) = next;
         tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
