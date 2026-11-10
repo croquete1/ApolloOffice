@@ -434,7 +434,10 @@ mod tests {
         assert_eq!(retry(&a, manual, false), Ok(true));
         assert_eq!(a.db.jg(manual).unwrap().st, "ready");
         let automatic = dropped(&a, "machine kept failing: timed out", json!({}));
-        assert_eq!(retry(&a, automatic, true), Err("Apollo Office em pausa ou manutenção"));
+        assert_eq!(
+            retry(&a, automatic, true),
+            Err("Apollo Office em pausa ou manutenção")
+        );
     }
 
     #[test]
@@ -443,7 +446,10 @@ mod tests {
         a.db.ks("cired:org/repo", &json!({"sha":"a".repeat(40)}));
         let good = json!({"s":"a".repeat(40)});
         assert!(cache_default_head(&a, "org/repo", &good).is_ok());
-        assert_eq!(crate::gh::cg(&a, "head:org/repo", 60_000), Some(good.clone()));
+        assert_eq!(
+            crate::gh::cg(&a, "head:org/repo", 60_000),
+            Some(good.clone())
+        );
         assert_eq!(a.db.kg("cired:org/repo")["sha"], "a".repeat(40));
         assert!(cache_default_head(&a, "org/repo", &json!({"s":"invalid"})).is_err());
         assert_eq!(crate::gh::cg(&a, "head:org/repo", 60_000), Some(good));
