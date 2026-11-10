@@ -332,7 +332,7 @@ fn stored_pr_footer(j: &Job, configured: &str) -> String {
         return saved.to_string();
     }
     if let Some(body) = j.d["pb"].as_str() {
-        if let Some(legacy) = supported.into_iter().find(|footer| body.contains(footer)) {
+        if let Some(legacy) = supported.into_iter().find(|footer| body.contains(*footer)) {
             return legacy.to_string();
         }
     }
