@@ -107,8 +107,8 @@ async fn answer(
         if raw.len() > 131_072 {
             return Err("Resposta Codex demasiado extensa".into());
         }
-        let line = std::str::from_utf8(&raw)
-            .map_err(|_| "Resposta Codex não contém UTF-8 válido")?;
+        let line =
+            std::str::from_utf8(&raw).map_err(|_| "Resposta Codex não contém UTF-8 válido")?;
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
         };
