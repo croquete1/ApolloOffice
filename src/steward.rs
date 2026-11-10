@@ -42,7 +42,7 @@ fn work_files(pr: &Value) -> BTreeSet<String> {
         .collect()
 }
 
-fn issue_refs(pr: &Value) -> BTreeSet<String> {
+pub(crate) fn issue_refs(pr: &Value) -> BTreeSet<String> {
     let source = format!(
         "{}\n{}",
         pr["title"].as_str().unwrap_or(""),
@@ -192,6 +192,8 @@ pub async fn scan(a: &Ax, repo: &str) -> Result<(), String> {
         return Err(format!("{repo}: lista de PRs truncada"));
     }
     let report = assess(list);
+    // Só recuperar falhas transitórias depois de obter PRs atuais do GitHub.
+    crate::drop_recovery::scan(a, repo, list);
     let merge_enabled = a.db.n(
         "select auto_merge from rp where full=? and on_=1",
         pa![repo.to_string()],
@@ -266,7 +268,6 @@ pub async fn run(a: Ax) {
                 let Some(repo) = row["full"].as_str() else {
                     continue;
                 };
-                crate::drop_recovery::scan(&a, repo);
                 if let Err(err) = scan(&a, repo).await {
                     a.db.ks(
                         &format!("steward:error:{repo}"),

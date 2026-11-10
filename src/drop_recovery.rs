@@ -69,7 +69,7 @@ pub fn retry(a: &Ax, id: i64, automatic: bool) -> Result<bool, &'static str> {
     }
     if j.num > 0
         && a.db.n(
-            "select count(*) from jobs where repo=? and num=? and kind='fix' and id<>? and st not in ('done','drop')",
+            "select count(*) from jobs where repo=? and num=? and kind='fix' and id<>? and (st<>'drop' or pr is not null)",
             pa![j.repo.clone(), j.num, id],
         ) != 0
     {
@@ -129,7 +129,7 @@ pub fn retry(a: &Ax, id: i64, automatic: bool) -> Result<bool, &'static str> {
 /// Corre apenas quando o proprietário ativa a opção no repositório.
 /// Drops deliberados, com publicação, alterações de código ou sem provas
 /// de segurança ficam intactos para análise manual.
-pub fn scan(a: &Ax, repo: &str) {
+pub fn scan(a: &Ax, repo: &str, prs: &[Value]) {
     if a.hold("watcher") || a.drain.load(std::sync::atomic::Ordering::Relaxed) {
         return;
     }
@@ -148,6 +148,12 @@ pub fn scan(a: &Ax, repo: &str) {
             break;
         }
         if let Some(id) = item["id"].as_i64() {
+            let Some(job) = a.db.jg(id) else { continue };
+            // Uma PR aberta para a mesma issue impede reintroduzir trabalho duplicado.
+            let issue = job.num.to_string();
+            if prs.iter().any(|pr| crate::steward::issue_refs(pr).contains(&issue)) {
+                continue;
+            }
             let _ = retry(a, id, true);
         }
     }
