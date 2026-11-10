@@ -99,7 +99,7 @@ pub async fn retry_manual(a: &Ax, id: i64) -> Result<bool, String> {
             return Err("Já existe uma PR aberta para esta issue".into());
         }
     }
-    retry(a, id, false).map_err(str::to_string)
+    retry(a, id, false).map_err(|error| error.to_string())
 }
 
 /// Nova tentativa desde o início, com limpeza de provas e autorizações antigas.
