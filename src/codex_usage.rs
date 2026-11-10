@@ -188,13 +188,11 @@ printf '%s\n' '{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":12,"wind
         let mut permissions = std::fs::metadata(&path).unwrap().permissions();
         permissions.set_mode(0o700);
         std::fs::set_permissions(&path, permissions).unwrap();
-        let result = tokio::time::timeout(
-            Duration::from_secs(4),
-            query_with(path.to_str().unwrap()),
-        )
-        .await
-        .expect("o app-server local não deve bloquear")
-        .expect("resposta de app-server válida");
+        let result =
+            tokio::time::timeout(Duration::from_secs(4), query_with(path.to_str().unwrap()))
+                .await
+                .expect("o app-server local não deve bloquear")
+                .expect("resposta de app-server válida");
         let _ = std::fs::remove_file(path);
         assert_eq!(result["fiveHour"]["remainingPercent"], 88.0);
         assert_eq!(result["weekly"]["remainingPercent"], 59.0);
@@ -214,12 +212,14 @@ printf '%s\n' '{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":12,"wind
 
     #[test]
     fn uses_codex_bucket_not_other_meters() {
-        let r = normalize(&json!({"rateLimits":{"primary":{"usedPercent":95,"windowDurationMins":300,"resetsAt":1794350000}},
-            "rateLimitsByLimitId":{
-                "codex":{"primary":{"usedPercent":35,"windowDurationMins":300,"resetsAt":1794350000}},
-                "codex_other":{"primary":{"usedPercent":80,"windowDurationMins":10080,"resetsAt":1794500000}}
-            }
-        }));
+        let r = normalize(
+            &json!({"rateLimits":{"primary":{"usedPercent":95,"windowDurationMins":300,"resetsAt":1794350000}},
+                "rateLimitsByLimitId":{
+                    "codex":{"primary":{"usedPercent":35,"windowDurationMins":300,"resetsAt":1794350000}},
+                    "codex_other":{"primary":{"usedPercent":80,"windowDurationMins":10080,"resetsAt":1794500000}}
+                }
+            }),
+        );
         assert_eq!(r["fiveHour"]["remainingPercent"], 65.0);
         assert!(r["weekly"].is_null());
     }
@@ -233,7 +233,9 @@ printf '%s\n' '{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":12,"wind
         assert_eq!(r["status"], "unavailable");
         assert!(r["fiveHour"].is_null());
         assert!(r["weekly"].is_null());
-        let r = normalize(&json!({"rateLimits":{"primary":{"usedPercent":0,"windowDurationMins":10080,"resetsAt":1794500000}}}));
+        let r = normalize(
+            &json!({"rateLimits":{"primary":{"usedPercent":0,"windowDurationMins":10080,"resetsAt":1794500000}}}),
+        );
         assert_eq!(r["weekly"]["remainingPercent"], 100.0);
         assert!(r["fiveHour"].is_null());
     }
