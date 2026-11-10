@@ -18,7 +18,11 @@ function makePanel(payload, modern = false) {
     classList: { add() {}, remove() {}, toggle() {} }
   }]));
   let moved = null;
-  const now = Date.now();
+  let now = Date.now();
+  let fetches = 0;
+  class ClockDate extends Date {
+    static now() { return now; }
+  }
   const doc = {
     hidden: false,
     getElementById(id) { return nodes.get(id); },
@@ -29,18 +33,23 @@ function makePanel(payload, modern = false) {
   const context = {
     document: doc,
     window: { AO: { modernRoom: modern } },
-    fetch: async () => ({ ok: true, json: async () => ({
+    fetch: async () => { fetches++; return { ok: true, json: async () => ({
       status: "ok", checkedAt: now, serverTime: now,
       fiveHour: { remainingPercent: 88, resetsAt: Math.floor((now + 18 * 60_000) / 1000) },
       weekly: { remainingPercent: 59, resetsAt: Math.floor((now + 5 * 86_400_000) / 1000) },
       ...payload
-    }) }),
+    }) }; },
     performance: { now: () => 1_000 },
     setInterval: callback => { waits.push(callback); return waits.length; },
-    Date, Math
+    Date: ClockDate, Math
   };
   runInNewContext(source, context);
-  return { nodes, waits, get moved() { return moved; } };
+  return {
+    nodes, waits,
+    advance(ms) { now += ms; },
+    fetchCount() { return fetches; },
+    get moved() { return moved; }
+  };
 }
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
@@ -64,6 +73,30 @@ test("Unavailable windows are not invented and never display fake percentages", 
   assert.equal(ui.nodes.get("codexWeekPct").textContent, "—");
   assert.equal(ui.nodes.get("codexWeekReset").textContent, "Sem dados");
   assert.equal(ui.nodes.get("codexWeekMeter").attributes["aria-valuenow"], undefined);
+});
+
+test("Successful reads refresh every 120 seconds", async () => {
+  const ui = makePanel();
+  await settle();
+  assert.equal(ui.fetchCount(), 1);
+  ui.advance(30_000);
+  ui.waits[1]();
+  await settle();
+  assert.equal(ui.fetchCount(), 1);
+  ui.advance(90_000);
+  ui.waits[1]();
+  await settle();
+  assert.equal(ui.fetchCount(), 2);
+});
+
+test("Unavailable quota retries after 30 seconds rather than two minutes", async () => {
+  const ui = makePanel({ status: "unavailable" });
+  await settle();
+  assert.equal(ui.fetchCount(), 1);
+  ui.advance(30_000);
+  ui.waits[1]();
+  await settle();
+  assert.equal(ui.fetchCount(), 2);
 });
 
 test("Optional modern view reuses the same quota panel", async () => {
