@@ -263,6 +263,9 @@ class Handler(SimpleHTTPRequestHandler):
         (!quota || !quota.textContent.includes("88% restante") ||
          !quota.textContent.includes("59% restante")))
       errors.push("Limites Codex não apresentados na vista pixelizada");
+    if ("__PIXEL_TELEMETRY__" === "skew" &&
+        !quota?.querySelector("#codexQuotaStatus")?.textContent.includes("Atualizado"))
+      errors.push("Quota recente interpretada como antiga por divergência dos relógios");
     if (quotaMode === "unavailable" &&
         (!quota || !quota.textContent.includes("Indisponível") ||
          !quota.querySelector("#codexQuotaStatus")?.textContent.includes("Sem ligação")))
