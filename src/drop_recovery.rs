@@ -198,7 +198,14 @@ pub fn retry(a: &Ax, id: i64, automatic: bool) -> Result<bool, &'static str> {
         "Recolocado na fila pelo proprietário".to_string()
     };
     let changed = a.db.ch(
-        "update jobs set st=?,why=?,d=?,t1=? where id=? and st='drop' and pr is null",
+        "update jobs set st=?,why=?,d=?,t1=?
+         where id=? and st='drop' and pr is null
+         and (jobs.num<=0 or not exists (
+             select 1 from jobs as other
+             where other.repo=jobs.repo and other.num=jobs.num
+               and other.kind='fix' and other.id<>jobs.id
+               and (other.st<>'drop' or other.pr is not null)
+         ))",
         pa![
             next_state.to_string(),
             message.clone(),
