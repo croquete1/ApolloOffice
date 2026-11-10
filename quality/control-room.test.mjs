@@ -25,16 +25,8 @@ test("pixel-art office stays the default, modern dashboard requires explicit opt
   assert.match(html, /<canvas id="cv"><\/canvas>/);
 });
 
-test("pixel machine tooltip does not misrepresent CPU load, temperature or stale data", () => {
-  assert.match(original, /carga média/);
-  assert.doesNotMatch(original, /load.*bar\(m\.load, m\.cpu\)/);
-  assert.match(original, /sensor não identificado/);
-  assert.match(original, /age < 120000/);
-  assert.match(original, /sem telemetria recente/);
-  assert.match(original, /available <= total/);
-  assert.match(original, /free <= total/);
-  assert.match(original, /clique para configurar as máquinas/);
-});
+// As leituras e os limites da telemetria são agora testados no navegador,
+// com eventos de hover reais e snapshots frescos, antigos e inválidos.
 
 test("Control Room is loaded after the original application", () => {
   assert.match(html, /href="control-room\.css"/);
