@@ -136,17 +136,46 @@ class Handler(SimpleHTTPRequestHandler):
                 probe = """
 <script>
 (function () {
-  var errors = [];
-  var canvas = document.getElementById("cv");
-  if (!canvas) errors.push("Canvas pixelizado indisponível");
-  if (document.getElementById("aoControlRoom"))
-    errors.push("Control Room montado sem opção explícita");
-  if (window.AO?.modernRoom === true)
-    errors.push("Vista moderna ativada por omissão");
-  if (canvas && getComputedStyle(canvas).display === "none")
-    errors.push("Canvas pixelizado oculto");
-  document.documentElement.setAttribute("data-ao-smoke",
-    errors.length ? "FAIL: " + errors.join(" | ") : "PASS");
+  // O canvas pode existir antes do primeiro frame. Validar que a
+  // interface recebeu dados e desenhou píxeis visíveis.
+  var started = Date.now();
+  function painted(canvas) {
+    if (!canvas || canvas.width <= 0 || canvas.height <= 0) return false;
+    var ctx = canvas.getContext("2d");
+    if (!ctx) return false;
+    var w = canvas.width, h = canvas.height;
+    var positions = [[0.25, 0.25], [0.5, 0.5], [0.75, 0.75]];
+    return positions.some(function (point) {
+      var pixel = ctx.getImageData(
+        Math.floor(w * point[0]), Math.floor(h * point[1]), 1, 1
+      ).data;
+      return pixel[3] > 0;
+    });
+  }
+  function verify() {
+    var errors = [];
+    var canvas = document.getElementById("cv");
+    if (!canvas) errors.push("Canvas pixelizado indisponível");
+    if (document.getElementById("aoControlRoom"))
+      errors.push("Control Room montado sem opção explícita");
+    if (window.AO?.modernRoom === true)
+      errors.push("Vista moderna ativada por omissão");
+    if (canvas && getComputedStyle(canvas).display === "none")
+      errors.push("Canvas pixelizado oculto");
+    if (!window.AO?.S) errors.push("Estado real da interface não recebido");
+    try {
+      if (!painted(canvas)) errors.push("O escritório pixelizado não desenhou nenhum frame");
+    } catch (error) {
+      errors.push("Falha ao ler o canvas pixelizado: " + String(error));
+    }
+    document.documentElement.setAttribute("data-ao-smoke",
+      errors.length ? "FAIL: " + errors.join(" | ") : "PASS");
+  }
+  (function waitForFrame() {
+    var ready = window.AO?.S && painted(document.getElementById("cv"));
+    if (ready || Date.now() - started >= 3500) verify();
+    else setTimeout(waitForFrame, 100);
+  })();
 })();
 </script>
 """
@@ -242,7 +271,7 @@ def run_case(browser: str, active: bool, modern: bool = True) -> None:
 
 
 def main() -> int:
-    """Run both browser scenarios and fail loudly on missing capabilities."""
+    """Run the original pixel office and optional modern views in a real browser."""
     if not (UI_DIR / "control-room.js").is_file():
         raise RuntimeError("Os ficheiros reais da interface estão em falta.")
     browser = choose_browser()
