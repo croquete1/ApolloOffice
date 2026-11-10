@@ -68,6 +68,12 @@ def fixture(active: bool, telemetry: str = "") -> dict:
             "temp": 45,
         }},
         "lm": None, "star": None,
+        # Valores sintéticos exclusivos dos testes, não dados da conta.
+        "codex_usage": {
+            "status": "ok", "updated_at": stamp,
+            "five_hour": {"remaining": 88, "resets_at": stamp // 1000 + 1800},
+            "weekly": {"remaining": 59, "resets_at": stamp // 1000 + 400_000},
+        },
     }
 
 
@@ -107,6 +113,10 @@ class Handler(SimpleHTTPRequestHandler):
       var overlay = document.getElementById("aoAgentOverlay");
       assert(Boolean(app), "Control Room indisponível");
       assert(Boolean(fixer), "Personagem Fixer em falta");
+      var quota = document.getElementById("codexQuota");
+      assert(quota && quota.textContent.includes("88% restante") &&
+             quota.textContent.includes("59% restante"),
+             "Limites Codex não apresentados na vista moderna");
       var room = document.querySelector(".ao-office");
       assert(room && room.dataset.visualVersion === "2",
              "O escritório 2.5D premium não está ativo");
@@ -225,6 +235,10 @@ class Handler(SimpleHTTPRequestHandler):
     if (canvas && getComputedStyle(canvas).display === "none")
       errors.push("Canvas pixelizado oculto");
     if (!window.AO?.S) errors.push("Estado real da interface não recebido");
+    var quota = document.getElementById("codexQuota");
+    if (!quota || !quota.textContent.includes("88% restante") ||
+        !quota.textContent.includes("59% restante"))
+      errors.push("Limites Codex não apresentados na vista pixelizada");
     try {
       if (!painted(canvas)) errors.push("O escritório pixelizado não desenhou nenhum frame");
       inspectTelemetry(canvas, errors);
