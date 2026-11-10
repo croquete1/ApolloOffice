@@ -277,8 +277,7 @@ pub fn spawn(a: Ax) {
                             None,
                         );
                     }
-                    if idle(&a) {
-                        apply(&a);
+                    if idle(&a) && apply(&a) {
                         return;
                     }
                 }
