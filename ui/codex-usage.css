@@ -15,5 +15,8 @@
 .codex-quota-reset,.codex-quota-footer { color:var(--t3,#8b97a7); font:10px/1.45 var(--m,ui-monospace,monospace); }
 .codex-quota-footer { border-top:1px solid var(--l,#384151); padding-top:6px; margin-top:3px; }
 .side:has(.codex-quota-card) { grid-template-rows:minmax(0,1.1fr) minmax(0,.9fr) minmax(135px,.85fr) minmax(0,.7fr); }
+@media (max-width:860px) and (min-width:701px) {
+  .side:has(.codex-quota-card) { grid-template-rows:minmax(0,1fr) minmax(135px,1fr); }
+}
 .ao-bottom-grid .codex-quota-card { padding:16px; }
 @media (prefers-reduced-motion:reduce) { .codex-quota-bar i { transition:none; } }
