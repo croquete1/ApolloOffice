@@ -1,6 +1,7 @@
 mod ai;
 mod app;
 mod codex_usage;
+mod codex_forecast;
 mod db;
 mod gh;
 mod goog;
