@@ -15,6 +15,7 @@
   ];
   const stamp = $("codexUpdated");
   const REFRESH_MS = 120_000;
+  const ERROR_RETRY_MS = 30_000;
   let limits = null;
   let serverTime = null;
   let fetchedAt = 0;
@@ -97,10 +98,11 @@
   paint();
   void refresh();
   setInterval(paint, 1000); // Contagem decrescente local; não interroga o Codex.
+  const due = () => Date.now() - lastFetch >= (limits ? REFRESH_MS : ERROR_RETRY_MS);
   setInterval(() => {
-    if (!document.hidden) void refresh();
-  }, REFRESH_MS);
+    if (!document.hidden && due()) void refresh();
+  }, ERROR_RETRY_MS);
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden && Date.now() - lastFetch >= REFRESH_MS) void refresh();
+    if (!document.hidden && due()) void refresh();
   });
 })();
