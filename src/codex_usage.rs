@@ -242,7 +242,10 @@ printf '%s\n' '{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":12,"wind
         ));
         a.cache.lock().unwrap().insert(
             "codex:rate-limits".into(),
-            (now() - ERROR_CACHE_MS - 100, json!({"status":"unavailable"})),
+            (
+                now() - ERROR_CACHE_MS - 100,
+                json!({"status":"unavailable"}),
+            ),
         );
         assert!(cached(&a).is_none());
         a.cache.lock().unwrap().insert(
