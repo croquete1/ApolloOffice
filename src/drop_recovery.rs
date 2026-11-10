@@ -49,6 +49,59 @@ fn eligible(j: &Job, automatic: bool) -> bool {
         && j.d["rp"] != true
 }
 
+fn open_issue(issue: &Value, number: i64) -> bool {
+    number > 0
+        && issue["number"] == number
+        && issue["state"] == "open"
+        && issue["pull_request"].is_null()
+}
+
+fn has_related_pr(prs: &[Value], number: i64) -> bool {
+    let issue = number.to_string();
+    prs.iter()
+        .any(|pr| crate::steward::issue_refs(pr).contains(&issue))
+}
+
+pub async fn retry_manual(a: &Ax, id: i64) -> Result<bool, String> {
+    let job = a.db.jg(id).ok_or("Trabalho inexistente")?;
+    if !eligible(&job, false) {
+        return Err("Drop não elegível para recuperação segura".into());
+    }
+    if job.num > 0 {
+        let issue_path = format!("repos/{}/issues/{}", job.repo, job.num);
+        let issue = ghj(&["api", &issue_path], 40).await?;
+        if !open_issue(&issue, job.num) {
+            return Err("Issue já não está aberta no GitHub".into());
+        }
+        let prs = ghj(
+            &[
+                "pr",
+                "list",
+                "-R",
+                &job.repo,
+                "--state",
+                "open",
+                "--limit",
+                "200",
+                "--json",
+                "number,title,body",
+            ],
+            90,
+        )
+        .await?;
+        let list = prs
+            .as_array()
+            .ok_or("Resposta de PRs inválida")?;
+        if list.len() >= 200 {
+            return Err("Lista de PRs truncada; recuperação bloqueada".into());
+        }
+        if has_related_pr(list, job.num) {
+            return Err("Já existe uma PR aberta para esta issue".into());
+        }
+    }
+    retry(a, id, false).map_err(str::to_string)
+}
+
 /// Nova tentativa desde o início, com limpeza de provas e autorizações antigas.
 /// A escrita condicional impede duas recuperações do mesmo drop em simultâneo.
 pub fn retry(a: &Ax, id: i64, automatic: bool) -> Result<bool, &'static str> {
@@ -147,7 +200,7 @@ pub async fn scan(a: &Ax, repo: &str, prs: &[Value]) {
         return;
     }
     let dropped = a.db.all(
-        "select id from jobs where repo=? and st='drop' and kind='fix' order by t1 desc limit 100",
+        "select id,t1 from jobs where repo=? and st='drop' and kind='fix' order by t1 desc limit 100",
         pa![repo.to_string()],
     );
     let mut restarted = 0_u8;
@@ -162,25 +215,21 @@ pub async fn scan(a: &Ax, repo: &str, prs: &[Value]) {
             let Some(job) = a.db.jg(id) else {
                 continue;
             };
-            if !eligible(&job, true) {
+            let age = now().saturating_sub(item["t1"].as_i64().unwrap_or(0));
+            if !eligible(&job, true)
+                || !(RETRY_DELAY_MS..=MAX_AUTO_AGE_MS).contains(&age)
+                || has_related_pr(prs, job.num)
+            {
                 continue;
             }
-            // A issue tem de continuar aberta no GitHub. Se não for possível
-            // verificar o estado remoto, não se reintroduz trabalho.
+            // A issue tem de continuar aberta no GitHub. Erros de leitura
+            // bloqueiam a recuperação, sem qualquer escrita ou requeue.
             let path = format!("repos/{repo}/issues/{}", job.num);
             let issue = match ghj(&["api", &path], 40).await {
                 Ok(value) => value,
                 Err(_) => continue,
             };
-            if issue["number"] != job.num
-                || issue["state"] != "open"
-                || !issue["pull_request"].is_null()
-            {
-                continue;
-            }
-            // Uma PR aberta para a mesma issue impede reintroduzir trabalho duplicado.
-            let issue_number = job.num.to_string();
-            if prs.iter().any(|pr| crate::steward::issue_refs(pr).contains(&issue_number)) {
+            if !open_issue(&issue, job.num) {
                 continue;
             }
             if retry(a, id, true) == Ok(true) {
@@ -299,17 +348,16 @@ mod tests {
         assert_eq!(retry(&a, id, true), Err("Recuperação automática desativada"));
     }
 
-    #[tokio::test]
-    async fn open_pull_request_for_same_issue_prevents_automatic_recovery() {
-        let a = setup();
-        let id = dropped(&a, "machine kept failing: timed out", json!({}));
-        let pr = json!({
-            "title":"Corrigir problema",
-            "body":"Fixes #42",
-            "number":123
-        });
-        scan(&a, "org/repo", &[pr]).await;
-        assert_eq!(a.db.jg(id).unwrap().st, "drop");
+    #[test]
+    fn github_issue_validation_and_pr_duplicates_are_fail_closed() {
+        assert!(open_issue(&json!({"number":42,"state":"open"}), 42));
+        assert!(!open_issue(&json!({"number":42,"state":"closed"}), 42));
+        assert!(!open_issue(&json!({"number":41,"state":"open"}), 42));
+        assert!(!open_issue(&json!({"number":42,"state":"open","pull_request":{}}), 42));
+        assert!(!open_issue(&json!({}), 42));
+        let pr = json!({"body":"Fixes #42","number":123});
+        assert!(has_related_pr(&[pr], 42));
+        assert!(!has_related_pr(&[json!({"body":"Fixes #99"})], 42));
     }
 
     #[test]
