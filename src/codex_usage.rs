@@ -77,7 +77,10 @@ async fn until_id(
         if !msg["error"].is_null() {
             return Err("a sessão Codex não está autenticada ou o serviço recusou a consulta");
         }
-        return msg.get("result").cloned().ok_or("resposta inválida do Codex");
+        return msg
+            .get("result")
+            .cloned()
+            .ok_or("resposta inválida do Codex");
     }
     Err("resposta do Codex não encontrada")
 }
@@ -110,7 +113,9 @@ async fn query_with(binary: &str) -> Result<Value, &'static str> {
         .map_err(|_| "falha na inicialização Codex")?;
     until_id(&mut lines, 1).await?;
     input
-        .write_all(b"{\"method\":\"initialized\"}\n{\"method\":\"account/rateLimits/read\",\"id\":2}\n")
+        .write_all(
+            b"{\"method\":\"initialized\"}\n{\"method\":\"account/rateLimits/read\",\"id\":2}\n",
+        )
         .await
         .map_err(|_| "falha na consulta Codex")?;
     let result = until_id(&mut lines, 2).await?;
@@ -144,8 +149,12 @@ pub async fn read(a: &Ax) -> Value {
     }
     let data = match tokio::time::timeout(Duration::from_secs(10), query()).await {
         Ok(Ok(value)) => value,
-        Ok(Err(message)) => json!({"status":"unavailable","fiveHour":null,"weekly":null,"message":message}),
-        Err(_) => json!({"status":"unavailable","fiveHour":null,"weekly":null,"message":"consulta Codex excedeu o tempo disponível"}),
+        Ok(Err(message)) => {
+            json!({"status":"unavailable","fiveHour":null,"weekly":null,"message":message})
+        }
+        Err(_) => {
+            json!({"status":"unavailable","fiveHour":null,"weekly":null,"message":"consulta Codex excedeu o tempo disponível"})
+        }
     };
     let mut value = data;
     value["checkedAt"] = json!(now());
