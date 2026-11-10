@@ -5,7 +5,7 @@ use crate::db::now;
 use serde_json::{json, Value};
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(180);
@@ -82,23 +82,34 @@ async fn write_rpc(input: &mut tokio::process::ChildStdin, v: Value) -> Result<(
 
 /// Aguarda pelo ID RPC solicitado e ignora notificações intercalares.
 async fn answer(
-    lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    output: &mut BufReader<tokio::process::ChildStdout>,
     id: i64,
 ) -> Result<Value, String> {
     // Notificações assíncronas podem chegar antes da resposta solicitada.
     // Limitar linhas recebidas para não consumir memória indefinidamente.
     for _ in 0..256 {
-        let Some(line) = lines
-            .next_line()
+        // Limitar bytes ANTES de os acumular, mesmo num stream sem newline.
+        let mut raw = Vec::new();
+        let read = (&mut *output)
+            .take(131_074)
+            .read_until(b'\n', &mut raw)
             .await
-            .map_err(|_| "Falha de leitura do Codex")?
-        else {
+            .map_err(|_| "Falha de leitura do Codex")?;
+        if read == 0 {
             return Err("O Codex terminou a comunicação".into());
-        };
-        if line.len() > 131_072 {
+        }
+        if raw.last() == Some(&b'\n') {
+            raw.pop();
+            if raw.last() == Some(&b'\r') {
+                raw.pop();
+            }
+        }
+        if raw.len() > 131_072 {
             return Err("Resposta Codex demasiado extensa".into());
         }
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+        let line = std::str::from_utf8(&raw)
+            .map_err(|_| "Resposta Codex não contém UTF-8 válido")?;
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
         };
         if value["id"] == id {
@@ -128,7 +139,7 @@ async fn request(bin: &str) -> Result<Value, String> {
         .map_err(|_| "Codex CLI não encontrado")?;
     let mut input = child.stdin.take().ok_or("Codex sem entrada standard")?;
     let output = child.stdout.take().ok_or("Codex sem saída standard")?;
-    let mut lines = BufReader::new(output).lines();
+    let mut output = BufReader::new(output);
 
     write_rpc(
         &mut input,
@@ -143,14 +154,14 @@ async fn request(bin: &str) -> Result<Value, String> {
         }),
     )
     .await?;
-    answer(&mut lines, 1).await?;
+    answer(&mut output, 1).await?;
     write_rpc(&mut input, json!({"method": "initialized", "params": {}})).await?;
     write_rpc(
         &mut input,
         json!({"id": 2, "method": "account/rateLimits/read"}),
     )
     .await?;
-    let result = answer(&mut lines, 2).await?;
+    let result = answer(&mut output, 2).await?;
     drop(input);
     // Encerrar e recolher o subprocesso após a leitura. O kill_on_drop
     // continua a proteger os caminhos de erro ou timeout.
