@@ -482,6 +482,10 @@ fn import(a: &Ax, b: &Value) -> Result<String, String> {
         a.db.run("insert into rp(full,t0) values(?,?)", pa![f.clone(), now()]);
         for k in RPF {
             let v = &r[*k];
+            // Impedir que valores numéricos contaminem o idioma persistido.
+            if *k == "lang" && !v.is_string() {
+                continue;
+            }
             match v {
                 Value::Number(n) if n.is_i64() && *k != "bud" => {
                     a.db.run(
@@ -1855,6 +1859,31 @@ mod t {
         )
         .unwrap();
         assert_ne!(x["id"], z["id"]);
+    }
+
+    #[test]
+    fn import_skips_non_string_pull_request_language() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            47302,
+            "apollo-office".into(),
+        ));
+        import(
+            &a,
+            &json!({
+                "apollo_office": "0.10.0",
+                "set": {},
+                "repos": [{"full": "owner/repo", "lang": 1}],
+                "hosts": []
+            }),
+        )
+        .unwrap();
+        let row = a
+            .db
+            .one("select lang from rp where full=?", pa!["owner/repo".to_string()])
+            .unwrap();
+        assert_eq!(row["lang"], "en");
     }
 
     #[test]
