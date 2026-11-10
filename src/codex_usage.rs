@@ -8,6 +8,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 const CACHE_MS: i64 = 120_000;
+const ERROR_CACHE_MS: i64 = 20_000;
 const MAX_LINES: usize = 32;
 static REFRESH: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -129,7 +130,14 @@ fn cached(a: &Ax) -> Option<Value> {
     let guard = a.cache.lock().ok()?;
     guard
         .get("codex:rate-limits")
-        .filter(|(t, _)| now().saturating_sub(*t) < CACHE_MS)
+        .filter(|(t, value)| {
+            let lifetime = if value["status"] == "ok" {
+                CACHE_MS
+            } else {
+                ERROR_CACHE_MS
+            };
+            now().saturating_sub(*t) < lifetime
+        })
         .map(|(_, v)| v.clone())
 }
 
@@ -222,6 +230,26 @@ printf '%s\n' '{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":12,"wind
         );
         assert_eq!(r["fiveHour"]["remainingPercent"], 65.0);
         assert!(r["weekly"].is_null());
+    }
+
+    #[test]
+    fn failures_expire_earlier_than_valid_results() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            47302,
+            "apollo-office".into(),
+        ));
+        a.cache.lock().unwrap().insert(
+            "codex:rate-limits".into(),
+            (now() - ERROR_CACHE_MS - 100, json!({"status":"unavailable"})),
+        );
+        assert!(cached(&a).is_none());
+        a.cache.lock().unwrap().insert(
+            "codex:rate-limits".into(),
+            (now() - 40_000, json!({"status":"ok"})),
+        );
+        assert!(cached(&a).is_some());
     }
 
     #[test]
