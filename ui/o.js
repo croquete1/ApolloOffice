@@ -445,8 +445,8 @@
     requestAnimationFrame(frame);
   };
 
-  const ago = (t) => {
-    const s = Math.max(0, (Date.now() - t) / 1000);
+  const ago = (t, nowMs = Date.now()) => {
+    const s = Math.max(0, (nowMs - t) / 1000);
     return s < 60 ? Math.round(s) + "s" : s < 3600 ? Math.round(s / 60) + "m" : s < 86400 ? Math.round(s / 3600) + "h" : Math.round(s / 86400) + "d";
   };
   const hm = (t) => new Date(t).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
@@ -633,7 +633,13 @@
     const metric = (value) => value != null && value !== "" && Number.isFinite(Number(value))
       ? Number(value) : null;
     const lastSeen = metric(m?.t);
-    const age = lastSeen == null ? Infinity : Date.now() - lastSeen;
+    // Os relógios do navegador e do servidor podem divergir. Usar o tempo
+    // de servidor do snapshot e avançá-lo pelo relógio monotónico local.
+    // Sem hora de servidor válida, conservar o comportamento anterior.
+    const serverTime = metric(S.t);
+    const nowMs = serverTime != null && serverTime > 0
+      ? serverTime + Math.max(0, performance.now() - last) : Date.now();
+    const age = lastSeen == null ? Infinity : nowMs - lastSeen;
     const recent = !disabled && !down && age >= 0 && age < 120000;
     const jobs = S.q.filter((q) =>
       q.h === h.h && ["repro", "fix", "ci", "review", "gate", "submit"].includes(q.st));
@@ -675,7 +681,7 @@
     }
     if (m?.up) text += tr("ativo", esc(m.up));
     if (lastSeen != null && lastSeen > 0) {
-      text += tr("leitura", '<span class="k">' + esc(ago(lastSeen)) + ' atrás</span>');
+      text += tr("leitura", '<span class="k">' + esc(ago(lastSeen, nowMs)) + ' atrás</span>');
     }
     if (jobs.length) {
       text += '<div class="tc">' + jobs.map((q) =>
