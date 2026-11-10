@@ -419,7 +419,7 @@ fn pr_lang(value: &str) -> &'static str {
 
 const RPF: &[&str] = &[
     "iss", "hunt", "feat", "nm", "on_", "maxo", "maxd", "bud", "ci", "setup", "rules", "mode",
-    "skl", "lang", "auto_recover_drops",
+    "skl", "lang",
 ];
 const HSF: &[&str] = &["id", "ssh", "dk", "ln", "ci", "gb", "raw", "no", "cpu"];
 
