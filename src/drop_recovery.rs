@@ -265,6 +265,21 @@ mod tests {
     }
 
     #[test]
+    fn open_pull_request_for_same_issue_prevents_automatic_recovery() {
+        let a = setup();
+        let id = dropped(&a, "machine kept failing: timed out", json!({}));
+        let pr = json!({
+            "title":"Corrigir problema",
+            "body":"Fixes #42",
+            "number":123
+        });
+        scan(&a, "org/repo", &[pr]);
+        assert_eq!(a.db.jg(id).unwrap().st, "drop");
+        scan(&a, "org/repo", &[]);
+        assert_eq!(a.db.jg(id).unwrap().st, "ready");
+    }
+
+    #[test]
     fn recovery_waits_and_does_not_rerun_pending_duplicate_work() {
         let a = setup();
         let id = dropped(&a, "machine kept failing: connection reset", json!({}));
