@@ -182,7 +182,10 @@ async fn fetch() -> Result<Value, String> {
 pub async fn watch(a: Ax) {
     loop {
         let next = match fetch().await {
-            Ok(value) => value,
+            Ok(mut value) => {
+                crate::codex_forecast::update(&a.db, &mut value);
+                value
+            },
             Err(message) => {
                 let previous = a
                     .codex_usage
