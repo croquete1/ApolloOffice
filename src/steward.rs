@@ -80,7 +80,8 @@ pub(crate) fn issue_refs(pr: &Value) -> BTreeSet<String> {
         pr["title"].as_str().unwrap_or(""),
         pr["body"].as_str().unwrap_or("")
     );
-    let re = regex::Regex::new(r"(?i)\b(?:fix(?:e[sd])?|close[sd]?|resolve[sd]?)\s*:?\s+#(\d+)\b").unwrap();
+    let re = regex::Regex::new(r"(?i)\b(?:fix(?:e[sd])?|close[sd]?|resolve[sd]?)\s*:?\s+#(\d+)\b")
+        .unwrap();
     re.captures_iter(&source)
         .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
         .collect()
@@ -356,14 +357,16 @@ mod tests {
     #[test]
     fn detects_all_github_issue_closing_keywords_without_false_issue_number() {
         for keyword in [
-            "Fix", "Fixes", "Fixed", "Close", "Closes", "Closed",
-            "Resolve", "Resolves", "Resolved",
+            "Fix", "Fixes", "Fixed", "Close", "Closes", "Closed", "Resolve", "Resolves", "Resolved",
         ] {
             let p = json!({"title":"Correção","body":format!("{keyword} #42")});
             assert_eq!(issue_refs(&p), BTreeSet::from(["42".to_string()]));
         }
         let p = json!({"title":"Correção","body":"Resolved: #42\nFixed #142"});
-        assert_eq!(issue_refs(&p), BTreeSet::from(["42".to_string(), "142".to_string()]));
+        assert_eq!(
+            issue_refs(&p),
+            BTreeSet::from(["42".to_string(), "142".to_string()])
+        );
         assert!(!issue_refs(&json!({"body":"Referência à issue #42"})).contains("42"));
     }
 
