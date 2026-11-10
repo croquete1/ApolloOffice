@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 
 const MAX_AUTO_ATTEMPTS: u64 = 2;
 const RETRY_DELAY_MS: i64 = 5 * 60 * 1000;
+const MAX_AUTO_AGE_MS: i64 = 48 * 60 * 60 * 1000;
 
 fn category(reason: &str) -> &'static str {
     let s = reason.to_ascii_lowercase();
@@ -78,8 +79,12 @@ pub fn retry(a: &Ax, id: i64, automatic: bool) -> Result<bool, &'static str> {
     let updated = a.db.one("select t1 from jobs where id=?", pa![id])
         .and_then(|v| v["t1"].as_i64())
         .ok_or("Data de estado em falta")?;
-    if automatic && now().saturating_sub(updated) < RETRY_DELAY_MS {
+    let age = now().saturating_sub(updated);
+    if automatic && age < RETRY_DELAY_MS {
         return Err("Aguarda intervalo de segurança");
+    }
+    if automatic && age > MAX_AUTO_AGE_MS {
+        return Err("Drop antigo; requer avaliação manual");
     }
     let mut data = j.d.clone();
     let mut history = data["drop_history"].as_array().cloned().unwrap_or_default();
@@ -149,7 +154,9 @@ pub fn scan(a: &Ax, repo: &str, prs: &[Value]) {
             break;
         }
         if let Some(id) = item["id"].as_i64() {
-            let Some(job) = a.db.jg(id) else { continue };
+            let Some(job) = a.db.jg(id) else {
+                continue;
+            };
             // Uma PR aberta para a mesma issue impede reintroduzir trabalho duplicado.
             let issue = job.num.to_string();
             if prs.iter().any(|pr| crate::steward::issue_refs(pr).contains(&issue)) {
@@ -174,13 +181,16 @@ pub fn report(a: &Ax, repo: &str) -> Value {
         pa![repo.to_string()],
     ).into_iter().map(|row| {
         let j = Job::of(row);
+        let cause = category(&j.why);
+        let can_retry = eligible(&j, true);
+        let used = attempts(&j);
         json!({
             "id": j.id,
             "title": j.title,
             "reason": j.why,
-            "category": category(&j.why),
-            "safe_auto": eligible(&j, true),
-            "attempts": attempts(&j),
+            "category": cause,
+            "safe_auto": can_retry,
+            "attempts": used,
         })
     }).collect();
     json!({"enabled":enabled,"total":total,"jobs":rows})
@@ -220,7 +230,7 @@ mod tests {
         let a = setup();
         let id = dropped(
             &a, "machine kept failing: timed out",
-            json!({"h":"host","last_review":{"verdict":{"ok":true}},"ci_evidence":{"exit":0}}),
+            json!({"h":"host","last_review":{"verdict":{"ok":true}},"ci_evidence":{"exit":0},"ir":5}),
         );
         assert_eq!(retry(&a, id, true), Ok(true));
         let j = a.db.jg(id).unwrap();
@@ -228,6 +238,7 @@ mod tests {
         assert_eq!(j.d["recovery_attempts"], 1);
         assert!(j.d["last_review"].is_null());
         assert!(j.d["ci_evidence"].is_null());
+        assert!(j.d["ir"].is_null());
         assert_eq!(j.d["drop_history"][0]["automatic"], true);
         assert_eq!(retry(&a, id, true), Err("Drop não elegível para recuperação segura"));
     }
