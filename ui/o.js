@@ -585,12 +585,12 @@
       post({ a: "requeue", id: Number(rq.dataset.rq) }).then((result) => {
         rq.disabled = false;
         if (result.error) {
-          const reason = rq.closest(".row")?.querySelector(".w");
+          const reason = (rq.closest(".row")?.querySelector(".w") || rq.closest(".box")?.querySelector("[data-requeue-message]"));
           if (reason) { reason.textContent = result.error; reason.classList.add("bad2"); }
         } else apply(result);
       }).catch((error) => {
         rq.disabled = false;
-        const reason = rq.closest(".row")?.querySelector(".w");
+        const reason = (rq.closest(".row")?.querySelector(".w") || rq.closest(".box")?.querySelector("[data-requeue-message]"));
         if (reason) { reason.textContent = String(error); reason.classList.add("bad2"); }
       });
       return;
