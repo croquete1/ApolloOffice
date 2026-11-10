@@ -234,13 +234,21 @@ pub fn ready(a: &Ax) -> bool {
 }
 
 pub fn idle(a: &Ax) -> bool {
-    a.act.lock().unwrap().is_empty()
-        && a.lk.lock().unwrap().is_empty()
-        && a.merge_in_progress.lock().unwrap().is_empty()
-        && a.db.n(
-            "select count(*) from jobs where st in ('hunt','repro','fix','ci','review','gate','submit')",
-            crate::pa![],
-        ) == 0
+    // Release each mutex before checking the SQLite state: workers may lock
+    // these structures in a different order.
+    if !a.act.lock().unwrap().is_empty() {
+        return false;
+    }
+    if !a.lk.lock().unwrap().is_empty() {
+        return false;
+    }
+    if !a.merge_in_progress.lock().unwrap().is_empty() {
+        return false;
+    }
+    a.db.n(
+        "select count(*) from jobs where st in ('hunt','repro','fix','ci','review','gate','submit')",
+        crate::pa![],
+    ) == 0
 }
 
 pub fn manually_paused(a: &Ax) -> bool {
