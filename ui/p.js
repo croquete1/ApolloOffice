@@ -122,9 +122,16 @@
         <div class="hint">Runs from the repository root. A fix is only submitted when this passes.</div>
         <label>Setup command</label><input type="text" name="setup" value="${esc(r.setup)}" placeholder="optional, e.g. npm ci">
         <div class="hint">Runs before every job, after checkout.</div>
+        <label>PR language</label><select name="lang" aria-label="Idioma das Pull Requests"><option value="en" ${r.lang !== "pt-PT" ? "selected" : ""}>English</option><option value="pt-PT" ${r.lang === "pt-PT" ? "selected" : ""}>Português de Portugal (PT-PT)</option></select>
         <label>Pull requests</label><select name="mode"><option value="ask" ${r.mode !== "auto" ? "selected" : ""}>wait for my approval</option><option value="auto" ${r.mode === "auto" ? "selected" : ""}>submit automatically</option></select>
+        <label>Encaminhar revisões para correção</label>${tg("steward_repair", r.steward_repair, "Criar trabalhos de revisão apenas para PRs próprias com pedidos humanos validados")}
+        <div class="hint">Desligado por defeito. Requer pedido CHANGES_REQUESTED no HEAD atual, autor com permissões, Guard aprovado, ausência de duplicações e de trabalho de revisão pendente. Encaminha para o Fixer e os gates habituais; não faz merge.</div>
+        <label>Integração automática (restrita)</label>${tg("auto_merge", r.auto_merge, "Integrar PRs elegíveis após verificar os requisitos")}
+        <div class="hint">Quando a branch é protegida, exige checks GitHub obrigatórios e aprovação humana independente.</div>
+        <label>Modo local sem plano GitHub pago</label>${tg("local_merge", r.local_merge, "Permitir integrações com provas de CI e revisão independente guardadas no ApolloOffice")}
+        <div class="warn">Exige também Integração automática ativada. Só considera PRs criadas e acompanhadas pelo ApolloOffice, no HEAD e base verificados, com testes bem-sucedidos e parecer independente no mesmo conteúdo, sem comentários pendentes, conflitos, sobreposições ou ficheiros sensíveis. A proteção local NÃO impede pushes diretos nem substitui a proteção GitHub. Desligado por defeito.</div>
         <label>Limits</label><div class="lm"><span>open</span><input type="number" name="maxo" min="0" max="10000" value="${r.maxo}"><span>new per day</span><input type="number" name="maxd" min="0" max="10000" value="${r.maxd}"><span>USD per day</span><input type="number" name="bud" min="0" step="0.01" value="${r.bud || 0}"></div>
-        <div class="hint">Most open PRs at once and new PRs per day. The daily budget counts API keys only, 0 = no limit.</div>
+        <div class="hint">Set open or new per day to 0 for unlimited PRs. Queue capacity, CI and review still apply. The daily budget counts API keys only; 0 = no limit.</div>
         <label>PR footer</label>${tg("nm", r.nm ?? 1, "mention ApolloOffice with a link")}
         <div class="hint">The AI note and the Co-Authored-By trailers are always added.</div>
         <label>Your rules</label><textarea name="rules" placeholder="optional, e.g. never touch the plugin API">${esc(r.rules)}</textarea>
@@ -548,7 +555,48 @@
     $("bp").onclick = repos;
   };
 
+  const steward = async () => {
+    show("Gestão de PRs · diagnóstico", "steward");
+    B.innerHTML = '<div class="msg">A consultar a fila de revisão…</div>';
+    const data = await get("/api/steward");
+    const reports = data.repos || [];
+    B.innerHTML = `<div class="sec"><div class="box">
+      <b>PR Steward — análise automática</b>
+      <div class="hint">Consulta o GitHub periodicamente. Identifica duplicações, conflitos, checks e revisões pendentes. O estado «CI: aprovado» não dispensa provas de testes completos nem as regras de proteção da branch. CodeRabbit isolado não é CI. A integração é opcional e fica desligada por omissão.</div>
+      <div class="acts"><button id="steRefresh" type="button">Atualizar painel</button></div>
+    </div></div>
+    ${reports.map(({ repo, report, error, merge_error, repair_error }) => {
+      const rows = [...(report?.prs || [])].sort((a,b) => (Number(a.priority ?? 9) - Number(b.priority ?? 9)) || (Number(b.number) - Number(a.number)));
+      const at = report?.at ? new Date(report.at).toLocaleString("pt-PT") : "sem leitura";
+      const mode = !report?.merge_enabled
+        ? "Apenas auditoria — integrações desativadas"
+        : report?.local_merge_enabled
+          ? "Integração local com provas obrigatórias (sem proteção GitHub)"
+          : "Integração com proteção GitHub obrigatória";
+      const repairs = report?.repair_enabled ? "Encaminhamento de revisões ativo (só PRs próprias)" : "Encaminhamento de revisões desativado";
+      return `<div class="sec"><h4>${esc(repo)}</h4><div class="box">
+        <div class="msg">${rows.length} PRs abertas · ${esc(at)} · ${esc(mode)} · ${esc(repairs)}${error?.error ? " · Último erro: " + esc(error.error) : ""}</div>
+        ${repair_error?.error ? `<div class="warn">Revisão não encaminhada: ${esc(repair_error.error)}</div>` : ""}
+        ${merge_error?.reason ? `<div class="warn">Integração bloqueada: ${esc(merge_error.reason)}</div>` : ""}
+        ${!report || report.error ? '<div class="warn">Sem diagnóstico completo. Não é possível concluir que alguma PR esteja pronta.</div>' : ""}
+        ${rows.length ? rows.map((p) => `<div class="ck" style="margin:5px 0;align-items:flex-start;gap:8px">
+          <span class="pill">${esc(String(p.number))}</span>
+          <div style="flex:1;min-width:0">
+            <a href="${esc(p.url || "#")}" target="_blank" rel="noopener noreferrer"><b>${esc(p.title || "PR")}</b></a>
+            <div class="hint">Prioridade P${esc(String(p.priority ?? 9))} · Estado: ${esc(p.state)} · CI: ${esc(p.checks)} · Revisão: ${esc(p.review || "não verificada")}</div>
+            <div class="hint">Próximo passo: ${esc(p.next_action || "Rever PR")}</div>
+            ${p.overlaps?.length ? `<div class="hint bad2">Ficheiros em comum com: #${p.overlaps.map(Number).join(", #")}</div>` : ""}
+            ${p.possible_duplicates?.length ? `<div class="hint bad2">Possível duplicação da mesma issue: #${p.possible_duplicates.map(Number).join(", #")}</div>` : ""}
+          </div>
+        </div>`).join("") : '<div class="empty">Não foram identificadas PRs nesta leitura.</div>'}
+      </div></div>`;
+    }).join("") || '<div class="empty">Não existem repositórios ativos.</div>'}`;
+    B.querySelector("#steRefresh").onclick = steward;
+  };
+  A.steward = steward;
+
   $("bRepos").onclick = repos;
+  $("bSteward").onclick = steward;
   $("bCost").onclick = costs;
   $("bHosts").onclick = hosts;
   A.hosts = hosts;

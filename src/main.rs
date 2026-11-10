@@ -12,6 +12,9 @@ mod quality;
 mod routing;
 mod sh;
 mod star;
+mod steward;
+mod steward_merge;
+mod steward_repair;
 mod sys;
 mod upd;
 mod vault;
@@ -128,6 +131,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(wk::scout(ax.clone()));
     tokio::spawn(wk::vet(ax.clone()));
     tokio::spawn(wk::watch(ax.clone()));
+    tokio::spawn(steward::run(ax.clone()));
     if !a.quiet {
         println!(
             "\n  ApolloOffice {}\n\n  Open {}\n\n  Data: {}\n  Stop with Ctrl+C\n",
