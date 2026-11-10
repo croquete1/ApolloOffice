@@ -349,7 +349,7 @@
         <div class="hint" style="margin-top:6px">Sentry: add an internal integration with this webhook URL and alert rule actions. GlitchTip: add it as a webhook alert. The office has to be reachable from the internet for this, for example through a tunnel; use that address instead of 127.0.0.1. The same error goes into one report. Senders that can set headers can pass the key as <code>X-Hook-Key</code> instead of in the URL. The key can only create reports; replace the link if it leaks.</div>
         <div class="hint">GitHub Actions: a failed run can report itself with <code>Silvertree2010/ApolloOffice/report</code>, see the README.</div>
         <div class="acts"><button type="button" id="hn">${cfg.hook.on ? "Replace link" : "Create link"}</button>${cfg.hook.on ? `<button type="button" class="dng" id="ho">Revoke</button>` : ""}</div></div></div>
-      <div data-tab="sys" class="sec"><h4>Updates</h4><div class="box">${tg("updates", u.configured && s.updates, "install verified fork updates automatically when the office is idle")}<div class="msg" id="um">${ust}</div><div class="acts">${u.configured ? '<button type="button" id="uc">Check now</button>' : ""}${nu ? `<button type="button" class="pri" id="ua">Install and restart</button>` : ""}</div></div></div>
+      <div data-tab="sys" class="sec"><h4>Atualizações</h4><div class="box">${tg("updates", u.configured && s.updates, "install verified fork updates automatically when the office is idle")}<div class="msg" id="um">${ust}</div><div class="acts">${u.configured ? '<button type="button" id="uc">Verificar atualizações</button>' : ""}${nu ? `<button type="button" class="pri" id="ua">Atualizar agora</button>` : ""}</div></div></div>
       <div data-tab="sys" class="sec"><h4>Export and import</h4><div class="box"><div class="ck">Settings, repositories, machines and models as a JSON file. API keys, tokens, logins and notification addresses are not included.</div>
         <div class="acts"><button type="button" id="ex">Export</button><button type="button" id="im">Import…</button><input type="file" id="imf" accept="application/json,.json" hidden></div><div class="msg" id="xm"></div></div></div>
       <div data-tab="sys" class="sec"><h4>This installation</h4><div class="box"><div class="fm" style="margin:0">
@@ -462,7 +462,17 @@
     if ($("ho")) $("ho").onclick = async (e) => { if (e.target.dataset.sure !== "1") { e.target.dataset.sure = "1"; e.target.textContent = "Click again to revoke"; return; } await post({ op: "off" }, "/api/hooktok"); settings(); };
     if ($("ao")) $("ao").onclick = async (e) => { if (e.target.dataset.sure !== "1") { e.target.dataset.sure = "1"; e.target.textContent = "Click again to revoke"; return; } await post({ op: "off" }, "/api/apitok"); settings(); };
     if ($("uc")) $("uc").onclick = async (e) => { busy(e.target, true, "Checking…"); const r = await post({ op: "check" }, "/api/update"); await settings(); $("um").textContent = r.ok ? (r.r.new ? `Update ${r.r.latest} downloaded.` : `Up to date (latest ${r.r.latest}).`) : r.m; };
-    if ($("ua")) $("ua").onclick = async (e) => { busy(e.target, true, "Restarting…"); await post({ op: "apply" }, "/api/update"); setTimeout(() => location.reload(), 6000); };
+    if ($("ua")) $("ua").onclick = async (e) => {
+      busy(e.target, true, "A verificar segurança…");
+      const r = await post({ op: "apply" }, "/api/update");
+      if (!r.ok) {
+        busy(e.target, false, "Atualizar agora");
+        $("um").className = "msg bad2";
+        $("um").textContent = r.error || r.m || "Não foi possível iniciar a atualização.";
+        return;
+      }
+      setTimeout(() => location.reload(), 6000);
+    };
   };
 
   const costs = async () => {
