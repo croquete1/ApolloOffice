@@ -122,7 +122,7 @@
         <div class="hint">Runs from the repository root. A fix is only submitted when this passes.</div>
         <label>Setup command</label><input type="text" name="setup" value="${esc(r.setup)}" placeholder="optional, e.g. npm ci">
         <div class="hint">Runs before every job, after checkout.</div>
-        <label>PR language</label><select name="lang"><option value="en" ${r.lang !== "pt-PT" ? "selected" : ""}>English</option><option value="pt-PT" ${r.lang === "pt-PT" ? "selected" : ""}>Português de Portugal (PT-PT)</option></select>
+        <label>PR language</label><select name="lang" aria-label="Idioma das Pull Requests"><option value="en" ${r.lang !== "pt-PT" ? "selected" : ""}>English</option><option value="pt-PT" ${r.lang === "pt-PT" ? "selected" : ""}>Português de Portugal (PT-PT)</option></select>
         <label>Pull requests</label><select name="mode"><option value="ask" ${r.mode !== "auto" ? "selected" : ""}>wait for my approval</option><option value="auto" ${r.mode === "auto" ? "selected" : ""}>submit automatically</option></select>
         <label>Encaminhar revisões para correção</label>${tg("steward_repair", r.steward_repair, "Criar trabalhos de revisão apenas para PRs próprias com pedidos humanos validados")}
         <div class="hint">Desligado por defeito. Requer pedido CHANGES_REQUESTED no HEAD atual, autor com permissões, Guard aprovado, ausência de duplicações e de trabalho de revisão pendente. Encaminha para o Fixer e os gates habituais; não faz merge.</div>
