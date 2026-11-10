@@ -361,7 +361,9 @@ fn english_pr_heading(body: &str) -> bool {
         let Some(heading) = line.strip_prefix("## ") else {
             return false;
         };
-        english.iter().any(|word| heading.trim().eq_ignore_ascii_case(word))
+        english
+            .iter()
+            .any(|word| heading.trim().eq_ignore_ascii_case(word))
     })
 }
 
@@ -3973,7 +3975,9 @@ mod t {
 
     #[test]
     fn portuguese_template_rejects_common_english_headings() {
-        assert!(english_pr_heading("Fixes #12\n\n## Summary\n...\n## Testing\n..."));
+        assert!(english_pr_heading(
+            "Fixes #12\n\n## Summary\n...\n## Testing\n..."
+        ));
         assert!(english_pr_heading("## testing\nTestes executados"));
         assert!(!english_pr_heading("Fixes #12\n## Resumo\n## Validação"));
     }
