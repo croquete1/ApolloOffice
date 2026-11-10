@@ -83,7 +83,11 @@ async fn until_id(
 }
 
 async fn query() -> Result<Value, &'static str> {
-    let mut proc = crate::sh::cmd(&crate::sh::tool("codex"), &["app-server".to_string()])
+    query_with(&crate::sh::tool("codex")).await
+}
+
+async fn query_with(binary: &str) -> Result<Value, &'static str> {
+    let mut proc = crate::sh::cmd(binary, &["app-server".to_string()])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -154,6 +158,38 @@ pub async fn read(a: &Ax) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn handshake_reads_local_app_server_response_without_auth_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!(
+            "apollo-codex-usage-{:016x}.sh",
+            rand::random::<u64>()
+        ));
+        let script = r#"#!/bin/sh
+IFS= read -r first || exit 2
+printf '%s\n' '{"id":1,"result":{}}'
+IFS= read -r initialized || exit 3
+IFS= read -r request || exit 4
+case "$request" in *account/rateLimits/read*) ;; *) exit 5;; esac
+printf '%s\n' '{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":12,"windowDurationMins":300,"resetsAt":1794350000},"secondary":{"usedPercent":41,"windowDurationMins":10080,"resetsAt":1794500000}}}}'
+"#;
+        std::fs::write(&path, script).unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(4),
+            query_with(path.to_str().unwrap()),
+        )
+        .await
+        .expect("o app-server local não deve bloquear")
+        .expect("resposta de app-server válida");
+        let _ = std::fs::remove_file(path);
+        assert_eq!(result["fiveHour"]["remainingPercent"], 88.0);
+        assert_eq!(result["weekly"]["remainingPercent"], 59.0);
+    }
 
     #[test]
     fn maps_real_windows_regardless_of_primary_order() {
