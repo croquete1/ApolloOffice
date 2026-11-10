@@ -1879,9 +1879,11 @@ mod t {
             }),
         )
         .unwrap();
-        let row = a
-            .db
-            .one("select lang from rp where full=?", pa!["owner/repo".to_string()])
+        let row =
+            a.db.one(
+                "select lang from rp where full=?",
+                pa!["owner/repo".to_string()],
+            )
             .unwrap();
         assert_eq!(row["lang"], "en");
     }
