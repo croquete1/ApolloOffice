@@ -21,8 +21,10 @@ fn valid_sample(v: &Value, now_ms: i64) -> Option<Sample> {
     let a = v.as_array()?;
     let at = a.first()?.as_i64()?;
     let used = a.get(1)?.as_f64()?;
-    if at > now_ms || at <= now_ms.saturating_sub(WEEK_MS)
-        || !used.is_finite() || !(0.0..=100.0).contains(&used)
+    if at > now_ms
+        || at <= now_ms.saturating_sub(WEEK_MS)
+        || !used.is_finite()
+        || !(0.0..=100.0).contains(&used)
     {
         return None;
     }
@@ -131,7 +133,11 @@ pub fn update(db: &Db, snapshot: &mut Value) {
     let mut samples: Vec<Sample> = if stored["reset_at"] == reset_sec {
         stored["samples"]
             .as_array()
-            .map(|rows| rows.iter().filter_map(|v| valid_sample(v, now_ms)).collect())
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|v| valid_sample(v, now_ms))
+                    .collect()
+            })
             .unwrap_or_default()
     } else {
         Vec::new()
@@ -139,7 +145,10 @@ pub fn update(db: &Db, snapshot: &mut Value) {
     samples.sort_by_key(|s| s.at);
     // Rejeita históricos que regrediram, por reinício da quota, conta
     // diferente ou variações de uma janela de consumo deslizante.
-    if samples.windows(2).any(|pair| pair[1].used + 0.25 < pair[0].used) {
+    if samples
+        .windows(2)
+        .any(|pair| pair[1].used + 0.25 < pair[0].used)
+    {
         samples.clear();
     }
     let used = 100.0 - rem;
@@ -149,8 +158,7 @@ pub fn update(db: &Db, snapshot: &mut Value) {
 
     let current = Sample { at: now_ms, used };
     let save = samples.last().is_none_or(|last| {
-        now_ms.saturating_sub(last.at) >= SAVE_INTERVAL_MS
-            || used - last.used >= 1.0
+        now_ms.saturating_sub(last.at) >= SAVE_INTERVAL_MS || used - last.used >= 1.0
     });
     if save {
         samples.push(current);
@@ -178,7 +186,10 @@ mod tests {
     const NOW: i64 = 1_800_000_000_000;
 
     fn sample(hours_ago: i64, used: f64) -> Sample {
-        Sample { at: NOW - hours_ago * H, used }
+        Sample {
+            at: NOW - hours_ago * H,
+            used,
+        }
     }
 
     #[test]
@@ -193,17 +204,29 @@ mod tests {
     #[test]
     fn reports_sustainable_and_low_use_without_promising_a_guarantee() {
         let history = [sample(6, 15.0), sample(3, 16.0), sample(0, 17.0)];
-        assert_eq!(forecast(&history, 83.0, NOW + 24 * H, NOW)["status"], "on_track");
+        assert_eq!(
+            forecast(&history, 83.0, NOW + 24 * H, NOW)["status"],
+            "on_track"
+        );
         let little = [sample(5, 20.00), sample(3, 20.01), sample(0, 20.05)];
-        assert_eq!(forecast(&little, 79.95, NOW + 24 * H, NOW)["status"], "low_use");
+        assert_eq!(
+            forecast(&little, 79.95, NOW + 24 * H, NOW)["status"],
+            "low_use"
+        );
     }
 
     #[test]
     fn refuses_scarce_or_decreasing_history() {
         let scarce = [sample(1, 20.0), sample(0, 21.0)];
-        assert_eq!(forecast(&scarce, 79.0, NOW + 24 * H, NOW)["status"], "insufficient");
+        assert_eq!(
+            forecast(&scarce, 79.0, NOW + 24 * H, NOW)["status"],
+            "insufficient"
+        );
         let descending = [sample(3, 45.0), sample(2, 43.0), sample(0, 41.0)];
-        assert_eq!(forecast(&descending, 59.0, NOW + 24 * H, NOW)["status"], "insufficient");
+        assert_eq!(
+            forecast(&descending, 59.0, NOW + 24 * H, NOW)["status"],
+            "insufficient"
+        );
     }
 
     fn state(at: i64, used: f64, reset: i64) -> Value {
@@ -217,8 +240,8 @@ mod tests {
     fn history_persists_but_resets_on_new_window_or_decreased_consumption() {
         let db = Db::mem();
         let reset = NOW + 48 * H;
-        for (hours_ago, used) in [(5,40.0),(3,48.0),(0,60.0)] {
-            let mut s = state(NOW - hours_ago*H, used, reset);
+        for (hours_ago, used) in [(5, 40.0), (3, 48.0), (0, 60.0)] {
+            let mut s = state(NOW - hours_ago * H, used, reset);
             update(&db, &mut s);
         }
         let previous = db.kg(KEY);
@@ -227,12 +250,12 @@ mod tests {
         update(&db, &mut next);
         assert_eq!(next["weekly_forecast"]["status"], "at_risk");
 
-        let mut lower = state(NOW + 2*H, 12.0, reset);
+        let mut lower = state(NOW + 2 * H, 12.0, reset);
         update(&db, &mut lower);
         assert_eq!(lower["weekly_forecast"]["status"], "insufficient");
         assert_eq!(db.kg(KEY)["samples"].as_array().unwrap().len(), 1);
 
-        let mut new_window = state(NOW + 3*H, 2.0, reset + 3*H);
+        let mut new_window = state(NOW + 3 * H, 2.0, reset + 3 * H);
         update(&db, &mut new_window);
         assert_eq!(new_window["weekly_forecast"]["status"], "insufficient");
         assert_eq!(db.kg(KEY)["samples"].as_array().unwrap().len(), 1);
@@ -261,8 +284,8 @@ mod tests {
         assert_eq!(expired["weekly_forecast"]["status"], "insufficient");
         assert!(db.kg(KEY).is_null());
         for n in 0..900_i64 {
-            let at = NOW - 6*24*H + n*10*60_000;
-            let mut s = state(at, 10.0 + (n as f64)/1000.0, reset);
+            let at = NOW - 6 * 24 * H + n * 10 * 60_000;
+            let mut s = state(at, 10.0 + (n as f64) / 1000.0, reset);
             update(&db, &mut s);
         }
         let stored = db.kg(KEY);
