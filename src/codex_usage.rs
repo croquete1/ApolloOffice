@@ -173,7 +173,11 @@ pub async fn watch(a: Ax) {
         let next = match fetch().await {
             Ok(value) => value,
             Err(message) => {
-                let previous = a.codex_usage.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let previous = a
+                    .codex_usage
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
                 if previous["updated_at"].as_i64().is_some() {
                     let mut stale = previous;
                     stale["status"] = json!("stale");
