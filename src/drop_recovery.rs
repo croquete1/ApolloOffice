@@ -24,10 +24,7 @@ fn category(reason: &str) -> &'static str {
 }
 
 fn published_or_approved(j: &Job) -> bool {
-    j.pr.is_some()
-        || j.d["published_sha"].is_string()
-        || j.d["ap"] == true
-        || j.d["sq"] == true
+    j.pr.is_some() || j.d["published_sha"].is_string() || j.d["ap"] == true || j.d["sq"] == true
 }
 
 fn attempts(j: &Job) -> u64 {
@@ -89,9 +86,7 @@ pub async fn retry_manual(a: &Ax, id: i64) -> Result<bool, String> {
             90,
         )
         .await?;
-        let list = prs
-            .as_array()
-            .ok_or("Resposta de PRs inválida")?;
+        let list = prs.as_array().ok_or("Resposta de PRs inválida")?;
         if list.len() >= 200 {
             return Err("Lista de PRs truncada; recuperação bloqueada".into());
         }
@@ -112,10 +107,12 @@ pub fn retry(a: &Ax, id: i64, automatic: bool) -> Result<bool, &'static str> {
     if a.hold("watcher") || a.drain.load(std::sync::atomic::Ordering::Relaxed) {
         return Err("Apollo Office em pausa ou manutenção");
     }
-    let repo = a.db.one(
-        "select on_,ci,auto_recover_drops from rp where full=?",
-        pa![j.repo.clone()],
-    ).ok_or("Repositório inexistente")?;
+    let repo =
+        a.db.one(
+            "select on_,ci,auto_recover_drops from rp where full=?",
+            pa![j.repo.clone()],
+        )
+        .ok_or("Repositório inexistente")?;
     if repo["on_"] != 1 || repo["ci"].as_str().unwrap_or("").trim().is_empty() {
         return Err("Repositório inativo ou sem comando de testes");
     }
@@ -130,9 +127,10 @@ pub fn retry(a: &Ax, id: i64, automatic: bool) -> Result<bool, &'static str> {
     {
         return Err("Já existe outro trabalho ativo para a mesma issue");
     }
-    let updated = a.db.one("select t1 from jobs where id=?", pa![id])
-        .and_then(|v| v["t1"].as_i64())
-        .ok_or("Data de estado em falta")?;
+    let updated =
+        a.db.one("select t1 from jobs where id=?", pa![id])
+            .and_then(|v| v["t1"].as_i64())
+            .ok_or("Data de estado em falta")?;
     let age = now().saturating_sub(updated);
     if automatic && age < RETRY_DELAY_MS {
         return Err("Aguarda intervalo de segurança");
@@ -152,30 +150,62 @@ pub fn retry(a: &Ax, id: i64, automatic: bool) -> Result<bool, &'static str> {
     }
     if let Some(map) = data.as_object_mut() {
         for key in [
-            "h", "rs", "rp", "br", "f", "f0", "sq", "known", "vt", "ap",
-            "base", "pbase", "pt", "pb", "pb_footer", "df", "proof",
-            "published_sha", "publish_tree", "ci_tree", "ci_evidence",
-            "ci_verified_at", "last_review", "last_diagnosis", "fx",
-            "ir", "ie", "acceptance", "acceptance_proof", "verification_feedback",
+            "h",
+            "rs",
+            "rp",
+            "br",
+            "f",
+            "f0",
+            "sq",
+            "known",
+            "vt",
+            "ap",
+            "base",
+            "pbase",
+            "pt",
+            "pb",
+            "pb_footer",
+            "df",
+            "proof",
+            "published_sha",
+            "publish_tree",
+            "ci_tree",
+            "ci_evidence",
+            "ci_verified_at",
+            "last_review",
+            "last_diagnosis",
+            "fx",
+            "ir",
+            "ie",
+            "acceptance",
+            "acceptance_proof",
+            "verification_feedback",
         ] {
             map.remove(key);
         }
     }
-    let next_state = if !automatic
-        && (j.why.starts_with("Guard") || j.why.starts_with("Vet"))
-    {
+    let next_state = if !automatic && (j.why.starts_with("Guard") || j.why.starts_with("Vet")) {
         "vet"
     } else {
         "ready"
     };
     let message = if automatic {
-        format!("Recuperação automática segura ({}/{MAX_AUTO_ATTEMPTS})", attempts(&j) + 1)
+        format!(
+            "Recuperação automática segura ({}/{MAX_AUTO_ATTEMPTS})",
+            attempts(&j) + 1
+        )
     } else {
         "Recolocado na fila pelo proprietário".to_string()
     };
     let changed = a.db.ch(
         "update jobs set st=?,why=?,d=?,t1=? where id=? and st='drop' and pr is null",
-        pa![next_state.to_string(), message.clone(), data.to_string(), now(), id],
+        pa![
+            next_state.to_string(),
+            message.clone(),
+            data.to_string(),
+            now(),
+            id
+        ],
     );
     if changed != 1 {
         return Ok(false);
@@ -196,7 +226,8 @@ pub async fn scan(a: &Ax, repo: &str, prs: &[Value]) {
     if a.db.n(
         "select count(*) from rp where full=? and on_=1 and auto_recover_drops=1",
         pa![repo.to_string()],
-    ) != 1 {
+    ) != 1
+    {
         return;
     }
     let dropped = a.db.all(
@@ -248,23 +279,27 @@ pub fn report(a: &Ax, repo: &str) -> Value {
         "select count(*) from jobs where repo=? and st='drop'",
         pa![repo.to_string()],
     );
-    let rows: Vec<Value> = a.db.all(
-        "select * from jobs where repo=? and st='drop' order by t1 desc limit 25",
-        pa![repo.to_string()],
-    ).into_iter().map(|row| {
-        let j = Job::of(row);
-        let cause = category(&j.why);
-        let can_retry = eligible(&j, true);
-        let used = attempts(&j);
-        json!({
-            "id": j.id,
-            "title": j.title,
-            "reason": j.why,
-            "category": cause,
-            "safe_auto": can_retry,
-            "attempts": used,
+    let rows: Vec<Value> =
+        a.db.all(
+            "select * from jobs where repo=? and st='drop' order by t1 desc limit 25",
+            pa![repo.to_string()],
+        )
+        .into_iter()
+        .map(|row| {
+            let j = Job::of(row);
+            let cause = category(&j.why);
+            let can_retry = eligible(&j, true);
+            let used = attempts(&j);
+            json!({
+                "id": j.id,
+                "title": j.title,
+                "reason": j.why,
+                "category": cause,
+                "safe_auto": can_retry,
+                "attempts": used,
+            })
         })
-    }).collect();
+        .collect();
     json!({"enabled":enabled,"total":total,"jobs":rows})
 }
 
@@ -282,13 +317,25 @@ mod tests {
             pa!["org/repo".to_string(), "cargo test".to_string()],
         );
         Arc::new(App::new(
-            db, std::env::temp_dir(), 47300, "apollo-office".into(),
+            db,
+            std::env::temp_dir(),
+            47300,
+            "apollo-office".into(),
         ))
     }
 
     fn dropped(a: &Ax, reason: &str, data: Value) -> i64 {
         let id = a.db.jnew(
-            "org/repo", 42, "fix", "Corrigir problema", "", "drop", reason, data, None, 0.0,
+            "org/repo",
+            42,
+            "fix",
+            "Corrigir problema",
+            "",
+            "drop",
+            reason,
+            data,
+            None,
+            0.0,
         );
         a.db.run(
             "update jobs set t1=? where id=?",
@@ -301,7 +348,8 @@ mod tests {
     fn automatic_recovery_is_bounded_and_clears_stale_evidence() {
         let a = setup();
         let id = dropped(
-            &a, "machine kept failing: timed out",
+            &a,
+            "machine kept failing: timed out",
             json!({"h":"host","last_review":{"verdict":{"ok":true}},"ci_evidence":{"exit":0},"ir":5}),
         );
         assert_eq!(retry(&a, id, true), Ok(true));
@@ -312,24 +360,41 @@ mod tests {
         assert!(j.d["ci_evidence"].is_null());
         assert!(j.d["ir"].is_null());
         assert_eq!(j.d["drop_history"][0]["automatic"], true);
-        assert_eq!(retry(&a, id, true), Err("Drop não elegível para recuperação segura"));
+        assert_eq!(
+            retry(&a, id, true),
+            Err("Drop não elegível para recuperação segura")
+        );
     }
 
     #[test]
     fn rejected_owner_or_guard_drops_are_never_automatically_retried() {
         let a = setup();
-        for reason in ["dropped by the owner", "Guard rejected unsafe request", "Vet rejected"] {
+        for reason in [
+            "dropped by the owner",
+            "Guard rejected unsafe request",
+            "Vet rejected",
+        ] {
             let id = dropped(&a, reason, json!({}));
-            assert_eq!(retry(&a, id, true), Err("Drop não elegível para recuperação segura"));
+            assert_eq!(
+                retry(&a, id, true),
+                Err("Drop não elegível para recuperação segura")
+            );
         }
     }
 
     #[test]
     fn manual_retry_does_not_reuse_approval_or_published_work() {
         let a = setup();
-        for data in [json!({"ap":true}),json!({"published_sha":"abcdef"}),json!({"sq":true})] {
+        for data in [
+            json!({"ap":true}),
+            json!({"published_sha":"abcdef"}),
+            json!({"sq":true}),
+        ] {
             let id = dropped(&a, "error: failed", data);
-            assert_eq!(retry(&a, id, false), Err("Drop não elegível para recuperação segura"));
+            assert_eq!(
+                retry(&a, id, false),
+                Err("Drop não elegível para recuperação segura")
+            );
         }
         let id = dropped(&a, "Guard rejected", json!({"br":"scratch"}));
         assert_eq!(retry(&a, id, false), Ok(true));
@@ -341,11 +406,21 @@ mod tests {
     #[test]
     fn no_auto_retry_without_explicit_opt_in_or_after_limit() {
         let a = setup();
-        let id = dropped(&a, "machine kept failing: connection reset", json!({"recovery_attempts":2}));
-        assert_eq!(retry(&a, id, true), Err("Drop não elegível para recuperação segura"));
+        let id = dropped(
+            &a,
+            "machine kept failing: connection reset",
+            json!({"recovery_attempts":2}),
+        );
+        assert_eq!(
+            retry(&a, id, true),
+            Err("Drop não elegível para recuperação segura")
+        );
         let id = dropped(&a, "machine kept failing: connection reset", json!({}));
         a.db.run("update rp set auto_recover_drops=0", pa![]);
-        assert_eq!(retry(&a, id, true), Err("Recuperação automática desativada"));
+        assert_eq!(
+            retry(&a, id, true),
+            Err("Recuperação automática desativada")
+        );
     }
 
     #[test]
@@ -353,7 +428,10 @@ mod tests {
         assert!(open_issue(&json!({"number":42,"state":"open"}), 42));
         assert!(!open_issue(&json!({"number":42,"state":"closed"}), 42));
         assert!(!open_issue(&json!({"number":41,"state":"open"}), 42));
-        assert!(!open_issue(&json!({"number":42,"state":"open","pull_request":{}}), 42));
+        assert!(!open_issue(
+            &json!({"number":42,"state":"open","pull_request":{}}),
+            42
+        ));
         assert!(!open_issue(&json!({}), 42));
         let pr = json!({"body":"Fixes #42","number":123});
         assert!(has_related_pr(&[pr], 42));
@@ -364,10 +442,27 @@ mod tests {
     fn recovery_waits_and_does_not_rerun_pending_duplicate_work() {
         let a = setup();
         let id = dropped(&a, "machine kept failing: connection reset", json!({}));
-        a.db.run("update jobs set t1=? where id=?", pa![now(),id]);
+        a.db.run("update jobs set t1=? where id=?", pa![now(), id]);
         assert_eq!(retry(&a, id, true), Err("Aguarda intervalo de segurança"));
-        a.db.run("update jobs set t1=? where id=?", pa![now()-RETRY_DELAY_MS-1,id]);
-        a.db.jnew("org/repo",42,"fix","Outra tentativa","","ready","",json!({}),None,0.0);
-        assert_eq!(retry(&a, id, true), Err("Já existe outro trabalho ativo para a mesma issue"));
+        a.db.run(
+            "update jobs set t1=? where id=?",
+            pa![now() - RETRY_DELAY_MS - 1, id],
+        );
+        a.db.jnew(
+            "org/repo",
+            42,
+            "fix",
+            "Outra tentativa",
+            "",
+            "ready",
+            "",
+            json!({}),
+            None,
+            0.0,
+        );
+        assert_eq!(
+            retry(&a, id, true),
+            Err("Já existe outro trabalho ativo para a mesma issue")
+        );
     }
 }
