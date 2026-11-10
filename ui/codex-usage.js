@@ -23,6 +23,7 @@
     '  <div class="codex-quota-line"><strong>Limite semanal</strong><span data-remaining>—</span></div>',
     '  <div class="codex-quota-bar" role="progressbar" aria-label="Quota semanal disponível" aria-valuemin="0" aria-valuemax="100"><i></i></div>',
     '  <div class="codex-quota-reset" data-reset>Reposição: —</div>',
+    '  <div class="codex-quota-prediction" id="codexWeeklyForecast" role="status" aria-live="polite">A recolher histórico para estimar o risco semanal…</div>',
     '</div>',
     '<div class="codex-quota-footer" id="codexQuotaUpdated">A aguardar leitura do Codex CLI</div>'
   ].join("");
@@ -34,6 +35,7 @@
 
   const status = panel.querySelector("#codexQuotaStatus");
   const footer = panel.querySelector("#codexQuotaUpdated");
+  const prediction = panel.querySelector("#codexWeeklyForecast");
   const nodes = {
     five_hour: panel.querySelector('[data-codex-window="five_hour"]'),
     weekly: panel.querySelector('[data-codex-window="weekly"]')
@@ -89,6 +91,44 @@
       reset.textContent = duration(remainingSec) + " · " + formatter.format(new Date(ts * 1000));
     }
   };
+  const renderForecast = (live) => {
+    const f = usage?.weekly_forecast;
+    let level = "unknown";
+    let message = "A recolher histórico para estimar o risco semanal (mínimo 2 h).";
+    if (!live) {
+      message = "Previsão suspensa: é necessária uma leitura Codex atualizada.";
+    } else if (usage?.weekly?.remaining === 0 || f?.status === "exhausted") {
+      level = "exhausted";
+      message = "Quota semanal esgotada. Aguarde a próxima reposição.";
+    } else if (f?.status === "expired") {
+      message = "A aguardar os limites do novo período semanal.";
+    } else if (f?.status === "unavailable") {
+      message = "Sem dados suficientes da quota semanal para prever o consumo.";
+    } else if (f?.status === "low_use") {
+      level = "low";
+      message = "Consumo pouco significativo no período observado; sem esgotamento projetado neste ritmo.";
+    } else if (["at_risk", "near_limit", "on_track"].includes(f?.status)) {
+      const hrs = Number(f.observed_hours);
+      const period = Number.isFinite(hrs) && hrs >= 2
+        ? " (últimas " + hrs.toLocaleString("pt-PT", { maximumFractionDigits: 1 }) + " h)" : "";
+      const at = Number(f.projected_exhaust_at);
+      const date = Number.isFinite(at) && at > 0
+        ? formatter.format(new Date(at * 1000)) : "hora não disponível";
+      if (f.status === "at_risk") {
+        level = "risk";
+        message = "Risco de esgotamento antes da reposição" + period + ". Previsão: " + date + ".";
+      } else if (f.status === "near_limit") {
+        level = "near";
+        message = "Previsão próxima da reposição" + period + ". Esgotamento estimado: " + date + ".";
+      } else {
+        level = "ok";
+        message = "Ao ritmo observado, não deverá esgotar antes da reposição" + period + ".";
+      }
+      message += " Estimativa, não garantia.";
+    }
+    if (prediction.textContent !== message) prediction.textContent = message;
+    prediction.dataset.risk = level;
+  };
   const refresh = () => {
     if (!panel.isConnected) return;
     const at = Number(usage?.updated_at);
@@ -107,6 +147,7 @@
     }
     renderWindow("five_hour");
     renderWindow("weekly");
+    renderForecast(live);
   };
   A.subscribeState((s) => {
     serverTime = Number(s?.t);

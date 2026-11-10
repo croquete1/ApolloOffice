@@ -13,6 +13,10 @@
 .codex-quota-low .codex-quota-bar i { background:var(--bad,#e0675a); }
 .codex-quota-missing .codex-quota-bar { opacity:.35; }
 .codex-quota-reset,.codex-quota-footer { color:var(--t3,#8b97a7); font:10px/1.45 var(--m,ui-monospace,monospace); }
+.codex-quota-prediction { margin-top:7px; padding:4px 0 0 8px; border-left:2px solid var(--l,#384151); color:var(--t2,#b9bec7); font:10px/1.5 var(--m,ui-monospace,monospace); }
+.codex-quota-prediction[data-risk="risk"], .codex-quota-prediction[data-risk="exhausted"] { border-color:var(--bad,#e0675a); color:var(--t1,#eee); }
+.codex-quota-prediction[data-risk="near"] { border-color:var(--warn,#e6b65b); color:var(--t1,#eee); }
+.codex-quota-prediction[data-risk="ok"], .codex-quota-prediction[data-risk="low"] { border-color:var(--ok,#5cbf6a); }
 .codex-quota-footer { border-top:1px solid var(--l,#384151); padding-top:6px; margin-top:3px; }
 .side:has(.codex-quota-card) { grid-template-rows:minmax(0,1.1fr) minmax(0,.9fr) minmax(135px,.85fr) minmax(0,.7fr); }
 @media (max-width:860px) and (min-width:701px) {
