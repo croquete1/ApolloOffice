@@ -82,12 +82,11 @@ pub fn retry(a: &Ax, id: i64, automatic: bool) -> Result<bool, &'static str> {
         return Err("Aguarda intervalo de segurança");
     }
     let mut data = j.d.clone();
-    let history = data["drop_history"].as_array().cloned().unwrap_or_default();
-    let mut history = history;
+    let mut history = data["drop_history"].as_array().cloned().unwrap_or_default();
     if history.len() >= 8 {
         history.remove(0);
     }
-    history.push(json!({"at":now(),"reason":j.why,"automatic":automatic}));
+    history.push(json!({"at":now(),"reason":j.why.clone(),"automatic":automatic}));
     data["drop_history"] = json!(history);
     if automatic {
         data["recovery_attempts"] = json!(attempts(&j) + 1);
