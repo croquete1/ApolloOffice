@@ -215,7 +215,7 @@ pub async fn scan(a: &Ax, repo: &str) -> Result<(), String> {
     }
     let report = assess(list);
     // Só recuperar falhas transitórias depois de obter PRs atuais do GitHub.
-    crate::drop_recovery::scan(a, repo, list);
+    crate::drop_recovery::scan(a, repo, list).await;
     let merge_enabled = a.db.n(
         "select auto_merge from rp where full=? and on_=1",
         pa![repo.to_string()],
