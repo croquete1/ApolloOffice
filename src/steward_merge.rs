@@ -412,8 +412,7 @@ fn pr_current(pr: &Value, expected: &ExpectedMerge<'_>) -> bool {
         && pr["user"]["login"] == expected.author
         && pr["mergeable"] == true
         && pr["mergeable_state"] == "clean"
-        && (expected.mode != MergeMode::Local
-            || pr["head"]["repo"]["full_name"] == expected.repo)
+        && (expected.mode != MergeMode::Local || pr["head"]["repo"]["full_name"] == expected.repo)
 }
 
 fn review_gate(reviews: &Value, expected: &ExpectedMerge<'_>) -> bool {
@@ -644,13 +643,19 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
     // Uma resposta incompleta ou erro da API aborta o merge.
     let read: Result<FinalReads, String> = async {
         let reviews = ghj(
-            &["api", &format!("repos/{repo}/pulls/{number}/reviews?per_page=100")],
+            &[
+                "api",
+                &format!("repos/{repo}/pulls/{number}/reviews?per_page=100"),
+            ],
             40,
         )
         .await?;
         let threads_resolved = review_threads_resolved(repo, number).await?;
         let checks = ghj(
-            &["api", &format!("repos/{repo}/commits/{head}/check-runs?per_page=100")],
+            &[
+                "api",
+                &format!("repos/{repo}/commits/{head}/check-runs?per_page=100"),
+            ],
             40,
         )
         .await?;
@@ -800,8 +805,7 @@ mod tests {
         assert!(!final_gate(Ok(snapshot), &e).unwrap());
 
         let mut snapshot = sample_final_reads();
-        snapshot.branch["commit"]["sha"] =
-            json!("cccccccccccccccccccccccccccccccccccccccc");
+        snapshot.branch["commit"]["sha"] = json!("cccccccccccccccccccccccccccccccccccccccc");
         assert!(!final_gate(Ok(snapshot), &e).unwrap());
 
         let mut snapshot = sample_final_reads();
@@ -1025,7 +1029,10 @@ mod tests {
         job["d"]["ci_evidence"]["candidate"] = json!(wrong_head);
         assert!(!local_proof(&job, sha, base, tree, ci));
         job["d"]["ci_evidence"]["candidate"] = json!(sha);
-        job["d"]["ci_evidence"].as_object_mut().unwrap().remove("candidate");
+        job["d"]["ci_evidence"]
+            .as_object_mut()
+            .unwrap()
+            .remove("candidate");
         assert!(!local_proof(&job, sha, base, tree, ci));
         job["d"]["ci_evidence"]["candidate"] = json!(sha);
         job["d"]["published_sha"] = json!("ffffffffffffffffffffffffffffffffffffffff");
