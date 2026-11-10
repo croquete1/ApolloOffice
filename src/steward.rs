@@ -80,7 +80,7 @@ pub(crate) fn issue_refs(pr: &Value) -> BTreeSet<String> {
         pr["title"].as_str().unwrap_or(""),
         pr["body"].as_str().unwrap_or("")
     );
-    let re = regex::Regex::new(r"(?i)\b(?:fixes|closes|resolves)\s+#(\d+)\b").unwrap();
+    let re = regex::Regex::new(r"(?i)\b(?:fix(?:e[sd])?|close[sd]?|resolve[sd]?)\s*:?\s+#(\d+)\b").unwrap();
     re.captures_iter(&source)
         .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
         .collect()
@@ -106,9 +106,12 @@ fn check_state(pr: &Value) -> &'static str {
     if !checks.iter().any(|c| is_test_check(c)) {
         return "nao_verificado";
     }
-    if checks
-        .iter()
-        .all(|c| c["conclusion"] == "SUCCESS" || c["state"] == "SUCCESS")
+    let success = |c: &&Value| c["conclusion"] == "SUCCESS" || c["state"] == "SUCCESS";
+    let neutral = |c: &&Value| c["conclusion"] == "SKIPPED" || c["conclusion"] == "NEUTRAL";
+    // Os checks opcionais ignorados não bloqueiam, mas é obrigatório
+    // pelo menos um teste realmente executado com sucesso.
+    if checks.iter().any(|c| is_test_check(c) && success(c))
+        && checks.iter().all(|c| success(c) || neutral(c))
     {
         return "aprovado";
     }
@@ -348,6 +351,35 @@ mod tests {
             "statusCheckRollup":[{"name":"test-suite","conclusion":"SUCCESS"}],
             "files":[{"path":path}]
         })
+    }
+
+    #[test]
+    fn detects_all_github_issue_closing_keywords_without_false_issue_number() {
+        for keyword in [
+            "Fix", "Fixes", "Fixed", "Close", "Closes", "Closed",
+            "Resolve", "Resolves", "Resolved",
+        ] {
+            let p = json!({"title":"Correção","body":format!("{keyword} #42")});
+            assert_eq!(issue_refs(&p), BTreeSet::from(["42".to_string()]));
+        }
+        let p = json!({"title":"Correção","body":"Resolved: #42\nFixed #142"});
+        assert_eq!(issue_refs(&p), BTreeSet::from(["42".to_string(), "142".to_string()]));
+        assert!(!issue_refs(&json!({"body":"Referência à issue #42"})).contains("42"));
+    }
+
+    #[test]
+    fn skipped_optional_checks_do_not_block_successful_tests() {
+        let mut pr = sample(44, "src/abc.rs", "44");
+        pr["statusCheckRollup"] = json!([
+            {"name":"test-suite","conclusion":"SUCCESS"},
+            {"name":"lint","conclusion":"SKIPPED"},
+            {"name":"docs","conclusion":"NEUTRAL"}
+        ]);
+        assert_eq!(assess(&[pr.clone()])[0]["checks"], "aprovado");
+        pr["statusCheckRollup"][0]["conclusion"] = json!("SKIPPED");
+        assert_eq!(assess(&[pr.clone()])[0]["checks"], "pendente");
+        pr["statusCheckRollup"][0]["conclusion"] = json!("FAILURE");
+        assert_eq!(assess(&[pr])[0]["checks"], "falhou");
     }
 
     #[test]
