@@ -39,6 +39,12 @@
     weekly: panel.querySelector('[data-codex-window="weekly"]')
   };
   let usage = null;
+  let serverTime = NaN;
+  let receivedAt = 0;
+  // A base temporal é a hora do servidor, atualizada pelo relógio monotónico.
+  // Evita contagens incorretas quando os relógios locais divergem.
+  const nowMs = () => Number.isFinite(serverTime) && serverTime > 0
+    ? serverTime + Math.max(0, performance.now() - receivedAt) : Date.now();
   const formatter = new Intl.DateTimeFormat("pt-PT", {
     day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit"
   });
@@ -79,14 +85,14 @@
     if (!Number.isFinite(ts) || ts <= 0) {
       reset.textContent = "Hora de reposição indisponível";
     } else {
-      const remainingSec = Math.ceil(ts - Date.now() / 1000);
+      const remainingSec = Math.ceil(ts - nowMs() / 1000);
       reset.textContent = duration(remainingSec) + " · " + formatter.format(new Date(ts * 1000));
     }
   };
   const refresh = () => {
     if (!panel.isConnected) return;
     const at = Number(usage?.updated_at);
-    const age = Number.isFinite(at) && at > 0 ? Date.now() - at : Infinity;
+    const age = Number.isFinite(at) && at > 0 ? nowMs() - at : Infinity;
     const live = usage?.status === "ok" && age >= -60000 && age < 600000;
     const historical = age < Infinity;
     status.textContent = live ? "Atualizado" : usage?.status === "loading"
@@ -103,6 +109,8 @@
     renderWindow("weekly");
   };
   A.subscribeState((s) => {
+    serverTime = Number(s?.t);
+    receivedAt = performance.now();
     usage = s?.codex_usage || null;
     refresh();
   });
