@@ -170,18 +170,24 @@ class Handler(SimpleHTTPRequestHandler):
       return pixel[3] > 0;
     });
   }
-  function inspectTelemetry(canvas, errors) {
-    var scenario = "__PIXEL_TELEMETRY__";
-    if (!scenario || !canvas) return;
-    // Reproduzir o hover real sobre o primeiro host no rack pixelizado.
+  function hoverHost(canvas) {
+    // O primeiro frame pode ter sido desenhado antes da resposta /api/state.
+    // O rack só recebe a hitbox do host num frame seguinte.
+    if (!canvas) return "";
     var rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return "";
     canvas.dispatchEvent(new MouseEvent("mousemove", {
       bubbles: true,
       clientX: rect.left + rect.width * (272 / 400),
       clientY: rect.top + rect.height * (80 / 258)
     }));
     var tooltip = document.getElementById("tip");
-    var text = tooltip && !tooltip.hidden ? tooltip.textContent : "";
+    return tooltip && !tooltip.hidden ? tooltip.textContent : "";
+  }
+  function inspectTelemetry(canvas, errors) {
+    var scenario = "__PIXEL_TELEMETRY__";
+    if (!scenario || !canvas) return;
+    var text = hoverHost(canvas);
     if (!text.includes("este computador"))
       errors.push("Tooltip do host não abriu através do canvas");
     if (scenario === "fresh" || scenario === "skew") {
@@ -222,8 +228,17 @@ class Handler(SimpleHTTPRequestHandler):
       errors.length ? "FAIL: " + errors.join(" | ") : "PASS");
   }
   (function waitForFrame() {
-    var ready = window.AO?.S && painted(document.getElementById("cv"));
-    if (ready || Date.now() - started >= 3500) verify();
+    var canvas = document.getElementById("cv");
+    var ready = window.AO?.S && painted(canvas);
+    var expired = Date.now() - started >= 3500;
+    // O snapshot pode chegar depois do primeiro frame pintado: aguardar até
+    // a hitbox do host existir, sem dispensar os testes reais do tooltip.
+    if (ready && "__PIXEL_TELEMETRY__" &&
+        !hoverHost(canvas).includes("este computador") && !expired) {
+      setTimeout(waitForFrame, 100);
+      return;
+    }
+    if (ready || expired) verify();
     else setTimeout(waitForFrame, 100);
   })();
 })();
