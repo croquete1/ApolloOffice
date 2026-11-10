@@ -1210,8 +1210,12 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                     }
                 }
                 "requeue" => {
-                    if let Err(reason) = crate::drop_recovery::retry_manual(a, id).await {
-                        return er(StatusCode::CONFLICT, reason);
+                    match crate::drop_recovery::retry_manual(a, id).await {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            return er(StatusCode::CONFLICT, "Job alterado durante a recuperação");
+                        }
+                        Err(reason) => return er(StatusCode::CONFLICT, &reason),
                     }
                 }
                 _ => return er(StatusCode::BAD_REQUEST, "unknown action"),
