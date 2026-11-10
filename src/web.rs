@@ -193,7 +193,7 @@ fn state(a: &Ax) -> Value {
         "lm": if now() - lm["t"].as_i64().unwrap_or(0) < 180_000 { lm } else { Value::Null },
         "nr": a.db.n("select count(*) from rp", pa![]),
         "star": crate::star::show(a),
-        "codex_usage": a.codex_usage.lock().unwrap().clone(),
+        "codex_usage": a.codex_usage.lock().unwrap_or_else(|e| e.into_inner()).clone(),
     })
 }
 
