@@ -343,8 +343,18 @@ fn stored_pr_footer(j: &Job, configured: &str) -> String {
 // pode reintroduzir numa PR configurada para PT-PT.
 fn english_pr_heading(body: &str) -> bool {
     let english = [
-        "Cause", "Fix", "Verified", "Not changed", "Why", "Change",
-        "Summary", "Testing", "Tests", "Test plan", "Description", "Changes",
+        "Cause",
+        "Fix",
+        "Verified",
+        "Not changed",
+        "Why",
+        "Change",
+        "Summary",
+        "Testing",
+        "Tests",
+        "Test plan",
+        "Description",
+        "Changes",
     ];
     body.lines().any(|line| {
         let line = line.trim_start();
@@ -3664,7 +3674,7 @@ mod t {
     fn approved_pr_footer_survives_language_changes() {
         let mut j = Job::of(json!({
             "id": 88, "repo": "o/r", "num": 12, "kind": "fix", "title": "T",
-            "d": {"pb_footer": FOOT_PT, "pb": format!("Fixes #12\\n\\n{FOOT_PT}")}
+            "d": {"pb_footer": FOOT_PT, "pb": format!("Fixes #12\n\n{FOOT_PT}")}
         }));
         assert_eq!(stored_pr_footer(&j, FOOT), FOOT_PT);
         j.d.as_object_mut().unwrap().remove("pb_footer");
