@@ -1210,7 +1210,7 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                     }
                 }
                 "requeue" => {
-                    if let Err(reason) = crate::drop_recovery::retry(a, id, false) {
+                    if let Err(reason) = crate::drop_recovery::retry_manual(a, id).await {
                         return er(StatusCode::CONFLICT, reason);
                     }
                 }
