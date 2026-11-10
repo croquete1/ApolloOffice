@@ -278,10 +278,10 @@ printf '%s\n' '{"id":2,"result":{"rateLimits":{"limitId":"codex","primary":{"use
 "#;
         std::fs::write(&path, script).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let result = tokio::time::timeout(
-            Duration::from_secs(4),
-            request(path.to_str().unwrap())
-        ).await.unwrap().unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(4), request(path.to_str().unwrap()))
+            .await
+            .unwrap()
+            .unwrap();
         let _ = std::fs::remove_file(&path);
         let parsed = parse_limits(&result, 123).unwrap();
         assert_eq!(parsed["five_hour"]["remaining"], 88.0);
