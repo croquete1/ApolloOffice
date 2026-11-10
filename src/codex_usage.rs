@@ -37,9 +37,7 @@ fn parse_limits(response: &Value, at: i64) -> Result<Value, &'static str> {
     } else {
         &response["rateLimits"]
     };
-    if !limits.is_object()
-        || limits["limitId"].as_str().is_some_and(|id| id != "codex")
-    {
+    if !limits.is_object() || limits["limitId"].as_str().is_some_and(|id| id != "codex") {
         return Err("Resposta Codex sem o limite principal");
     }
     let mut five_hour = None;
@@ -64,9 +62,18 @@ fn parse_limits(response: &Value, at: i64) -> Result<Value, &'static str> {
 }
 
 async fn write_rpc(input: &mut tokio::process::ChildStdin, v: Value) -> Result<(), String> {
-    input.write_all(v.to_string().as_bytes()).await.map_err(|_| "Não foi possível contactar Codex")?;
-    input.write_all(b"\n").await.map_err(|_| "Não foi possível contactar Codex")?;
-    input.flush().await.map_err(|_| "Não foi possível contactar Codex")?;
+    input
+        .write_all(v.to_string().as_bytes())
+        .await
+        .map_err(|_| "Não foi possível contactar Codex")?;
+    input
+        .write_all(b"\n")
+        .await
+        .map_err(|_| "Não foi possível contactar Codex")?;
+    input
+        .flush()
+        .await
+        .map_err(|_| "Não foi possível contactar Codex")?;
     Ok(())
 }
 
@@ -77,7 +84,11 @@ async fn answer(
     // Notificações assíncronas podem chegar antes da resposta solicitada.
     // Limitar linhas recebidas para não consumir memória indefinidamente.
     for _ in 0..256 {
-        let Some(line) = lines.next_line().await.map_err(|_| "Falha de leitura do Codex")? else {
+        let Some(line) = lines
+            .next_line()
+            .await
+            .map_err(|_| "Falha de leitura do Codex")?
+        else {
             return Err("O Codex terminou a comunicação".into());
         };
         if line.len() > 131_072 {
@@ -114,18 +125,26 @@ async fn request(bin: &str) -> Result<Value, String> {
     let output = child.stdout.take().ok_or("Codex sem saída standard")?;
     let mut lines = BufReader::new(output).lines();
 
-    write_rpc(&mut input, json!({
-        "id": 1,
-        "method": "initialize",
-        "params": {"clientInfo": {
-            "name": "apollo_office",
-            "title": "Apollo Office",
-            "version": env!("CARGO_PKG_VERSION")
-        }}
-    })).await?;
+    write_rpc(
+        &mut input,
+        json!({
+            "id": 1,
+            "method": "initialize",
+            "params": {"clientInfo": {
+                "name": "apollo_office",
+                "title": "Apollo Office",
+                "version": env!("CARGO_PKG_VERSION")
+            }}
+        }),
+    )
+    .await?;
     answer(&mut lines, 1).await?;
     write_rpc(&mut input, json!({"method": "initialized", "params": {}})).await?;
-    write_rpc(&mut input, json!({"id": 2, "method": "account/rateLimits/read"})).await?;
+    write_rpc(
+        &mut input,
+        json!({"id": 2, "method": "account/rateLimits/read"}),
+    )
+    .await?;
     let result = answer(&mut lines, 2).await?;
     Ok(result)
 }
@@ -206,10 +225,17 @@ mod tests {
             "rateLimitsByLimitId":{"codex":{"limitId":"codex",
                 "primary":{"usedPercent":7,"windowDurationMins":300,"resetsAt":1780000000}}}
         });
-        assert_eq!(parse_limits(&raw, 100).unwrap()["five_hour"]["remaining"], 93.0);
-        assert!(parse_limits(&json!({"rateLimits":{"limitId":"codex_other","primary":{
-            "usedPercent":99,"windowDurationMins":300,"resetsAt":1780000000
-        }}}), 100).is_err());
+        assert_eq!(
+            parse_limits(&raw, 100).unwrap()["five_hour"]["remaining"],
+            93.0
+        );
+        assert!(parse_limits(
+            &json!({"rateLimits":{"limitId":"codex_other","primary":{
+                "usedPercent":99,"windowDurationMins":300,"resetsAt":1780000000
+            }}}),
+            100
+        )
+        .is_err());
     }
 
     #[test]
@@ -221,9 +247,13 @@ mod tests {
             assert!(parse_limits(&v, 100).is_err());
         }
         assert!(parse_limits(&json!({}), 100).is_err());
-        assert!(parse_limits(&json!({"rateLimits":{"limitId":"codex",
-            "primary":{"usedPercent":10,"windowDurationMins":60,"resetsAt":1780000000}
-        }}), 100).is_err());
+        assert!(parse_limits(
+            &json!({"rateLimits":{"limitId":"codex",
+                "primary":{"usedPercent":10,"windowDurationMins":60,"resetsAt":1780000000}
+            }}),
+            100
+        )
+        .is_err());
     }
 
     #[test]
