@@ -256,6 +256,39 @@ mod tests {
         .is_err());
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rpc_handshake_is_read_only_and_returns_real_quota_fields() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!(
+            "apollo-codex-usage-mock-{}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let script = r#"#!/bin/sh
+[ "$1" = "app-server" ] || exit 4
+IFS= read -r hello || exit 5
+case "$hello" in *'"method":"initialize"'*) ;; *) exit 6;; esac
+printf '%s\n' '{"id":1,"result":{}}'
+IFS= read -r ready || exit 7
+case "$ready" in *'"method":"initialized"'*) ;; *) exit 8;; esac
+IFS= read -r query || exit 9
+case "$query" in *'"method":"account/rateLimits/read"'*) ;; *) exit 10;; esac
+printf '%s\n' '{"id":2,"result":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":12,"windowDurationMins":300,"resetsAt":1780000000},"secondary":{"usedPercent":41,"windowDurationMins":10080,"resetsAt":1781000000}}}}'
+"#;
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(4),
+            request(path.to_str().unwrap())
+        ).await.unwrap().unwrap();
+        let _ = std::fs::remove_file(&path);
+        let parsed = parse_limits(&result, 123).unwrap();
+        assert_eq!(parsed["five_hour"]["remaining"], 88.0);
+        assert_eq!(parsed["weekly"]["remaining"], 59.0);
+        assert_eq!(parsed["five_hour"]["resets_at"], 1780000000);
+    }
+
     #[test]
     fn missing_reset_timestamp_does_not_create_a_fake_countdown() {
         let raw = json!({"rateLimits":{"limitId":"codex",
