@@ -232,7 +232,7 @@ mod tests {
         assert_eq!(lower["weekly_forecast"]["status"], "insufficient");
         assert_eq!(db.kg(KEY)["samples"].as_array().unwrap().len(), 1);
 
-        let mut new_window = state(NOW + 3*H, 2.0, reset + WEEK_MS);
+        let mut new_window = state(NOW + 3*H, 2.0, reset + 3*H);
         update(&db, &mut new_window);
         assert_eq!(new_window["weekly_forecast"]["status"], "insufficient");
         assert_eq!(db.kg(KEY)["samples"].as_array().unwrap().len(), 1);
