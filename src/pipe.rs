@@ -322,6 +322,39 @@ fn pr_pt(a: &Ax, j: &Job) -> bool {
     rp(a, &j.repo)["lang"].as_str() == Some("pt-PT")
 }
 
+// Manter o rodapé que acompanhou o corpo aprovado, mesmo após mudar o idioma.
+fn stored_pr_footer(j: &Job, configured: &str) -> String {
+    let supported = [FOOT, FOOT0, FOOT_PT, FOOT0_PT];
+    if let Some(saved) = j.d["pb_footer"]
+        .as_str()
+        .filter(|saved| supported.contains(saved))
+    {
+        return saved.to_string();
+    }
+    if let Some(body) = j.d["pb"].as_str() {
+        if let Some(legacy) = supported.into_iter().find(|footer| body.contains(footer)) {
+            return legacy.to_string();
+        }
+    }
+    configured.to_string()
+}
+
+// Não aceitar os cabeçalhos ingleses comuns que o preenchimento do template
+// pode reintroduzir numa PR configurada para PT-PT.
+fn english_pr_heading(body: &str) -> bool {
+    let english = [
+        "Cause", "Fix", "Verified", "Not changed", "Why", "Change",
+        "Summary", "Testing", "Tests", "Test plan", "Description", "Changes",
+    ];
+    body.lines().any(|line| {
+        let line = line.trim_start();
+        let Some(heading) = line.strip_prefix("## ") else {
+            return false;
+        };
+        english.iter().any(|word| heading.trim().eq_ignore_ascii_case(word))
+    })
+}
+
 fn fo(a: &Ax, j: &Job) -> &'static str {
     let branded = rp(a, &j.repo)["nm"].as_i64().unwrap_or(1) == 1;
     match (pr_pt(a, j), branded) {
@@ -2078,17 +2111,7 @@ async fn mkbody(a: &Ax, j: &mut Job) -> R<()> {
             if let Ok((_, js)) = ask(a, o).await {
                 if let Some(s) = js["body"].as_str().filter(|s| s.len() > 40) {
                     // A template model must not silently reintroduce English headings.
-                    let wrong_language = pr_pt(a, j)
-                        && [
-                            "## Cause",
-                            "## Fix",
-                            "## Verified",
-                            "## Not changed",
-                            "## Why",
-                            "## Change",
-                        ]
-                        .iter()
-                        .any(|heading| s.contains(heading));
+                    let wrong_language = pr_pt(a, j) && english_pr_heading(s);
                     let missing_reference = j.kind == "fix"
                         && !j.own()
                         && !s.contains(&format!(
@@ -2113,6 +2136,7 @@ async fn mkbody(a: &Ax, j: &mut Job) -> R<()> {
         }
     }
     j.d["pt"] = json!(f["title"].as_str().unwrap_or(&j.title));
+    j.d["pb_footer"] = json!(ft);
     j.d["pb"] = json!(b);
     j.d["df"] = json!(ok(
         a,
@@ -2144,7 +2168,9 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
         let f = j.d["f"].clone();
         let ci = rp(a, &j.repo)["ci"].as_str().unwrap_or("").to_string();
         j.d["pt"] = json!(f["title"].as_str().unwrap_or(&j.title));
-        j.d["pb"] = json!(body_lang(j, &f, &ci, fo(a, j), pr_pt(a, j)));
+        let footer = fo(a, j);
+        j.d["pb_footer"] = json!(footer);
+        j.d["pb"] = json!(body_lang(j, &f, &ci, footer, pr_pt(a, j)));
         let tip = if j.s("br").is_empty() {
             "HEAD".to_string()
         } else {
@@ -2170,7 +2196,7 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
     a.flow("reviewer", "submit", &j.tag());
     need(a, "submit", &["gh", &j.h()]).await?;
     let f = j.d["f"].clone();
-    let ft = fo(a, j);
+    let ft = stored_pr_footer(j, fo(a, j));
     let tr = trs(j);
     let ti = j.d["pt"]
         .as_str()
@@ -2235,7 +2261,7 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
             j,
             &f,
             rp(a, &j.repo)["ci"].as_str().unwrap_or(""),
-            ft,
+            ft.as_str(),
             pr_pt(a, j),
         )
     });
@@ -2244,7 +2270,7 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
         return drop("PR text or commit still references #0, not pushing");
     }
     if (j.kind != "rebase" || !j.s("fx").is_empty())
-        && (!tr.iter().all(|t| msg.contains(t)) || j.kind == "fix" && !pb.contains(ft))
+        && (!tr.iter().all(|t| msg.contains(t)) || j.kind == "fix" && !pb.contains(ft.as_str()))
     {
         return drop("AI disclosure missing (Co-Authored-By trailer or footer), not pushing");
     }
@@ -3625,6 +3651,28 @@ mod t {
         assert!(b.starts_with("Closes #9"));
         assert!(b.contains("## Why") && b.contains("## Change") && !b.contains("## Cause"));
         assert!(b.contains("Test `t1`: fails on `main` without the change"));
+    }
+
+    #[test]
+    fn portuguese_template_rejects_common_english_headings() {
+        assert!(english_pr_heading("Fixes #12\n\n## Summary\n...\n## Testing\n..."));
+        assert!(english_pr_heading("## testing\nTestes executados"));
+        assert!(!english_pr_heading("Fixes #12\n## Resumo\n## Validação"));
+    }
+
+    #[test]
+    fn approved_pr_footer_survives_language_changes() {
+        let mut j = Job::of(json!({
+            "id": 88, "repo": "o/r", "num": 12, "kind": "fix", "title": "T",
+            "d": {"pb_footer": FOOT_PT, "pb": format!("Fixes #12\\n\\n{FOOT_PT}")}
+        }));
+        assert_eq!(stored_pr_footer(&j, FOOT), FOOT_PT);
+        j.d.as_object_mut().unwrap().remove("pb_footer");
+        assert_eq!(stored_pr_footer(&j, FOOT), FOOT_PT);
+        j.d["pb"] = json!("sem rodapé");
+        assert_eq!(stored_pr_footer(&j, FOOT), FOOT);
+        j.d["pb_footer"] = json!("rodapé arbitrário");
+        assert_eq!(stored_pr_footer(&j, FOOT), FOOT);
     }
 
     #[test]
