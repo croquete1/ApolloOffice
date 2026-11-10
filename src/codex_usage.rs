@@ -124,14 +124,19 @@ fn cached(a: &Ax) -> Option<Value> {
         .map(|(_, v)| v.clone())
 }
 
+fn with_server_time(mut value: Value) -> Value {
+    value["serverTime"] = json!(now());
+    value
+}
+
 /// Só expõe percentagens, instantes de reposição e estado operacional.
 pub async fn read(a: &Ax) -> Value {
     if let Some(v) = cached(a) {
-        return v;
+        return with_server_time(v);
     }
     let _guard = REFRESH.lock().await;
     if let Some(v) = cached(a) {
-        return v;
+        return with_server_time(v);
     }
     let data = match tokio::time::timeout(Duration::from_secs(10), query()).await {
         Ok(Ok(value)) => value,
@@ -143,7 +148,7 @@ pub async fn read(a: &Ax) -> Value {
     if let Ok(mut cache) = a.cache.lock() {
         cache.insert("codex:rate-limits".into(), (now(), value.clone()));
     }
-    value
+    with_server_time(value)
 }
 
 #[cfg(test)]
