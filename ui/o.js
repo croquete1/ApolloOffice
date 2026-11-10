@@ -580,7 +580,21 @@
     const d = e.target.closest("[data-d]");
     if (d) { post({ a: "drop", id: Number(d.dataset.d) }).then(apply); return; }
     const rq = e.target.closest("[data-rq]");
-    if (rq) { post({ a: "requeue", id: Number(rq.dataset.rq) }).then(apply); return; }
+    if (rq) {
+      rq.disabled = true;
+      post({ a: "requeue", id: Number(rq.dataset.rq) }).then((result) => {
+        rq.disabled = false;
+        if (result.error) {
+          const reason = rq.closest(".row")?.querySelector(".w");
+          if (reason) { reason.textContent = result.error; reason.classList.add("bad2"); }
+        } else apply(result);
+      }).catch((error) => {
+        rq.disabled = false;
+        const reason = rq.closest(".row")?.querySelector(".w");
+        if (reason) { reason.textContent = String(error); reason.classList.add("bad2"); }
+      });
+      return;
+    }
     const jb = e.target.closest("[data-j]");
     if (jb) { e.preventDefault(); window.AO.job && window.AO.job(Number(jb.dataset.j)); }
   });
