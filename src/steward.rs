@@ -10,17 +10,39 @@ use std::collections::BTreeSet;
 
 const PAGE_LIMIT: &str = "200";
 
-/// Uma aprovação de um bot de revisão não é execução dos testes da aplicação.
-/// Exigir pelo menos um check não pertencente ao CodeRabbit, com nome explícito.
-pub(crate) fn is_test_check(check: &Value) -> bool {
+/// Reviews automáticas não constituem provas de testes.
+fn is_review_bot(check: &Value) -> bool {
     let name = check["name"]
         .as_str()
         .or_else(|| check["context"].as_str())
-        .unwrap_or("");
-    let app = check["app"]["slug"].as_str().unwrap_or("");
-    !name.trim().is_empty()
-        && !name.to_ascii_lowercase().contains("coderabbit")
-        && !app.to_ascii_lowercase().contains("coderabbit")
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let app = check["app"]["slug"]
+        .as_str()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    name.contains("coderabbit") || app.contains("coderabbit")
+}
+
+/// Exigir um nome que identifique testes de forma explícita.
+/// Um check isolado de lint, build ou análise estática não certifica execução de testes.
+pub(crate) fn is_test_check(check: &Value) -> bool {
+    if is_review_bot(check) {
+        return false;
+    }
+    let name = check["name"]
+        .as_str()
+        .or_else(|| check["context"].as_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    name.split(|c: char| !c.is_ascii_alphanumeric()).any(|part| {
+        matches!(
+            part,
+            "test" | "tests" | "testing" | "unit" | "integration"
+                | "e2e" | "smoke" | "pytest" | "jest" | "vitest"
+                | "mocha" | "playwright"
+        )
+    })
 }
 
 fn work_files(pr: &Value) -> BTreeSet<String> {
@@ -58,14 +80,11 @@ fn check_state(pr: &Value) -> &'static str {
     let Some(checks) = pr["statusCheckRollup"].as_array() else {
         return "nao_verificado";
     };
+    let checks: Vec<_> = checks.iter().filter(|c| !is_review_bot(c)).collect();
     if checks.is_empty() {
         return "nao_verificado";
     }
-    let test_checks: Vec<_> = checks.iter().filter(|c| is_test_check(c)).collect();
-    if test_checks.is_empty() {
-        return "nao_verificado";
-    }
-    if test_checks.iter().any(|c| {
+    if checks.iter().any(|c| {
         c["conclusion"] == "FAILURE"
             || c["conclusion"] == "CANCELLED"
             || c["conclusion"] == "TIMED_OUT"
@@ -74,7 +93,10 @@ fn check_state(pr: &Value) -> &'static str {
     }) {
         return "falhou";
     }
-    if test_checks
+    if !checks.iter().any(|c| is_test_check(c)) {
+        return "nao_verificado";
+    }
+    if checks
         .iter()
         .all(|c| c["conclusion"] == "SUCCESS" || c["state"] == "SUCCESS")
     {
@@ -368,6 +390,27 @@ mod tests {
         let rows = assess(&[pr]);
         assert_eq!(rows[0]["checks"], "aprovado");
         assert_eq!(rows[0]["state"], "revisao_final_necessaria");
+    }
+
+    #[test]
+    fn static_analysis_or_build_alone_cannot_prove_tests() {
+        let mut pr = sample(14, "src/c.ts", "14");
+        pr["statusCheckRollup"] = json!([
+            {"name":"lint","conclusion":"SUCCESS"},
+            {"name":"CodeQL","conclusion":"SUCCESS"},
+            {"name":"build","conclusion":"SUCCESS"}
+        ]);
+        assert_eq!(assess(&[pr])[0]["checks"], "nao_verificado");
+    }
+
+    #[test]
+    fn failing_lint_blocks_success_even_when_tests_pass() {
+        let mut pr = sample(15, "src/c.ts", "15");
+        pr["statusCheckRollup"] = json!([
+            {"name":"test-suite","conclusion":"SUCCESS"},
+            {"name":"lint","conclusion":"FAILURE"}
+        ]);
+        assert_eq!(assess(&[pr])[0]["checks"], "falhou");
     }
 
     #[test]
