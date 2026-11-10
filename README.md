@@ -40,6 +40,8 @@ ours.
 For optional free-model authors with Codex/Claude subscription review, see
 [the free-first guide](docs/free-first.md).
 
+**Limites do Codex no fork:** o escritório pixelizado mostra as quotas de 5 horas e semanais da sessão Codex CLI, incluindo reposição e atualização automática. Consulte [Limites do Codex](docs/codex-usage.md) para configuração e privacidade.
+
 ## What's inside
 
 - **A fixed pipeline** of small workers: Scout, Guard, Vet, Hunter, Repro,
