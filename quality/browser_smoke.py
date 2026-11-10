@@ -88,6 +88,13 @@ class Handler(SimpleHTTPRequestHandler):
         if url.path in ("/", "/index.html"):
             # Inject a browser-only smoke probe; the repository UI is unchanged.
             html = (UI_DIR / "index.html").read_text(encoding="utf-8")
+            if not modern and query.get("pixel_raf_block", [""])[0] == "1":
+                # Reproduz ambientes headless que suspendem RAF; o snapshot
+                # continua a ter de desenhar o rack, sem loop adicional.
+                html = html.replace("</head>", (
+                    "<script>window.requestAnimationFrame = function () { return 0; };"
+                    "</script></head>"
+                ))
             probe = """
 <script>
 (function () {
@@ -356,7 +363,9 @@ def main() -> int:
     # As semelhanças textuais não podem ativar a vista moderna.
     run_case(browser, active=False, modern=False, query="?ui=modern2")
     run_case(browser, active=False, modern=False, query="?x=ui%3Dmodern")
-    print("PASS: 10 cenários de navegador: pixel/modern, telemetria e query exata.")
+    run_case(browser, active=False, modern=False,
+             telemetry="fresh", query="?pixel_telemetry=fresh&pixel_raf_block=1")
+    print("PASS: 11 cenários de navegador: pixel/modern, telemetria, query e RAF suspenso.")
     return 0
 
 
