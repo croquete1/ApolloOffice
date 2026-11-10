@@ -287,7 +287,7 @@ pub fn spawn(a: Ax) {
 }
 
 pub fn apply(a: &Ax) -> bool {
-    if !ready(a) || !idle(a) {
+    if !ready(a) || !idle(a) || !writable(&a.me) {
         return false;
     }
     // Prevent workers from starting between the idle check and shutdown.
@@ -399,6 +399,8 @@ mod t {
         ));
         assert!(idle(&a));
         assert!(!manually_paused(&a));
+        assert!(!apply(&a));
+        assert!(!a.drain.load(std::sync::atomic::Ordering::SeqCst));
         a.db.run("insert into jobs(st) values('fix')", crate::pa![]);
         assert!(!idle(&a));
         a.db.run("delete from jobs", crate::pa![]);
