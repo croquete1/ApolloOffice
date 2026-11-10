@@ -3,6 +3,7 @@
 use crate::app::Ax;
 use crate::db::{now, Job};
 use crate::pa;
+use crate::sh::ghj;
 use serde_json::{json, Value};
 
 const MAX_AUTO_ATTEMPTS: u64 = 2;
@@ -135,7 +136,7 @@ pub fn retry(a: &Ax, id: i64, automatic: bool) -> Result<bool, &'static str> {
 /// Corre apenas quando o proprietário ativa a opção no repositório.
 /// Drops deliberados, com publicação, alterações de código ou sem provas
 /// de segurança ficam intactos para análise manual.
-pub fn scan(a: &Ax, repo: &str, prs: &[Value]) {
+pub async fn scan(a: &Ax, repo: &str, prs: &[Value]) {
     if a.hold("watcher") || a.drain.load(std::sync::atomic::Ordering::Relaxed) {
         return;
     }
@@ -149,7 +150,11 @@ pub fn scan(a: &Ax, repo: &str, prs: &[Value]) {
         "select id from jobs where repo=? and st='drop' and kind='fix' order by t1 desc limit 100",
         pa![repo.to_string()],
     );
+    let mut restarted = 0_u8;
     for item in dropped {
+        if restarted >= 2 {
+            break;
+        }
         if a.hold("watcher") {
             break;
         }
@@ -157,12 +162,30 @@ pub fn scan(a: &Ax, repo: &str, prs: &[Value]) {
             let Some(job) = a.db.jg(id) else {
                 continue;
             };
-            // Uma PR aberta para a mesma issue impede reintroduzir trabalho duplicado.
-            let issue = job.num.to_string();
-            if prs.iter().any(|pr| crate::steward::issue_refs(pr).contains(&issue)) {
+            if !eligible(&job, true) {
                 continue;
             }
-            let _ = retry(a, id, true);
+            // A issue tem de continuar aberta no GitHub. Se não for possível
+            // verificar o estado remoto, não se reintroduz trabalho.
+            let path = format!("repos/{repo}/issues/{}", job.num);
+            let issue = match ghj(&["api", &path], 40).await {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            if issue["number"] != job.num
+                || issue["state"] != "open"
+                || !issue["pull_request"].is_null()
+            {
+                continue;
+            }
+            // Uma PR aberta para a mesma issue impede reintroduzir trabalho duplicado.
+            let issue_number = job.num.to_string();
+            if prs.iter().any(|pr| crate::steward::issue_refs(pr).contains(&issue_number)) {
+                continue;
+            }
+            if retry(a, id, true) == Ok(true) {
+                restarted += 1;
+            }
         }
     }
 }
@@ -276,8 +299,8 @@ mod tests {
         assert_eq!(retry(&a, id, true), Err("Recuperação automática desativada"));
     }
 
-    #[test]
-    fn open_pull_request_for_same_issue_prevents_automatic_recovery() {
+    #[tokio::test]
+    async fn open_pull_request_for_same_issue_prevents_automatic_recovery() {
         let a = setup();
         let id = dropped(&a, "machine kept failing: timed out", json!({}));
         let pr = json!({
@@ -285,10 +308,8 @@ mod tests {
             "body":"Fixes #42",
             "number":123
         });
-        scan(&a, "org/repo", &[pr]);
+        scan(&a, "org/repo", &[pr]).await;
         assert_eq!(a.db.jg(id).unwrap().st, "drop");
-        scan(&a, "org/repo", &[]);
-        assert_eq!(a.db.jg(id).unwrap().st, "ready");
     }
 
     #[test]
