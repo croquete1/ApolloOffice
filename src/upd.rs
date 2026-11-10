@@ -340,6 +340,9 @@ pub fn install(a: &Ax) -> std::io::Result<()> {
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755))?;
+            // Preserve the previous executable for recovery if the new one
+            // fails to exec or crashes after replacing the running image.
+            std::fs::copy(me, me.with_extension("old"))?;
         }
         std::fs::rename(&f, me)?;
     }
@@ -353,6 +356,12 @@ pub fn relaunch(me: &Path) -> ! {
         use std::os::unix::process::CommandExt;
         let e = std::process::Command::new(me).args(&args).exec();
         eprintln!("restart failed: {e}");
+        let old = me.with_extension("old");
+        if old.exists() && std::fs::rename(&old, me).is_ok() {
+            eprintln!("restored previous Apollo Office executable");
+            let fallback = std::process::Command::new(me).args(&args).exec();
+            eprintln!("rollback restart failed: {fallback}");
+        }
         std::process::exit(1);
     }
     #[cfg(not(unix))]
