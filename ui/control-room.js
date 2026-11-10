@@ -4,6 +4,10 @@
 (() => {
   "use strict";
   const A = window.AO;
+  // O ApolloOffice personalizado mantém o escritório pixelizado por omissão.
+  // A vista moderna só é carregada por pedido explícito: ?ui=modern.
+  const requestedUi = new URLSearchParams(window.location.search).get("ui");
+  if (requestedUi !== "modern") return;
   if (!A || document.querySelector(".ao-app")) return;
   const byId = (id) => document.getElementById(id);
   const escapeHTML = (value) => A.esc(value ?? "");

@@ -20,14 +20,18 @@ import threading
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 UI_DIR = Path(__file__).resolve().parent.parent / "ui"
 ROLES = ("scout", "guard", "vet", "watcher", "hunter", "repro", "fixer", "ci", "reviewer", "submit")
 
 
-def fixture(active: bool) -> dict:
-    """Construct an API-compatible snapshot with one optional local Qwen worker."""
+def fixture(active: bool, telemetry: str = "") -> dict:
+    """Construct an API-compatible snapshot, optionally with telemetry anomalies."""
     stamp = int(time.time() * 1000)
+    if telemetry == "skew":
+        # Simula um servidor dez minutos atrás do relógio do navegador.
+        stamp -= 600_000
     workers = {
         role: {"st": "idle", "say": "", "job": None, "md": "", "hold": False,
                "t": stamp, "mood": "", "cmds": [], "tk": 0}
@@ -54,7 +58,15 @@ def fixture(active: bool) -> dict:
         "w": workers, "q": jobs, "dn": [], "pr": [],
         "mg": [], "ev": [], "n": counts, "fl": [], "ln": {}, "cil": {},
         "hs": [{"id": "local", "on_": 1}],
-        "hst": {"local": {"t": stamp, "cpu": 8, "mem": [16384, 8192]}},
+        "hst": {"local": {
+            "t": stamp - 130_000 if telemetry == "stale" else (
+                stamp + 300_000 if telemetry == "future" else stamp
+            ),
+            "cpu": 8, "load": 1.75,
+            "mem": [8192, 16384] if telemetry == "invalid" else [16384, 8192],
+            "disk": [40, 60] if telemetry == "invalid" else [100, 40],
+            "temp": 45,
+        }},
         "lm": None, "star": None,
     }
 
@@ -67,7 +79,13 @@ class Handler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(UI_DIR), **kwargs)
 
     def do_GET(self):
-        if self.path in ("/", "/index.html"):
+        url = urlsplit(self.path)
+        query = parse_qs(url.query)
+        modern = query.get("ui", [""])[0] == "modern"
+        telemetry = query.get("pixel_telemetry", [""])[0]
+        if telemetry not in ("fresh", "stale", "skew", "invalid", "future"):
+            telemetry = ""
+        if url.path in ("/", "/index.html"):
             # Inject a browser-only smoke probe; the repository UI is unchanged.
             html = (UI_DIR / "index.html").read_text(encoding="utf-8")
             probe = """
@@ -132,6 +150,86 @@ class Handler(SimpleHTTPRequestHandler):
 })();
 </script>
 """
+            if not modern:
+                probe = """
+<script>
+(function () {
+  // O canvas pode existir antes do primeiro frame. Validar que a
+  // interface recebeu dados e desenhou píxeis visíveis.
+  var started = Date.now();
+  function painted(canvas) {
+    if (!canvas || canvas.width <= 0 || canvas.height <= 0) return false;
+    var ctx = canvas.getContext("2d");
+    if (!ctx) return false;
+    var w = canvas.width, h = canvas.height;
+    var positions = [[0.25, 0.25], [0.5, 0.5], [0.75, 0.75]];
+    return positions.some(function (point) {
+      var pixel = ctx.getImageData(
+        Math.floor(w * point[0]), Math.floor(h * point[1]), 1, 1
+      ).data;
+      return pixel[3] > 0;
+    });
+  }
+  function inspectTelemetry(canvas, errors) {
+    var scenario = "__PIXEL_TELEMETRY__";
+    if (!scenario || !canvas) return;
+    // Reproduzir o hover real sobre o primeiro host no rack pixelizado.
+    var rect = canvas.getBoundingClientRect();
+    canvas.dispatchEvent(new MouseEvent("mousemove", {
+      bubbles: true,
+      clientX: rect.left + rect.width * (272 / 400),
+      clientY: rect.top + rect.height * (80 / 258)
+    }));
+    var tooltip = document.getElementById("tip");
+    var text = tooltip && !tooltip.hidden ? tooltip.textContent : "";
+    if (!text.includes("este computador"))
+      errors.push("Tooltip do host não abriu através do canvas");
+    if (scenario === "fresh" || scenario === "skew") {
+      if (!text.includes("online") || !text.includes("carga média") ||
+          !text.includes("RAM") || !text.includes("disco") ||
+          !text.includes("sensor não identificado"))
+        errors.push("Telemetria atual não foi apresentada corretamente");
+      if (scenario === "skew" && !text.includes("0s atrás"))
+        errors.push("Idade da telemetria afetada pelo relógio do navegador");
+    } else if (scenario === "stale" || scenario === "future") {
+      if (!text.includes("por confirmar") ||
+          !text.includes("sem telemetria recente") || text.includes("carga média"))
+        errors.push("Telemetria expirada ou futura não foi bloqueada");
+    } else if (scenario === "invalid") {
+      if (!text.includes("online") || text.includes("RAM") ||
+          text.includes("disco") || !text.includes("carga média"))
+        errors.push("Valores de RAM/disco fora dos limites foram apresentados");
+    }
+  }
+  function verify() {
+    var errors = [];
+    var canvas = document.getElementById("cv");
+    if (!canvas) errors.push("Canvas pixelizado indisponível");
+    if (document.getElementById("aoControlRoom"))
+      errors.push("Control Room montado sem opção explícita");
+    if (window.AO?.modernRoom === true)
+      errors.push("Vista moderna ativada por omissão");
+    if (canvas && getComputedStyle(canvas).display === "none")
+      errors.push("Canvas pixelizado oculto");
+    if (!window.AO?.S) errors.push("Estado real da interface não recebido");
+    try {
+      if (!painted(canvas)) errors.push("O escritório pixelizado não desenhou nenhum frame");
+      inspectTelemetry(canvas, errors);
+    } catch (error) {
+      errors.push("Falha ao ler o canvas pixelizado: " + String(error));
+    }
+    document.documentElement.setAttribute("data-ao-smoke",
+      errors.length ? "FAIL: " + errors.join(" | ") : "PASS");
+  }
+  (function waitForFrame() {
+    var ready = window.AO?.S && painted(document.getElementById("cv"));
+    if (ready || Date.now() - started >= 3500) verify();
+    else setTimeout(waitForFrame, 100);
+  })();
+})();
+</script>
+"""
+                probe = probe.replace("__PIXEL_TELEMETRY__", telemetry)
             html = html.replace("</body>", probe + "</body>")
             payload = html.encode("utf-8")
             self.send_response(200)
@@ -170,13 +268,17 @@ def choose_browser() -> str:
     raise RuntimeError("Chrome/Chromium não está instalado neste ambiente.")
 
 
-def run_case(browser: str, active: bool) -> None:
-    """Render a complete frontend page and verify real DOM and agent state."""
-    Handler.state = fixture(active)
+def run_case(browser: str, active: bool, modern: bool = True,
+             telemetry: str = "", query: str = "") -> None:
+    """Render the real frontend, selecting a view and optional telemetry fixture."""
+    Handler.state = fixture(active, telemetry)
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    url = f"http://127.0.0.1:{server.server_port}/"
+    suffix = query or ("?ui=modern" if modern else (
+        "?pixel_telemetry=" + telemetry if telemetry else ""
+    ))
+    url = f"http://127.0.0.1:{server.server_port}/" + suffix
     try:
         with tempfile.TemporaryDirectory(prefix="apollo-browser-") as profile:
             command = [
@@ -194,22 +296,31 @@ def run_case(browser: str, active: bool) -> None:
             if not smoke or smoke.group(1) != "PASS":
                 raise AssertionError("Interações do navegador falharam: " +
                                      (smoke.group(1) if smoke else "teste não executado"))
-            if 'id="aoControlRoom"' not in dom:
-                raise AssertionError("O Control Room não foi montado. " + dom[-1200:])
-            for role in ROLES:
-                if f'data-role="{role}"' not in dom:
-                    raise AssertionError("Posto em falta: " + role)
-            if len(re.findall(r'class="ao-pipeline-stage\b', dom)) != 10:
-                raise AssertionError("O pipeline não apresenta as dez fases reais.")
-            expected = "1 / 10" if active else "0 / 10"
-            if not re.search(r'id="aoMetricWorkers"[^>]*>\s*' + re.escape(expected), dom):
-                raise AssertionError("Contagem incorreta de agentes ativos: " + expected)
-            if active and "qwen3:8b" not in dom:
-                raise AssertionError("O modelo local Qwen 3 8B não aparece no dashboard.")
-            if "Ações Rápidas" in dom:
-                raise AssertionError("A interface ainda apresenta ações rápidas.")
-            label = "trabalho real" if active else "repouso"
-            print(f"PASS: Chrome/Chromium validou renderização e interações de {label}.")
+            if modern:
+                if 'id="aoControlRoom"' not in dom:
+                    raise AssertionError("O Control Room não foi montado. " + dom[-1200:])
+                for role in ROLES:
+                    if f'data-role="{role}"' not in dom:
+                        raise AssertionError("Posto em falta: " + role)
+                if len(re.findall(r'class="ao-pipeline-stage\b', dom)) != 10:
+                    raise AssertionError("O pipeline não apresenta as dez fases reais.")
+                expected = "1 / 10" if active else "0 / 10"
+                if not re.search(r'id="aoMetricWorkers"[^>]*>\s*' + re.escape(expected), dom):
+                    raise AssertionError("Contagem incorreta de agentes ativos: " + expected)
+                if active and "qwen3:8b" not in dom:
+                    raise AssertionError("O modelo local Qwen 3 8B não aparece no dashboard.")
+                if "Ações Rápidas" in dom:
+                    raise AssertionError("A interface ainda apresenta ações rápidas.")
+                label = "trabalho real" if active else "repouso"
+                print(f"PASS: Chrome/Chromium validou renderização e interações de {label}.")
+            else:
+                if 'id="aoControlRoom"' in dom:
+                    raise AssertionError("Vista moderna ativada sem autorização.")
+                if 'id="cv"' not in dom:
+                    raise AssertionError("Canvas pixelizado não encontrado.")
+                print("PASS: escritório pixelizado" +
+                      (f" · telemetria {telemetry}" if telemetry else
+                       (f" · consulta {query}" if query else " predefinido")) + ".")
     finally:
         server.shutdown()
         server.server_close()
@@ -217,14 +328,20 @@ def run_case(browser: str, active: bool) -> None:
 
 
 def main() -> int:
-    """Run both browser scenarios and fail loudly on missing capabilities."""
+    """Run the original pixel office and optional modern views in a real browser."""
     if not (UI_DIR / "control-room.js").is_file():
         raise RuntimeError("Os ficheiros reais da interface estão em falta.")
     browser = choose_browser()
     print("Browser:", browser)
-    run_case(browser, active=False)
-    run_case(browser, active=True)
-    print("PASS: 2 cenários de navegador, 10 agentes e pipeline de 10 fases.")
+    run_case(browser, active=False, modern=False)
+    run_case(browser, active=False, modern=True)
+    run_case(browser, active=True, modern=True)
+    for scenario in ("fresh", "stale", "skew", "invalid", "future"):
+        run_case(browser, active=False, modern=False, telemetry=scenario)
+    # As semelhanças textuais não podem ativar a vista moderna.
+    run_case(browser, active=False, modern=False, query="?ui=modern2")
+    run_case(browser, active=False, modern=False, query="?x=ui%3Dmodern")
+    print("PASS: 10 cenários de navegador: pixel/modern, telemetria e query exata.")
     return 0
 
 
