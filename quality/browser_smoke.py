@@ -103,6 +103,11 @@ class Handler(SimpleHTTPRequestHandler):
     function assert(value, message) { if (!value) errors.push(message); }
     try {
       var app = document.getElementById("aoControlRoom");
+      assert(document.getElementById("codexLimits")?.closest(".ao-top-actions"),
+             "Quotas Codex não aparecem na vista moderna");
+      assert(document.getElementById("codexFivePct")?.textContent === "88%" &&
+             document.getElementById("codexWeekPct")?.textContent === "59%",
+             "Limites Codex indisponíveis na vista moderna");
       var fixer = document.querySelector('.ao-station[data-role="fixer"]');
       var overlay = document.getElementById("aoAgentOverlay");
       assert(Boolean(app), "Control Room indisponível");
@@ -150,7 +155,8 @@ class Handler(SimpleHTTPRequestHandler):
     var ready = document.getElementById("aoControlRoom") &&
       document.querySelector('.ao-station[data-role="fixer"]') &&
       document.getElementById("aoMetricWorkers") &&
-      document.getElementById("aoMetricWorkers").textContent.includes(" / 10");
+      document.getElementById("aoMetricWorkers").textContent.includes(" / 10") &&
+      document.getElementById("codexFivePct")?.textContent === "88%";
     if (ready || Date.now() - started >= 3500) verify();
     else setTimeout(waitForDashboard, 100);
   })();
@@ -225,6 +231,12 @@ class Handler(SimpleHTTPRequestHandler):
     if (canvas && getComputedStyle(canvas).display === "none")
       errors.push("Canvas pixelizado oculto");
     if (!window.AO?.S) errors.push("Estado real da interface não recebido");
+    if (document.getElementById("codexFivePct")?.textContent !== "88%" ||
+        document.getElementById("codexWeekPct")?.textContent !== "59%")
+      errors.push("Limites Codex de 5h/semanal não renderizados");
+    if (!document.getElementById("codexFiveReset")?.textContent.includes("min") ||
+        !document.getElementById("codexWeekReset")?.textContent.includes("d"))
+      errors.push("Reposição Codex não apresentada");
     try {
       if (!painted(canvas)) errors.push("O escritório pixelizado não desenhou nenhum frame");
       inspectTelemetry(canvas, errors);
@@ -236,7 +248,8 @@ class Handler(SimpleHTTPRequestHandler):
   }
   (function waitForFrame() {
     var canvas = document.getElementById("cv");
-    var ready = window.AO?.S && painted(canvas);
+    var ready = window.AO?.S && painted(canvas) &&
+      document.getElementById("codexFivePct")?.textContent === "88%";
     var expired = Date.now() - started >= 3500;
     // O snapshot pode chegar depois do primeiro frame pintado: aguardar até
     // a hitbox do host existir, sem dispensar os testes reais do tooltip.
@@ -260,6 +273,27 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
+            return
+        if url.path == "/api/codex/limits":
+            # Valores de teste, nunca dados da conta do utilizador.
+            stamp = int(time.time() * 1000)
+            data = json.dumps({
+                "status": "ok", "checkedAt": stamp, "serverTime": stamp,
+                "fiveHour": {
+                    "remainingPercent": 88,
+                    "resetsAt": int((stamp + 18 * 60_000) / 1000)
+                },
+                "weekly": {
+                    "remainingPercent": 59,
+                    "resetsAt": int((stamp + 5 * 86_400_000) / 1000)
+                }
+            }).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
             return
         if self.path == "/api/state":
             data = json.dumps(self.state).encode("utf-8")
