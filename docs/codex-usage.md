@@ -10,7 +10,7 @@ A aplicação utiliza o método oficial `account/rateLimits/read` do Codex App S
 - A reposição é calculada a partir de `resetsAt`, fornecido pelo Codex, nunca estimado pelos tokens consumidos.
 - São reconhecidas janelas com duração de **300 minutos** e **10 080 minutos**; `primary` não é automaticamente interpretada como 5 horas.
 - Quando o serviço não disponibiliza uma janela, aparece **Sem dados**. Isto pode depender do plano e dos limites em vigor.
-- O painel consulta o servidor aproximadamente a cada **2 minutos**, e a contagem decrescente avança localmente a cada segundo. O backend aplica uma cache de dois minutos e timeout de 10 segundos.
+- Em condições normais, o painel consulta o servidor aproximadamente a cada **2 minutos**; quando a consulta falha, tenta recuperar a cada **30 segundos**. A contagem decrescente avança localmente a cada segundo. O backend guarda leituras válidas durante dois minutos e falhas durante apenas 20 segundos, com timeout de 10 segundos.
 
 ## Requisitos
 
