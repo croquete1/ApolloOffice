@@ -402,11 +402,12 @@
   };
 
   let last = performance.now();
-  const frame = () => {
-    // The modern office has its own lightweight animations. Preserve the legacy
-    // canvas for fallback, but avoid drawing hidden pixel art every frame.
+  const frame = (schedule = true) => {
+    // Um snapshot pode chegar quando o navegador suspendeu RAF (headless,
+    // separador em segundo plano ou poupança de energia). frame(false) desenha
+    // o estado recebido sem criar um segundo ciclo de animação.
     if (window.AO?.modernRoom || window.AO?.disablePixelArt) {
-      setTimeout(() => requestAnimationFrame(frame), 1500);
+      if (schedule !== false) setTimeout(() => requestAnimationFrame(frame), 1500);
       return;
     }
     const t = (performance.now() - t0) / 1000;
@@ -442,7 +443,7 @@
         mg.hidden = false;
       }
     } else if (!mg.hidden) mg.hidden = true;
-    requestAnimationFrame(frame);
+    if (schedule !== false) requestAnimationFrame(frame);
   };
 
   const ago = (t, nowMs = Date.now()) => {
@@ -548,7 +549,12 @@
   const apply = (s) => {
     if (!s || s.error) return;
     nt(s); S = s; last = performance.now(); err = 0;
-    if (!window.AO.modernRoom) { tiles(); lists(); tip(); }
+    if (!window.AO.modernRoom) {
+      tiles();
+      lists();
+      frame(false);
+      tip();
+    }
     chips();
     window.AO.S = s;
     try {
