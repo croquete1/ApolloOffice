@@ -26,7 +26,7 @@ UI_DIR = Path(__file__).resolve().parent.parent / "ui"
 ROLES = ("scout", "guard", "vet", "watcher", "hunter", "repro", "fixer", "ci", "reviewer", "submit")
 
 
-def fixture(active: bool, telemetry: str = "") -> dict:
+def fixture(active: bool, telemetry: str = "", quota: str = "normal") -> dict:
     """Construct an API-compatible snapshot, optionally with telemetry anomalies."""
     stamp = int(time.time() * 1000)
     if telemetry == "skew":
@@ -51,6 +51,18 @@ def fixture(active: bool, telemetry: str = "") -> dict:
             "st": "fix", "why": "", "pr": None, "t0": stamp, "t1": 0,
         }]
         counts = {"fix": 1}
+    codex = {
+        "status": "ok", "updated_at": stamp,
+        "five_hour": {"remaining": 88, "resets_at": stamp // 1000 + 1800},
+        "weekly": {"remaining": 59, "resets_at": stamp // 1000 + 400_000},
+    }
+    if quota == "unavailable":
+        codex = {"status": "unavailable"}
+    elif quota == "weekly_only":
+        codex["five_hour"] = None
+    elif quota == "stale":
+        codex["status"] = "stale"
+        codex["updated_at"] = stamp - 30 * 60_000
     return {
         "t": stamp, "v": "smoke-fixture", "nr": 1,
         "o": {"off": False, "man": False, "pause": "", "warn": False,
@@ -68,12 +80,15 @@ def fixture(active: bool, telemetry: str = "") -> dict:
             "temp": 45,
         }},
         "lm": None, "star": None,
+        # Valores sintéticos exclusivos dos testes, não dados da conta.
+        "codex_usage": codex,
     }
 
 
 class Handler(SimpleHTTPRequestHandler):
     """Serve the real files in ui/ and a controlled fixture API."""
     state: dict = {}
+    quota_mode = "normal"
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(UI_DIR), **kwargs)
@@ -107,6 +122,23 @@ class Handler(SimpleHTTPRequestHandler):
       var overlay = document.getElementById("aoAgentOverlay");
       assert(Boolean(app), "Control Room indisponível");
       assert(Boolean(fixer), "Personagem Fixer em falta");
+      var quota = document.getElementById("codexQuota");
+      var quotaMode = "__QUOTA_EXPECT__";
+      if (quotaMode === "normal")
+        assert(quota && quota.textContent.includes("88% restante") &&
+               quota.textContent.includes("59% restante"),
+               "Limites Codex não apresentados na vista moderna");
+      else if (quotaMode === "unavailable")
+        assert(quota && quota.textContent.includes("Indisponível") &&
+               quota.querySelector("#codexQuotaStatus")?.textContent.includes("Sem ligação"),
+               "Valores inventados quando o Codex está indisponível");
+      else if (quotaMode === "weekly_only")
+        assert(quota && quota.textContent.includes("59% restante") &&
+               quota.textContent.includes("Indisponível"),
+               "Janela de 5 horas não aplicável foi inventada");
+      else if (quotaMode === "stale")
+        assert(quota && quota.querySelector("#codexQuotaStatus")?.textContent.includes("Dados anteriores"),
+               "Leitura anterior apresentada como atual");
       var room = document.querySelector(".ao-office");
       assert(room && room.dataset.visualVersion === "2",
              "O escritório 2.5D premium não está ativo");
@@ -225,6 +257,26 @@ class Handler(SimpleHTTPRequestHandler):
     if (canvas && getComputedStyle(canvas).display === "none")
       errors.push("Canvas pixelizado oculto");
     if (!window.AO?.S) errors.push("Estado real da interface não recebido");
+    var quota = document.getElementById("codexQuota");
+    var quotaMode = "__QUOTA_EXPECT__";
+    if (quotaMode === "normal" &&
+        (!quota || !quota.textContent.includes("88% restante") ||
+         !quota.textContent.includes("59% restante")))
+      errors.push("Limites Codex não apresentados na vista pixelizada");
+    if ("__PIXEL_TELEMETRY__" === "skew" &&
+        !quota?.querySelector("#codexQuotaStatus")?.textContent.includes("Atualizado"))
+      errors.push("Quota recente interpretada como antiga por divergência dos relógios");
+    if (quotaMode === "unavailable" &&
+        (!quota || !quota.textContent.includes("Indisponível") ||
+         !quota.querySelector("#codexQuotaStatus")?.textContent.includes("Sem ligação")))
+      errors.push("Quota inexistente apresentada como utilizável");
+    if (quotaMode === "weekly_only" &&
+        (!quota || !quota.textContent.includes("59% restante") ||
+         !quota.textContent.includes("Indisponível")))
+      errors.push("Janela 5h inexistente apresentada como disponível");
+    if (quotaMode === "stale" &&
+        (!quota || !quota.querySelector("#codexQuotaStatus")?.textContent.includes("Dados anteriores")))
+      errors.push("Quota antiga apresentada como atual");
     try {
       if (!painted(canvas)) errors.push("O escritório pixelizado não desenhou nenhum frame");
       inspectTelemetry(canvas, errors);
@@ -252,6 +304,7 @@ class Handler(SimpleHTTPRequestHandler):
 </script>
 """
                 probe = probe.replace("__PIXEL_TELEMETRY__", telemetry)
+            probe = probe.replace("__QUOTA_EXPECT__", self.quota_mode)
             html = html.replace("</body>", probe + "</body>")
             payload = html.encode("utf-8")
             self.send_response(200)
@@ -291,9 +344,11 @@ def choose_browser() -> str:
 
 
 def run_case(browser: str, active: bool, modern: bool = True,
-             telemetry: str = "", query: str = "") -> None:
+             telemetry: str = "", query: str = "",
+             quota: str = "normal") -> None:
     """Render the real frontend, selecting a view and optional telemetry fixture."""
-    Handler.state = fixture(active, telemetry)
+    Handler.state = fixture(active, telemetry, quota)
+    Handler.quota_mode = quota
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -365,7 +420,10 @@ def main() -> int:
     run_case(browser, active=False, modern=False, query="?x=ui%3Dmodern")
     run_case(browser, active=False, modern=False,
              telemetry="fresh", query="?pixel_telemetry=fresh&pixel_raf_block=1")
-    print("PASS: 11 cenários de navegador: pixel/modern, telemetria, query e RAF suspenso.")
+    for condition in ("unavailable", "weekly_only", "stale"):
+        run_case(browser, active=False, modern=False, quota=condition)
+    run_case(browser, active=False, modern=True, quota="unavailable")
+    print("PASS: 15 cenários de navegador: pixel/modern, Codex, telemetria e RAF.")
     return 0
 
 
