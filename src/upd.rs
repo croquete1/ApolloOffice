@@ -136,20 +136,29 @@ pub fn info(a: &Ax) -> Value {
     v
 }
 
-async fn get(a: &Ax, u: &str) -> Result<Vec<u8>, String> {
-    let r =
-        a.hc.get(u)
-            .timeout(Duration::from_secs(300))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
+async fn get(a: &Ax, u: &str, limit: usize) -> Result<Vec<u8>, String> {
+    let mut r = a.hc.get(u)
+        .timeout(Duration::from_secs(300))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
     if r.status().as_u16() == 404 {
-        return Err("no published release found (the repository may still be private)".into());
+        return Err("no signed fork release published".into());
     }
     if !r.status().is_success() {
         return Err(format!("HTTP {} for {u}", r.status().as_u16()));
     }
-    Ok(r.bytes().await.map_err(|e| e.to_string())?.to_vec())
+    if r.content_length().is_some_and(|size| size > limit as u64) {
+        return Err("update download exceeds size limit".into());
+    }
+    let mut out = Vec::new();
+    while let Some(chunk) = r.chunk().await.map_err(|e| e.to_string())? {
+        if chunk.len() > limit.saturating_sub(out.len()) {
+            return Err("update download exceeds size limit".into());
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
 }
 
 pub async fn check(a: &Ax) -> Result<Value, String> {
@@ -159,9 +168,10 @@ pub async fn check(a: &Ax) -> Result<Value, String> {
     let (b, key) = channel()?;
     let cid = channel_id(&b, &key);
     let r: Result<Value, String> = async {
-        let body = get(a, &format!("{b}/latest.json")).await?;
-        let sig =
-            String::from_utf8_lossy(&get(a, &format!("{b}/latest.json.sig")).await?).to_string();
+        let body = get(a, &format!("{b}/latest.json"), 128 * 1024).await?;
+        let sig = String::from_utf8_lossy(
+            &get(a, &format!("{b}/latest.json.sig"), 4 * 1024).await?
+        ).to_string();
         let m = check_sig(&key, &body, &sig)?;
         let v = m["v"].as_str().unwrap_or("").to_string();
         st(a, |x| {
@@ -174,7 +184,7 @@ pub async fn check(a: &Ax) -> Result<Value, String> {
             .as_str()
             .ok_or("no build for this system in the release")?
             .to_string();
-        let bin = get(a, &format!("{b}/{}", asset())).await?;
+        let bin = get(a, &format!("{b}/{}", asset()), 128 * 1024 * 1024).await?;
         if hex::encode(Sha256::digest(&bin)) != want {
             return Err("downloaded update does not match the signed checksum".into());
         }
@@ -223,8 +233,18 @@ pub fn ready(a: &Ax) -> bool {
         && staged(a).exists()
 }
 
-fn idle(a: &Ax) -> bool {
-    a.act.lock().unwrap().is_empty() && a.lk.lock().unwrap().is_empty()
+pub fn idle(a: &Ax) -> bool {
+    a.act.lock().unwrap().is_empty()
+        && a.lk.lock().unwrap().is_empty()
+        && a.merge_in_progress.lock().unwrap().is_empty()
+        && a.db.n(
+            "select count(*) from jobs where st in ('hunt','repro','fix','ci','review','gate','submit')",
+            crate::pa![],
+        ) == 0
+}
+
+pub fn manually_paused(a: &Ax) -> bool {
+    a.lv.lock().unwrap().o.man
 }
 
 pub fn spawn(a: Ax) {
@@ -259,9 +279,15 @@ pub fn spawn(a: Ax) {
     });
 }
 
-pub fn apply(a: &Ax) {
-    if !ready(a) {
-        return;
+pub fn apply(a: &Ax) -> bool {
+    if !ready(a) || !idle(a) {
+        return false;
+    }
+    // Prevent workers from starting between the idle check and shutdown.
+    a.drain.store(true, std::sync::atomic::Ordering::SeqCst);
+    if !idle(a) {
+        a.drain.store(false, std::sync::atomic::Ordering::SeqCst);
+        return false;
     }
     let v = a.db.kg("upd")["ready"].as_str().unwrap_or("").to_string();
     a.say(
@@ -271,6 +297,7 @@ pub fn apply(a: &Ax) {
     );
     *a.restart.lock().unwrap() = true;
     a.quit.notify_waiters();
+    true
 }
 
 pub fn install(a: &Ax) -> std::io::Result<()> {
@@ -345,6 +372,29 @@ mod t {
         assert!(!newer("0.4.0", "0.4.0"));
         assert!(newer("0.5.0", "0.5.0-rc1"));
         assert!(!newer("0.5.0-rc1", "0.5.0"));
+    }
+
+    #[test]
+    fn running_work_or_merge_blocks_update() {
+        let db = crate::db::Db::mem();
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db, PathBuf::from("/tmp/apollo-upd-test"), 47300,
+            PathBuf::from("/tmp/apollo-upd-test/apollo-office"),
+        ));
+        assert!(idle(&a));
+        assert!(!manually_paused(&a));
+        a.db.run("insert into jobs(st) values('fix')", crate::pa![]);
+        assert!(!idle(&a));
+        a.db.run("delete from jobs", crate::pa![]);
+        a.merge_in_progress.lock().unwrap().insert("test".into());
+        assert!(!idle(&a));
+        a.merge_in_progress.lock().unwrap().clear();
+        a.act.lock().unwrap().insert("test".into());
+        assert!(!idle(&a));
+        a.act.lock().unwrap().clear();
+        a.lv.lock().unwrap().o.man = true;
+        assert!(manually_paused(&a));
+        assert!(idle(&a));
     }
 
     #[test]
