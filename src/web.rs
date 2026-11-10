@@ -1316,6 +1316,7 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                         pa![format!("cired:{r}"), format!("cired:{r}@%")],
                     );
                     a.sw.notify_one();
+                    a.steward_wake.notify_one();
                     js(cfg(a))
                 }
                 "detect" => {
