@@ -41,7 +41,10 @@ fn mig(c: &Connection) {
     // Modo sem proteção nativa: exige provas locais e autorização explícita.
     let _ = c.execute("alter table rp add column local_merge int default 0", []);
     // Recuperação de drops é sempre uma opção explícita por repositório.
-    let _ = c.execute("alter table rp add column auto_recover_drops int default 0", []);
+    let _ = c.execute(
+        "alter table rp add column auto_recover_drops int default 0",
+        [],
+    );
 }
 
 pub type P = Vec<Box<dyn ToSql + Send>>;
