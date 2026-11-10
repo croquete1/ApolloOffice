@@ -265,18 +265,17 @@ enum MergeMode {
 /// Ambos têm de indicar uma exigência concreta; listas vazias não autorizam merge.
 fn has_required_status_checks(protection: &Value) -> bool {
     let required = &protection["required_status_checks"];
-    required["contexts"]
-        .as_array()
-        .is_some_and(|contexts| contexts.iter().any(|x| {
-            x.as_str().is_some_and(|name| !name.trim().is_empty())
-        }))
-        || required["checks"].as_array().is_some_and(|checks| {
-            checks.iter().any(|x| {
-                x["context"]
-                    .as_str()
-                    .is_some_and(|name| !name.trim().is_empty())
-            })
+    required["contexts"].as_array().is_some_and(|contexts| {
+        contexts
+            .iter()
+            .any(|x| x.as_str().is_some_and(|name| !name.trim().is_empty()))
+    }) || required["checks"].as_array().is_some_and(|checks| {
+        checks.iter().any(|x| {
+            x["context"]
+                .as_str()
+                .is_some_and(|name| !name.trim().is_empty())
         })
+    })
 }
 
 async fn merge_mode(
