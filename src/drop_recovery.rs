@@ -97,6 +97,7 @@ pub fn retry(a: &Ax, id: i64, automatic: bool) -> Result<bool, &'static str> {
             "base", "pbase", "pt", "pb", "pb_footer", "df", "proof",
             "published_sha", "publish_tree", "ci_tree", "ci_evidence",
             "ci_verified_at", "last_review", "last_diagnosis", "fx",
+            "ir", "ie", "acceptance", "acceptance_proof", "verification_feedback",
         ] {
             map.remove(key);
         }
