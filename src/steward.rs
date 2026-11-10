@@ -35,14 +35,24 @@ pub(crate) fn is_test_check(check: &Value) -> bool {
         .or_else(|| check["context"].as_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    name.split(|c: char| !c.is_ascii_alphanumeric()).any(|part| {
-        matches!(
-            part,
-            "test" | "tests" | "testing" | "unit" | "integration"
-                | "e2e" | "smoke" | "pytest" | "jest" | "vitest"
-                | "mocha" | "playwright"
-        )
-    })
+    name.split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|part| {
+            matches!(
+                part,
+                "test"
+                    | "tests"
+                    | "testing"
+                    | "unit"
+                    | "integration"
+                    | "e2e"
+                    | "smoke"
+                    | "pytest"
+                    | "jest"
+                    | "vitest"
+                    | "mocha"
+                    | "playwright"
+            )
+        })
 }
 
 fn work_files(pr: &Value) -> BTreeSet<String> {
