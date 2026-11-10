@@ -1,6 +1,7 @@
 mod ai;
 mod app;
 mod db;
+mod drop_recovery;
 mod gh;
 mod goog;
 mod mcp;

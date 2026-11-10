@@ -266,6 +266,7 @@ pub async fn run(a: Ax) {
                 let Some(repo) = row["full"].as_str() else {
                     continue;
                 };
+                crate::drop_recovery::scan(&a, repo);
                 if let Err(err) = scan(&a, repo).await {
                     a.db.ks(
                         &format!("steward:error:{repo}"),

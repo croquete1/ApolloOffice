@@ -419,7 +419,7 @@ fn pr_lang(value: &str) -> &'static str {
 
 const RPF: &[&str] = &[
     "iss", "hunt", "feat", "nm", "on_", "maxo", "maxd", "bud", "ci", "setup", "rules", "mode",
-    "skl", "lang",
+    "skl", "lang", "auto_recover_drops",
 ];
 const HSF: &[&str] = &["id", "ssh", "dk", "ln", "ci", "gb", "raw", "no", "cpu"];
 
@@ -1210,35 +1210,8 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                     }
                 }
                 "requeue" => {
-                    if let Some(j) = a.db.jg(id) {
-                        if j.st == "drop" && j.kind == "fix" {
-                            let mut d = j.d.clone();
-                            for k in ["h", "rs", "rp", "br", "f", "f0", "sq", "known", "vt"] {
-                                d.as_object_mut().map(|o| o.remove(k));
-                            }
-                            a.db.kd(&format!("kill:{id}"));
-                            a.db.run(
-                                "delete from kv where k=? or k like ?",
-                                pa![format!("cired:{}", j.repo), format!("cired:{}@%", j.repo)],
-                            );
-                            a.db.jset(
-                                id,
-                                &[
-                                    (
-                                        "st",
-                                        json!(if j.why.starts_with("Guard")
-                                            || j.why.starts_with("Vet")
-                                        {
-                                            "vet"
-                                        } else {
-                                            "ready"
-                                        }),
-                                    ),
-                                    ("why", json!("requeued by the owner")),
-                                    ("d", d),
-                                ],
-                            );
-                        }
+                    if let Err(reason) = crate::drop_recovery::retry(a, id, false) {
+                        return er(StatusCode::CONFLICT, reason);
                     }
                 }
                 _ => return er(StatusCode::BAD_REQUEST, "unknown action"),
@@ -1280,6 +1253,7 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                         ("auto_merge", 0),
                         ("local_merge", 0),
                         ("steward_repair", 0),
+                        ("auto_recover_drops", 0),
                         ("maxo", 1),
                         ("maxd", 1),
                         ("bud", 3),
@@ -1453,7 +1427,8 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                         "report": a.db.kg(&format!("steward:{repo}")),
                         "error": a.db.kg(&format!("steward:error:{repo}")),
                         "merge_error": a.db.kg(&format!("steward:merge_error:{repo}")),
-                        "repair_error": a.db.kg(&format!("steward:repair_error:{repo}"))
+                        "repair_error": a.db.kg(&format!("steward:repair_error:{repo}")),
+                        "drops": crate::drop_recovery::report(a, repo)
                     })
                 })
                 .collect::<Vec<Value>>()
