@@ -303,8 +303,11 @@ class Handler(SimpleHTTPRequestHandler):
          forecast.dataset.risk !== "risk"))
       errors.push("Risco de esgotamento não foi sinalizado");
     if (quotaMode === "forecast_near" &&
-        !forecast?.textContent.includes("Previsão próxima da reposição"))
-      errors.push("Risco próximo da reposição não foi sinalizado");
+        (!forecast?.textContent.includes("Previsão próxima da reposição") ||
+         forecast.dataset.risk !== "near"))
+      errors.push("Risco próximo da reposição não foi sinalizado" +
+        " (estado: " + String(window.AO?.S?.codex_usage?.weekly_forecast?.status ?? "ausente") +
+        "; painel: " + String(forecast?.textContent ?? "ausente").slice(0, 160) + ")");
     if (quotaMode === "forecast_on_track" &&
         (!forecast?.textContent.includes("não deverá esgotar") ||
          !forecast?.textContent.includes("Estimativa, não garantia")))
@@ -327,7 +330,11 @@ class Handler(SimpleHTTPRequestHandler):
   }
   (function waitForFrame() {
     var canvas = document.getElementById("cv");
-    var ready = window.AO?.S && painted(canvas);
+    var quotaStatus = document.querySelector("#codexQuotaStatus")?.textContent;
+    // A pintura do canvas e a receção do snapshot podem ocorrer antes da
+    // montagem/atualização do painel Codex. Não testar a previsão prematuramente.
+    var quotaReady = Boolean(quotaStatus && quotaStatus !== "A consultar…");
+    var ready = window.AO?.S && painted(canvas) && quotaReady;
     var expired = Date.now() - started >= 3500;
     // O snapshot pode chegar depois do primeiro frame pintado: aguardar até
     // a hitbox do host existir, sem dispensar os testes reais do tooltip.
