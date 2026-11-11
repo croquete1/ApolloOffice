@@ -869,6 +869,7 @@ mod t {
         assert!(!String::from_utf8_lossy(&failed.stdout).contains("npm cache cleaned"));
         std::fs::remove_dir_all(root).unwrap();
     }
+
     #[test]
     fn worker_image_build_must_succeed_before_replacing_container() {
         let host = Ho {
