@@ -978,7 +978,10 @@ mod t {
         assert!(output.status.success(), "{output:?}");
         assert!(!stale.exists());
         assert!(active.exists(), "active wrapper must retain its own cache");
-        assert!(unrelated.exists(), "unrelated /tmp directories are untouched");
+        assert!(
+            unrelated.exists(),
+            "unrelated /tmp directories are untouched"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

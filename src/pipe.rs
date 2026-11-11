@@ -3475,9 +3475,9 @@ pub(crate) fn admit(a: &Ax, repo: &str, host: &str, id: i64) -> bool {
     // Read capacity before holding the active/locked job mutexes.
     let hunter_limit = if is_hunt { hn(a) } else { 0 };
     // Idle npm maintenance must finish before this host can admit work.
-    if docker_cache_target(a, host).is_some_and(|target| {
-        a.cache_maintenance.lock().unwrap().contains(&target)
-    }) {
+    if docker_cache_target(a, host)
+        .is_some_and(|target| a.cache_maintenance.lock().unwrap().contains(&target))
+    {
         return false;
     }
     let mut active = a.act.lock().unwrap();
@@ -3489,10 +3489,7 @@ pub(crate) fn admit(a: &Ax, repo: &str, host: &str, id: i64) -> bool {
     if is_hunt
         && locked
             .iter()
-            .filter(|other_id| {
-                a.db.jg(**other_id)
-                    .is_some_and(|job| job.kind == "hunt")
-            })
+            .filter(|other_id| a.db.jg(**other_id).is_some_and(|job| job.kind == "hunt"))
             .count() as i64
             >= hunter_limit
     {
@@ -3924,7 +3921,11 @@ impl IdleCacheGuard {
 
 impl Drop for IdleCacheGuard {
     fn drop(&mut self) {
-        self.a.cache_maintenance.lock().unwrap().remove(&self.target);
+        self.a
+            .cache_maintenance
+            .lock()
+            .unwrap()
+            .remove(&self.target);
     }
 }
 
@@ -4194,12 +4195,28 @@ mod t {
         db.ks("set", &json!({"hunters": 1}));
         db.run("insert into hs(id,ln,dk,on_) values('local',2,0,1)", pa![]);
         let blocked_id = db.jnew(
-            "o/blocked", 0, "hunt", "blocked", "", "ready", "",
-            json!({}), None, 99.0,
+            "o/blocked",
+            0,
+            "hunt",
+            "blocked",
+            "",
+            "ready",
+            "",
+            json!({}),
+            None,
+            99.0,
         );
         let healthy_id = db.jnew(
-            "o/healthy", 0, "hunt", "healthy", "", "ready", "",
-            json!({}), None, 99.0,
+            "o/healthy",
+            0,
+            "hunt",
+            "healthy",
+            "",
+            "ready",
+            "",
+            json!({}),
+            None,
+            99.0,
         );
         let a = std::sync::Arc::new(crate::app::App::new(
             db,
@@ -4299,7 +4316,10 @@ mod t {
     #[tokio::test]
     async fn idle_cache_cleanup_blocks_admission_and_releases_on_drop() {
         let db = crate::db::Db::mem();
-        db.run("insert into hs(id,ln,dk,on_) values('worker1',1,1,1)", pa![]);
+        db.run(
+            "insert into hs(id,ln,dk,on_) values('worker1',1,1,1)",
+            pa![],
+        );
         let id = db.jnew(
             "o/r",
             0,
@@ -4329,9 +4349,26 @@ mod t {
     #[test]
     fn cache_maintenance_serializes_aliases_of_the_same_docker_target() {
         let db = crate::db::Db::mem();
-        db.run("insert into hs(id,ssh,ln,dk,on_) values('alias-a','worker@example',1,1,1)", pa![]);
-        db.run("insert into hs(id,ssh,ln,dk,on_) values('alias-b','worker@example',1,1,1)", pa![]);
-        let id = db.jnew("o/r", 0, "fix", "same daemon", "", "ready", "", json!({}), None, 0.0);
+        db.run(
+            "insert into hs(id,ssh,ln,dk,on_) values('alias-a','worker@example',1,1,1)",
+            pa![],
+        );
+        db.run(
+            "insert into hs(id,ssh,ln,dk,on_) values('alias-b','worker@example',1,1,1)",
+            pa![],
+        );
+        let id = db.jnew(
+            "o/r",
+            0,
+            "fix",
+            "same daemon",
+            "",
+            "ready",
+            "",
+            json!({}),
+            None,
+            0.0,
+        );
         let a = std::sync::Arc::new(crate::app::App::new(
             db,
             std::path::PathBuf::from("/tmp/apollo-cache-alias-test"),
