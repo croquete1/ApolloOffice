@@ -261,6 +261,23 @@ enum MergeMode {
     Local,
 }
 
+/// A API GitHub disponibiliza checks obrigatórios em `contexts` e/ou `checks`.
+/// Ambos têm de indicar uma exigência concreta; listas vazias não autorizam merge.
+fn has_required_status_checks(protection: &Value) -> bool {
+    let required = &protection["required_status_checks"];
+    required["contexts"].as_array().is_some_and(|contexts| {
+        contexts
+            .iter()
+            .any(|x| x.as_str().is_some_and(|name| !name.trim().is_empty()))
+    }) || required["checks"].as_array().is_some_and(|checks| {
+        checks.iter().any(|x| {
+            x["context"]
+                .as_str()
+                .is_some_and(|name| !name.trim().is_empty())
+        })
+    })
+}
+
 async fn merge_mode(
     repo: &str,
     base: &str,
@@ -277,17 +294,11 @@ async fn merge_mode(
             40,
         )
         .await?;
-        let required = &rules["required_status_checks"]["contexts"];
-        return Ok(
-            if required
-                .as_array()
-                .is_some_and(|contexts| !contexts.is_empty())
-            {
-                MergeMode::Protected
-            } else {
-                MergeMode::Blocked
-            },
-        );
+        return Ok(if has_required_status_checks(&rules) {
+            MergeMode::Protected
+        } else {
+            MergeMode::Blocked
+        });
     }
     // Só aceitar a ausência EXPLÍCITA de proteção, e nunca um 403/valor omitido.
     Ok(if branch["protected"] == false && local_enabled {
@@ -874,6 +885,44 @@ mod tests {
         snapshot.checks = valid_checks;
         snapshot.reviews = json!([{
             "state":"CHANGES_REQUESTED",
+            "commit_id":e.head,
+            "user":{"login":"maintainer","type":"User"}
+        }]);
+        assert!(!final_gate(Ok(snapshot), &e).unwrap());
+    }
+
+    #[test]
+    fn branch_protection_supports_modern_required_checks_without_bypass() {
+        assert!(has_required_status_checks(&json!({
+            "required_status_checks":{"contexts":["unit-tests"]}
+        })));
+        assert!(has_required_status_checks(&json!({
+            "required_status_checks":{"checks":[{"context":"CI / Tests","app_id":123}]}
+        })));
+        assert!(!has_required_status_checks(&json!({
+            "required_status_checks":{"checks":[{"app_id":123}]}
+        })));
+        assert!(!has_required_status_checks(&json!({
+            "required_status_checks":{"contexts":[],"checks":[]}
+        })));
+        assert!(!has_required_status_checks(&json!({})));
+    }
+
+    #[test]
+    fn protected_branch_does_not_accept_lint_only_as_test_evidence() {
+        let mut e = sample_expected();
+        e.mode = MergeMode::Protected;
+        let mut snapshot = sample_final_reads();
+        snapshot.checks = json!({
+            "total_count":1,
+            "check_runs":[{
+                "name":"lint",
+                "status":"completed",
+                "conclusion":"success"
+            }]
+        });
+        snapshot.reviews = json!([{
+            "state":"APPROVED",
             "commit_id":e.head,
             "user":{"login":"maintainer","type":"User"}
         }]);

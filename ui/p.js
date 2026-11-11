@@ -132,6 +132,8 @@
         <div class="hint">Quando a branch é protegida, exige checks GitHub obrigatórios e aprovação humana independente.</div>
         <label>Modo local sem plano GitHub pago</label>${tg("local_merge", r.local_merge, "Permitir integrações com provas de CI e revisão independente guardadas no ApolloOffice")}
         <div class="warn">Exige também Integração automática ativada. Só considera PRs criadas e acompanhadas pelo ApolloOffice, no HEAD e base verificados, com testes bem-sucedidos e parecer independente no mesmo conteúdo, sem comentários pendentes, conflitos, sobreposições ou ficheiros sensíveis. A proteção local NÃO impede pushes diretos nem substitui a proteção GitHub. Desligado por defeito.</div>
+        <label>Recuperação segura de drops</label>${tg("auto_recover_drops", r.auto_recover_drops, "Repetir apenas falhas temporárias anteriores à publicação")}
+        <div class="hint">Desligado por defeito. No máximo duas tentativas nas 48 horas após o drop, com intervalo mínimo de cinco minutos. Nunca retenta drops deliberados, revisões rejeitadas, trabalhos publicados ou com aprovação anterior. Cada tentativa volta aos gates normais.</div>
         <label>Limits</label><div class="lm"><span>open</span><input type="number" name="maxo" min="0" max="10000" value="${r.maxo}"><span>new per day</span><input type="number" name="maxd" min="0" max="10000" value="${r.maxd}"><span>USD per day</span><input type="number" name="bud" min="0" step="0.01" value="${r.bud || 0}"></div>
         <div class="hint">Set open or new per day to 0 for unlimited PRs. Queue capacity, CI and review still apply. The daily budget counts API keys only; 0 = no limit.</div>
         <label>PR footer</label>${tg("nm", r.nm ?? 1, "mention ApolloOffice with a link")}
@@ -583,7 +585,7 @@
       ? `<div class="sec"><h4>Diagnóstico técnico</h4><div class="box"><div class="msg">Fase: ${esc(j.failure.stage)} · Saída: ${esc(j.failure.exit_code)} · Máquina: ${esc(j.failure.host || "—")}</div><pre class="df">${esc(j.failure.output || "Sem detalhes")}</pre></div></div>`
       : "";
     B.innerHTML = `<div class="sec"><div class="box"><div class="hd2"><b>${esc(j.title)}</b><span class="pill">${esc(j.st)}</span></div><div class="msg">${esc(j.repo)} ${esc(tag)} · ${esc(j.kind)}${j.h ? " · " + esc(j.h) : ""}\n${esc(j.why || "")}</div>${cs}
-      <div class="acts">${j.url ? `<button data-u="${esc(j.url)}">Open on GitHub</button>` : ""}${!["done", "drop"].includes(j.st) ? `<button class="dng" data-d="${id}">Drop</button>` : ""}${j.st === "drop" && j.kind === "fix" ? `<button data-rq="${id}">Try again</button>` : ""}</div></div></div>
+      <div class="acts">${j.url ? `<button data-u="${esc(j.url)}">Open on GitHub</button>` : ""}${!["done", "drop"].includes(j.st) ? `<button class="dng" data-d="${id}">Drop</button>` : ""}${j.st === "drop" && j.kind === "fix" ? `<button data-rq="${id}" ${window.AO.retryStates?.get(id)?.pending ? "disabled" : ""}>Try again</button>` : ""}</div>${j.st === "drop" && j.kind === "fix" ? `<div class="msg${window.AO.retryStates?.get(id)?.error ? " bad2" : ""}" data-requeue-message="${id}" aria-live="polite">${esc(window.AO.retryStates?.get(id)?.error || "")}</div>` : ""}</div></div>
       ${failure}
       ${j.df ? `<div class="sec"><h4>Diff</h4>${dview(j.df)}</div>` : ""}
       <div class="sec"><h4>Log</h4><div class="log">${ev || `<div class="empty">nothing yet</div>`}</div></div>`;
@@ -615,7 +617,7 @@
       <div class="hint">Consulta o GitHub periodicamente. Identifica duplicações, conflitos, checks e revisões pendentes. O estado «CI: aprovado» não dispensa provas de testes completos nem as regras de proteção da branch. CodeRabbit isolado não é CI. A integração é opcional e fica desligada por omissão.</div>
       <div class="acts"><button id="steRefresh" type="button">Atualizar painel</button></div>
     </div></div>
-    ${reports.map(({ repo, report, error, merge_error, repair_error }) => {
+    ${reports.map(({ repo, report, error, merge_error, repair_error, drops }) => {
       const rows = [...(report?.prs || [])].sort((a,b) => (Number(a.priority ?? 9) - Number(b.priority ?? 9)) || (Number(b.number) - Number(a.number)));
       const at = report?.at ? new Date(report.at).toLocaleString("pt-PT") : "sem leitura";
       const mode = !report?.merge_enabled
@@ -628,6 +630,8 @@
         <div class="msg">${rows.length} PRs abertas · ${esc(at)} · ${esc(mode)} · ${esc(repairs)}${error?.error ? " · Último erro: " + esc(error.error) : ""}</div>
         ${repair_error?.error ? `<div class="warn">Revisão não encaminhada: ${esc(repair_error.error)}</div>` : ""}
         ${merge_error?.reason ? `<div class="warn">Integração bloqueada: ${esc(merge_error.reason)}</div>` : ""}
+        <div class="hint">Drops: ${esc(String(drops?.total ?? 0))} · Recuperação automática: ${drops?.enabled ? "ativa" : "desativada"} · Potencialmente recuperáveis: ${esc(String((drops?.jobs || []).filter(j => j.safe_auto).length))} (nos últimos 25).</div>
+        ${(drops?.jobs || []).slice(0, 5).map(j => `<div class="hint">Trabalho #${esc(String(j.id))} · ${esc(j.category)} · ${esc(j.reason)} · tentativas: ${esc(String(j.attempts))}</div>`).join("")}
         ${!report || report.error ? '<div class="warn">Sem diagnóstico completo. Não é possível concluir que alguma PR esteja pronta.</div>' : ""}
         ${rows.length ? rows.map((p) => `<div class="ck" style="margin:5px 0;align-items:flex-start;gap:8px">
           <span class="pill">${esc(String(p.number))}</span>

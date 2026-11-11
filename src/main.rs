@@ -3,6 +3,7 @@ mod app;
 mod codex_forecast;
 mod codex_usage;
 mod db;
+mod drop_recovery;
 mod gh;
 mod goog;
 mod hunt_health;

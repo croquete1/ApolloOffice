@@ -1281,40 +1281,13 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                         );
                     }
                 }
-                "requeue" => {
-                    if let Some(j) = a.db.jg(id) {
-                        if j.st == "drop" && j.kind == "fix" {
-                            let mut d = j.d.clone();
-                            for k in [
-                                "h", "rs", "rp", "br", "f", "f0", "sq", "known", "vt", "failure",
-                            ] {
-                                d.as_object_mut().map(|o| o.remove(k));
-                            }
-                            a.db.kd(&format!("kill:{id}"));
-                            a.db.run(
-                                "delete from kv where k=? or k like ?",
-                                pa![format!("cired:{}", j.repo), format!("cired:{}@%", j.repo)],
-                            );
-                            a.db.jset(
-                                id,
-                                &[
-                                    (
-                                        "st",
-                                        json!(if j.why.starts_with("Guard")
-                                            || j.why.starts_with("Vet")
-                                        {
-                                            "vet"
-                                        } else {
-                                            "ready"
-                                        }),
-                                    ),
-                                    ("why", json!("requeued by the owner")),
-                                    ("d", d),
-                                ],
-                            );
-                        }
+                "requeue" => match crate::drop_recovery::retry_manual(a, id).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return er(StatusCode::CONFLICT, "Job alterado durante a recuperação");
                     }
-                }
+                    Err(reason) => return er(StatusCode::CONFLICT, &reason),
+                },
                 _ => return er(StatusCode::BAD_REQUEST, "unknown action"),
             }
             js(state(a))
@@ -1354,6 +1327,7 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                         ("auto_merge", 0),
                         ("local_merge", 0),
                         ("steward_repair", 0),
+                        ("auto_recover_drops", 0),
                         ("maxo", 1),
                         ("maxd", 1),
                         ("bud", 3),
@@ -1416,6 +1390,7 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                         pa![format!("cired:{r}"), format!("cired:{r}@%")],
                     );
                     a.sw.notify_one();
+                    a.steward_wake.notify_one();
                     js(cfg(a))
                 }
                 "detect" => {
@@ -1527,7 +1502,8 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                         "report": a.db.kg(&format!("steward:{repo}")),
                         "error": a.db.kg(&format!("steward:error:{repo}")),
                         "merge_error": a.db.kg(&format!("steward:merge_error:{repo}")),
-                        "repair_error": a.db.kg(&format!("steward:repair_error:{repo}"))
+                        "repair_error": a.db.kg(&format!("steward:repair_error:{repo}")),
+                        "drops": crate::drop_recovery::report(a, repo)
                     })
                 })
                 .collect::<Vec<Value>>()
