@@ -3463,12 +3463,18 @@ pub(crate) fn admit(a: &Ax, repo: &str, host: &str, id: i64) -> bool {
     if active.contains(&claim) || locked.contains(&id) {
         return false;
     }
-    // No concurrent Hunter and another active job from the same repository:
-    // preparation shares the checkout and can corrupt a second run.
-    if is_hunt
-        && active
-            .iter()
-            .any(|entry| entry.split_once(' ').is_some_and(|(r, _)| r == repo))
+    // A Hunter's checkout is shared with other tasks for this repository.
+    // Protect both admission orders: a Hunter after a fix and a fix after
+    // an active Hunter, including when the tasks target different hosts.
+    let active_repo = active
+        .iter()
+        .any(|entry| entry.split_once(' ').is_some_and(|(r, _)| r == repo));
+    if active_repo
+        && (is_hunt
+            || locked.iter().any(|other_id| {
+                a.db.jg(*other_id)
+                    .is_some_and(|job| job.repo == repo && job.kind == "hunt")
+            }))
     {
         return false;
     }
@@ -3976,6 +3982,18 @@ mod t {
             None,
             99.0,
         );
+        let fix = db.jnew(
+            "o/r",
+            1,
+            "fix",
+            "fixture",
+            "",
+            "ready",
+            "",
+            json!({}),
+            None,
+            0.0,
+        );
         let a = std::sync::Arc::new(crate::app::App::new(
             db,
             std::path::PathBuf::from("/tmp/apollo-admit-hunt-tests"),
@@ -3984,12 +4002,20 @@ mod t {
         ));
         assert!(admit(&a, "o/r", "worker1", first));
         assert!(!admit(&a, "o/r", "worker2", second));
+        // Regression: a fix must not touch the checkout of an active Hunter.
+        assert!(!admit(&a, "o/r", "worker2", fix));
+        a.act.lock().unwrap().clear();
+        a.lk.lock().unwrap().clear();
+        // Preserve the reverse-order protection (Hunter after an active fix).
+        assert!(admit(&a, "o/r", "worker1", fix));
+        assert!(!admit(&a, "o/r", "worker2", first));
         a.act.lock().unwrap().clear();
         a.lk.lock().unwrap().clear();
         for _ in 0..3 {
             crate::hunt_health::fail(&a, "o/r", "setup", 1);
         }
         assert!(!admit(&a, "o/r", "worker1", first));
+        assert!(admit(&a, "o/r", "worker1", fix));
         assert_eq!(a.db.jg(first).unwrap().st, "ready");
     }
 
