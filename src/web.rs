@@ -179,10 +179,37 @@ fn state(a: &Ax) -> Value {
             }
         }
     }
+    // Distinguish an available agent from one that is deliberately paused,
+    // waiting for admission or blocked by an environment failure.
+    let waiting = a.db.n(
+        "select count(*) from jobs where st in ('ready','submit')",
+        pa![],
+    );
+    let paused = o["man"] == true
+        || o["pause"].as_str().is_some_and(|reason| !reason.is_empty());
+    let blocked_hunts = crate::hunt_health::blocked_repos(a);
+    for role in WS {
+        let idle = wv[*role]["st"] != "work";
+        let reason = if wv[*role]["hold"] == true {
+            "Agente pausado"
+        } else if paused {
+            "Escritório em pausa"
+        } else if !idle {
+            ""
+        } else if *role == "hunter" && !blocked_hunts.is_empty() {
+            "Existem pesquisas suspensas por falhas de preparação"
+        } else if waiting > 0 {
+            "Sem tarefa atribuída; existem trabalhos na fila"
+        } else {
+            "Sem tarefa atribuída"
+        };
+        wv[*role]["idle_reason"] = json!(reason);
+    }
     let lm = a.db.kg("lm");
     json!({
         "t": now(), "v": crate::app::V,
         "o": o, "w": wv, "fl": fl, "ln": ln, "cil": cil, "hst": hst,
+        "ops": {"waiting": waiting, "blocked_hunts": blocked_hunts, "paused": paused},
         "hs": a.db.all("select id, ln, dk, on_ from hs order by id='local' desc, id", pa![]),
         "q": a.db.all("select id,repo,num,kind,title,url,st,why,pr,t0,t1,json_extract(d,'$.h') h from jobs where st not in ('done','drop') order by st in ('hunt','repro','fix','ci','review','gate','submit') desc, st='approve' desc, st='vet', id limit 60", pa![]),
         "dn": a.db.all("select id,repo,num,kind,title,url,st,why,pr,t1 from jobs where st in ('done','drop') order by t1 desc limit 25", pa![]),
@@ -264,7 +291,7 @@ fn rst(a: &Ax, r: &str) -> Value {
         )
         .map(|x| x["u"].as_f64().unwrap_or(0.0))
         .unwrap_or(0.0);
-    json!({"m14": m14, "op": o["op"], "old": o["old"], "is": is, "ik": ik, "q": q, "usd": usd, "hy": crate::pipe::hy(a, r), "iv": crate::wk::ivl(a, r) / 60_000, "red": !a.db.kg(&format!("cired:{r}")).is_null()})
+    json!({"m14": m14, "op": o["op"], "old": o["old"], "is": is, "ik": ik, "q": q, "usd": usd, "hy": crate::pipe::hy(a, r), "iv": crate::wk::ivl(a, r) / 60_000, "red": !a.db.kg(&format!("cired:{r}")).is_null(), "hunt_health": crate::hunt_health::status(a, r)})
 }
 
 fn costs(a: &Ax) -> Value {
@@ -1131,6 +1158,13 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
         ("GET", "/api/state") => js(state(a)),
         ("GET", "/api/cfg") => js(cfg(a)),
         ("GET", "/api/check") => js(checks(a).await),
+        ("GET", "/api/failures") => js(json!({
+            "jobs": a.db.all(
+                "select id,repo,kind,title,why,t1, json_extract(d,'$.failure.stage') stage, json_extract(d,'$.failure.exit_code') exit_code from jobs where st='drop' order by t1 desc limit 80",
+                pa![],
+            ),
+            "blocked": crate::hunt_health::blocked_repos(a),
+        })),
         ("GET", "/api/report") => match repdetail(a, qv("id").parse().unwrap_or(0)) {
             Some(value) => js(value),
             None => er(StatusCode::NOT_FOUND, "no report with this id"),
@@ -1139,7 +1173,7 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
             let id: i64 = qv("id").parse().unwrap_or(0);
             match a.db.one("select * from jobs where id=?", pa![id]) {
                 Some(j) => js(
-                    json!({"id": j["id"], "repo": j["repo"], "num": j["num"], "kind": j["kind"], "title": j["title"], "url": j["url"], "st": j["st"], "why": j["why"], "pt": j["d"]["pt"], "pb": j["d"]["pb"], "df": j["d"]["df"], "proof": j["d"]["proof"], "known": j["d"]["known"], "h": j["d"]["h"], "ext": j["d"]["ext"]["src"], "cost": a.db.one("select sum(case when sub=0 then usd end) usd, sum(case when sub=1 then usd end) val, sum(tin+tcw+tcr) ti, sum(tout) tou, count(*) n from cost where job=?", pa![id]), "ev": a.db.all("select t,w,m from ev where j=? order by id desc limit 80", pa![id])}),
+                    json!({"id": j["id"], "repo": j["repo"], "num": j["num"], "kind": j["kind"], "title": j["title"], "url": j["url"], "st": j["st"], "why": j["why"], "failure": j["d"]["failure"], "pt": j["d"]["pt"], "pb": j["d"]["pb"], "df": j["d"]["df"], "proof": j["d"]["proof"], "known": j["d"]["known"], "h": j["d"]["h"], "ext": j["d"]["ext"]["src"], "cost": a.db.one("select sum(case when sub=0 then usd end) usd, sum(case when sub=1 then usd end) val, sum(tin+tcw+tcr) ti, sum(tout) tou, count(*) n from cost where job=?", pa![id]), "ev": a.db.all("select t,w,m from ev where j=? order by id desc limit 80", pa![id])}),
                 ),
                 None => er(StatusCode::NOT_FOUND, "no such job"),
             }
@@ -1147,6 +1181,16 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
         ("POST", "/api/act") => {
             let id = b["id"].as_i64().unwrap_or(0);
             match b["a"].as_str().unwrap_or("") {
+                "reset-hunt" => {
+                    let repo = b["repo"].as_str().unwrap_or("");
+                    if a.db.n(
+                        "select count(*) from rp where full=?",
+                        pa![repo.to_string()],
+                    ) != 1 {
+                        return er(StatusCode::BAD_REQUEST, "unknown repository");
+                    }
+                    crate::hunt_health::reset(a, repo);
+                }
                 "pause" => {
                     let on = b["on"].as_bool().unwrap_or(false);
                     a.lv.lock().unwrap().o.man = on;
