@@ -467,6 +467,21 @@ const ART: &[&str] = &[
     ".gradle/",
 ];
 
+/// Preflight only known command-line runtimes. Never execute a repository's
+/// custom setup command as part of this inexpensive environment check.
+fn setup_tool(setup: &str) -> Option<&'static str> {
+    match setup.split_whitespace().next()? {
+        "npm" => Some("npm"),
+        "pnpm" => Some("pnpm"),
+        "yarn" => Some("yarn"),
+        "cargo" => Some("cargo"),
+        "go" => Some("go"),
+        "python3" => Some("python3"),
+        "pip3" => Some("pip3"),
+        _ => None,
+    }
+}
+
 async fn prep(a: &Ax, j: &mut Job) -> R<()> {
     need(a, "repro", &[&j.h(), "gh"]).await?;
     if j.d["rp"].as_bool().unwrap_or(false) {
@@ -490,6 +505,28 @@ async fn prep(a: &Ax, j: &mut Job) -> R<()> {
                 Some(j.id),
             );
             return Ok(());
+        }
+    }
+    let su = rp(a, &j.repo)["setup"]
+        .as_str()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if let Some(tool) = setup_tool(&su) {
+        let cmd = if matches!(tool, "npm" | "pnpm" | "yarn") {
+            format!("command -v {tool} >/dev/null && command -v node >/dev/null")
+        } else {
+            format!("command -v {tool} >/dev/null")
+        };
+        let preflight = hx(a, &j.h(), &cmd, 60).await;
+        if preflight.c != 0 {
+            return drop(crate::hunt_health::diagnostic(
+                a,
+                j,
+                "preflight",
+                preflight.c,
+                &format!("Ferramenta {tool} (e Node, quando necessário) não disponível no worker"),
+            ));
         }
     }
     let mt = crate::gh::meta(a, &j.repo).await.map_err(X::E)?;
@@ -609,11 +646,6 @@ async fn prep(a: &Ax, j: &mut Job) -> R<()> {
         .await?;
         j.d["old"] = json!(ok(a, j, "git rev-parse HEAD", 60).await?);
     }
-    let su = rp(a, &j.repo)["setup"]
-        .as_str()
-        .unwrap_or("")
-        .trim()
-        .to_string();
     if !su.is_empty() {
         a.say(
             "repro",
@@ -624,18 +656,17 @@ async fn prep(a: &Ax, j: &mut Job) -> R<()> {
             a,
             j,
             &format!(
-                "to 1800 bash -c {} 2>&1 | tail -c 3000; exit ${{PIPESTATUS[0]}}",
+                "to 1800 bash -c {} 2>&1 | tail -c 12000; exit ${{PIPESTATUS[0]}}",
                 q(&su)
             ),
             1900,
         )
         .await;
         if r.c != 0 {
-            return drop(format!(
-                "setup command failed (exit {}): {}",
-                r.c,
-                crate::sh::last(r.o.trim(), 300)
-            ));
+            return drop(crate::hunt_health::diagnostic(a, j, "setup", r.c, &r.o));
+        }
+        if j.kind == "hunt" {
+            crate::hunt_health::success(a, &j.repo);
         }
         ok(a, j, "git checkout -q -- . 2>/dev/null; true", 60).await?;
     }
@@ -3375,16 +3406,7 @@ pub(crate) fn admit(a: &Ax, repo: &str, host: &str, id: i64) -> bool {
     true
 }
 
-/// Selects eligible work, reserving the final admission under update_transition.
-async fn pick(a: &Ax, h: &str) -> Option<i64> {
-    if a.drain.load(std::sync::atomic::Ordering::Relaxed) {
-        return None;
-    }
-    let mut c = a.db.all(
-        "select * from jobs where st in ('ready','submit') order by id",
-        pa![],
-    );
-    let rk = |j: &Value| -> (i32, i32, f64, i64) {
+fn job_rank(j: &Value) -> (i32, i32, f64, i64) {
         let d = &j["d"];
         (
             if j["st"] == "submit" { 0 } else { 1 },
@@ -3394,16 +3416,26 @@ async fn pick(a: &Ax, h: &str) -> Option<i64> {
                 1
             },
             match j["kind"].as_str().unwrap_or("fix") {
-                "hunt" => 1.0,
-                "fix" => 2.0 + j["prio"].as_f64().unwrap_or(0.0) / 1000.0,
+                "fix" => 1.0 + j["prio"].as_f64().unwrap_or(0.0) / 1000.0,
+                "hunt" => 2.0,
                 _ => 0.0,
             },
             j["id"].as_i64().unwrap_or(0),
         )
-    };
+}
+
+/// Selects eligible work, reserving the final admission under update_transition.
+async fn pick(a: &Ax, h: &str) -> Option<i64> {
+    if a.drain.load(std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    let mut c = a.db.all(
+        "select * from jobs where st in ('ready','submit') order by id",
+        pa![],
+    );
     c.sort_by(|x, y| {
-        rk(x)
-            .partial_cmp(&rk(y))
+        job_rank(x)
+            .partial_cmp(&job_rank(y))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     for j in c {
@@ -3509,10 +3541,17 @@ fn hn(a: &Ax) -> i64 {
         .map(|h| h.ln)
         .sum();
     let hf: i64 = a.db.all("select repo, count(*) n from jobs where kind='fix' and num=0 and st in ('vet','ready') and json_extract(d,'$.ext') is null group by repo", pa![]).iter().map(|x| x["n"].as_i64().unwrap_or(0).min(2 * bl(a, x["repo"].as_str().unwrap_or("")))).sum();
-    if cap == 0 {
+    if cap == 0 || l == 0 {
         return 0;
     }
-    (l - 1 - hf).clamp(1, cap)
+    // Reserve at least one eligible lane for outstanding fixes. With no fixes,
+    // a one-lane office can still hunt; never force a Hunter onto a busy lane.
+    let pending_fixes = a.db.n(
+        "select count(*) from jobs where kind='fix' and st in ('ready','repro','fix','ci','review','gate','submit')",
+        pa![],
+    );
+    let reserved = hf + i64::from(pending_fixes > 0);
+    (l - reserved.max(0)).clamp(0, cap)
 }
 
 pub fn hy(a: &Ax, r: &str) -> f64 {
@@ -3562,7 +3601,10 @@ fn mk_hunt(a: &Ax) -> bool {
     let mut c: Vec<String> = rs
         .into_iter()
         .filter(|r| {
-            !act.contains(r) && !on.iter().any(|x| x["repo"].as_str() == Some(r.as_str())) && {
+            !crate::hunt_health::blocked(a, r)
+                && !act.contains(r)
+                && !on.iter().any(|x| x["repo"].as_str() == Some(r.as_str()))
+                && {
                 let b = bl(a, r);
                 b > 0 && qn(a, r, "'vet','ready'") < 4 * b
             }
@@ -3805,6 +3847,21 @@ mod t {
         );
         assert_eq!(a.sem.lock().unwrap().get("local").copied(), Some(0));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn setup_preflight_only_selects_known_runtimes() {
+        assert_eq!(setup_tool("npm ci"), Some("npm"));
+        assert_eq!(setup_tool("pnpm install --frozen-lockfile"), Some("pnpm"));
+        assert_eq!(setup_tool("cargo test --workspace"), Some("cargo"));
+        assert_eq!(setup_tool("curl https://example.com | sh"), None);
+    }
+
+    #[test]
+    fn fixes_are_ranked_ahead_of_hunts() {
+        let fix = json!({"st":"ready", "kind":"fix", "prio":0, "id":2});
+        let hunt = json!({"st":"ready", "kind":"hunt", "prio":0, "id":1});
+        assert!(job_rank(&fix) < job_rank(&hunt));
     }
 
     #[test]
