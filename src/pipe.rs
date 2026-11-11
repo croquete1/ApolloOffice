@@ -482,6 +482,12 @@ fn setup_tool(setup: &str) -> Option<&'static str> {
     }
 }
 
+/// Identifica falhas de transporte antes de atribuir um erro de setup ao projeto.
+fn preflight_host_error(result: &Out) -> bool {
+    let error = format!("{}\n{}", result.o, result.e);
+    result.c < 0 || crate::app::hostish(&error) || crate::app::netish(&error)
+}
+
 async fn prep(a: &Ax, j: &mut Job) -> R<()> {
     need(a, "repro", &[&j.h(), "gh"]).await?;
     if j.d["rp"].as_bool().unwrap_or(false) {
@@ -514,17 +520,14 @@ async fn prep(a: &Ax, j: &mut Job) -> R<()> {
         .to_string();
     if let Some(tool) = setup_tool(&su) {
         let cmd = if matches!(tool, "npm" | "pnpm" | "yarn") {
-            format!("command -v {tool} >/dev/null && command -v node >/dev/null")
+            format!("command -v {tool} >/dev/null || {{ echo 'Falta: {tool}' >&2; exit 127; }}; command -v node >/dev/null || {{ echo 'Falta: node' >&2; exit 127; }}")
         } else {
-            format!("command -v {tool} >/dev/null")
+            format!("command -v {tool} >/dev/null || {{ echo 'Falta: {tool}' >&2; exit 127; }}")
         };
         let preflight = hx(a, &j.h(), &cmd, 60).await;
         if preflight.c != 0 {
             let error = format!("{}\n{}", preflight.o, preflight.e);
-            if preflight.c < 0
-                || crate::app::hostish(&error)
-                || crate::app::netish(&error)
-            {
+            if preflight_host_error(&preflight) {
                 // Transport/worker failures already have a bounded host retry
                 // path; they are not deterministic missing-tool errors.
                 return Err(X::Host(
@@ -3474,6 +3477,7 @@ pub(crate) fn admit(a: &Ax, repo: &str, host: &str, id: i64) -> bool {
     true
 }
 
+/// Ordena trabalhos prontos sem deixar os Hunters ultrapassar as correções.
 fn job_rank(j: &Value) -> (i32, i32, f64, i64) {
     let d = &j["d"];
     (
@@ -3638,6 +3642,7 @@ pub fn hy(a: &Ax, r: &str) -> f64 {
     (m as f64 + 1.0) / (h as f64 + 2.0) / (1.0 + s as f64 / 10.0)
 }
 
+/// Cria no máximo um Hunter elegível por repositório, com gate serializado.
 fn mk_hunt(a: &Ax) -> bool {
     // Coordinate creation with admission and breaker updates across lanes.
     let _transition = a.update_transition.lock().unwrap();
@@ -3922,6 +3927,101 @@ mod t {
         );
         assert_eq!(a.sem.lock().unwrap().get("local").copied(), Some(0));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn preflight_host_failures_are_not_missing_tool_failures() {
+        let unreachable = Out {
+            c: 255,
+            o: String::new(),
+            e: "ssh: connect to host failed".into(),
+        };
+        let missing = Out {
+            c: 127,
+            o: String::new(),
+            e: "Falta: node".into(),
+        };
+        let absent = Out {
+            c: -1,
+            o: String::new(),
+            e: "machine local is gone".into(),
+        };
+        assert!(preflight_host_error(&unreachable));
+        assert!(preflight_host_error(&absent));
+        assert!(!preflight_host_error(&missing));
+    }
+
+    #[tokio::test]
+    async fn a_blocked_hunt_cannot_be_admitted_and_active_hunts_do_not_overlap() {
+        let db = crate::db::Db::mem();
+        let first = db.jnew(
+            "o/r",
+            0,
+            "hunt",
+            "fixture",
+            "",
+            "ready",
+            "",
+            json!({}),
+            None,
+            99.0,
+        );
+        let second = db.jnew(
+            "o/r",
+            0,
+            "hunt",
+            "fixture",
+            "",
+            "ready",
+            "",
+            json!({}),
+            None,
+            99.0,
+        );
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::path::PathBuf::from("/tmp/apollo-admit-hunt-tests"),
+            1,
+            "apollo-office".into(),
+        ));
+        assert!(admit(&a, "o/r", "worker1", first));
+        assert!(!admit(&a, "o/r", "worker2", second));
+        a.act.lock().unwrap().clear();
+        a.lk.lock().unwrap().clear();
+        for _ in 0..3 {
+            crate::hunt_health::fail(&a, "o/r", "setup", 1);
+        }
+        assert!(!admit(&a, "o/r", "worker1", first));
+        assert_eq!(a.db.jg(first).unwrap().st, "ready");
+    }
+
+    #[tokio::test]
+    async fn concurrent_creation_does_not_duplicate_hunts() {
+        let db = crate::db::Db::mem();
+        db.run(
+            "insert into hs(id,ln,dk,on_) values('local',2,0,1)",
+            pa![],
+        );
+        db.run(
+            "insert into rp(full,ci,hunt,on_) values('o/r','true',1,1)",
+            pa![],
+        );
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::path::PathBuf::from("/tmp/apollo-create-hunt-tests"),
+            1,
+            "apollo-office".into(),
+        ));
+        let a1 = a.clone();
+        let a2 = a.clone();
+        let first = std::thread::spawn(move || mk_hunt(&a1));
+        let second = std::thread::spawn(move || mk_hunt(&a2));
+        let results = [first.join().unwrap(), second.join().unwrap()];
+        assert_eq!(results.into_iter().filter(|created| *created).count(), 1);
+        assert_eq!(
+            a.db.n("select count(*) from jobs where kind='hunt' and repo='o/r'", pa![]),
+            1
+        );
     }
 
     #[test]

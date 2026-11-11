@@ -10,10 +10,12 @@ const health = read("../src/hunt_health.rs");
 const shell = read("../src/sh.rs");
 const original = read("../ui/o.js");
 const panels = read("../ui/p.js");
+const modern = read("../ui/control-room.js");
 
 test("diagnostic UI scripts parse and expose authenticated error history", () => {
   assert.doesNotThrow(() => new Script(original));
   assert.doesNotThrow(() => new Script(panels));
+  assert.doesNotThrow(() => new Script(modern));
   assert.match(web, /\("GET", "\/api\/failures"\)/);
   assert.match(web, /"failure": j\["d"\]\["failure"\]/);
   assert.match(panels, /data-reset-hunt/);
@@ -26,6 +28,9 @@ test("repeated setup failures stop new hunts without disabling fixes", () => {
   assert.match(health, /const LIMIT: i64 = 3/);
   assert.match(health, /const COOLDOWN_MS: i64 = 30 \* 60 \* 1000/);
   assert.match(health, /pub fn success/);
+  assert.match(pipe, /preflight_host_error\(&preflight\)/);
+  assert.match(pipe, /crate::hunt_health::blocked\(a, repo\)/);
+  assert.match(pipe, /let _transition = a.update_transition.lock\(\).unwrap\(\)/);
 });
 
 test("preflight runs before cloning and existing setup remains mandatory", () => {
@@ -41,6 +46,8 @@ test("fix jobs outrank hunts and capacity is reserved for pending fixes", () => 
   assert.match(pipe, /pending_fixes > 0/);
   assert.match(web, /"idle_reason"/);
   assert.match(original, /w\.idle_reason/);
+  assert.match(modern, /w\.idle_reason/);
+  assert.match(modern, /s\.ops\?\.blocked_hunts/);
 });
 
 test("npm cache is persistent and npm ci is never silently bypassed", () => {

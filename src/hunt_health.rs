@@ -8,10 +8,12 @@ use serde_json::{json, Value};
 const LIMIT: i64 = 3;
 const COOLDOWN_MS: i64 = 30 * 60 * 1000;
 
+/// Identifica o estado persistente das falhas de pesquisa por repositório.
 fn key(repo: &str) -> String {
     format!("hunt-fail:{repo}")
 }
 
+/// Devolve as falhas acumuladas e a suspensão efetiva da pesquisa.
 pub fn status(a: &Ax, repo: &str) -> Value {
     let v = a.db.kg(&key(repo));
     let until = v["until"].as_i64().unwrap_or(0);
@@ -24,10 +26,12 @@ pub fn status(a: &Ax, repo: &str) -> Value {
     })
 }
 
+/// Indica se o repositório não pode iniciar um novo Hunter.
 pub fn blocked(a: &Ax, repo: &str) -> bool {
     status(a, repo)["blocked"] == true
 }
 
+/// Lista suspensões ativas para o painel autenticado.
 pub fn blocked_repos(a: &Ax) -> Vec<Value> {
     a.db.all(
         "select full from rp where on_=1 and hunt=1 order by full",
@@ -46,6 +50,7 @@ pub fn blocked_repos(a: &Ax) -> Vec<Value> {
     .collect()
 }
 
+/// Regista uma falha técnica, suspendendo novos Hunts após o limiar.
 pub fn fail(a: &Ax, repo: &str, stage: &str, code: i32) {
     // The same gate is used for Hunter creation and final job admission.
     let (failures, until, was_blocked) = {
@@ -84,6 +89,7 @@ pub fn fail(a: &Ax, repo: &str, stage: &str, code: i32) {
     }
 }
 
+/// Limpa o contador quando uma preparação real termina com sucesso.
 pub fn success(a: &Ax, repo: &str) {
     let had_failures = {
         let _transition = a.update_transition.lock().unwrap();
@@ -102,6 +108,7 @@ pub fn success(a: &Ax, repo: &str) {
     }
 }
 
+/// Reposição explícita do bloqueio após corrigir o ambiente.
 pub fn reset(a: &Ax, repo: &str) {
     {
         let _transition = a.update_transition.lock().unwrap();
