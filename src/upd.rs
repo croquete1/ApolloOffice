@@ -254,8 +254,13 @@ pub fn idle(a: &Ax) -> bool {
     if !a.merge_in_progress.lock().unwrap().is_empty() {
         return false;
     }
+    if !a.vtk.lock().unwrap().is_empty() {
+        return false;
+    }
+    // A queued 'submit' row may be retried after a machine error. Only
+    // admitted work (act/lk) can prevent shutdown in that state.
     a.db.n(
-        "select count(*) from jobs where st in ('hunt','repro','fix','ci','review','gate','submit')",
+        "select count(*) from jobs where st in ('hunt','repro','fix','ci','review','gate')",
         crate::pa![],
     ) == 0
 }
@@ -376,12 +381,23 @@ pub fn install(a: &Ax) -> std::io::Result<()> {
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755))?;
-            // Preserve the previous executable for recovery if the new one
-            // fails to exec or crashes after replacing the running image.
+            // Persist the replacement before making it the executable.
+            std::fs::File::open(&f)?.sync_all()?;
+            // Preserve the previous executable before replacing its directory
+            // entry. An atomic rename alone does not make backup data durable.
+            let dir = std::fs::File::open(
+                me.parent()
+                    .ok_or_else(|| std::io::Error::other("no executable directory"))?,
+            )?;
             let backup_tmp = me.with_extension("old.part");
             std::fs::copy(me, &backup_tmp)?;
+            std::fs::File::open(&backup_tmp)?.sync_all()?;
             std::fs::rename(&backup_tmp, me.with_extension("old"))?;
+            dir.sync_all()?;
+            std::fs::rename(&f, me)?;
+            dir.sync_all()?;
         }
+        #[cfg(not(unix))]
         std::fs::rename(&f, me)?;
     }
     Ok(())
@@ -493,6 +509,36 @@ mod t {
         cancel_watcher_drain(&a);
         assert!(!a.drain.load(std::sync::atomic::Ordering::SeqCst));
         assert!(crate::pipe::admit(&a, "sample/repo", "local", 42));
+    }
+
+    #[test]
+    fn queued_submit_does_not_block_update_when_not_admitted() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            PathBuf::from("/tmp/apollo-submit-test"),
+            47300,
+            PathBuf::from("/tmp/apollo-submit-test/apollo-office"),
+        ));
+        a.db.run("insert into jobs(st) values('submit')", crate::pa![]);
+        assert!(idle(&a));
+        assert!(reserve_install(&a, false));
+        assert!(a.drain.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn admitted_vet_work_prevents_update_until_completion() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            PathBuf::from("/tmp/apollo-vet-test"),
+            47300,
+            PathBuf::from("/tmp/apollo-vet-test/apollo-office"),
+        ));
+        assert!(crate::wk::admit_vet(&a, 42));
+        assert!(!idle(&a));
+        assert!(!reserve_install(&a, false));
+        a.vtk.lock().unwrap().remove(&42);
+        assert!(reserve_install(&a, false));
+        assert!(!crate::wk::admit_vet(&a, 43));
     }
 
     #[test]
