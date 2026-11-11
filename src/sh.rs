@@ -576,10 +576,32 @@ pub async fn hx(a: &App, id: &str, s: &str, t: u64) -> Out {
 pub const DF: &str = r#"FROM rust:1-trixie
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev clang cmake git curl ca-certificates procps xz-utils unzip libxdo-dev mesa-vulkan-drivers \
-    python3 python3-pip python3-venv python3-dev nodejs npm golang-go \
+    python3 python3-pip python3-venv python3-dev golang-go \
     libasound2-dev libfontconfig1-dev libfreetype-dev libgl1-mesa-dev libgtk-3-dev libwayland-dev \
     libx11-dev libxcursor-dev libxi-dev libxkbcommon-dev libxrandr-dev libudev-dev xvfb \
     && rm -rf /var/lib/apt/lists/*
+# Debian/Trixie provides Node 20; FixFlow requires >=24.22.1 <25.
+# Changing this Dockerfile also changes im(), forcing a new worker image.
+ARG NODE_VERSION=24.22.2
+RUN set -eu; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) node_arch=x64 ;; \
+      arm64) node_arch=arm64 ;; \
+      ppc64el) node_arch=ppc64le ;; \
+      s390x) node_arch=s390x ;; \
+      *) echo "Unsupported Node.js architecture" >&2; exit 1 ;; \
+    esac; \
+    archive="node-v${NODE_VERSION}-linux-${node_arch}.tar.xz"; \
+    url="https://nodejs.org/dist/v${NODE_VERSION}"; \
+    curl -fsSL --retry 3 -o "/tmp/${archive}" "${url}/${archive}"; \
+    curl -fsSL --retry 3 -o /tmp/SHASUMS256.txt "${url}/SHASUMS256.txt"; \
+    cd /tmp; \
+    grep -F "  ${archive}" SHASUMS256.txt | sha256sum -c -; \
+    mkdir -p /opt/node; \
+    tar -xJf "${archive}" -C /opt/node --strip-components=1; \
+    rm -f "${archive}" SHASUMS256.txt; \
+    test "$(/opt/node/bin/node --version)" = "v${NODE_VERSION}"
+ENV PATH="/opt/node/bin:${PATH}"
 RUN rustup component add rustfmt clippy && rustup target add wasm32-unknown-unknown && npm install -g pnpm yarn && pip3 install --break-system-packages pytest
 ENV CARGO_TERM_COLOR=never CARGO_INCREMENTAL=0 PIP_BREAK_SYSTEM_PACKAGES=1
 WORKDIR /work
@@ -587,7 +609,7 @@ WORKDIR /work
 
 pub fn dkup(h: &Ho, cpu: i64) -> String {
     format!(
-        "command -v docker >/dev/null || {{ echo 'docker is not installed'; exit 2; }}\ndocker info >/dev/null 2>&1 || {{ echo 'docker is not running'; exit 2; }}\nif ! docker image inspect {im} >/dev/null 2>&1; then docker build -q -t {im} - <<'DOCKERFILE'\n{DF}DOCKERFILE\nfi\nold=$(docker inspect -f '{{{{.Config.Image}}}}' {CT} 2>/dev/null)\nif [ -n \"$old\" ] && [ \"$old\" != {im} ]; then docker rm -f {CT} >/dev/null 2>&1; fi\nr=$(docker inspect -f '{{{{.State.Running}}}}' {CT} 2>/dev/null)\nm=$(( $(docker info --format '{{{{.MemTotal}}}}' 2>/dev/null || echo 0) / 1048576 - 3072 ))\n[ \"$m\" -lt 2048 ] && m=2048\nif [ -z \"$r\" ]; then docker run -d --name {CT} --restart unless-stopped --cpus {cpu} --cpu-shares 128 --memory \"$m\"m --memory-swap \"$m\"m -v apollo-office-work:/work -v apollo-office-cargo:/usr/local/cargo/registry {im} sleep infinity >/dev/null 2>&1 || [ \"$(docker inspect -f '{{{{.State.Running}}}}' {CT} 2>/dev/null)\" = true ] || docker start {CT} >/dev/null || exit 3; elif [ \"$r\" != true ]; then docker start {CT} >/dev/null || exit 3; fi\ndocker update --cpus {cpu} --cpu-shares 128 --memory \"$m\"m --memory-swap \"$m\"m {CT} >/dev/null 2>&1\ndocker images apollo-office-build --format '{{{{.Repository}}}}:{{{{.Tag}}}}' | grep -vx {im} | xargs -r docker rmi >/dev/null 2>&1\necho ok {}\n",
+        "command -v docker >/dev/null || {{ echo 'docker is not installed'; exit 2; }}\ndocker info >/dev/null 2>&1 || {{ echo 'docker is not running'; exit 2; }}\nif ! docker image inspect {im} >/dev/null 2>&1; then docker build -q -t {im} - <<'DOCKERFILE' || {{ echo 'worker image build failed; existing container preserved' >&2; exit 4; }}\n{DF}DOCKERFILE\nfi\ndocker image inspect {im} >/dev/null 2>&1 || {{ echo 'replacement worker image unavailable; existing container preserved' >&2; exit 4; }}\nold=$(docker inspect -f '{{{{.Config.Image}}}}' {CT} 2>/dev/null)\nif [ -n \"$old\" ] && [ \"$old\" != {im} ]; then docker rm -f {CT} >/dev/null 2>&1 || {{ echo 'cannot remove previous worker container' >&2; exit 5; }}; fi\nr=$(docker inspect -f '{{{{.State.Running}}}}' {CT} 2>/dev/null)\nm=$(( $(docker info --format '{{{{.MemTotal}}}}' 2>/dev/null || echo 0) / 1048576 - 3072 ))\n[ \"$m\" -lt 2048 ] && m=2048\nif [ -z \"$r\" ]; then docker run -d --name {CT} --restart unless-stopped --cpus {cpu} --cpu-shares 128 --memory \"$m\"m --memory-swap \"$m\"m -v apollo-office-work:/work -v apollo-office-cargo:/usr/local/cargo/registry {im} sleep infinity >/dev/null 2>&1 || [ \"$(docker inspect -f '{{{{.State.Running}}}}' {CT} 2>/dev/null)\" = true ] || docker start {CT} >/dev/null || exit 3; elif [ \"$r\" != true ]; then docker start {CT} >/dev/null || exit 3; fi\ndocker update --cpus {cpu} --cpu-shares 128 --memory \"$m\"m --memory-swap \"$m\"m {CT} >/dev/null 2>&1\ndocker images apollo-office-build --format '{{{{.Repository}}}}:{{{{.Tag}}}}' | grep -vx {im} | xargs -r docker rmi >/dev/null 2>&1\necho ok {}\n",
         h.id,
         im = im()
     )
@@ -735,6 +757,100 @@ fn api_pages(output: &str) -> Result<Vec<Value>, String> {
 #[cfg(test)]
 mod t {
     use super::*;
+
+    #[test]
+    fn worker_image_uses_verified_node24_instead_of_debian_node20() {
+        assert!(DF.contains("ARG NODE_VERSION=24.22.2"));
+        assert!(!DF.contains("nodejs npm"));
+        assert!(DF.contains("sha256sum -c -"));
+        assert!(DF.contains("ENV PATH=\"/opt/node/bin:${PATH}\""));
+        assert!(DF.contains("amd64) node_arch=x64"));
+        assert!(DF.contains("arm64) node_arch=arm64"));
+        assert!(DF.contains("ppc64el) node_arch=ppc64le"));
+        assert!(DF.contains("s390x) node_arch=s390x"));
+    }
+
+    #[test]
+    fn worker_image_build_must_succeed_before_replacing_container() {
+        let host = Ho {
+            id: "test".into(),
+            ssh: String::new(),
+            dk: true,
+            ln: 1,
+            ci: 1,
+            gb: 5,
+            on: true,
+            no: vec![],
+            cpu: 0,
+        };
+        let script = dkup(&host, 1);
+        let build = script.find("docker build -q").unwrap();
+        let guarded = script
+            .find("worker image build failed; existing container preserved")
+            .unwrap();
+        let remove = script.find("docker rm -f").unwrap();
+        assert!(build < guarded && guarded < remove);
+        assert!(script.contains("exit 4; }"));
+        assert!(script.contains("replacement worker image unavailable"));
+        assert!(script.contains("cannot remove previous worker container"));
+    }
+
+    /// Simulates a Docker image build failure without accessing real Docker.
+    /// A failed build must never reach docker rm for the existing worker.
+    #[cfg(unix)]
+    #[test]
+    fn failed_image_build_does_not_remove_existing_container() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "apollo-docker-build-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let docker = dir.join("docker");
+        let trace = dir.join("calls.txt");
+        std::fs::write(
+            &docker,
+            "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$APOLLO_DOCKER_TRACE\"\ncase \"$1\" in\n  info) exit 0 ;;\n  image) exit 1 ;;\n  build) exit 17 ;;\n  rm) exit 90 ;;\n  *) exit 0 ;;\nesac\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let host = Ho {
+            id: "local".into(),
+            ssh: String::new(),
+            dk: true,
+            ln: 1,
+            ci: 1,
+            gb: 5,
+            on: true,
+            no: vec![],
+            cpu: 0,
+        };
+        let mut paths = vec![dir.clone()];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(dkup(&host, 1))
+            .env("PATH", std::env::join_paths(paths).unwrap())
+            .env("APOLLO_DOCKER_TRACE", &trace)
+            .output()
+            .unwrap();
+        let calls = std::fs::read_to_string(&trace).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(
+            output.status.code(),
+            Some(4),
+            "unexpected shell status: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(calls.lines().any(|line| line == "build"));
+        assert!(!calls.lines().any(|line| line == "rm"));
+    }
 
     #[cfg(unix)]
     #[tokio::test]
