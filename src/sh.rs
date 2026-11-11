@@ -613,11 +613,28 @@ WORKDIR /work
 /// Bound the persistent npm cache at 4 GiB when a worker is idle.
 pub const NPM_CACHE_LIMIT_KIB: u64 = 4 * 1024 * 1024;
 
-/// Command run inside the already-created worker; never deletes the volume.
-pub fn npm_cache_cleanup_cmd() -> String {
+/// Builds the bounded cleanup command. The directory is a trusted internal path.
+fn npm_cache_cleanup_cmd_for(cache_dir: &str, limit_kib: u64) -> String {
+    let quoted = cache_dir.replace('\'', "'\\''");
     format!(
-        "if [ -d /root/.npm ]; then kb=$(du -sk /root/.npm 2>/dev/null | awk '{{print $1}}'); case \"$kb\" in ''|*[!0-9]*) exit 0;; esac; if [ \"$kb\" -gt {NPM_CACHE_LIMIT_KIB} ]; then npm cache clean --force >/dev/null 2>&1 && echo 'npm cache cleaned'; fi; fi"
+        "cache='{quoted}'; \
+         if [ -d \"$cache\" ]; then \
+         kb=$(du -sk \"$cache\" 2>/dev/null | awk '{{print $1}}'); \
+         case \"$kb\" in ''|*[!0-9]*) exit 1;; esac; \
+         if [ \"$kb\" -gt {limit_kib} ]; then \
+         npm cache clean --force >/dev/null 2>&1 || exit 1; \
+         rm -rf -- \"$cache/_npx\" || exit 1; \
+         remaining=$(du -sk \"$cache\" 2>/dev/null | awk '{{print $1}}'); \
+         case \"$remaining\" in ''|*[!0-9]*) exit 1;; esac; \
+         [ \"$remaining\" -le {limit_kib} ] || exit 1; \
+         echo 'npm cache cleaned'; \
+         fi; fi"
     )
+}
+
+/// Command run inside the already-created idle worker; never deletes the volume.
+pub fn npm_cache_cleanup_cmd() -> String {
+    npm_cache_cleanup_cmd_for("/root/.npm", NPM_CACHE_LIMIT_KIB)
 }
 
 pub fn dkup(h: &Ho, cpu: i64) -> String {
@@ -788,11 +805,70 @@ mod t {
     fn cache_cleanup_only_targets_npm_downloads_after_limit() {
         let cmd = npm_cache_cleanup_cmd();
         assert_eq!(NPM_CACHE_LIMIT_KIB, 4 * 1024 * 1024);
-        assert!(cmd.contains("du -sk /root/.npm"));
+        assert!(cmd.contains("cache='/root/.npm'"));
+        assert!(cmd.contains("du -sk \"$cache\""));
         assert!(cmd.contains("npm cache clean --force"));
+        assert!(cmd.contains("rm -rf -- \"$cache/_npx\""));
+        assert!(cmd.contains("remaining=$(du -sk"));
         assert!(cmd.contains("-gt 4194304"));
         assert!(!cmd.contains("docker volume rm"));
         assert!(!cmd.contains("node_modules"));
+    }
+
+
+    #[cfg(unix)]
+    #[test]
+    fn npm_cache_cleanup_only_reports_success_after_bounded_npx_removal() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "apollo-npm-cleanup-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let cache = root.join("cache");
+        let bin = root.join("bin");
+        std::fs::create_dir_all(cache.join("_npx")).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(cache.join("_npx/payload"), vec![0_u8; 256 * 1024]).unwrap();
+        let npm = bin.join("npm");
+        std::fs::write(&npm, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&npm, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let run = |limit| {
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg(npm_cache_cleanup_cmd_for(cache.to_str().unwrap(), limit))
+                .env(
+                    "PATH",
+                    format!(
+                        "{}:{}",
+                        bin.display(),
+                        std::env::var("PATH").unwrap_or_default()
+                    ),
+                )
+                .output()
+                .unwrap()
+        };
+
+        let below_limit = run(1024);
+        assert!(below_limit.status.success());
+        assert!(cache.join("_npx/payload").exists());
+        assert!(!String::from_utf8_lossy(&below_limit.stdout).contains("npm cache cleaned"));
+
+        let cleaned = run(64);
+        assert!(cleaned.status.success(), "{cleaned:?}");
+        assert!(!cache.join("_npx").exists());
+        assert!(String::from_utf8_lossy(&cleaned.stdout).contains("npm cache cleaned"));
+
+        std::fs::create_dir_all(cache.join("_npx")).unwrap();
+        std::fs::write(cache.join("_npx/payload"), vec![0_u8; 256 * 1024]).unwrap();
+        std::fs::write(&npm, "#!/bin/sh\nexit 4\n").unwrap();
+        let failed = run(64);
+        assert!(!failed.status.success());
+        assert!(cache.join("_npx/payload").exists());
+        assert!(!String::from_utf8_lossy(&failed.stdout).contains("npm cache cleaned"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
