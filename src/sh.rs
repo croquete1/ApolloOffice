@@ -663,9 +663,25 @@ fn npm_cache_cleanup_cmd_for(cache_dir: &str, limit_kib: u64) -> String {
     )
 }
 
+/// Remove npm execution roots left by SIGKILL/crashes, but only while the
+/// caller holds the idle Docker-target guard. The wrapper's own active cache
+/// root is explicitly excluded and no unrelated /tmp entries are touched.
+fn npm_orphan_cleanup_cmd_for(tmp_dir: &str) -> String {
+    let quoted = tmp_dir.replace('\'', "'\\''");
+    format!(
+        "find '{quoted}' -mindepth 1 -maxdepth 1 -type d \\
+         -name 'apollo-npm-????????' ! -path \\"$npm_config_cache\\" \\
+         -exec rm -rf -- {{}} + || exit 1"
+    )
+}
+
 /// Command run inside the already-created idle worker; never deletes the volume.
 pub fn npm_cache_cleanup_cmd() -> String {
-    npm_cache_cleanup_cmd_for(NPM_DOWNLOAD_CACHE_DIR, NPM_CACHE_LIMIT_KIB)
+    format!(
+        "{}; {}",
+        npm_orphan_cleanup_cmd_for("/tmp"),
+        npm_cache_cleanup_cmd_for(NPM_DOWNLOAD_CACHE_DIR, NPM_CACHE_LIMIT_KIB)
+    )
 }
 
 pub fn dkup(h: &Ho, cpu: i64) -> String {
@@ -936,6 +952,33 @@ mod t {
             "cached\n"
         );
         assert!(!downloads.join("_npx").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn orphaned_npm_execution_caches_are_reclaimed_only_when_idle() {
+        let root = std::env::temp_dir().join(format!(
+            "apollo-npm-orphan-test-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let stale = root.join("apollo-npm-abcdefgh");
+        let active = root.join("apollo-npm-12345678");
+        let unrelated = root.join("another-app-cache");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::create_dir_all(&active).unwrap();
+        std::fs::create_dir_all(&unrelated).unwrap();
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(npm_orphan_cleanup_cmd_for(root.to_str().unwrap()))
+            .env("npm_config_cache", &active)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(!stale.exists());
+        assert!(active.exists(), "active wrapper must retain its own cache");
+        assert!(unrelated.exists(), "unrelated /tmp directories are untouched");
         std::fs::remove_dir_all(root).unwrap();
     }
 
