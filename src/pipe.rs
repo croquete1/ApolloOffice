@@ -3407,21 +3407,21 @@ pub(crate) fn admit(a: &Ax, repo: &str, host: &str, id: i64) -> bool {
 }
 
 fn job_rank(j: &Value) -> (i32, i32, f64, i64) {
-        let d = &j["d"];
-        (
-            if j["st"] == "submit" { 0 } else { 1 },
-            if d["rs"].as_bool().unwrap_or(false) || d["rp"].as_bool().unwrap_or(false) {
-                0
-            } else {
-                1
-            },
-            match j["kind"].as_str().unwrap_or("fix") {
-                "fix" => 1.0 + j["prio"].as_f64().unwrap_or(0.0) / 1000.0,
-                "hunt" => 2.0,
-                _ => 0.0,
-            },
-            j["id"].as_i64().unwrap_or(0),
-        )
+    let d = &j["d"];
+    (
+        if j["st"] == "submit" { 0 } else { 1 },
+        if d["rs"].as_bool().unwrap_or(false) || d["rp"].as_bool().unwrap_or(false) {
+            0
+        } else {
+            1
+        },
+        match j["kind"].as_str().unwrap_or("fix") {
+            "fix" => 1.0 + j["prio"].as_f64().unwrap_or(0.0) / 1000.0,
+            "hunt" => 2.0,
+            _ => 0.0,
+        },
+        j["id"].as_i64().unwrap_or(0),
+    )
 }
 
 /// Selects eligible work, reserving the final admission under update_transition.
