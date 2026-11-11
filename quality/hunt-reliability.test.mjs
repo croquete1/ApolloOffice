@@ -87,5 +87,7 @@ test("npm cache is persistent and npm ci is never silently bypassed", () => {
   assert.match(shell, /rm -rf --/);
   assert.match(shell, /_npx/);
   assert.match(pipe, /clean_idle_npm_cache\(&a, &h\)\.await/);
+  assert.match(pipe, /fn docker_cache_target\(/);
+  assert.match(pipe, /cache_maintenance_serializes_aliases_of_the_same_docker_target/);
   assert.match(pipe, /q\(&su\)/);
 });

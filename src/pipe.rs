@@ -3475,7 +3475,9 @@ pub(crate) fn admit(a: &Ax, repo: &str, host: &str, id: i64) -> bool {
     // Read capacity before holding the active/locked job mutexes.
     let hunter_limit = if is_hunt { hn(a) } else { 0 };
     // Idle npm maintenance must finish before this host can admit work.
-    if a.cache_maintenance.lock().unwrap().contains(host) {
+    if docker_cache_target(a, host).is_some_and(|target| {
+        a.cache_maintenance.lock().unwrap().contains(&target)
+    }) {
         return false;
     }
     let mut active = a.act.lock().unwrap();
@@ -3868,10 +3870,25 @@ async fn disk(a: &Ax, h: &crate::sh::Ho) -> Out {
     hx(a, &h.id, &s, 1200).await
 }
 
+/// Identifies the Docker daemon used by a configured host. Different host IDs
+/// pointing at the same local or SSH Docker target must share one reservation.
+fn docker_cache_target(a: &Ax, host: &str) -> Option<String> {
+    let configured = crate::sh::ho(a, host)?;
+    if !configured.dk {
+        return None;
+    }
+    let ssh = configured.ssh.trim();
+    Some(if ssh.is_empty() {
+        "docker:local".to_string()
+    } else {
+        format!("docker:ssh:{ssh}")
+    })
+}
+
 /// Reserves an idle host for cache maintenance; admission is blocked until Drop.
 struct IdleCacheGuard {
     a: Ax,
-    host: String,
+    target: String,
 }
 
 impl IdleCacheGuard {
@@ -3881,28 +3898,33 @@ impl IdleCacheGuard {
         if a.drain.load(std::sync::atomic::Ordering::SeqCst) {
             return None;
         }
-        let active = a
+        let target = docker_cache_target(a, host)?;
+        let active_hosts: Vec<String> = a
             .act
             .lock()
             .unwrap()
             .iter()
-            .any(|claim| claim.rsplit_once(' ').is_some_and(|(_, h)| h == host));
-        if active {
+            .filter_map(|claim| claim.rsplit_once(' ').map(|(_, h)| h.to_string()))
+            .collect();
+        if active_hosts
+            .iter()
+            .any(|active_host| docker_cache_target(a, active_host).as_deref() == Some(&target))
+        {
             return None;
         }
-        if !a.cache_maintenance.lock().unwrap().insert(host.to_string()) {
+        if !a.cache_maintenance.lock().unwrap().insert(target.clone()) {
             return None;
         }
         Some(Self {
             a: a.clone(),
-            host: host.to_string(),
+            target,
         })
     }
 }
 
 impl Drop for IdleCacheGuard {
     fn drop(&mut self) {
-        self.a.cache_maintenance.lock().unwrap().remove(&self.host);
+        self.a.cache_maintenance.lock().unwrap().remove(&self.target);
     }
 }
 
@@ -4277,6 +4299,7 @@ mod t {
     #[tokio::test]
     async fn idle_cache_cleanup_blocks_admission_and_releases_on_drop() {
         let db = crate::db::Db::mem();
+        db.run("insert into hs(id,ln,dk,on_) values('worker1',1,1,1)", pa![]);
         let id = db.jnew(
             "o/r",
             0,
@@ -4301,6 +4324,26 @@ mod t {
         std::mem::drop(reservation);
         assert!(admit(&a, "o/r", "worker1", id));
         assert!(IdleCacheGuard::claim(&a, "worker1").is_none());
+    }
+
+    #[test]
+    fn cache_maintenance_serializes_aliases_of_the_same_docker_target() {
+        let db = crate::db::Db::mem();
+        db.run("insert into hs(id,ssh,ln,dk,on_) values('alias-a','worker@example',1,1,1)", pa![]);
+        db.run("insert into hs(id,ssh,ln,dk,on_) values('alias-b','worker@example',1,1,1)", pa![]);
+        let id = db.jnew("o/r", 0, "fix", "same daemon", "", "ready", "", json!({}), None, 0.0);
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::path::PathBuf::from("/tmp/apollo-cache-alias-test"),
+            1,
+            "apollo-office".into(),
+        ));
+        let reservation = IdleCacheGuard::claim(&a, "alias-a").unwrap();
+        assert!(IdleCacheGuard::claim(&a, "alias-b").is_none());
+        assert!(!admit(&a, "o/r", "alias-b", id));
+        std::mem::drop(reservation);
+        assert!(admit(&a, "o/r", "alias-b", id));
+        assert!(IdleCacheGuard::claim(&a, "alias-a").is_none());
     }
 
     #[test]
