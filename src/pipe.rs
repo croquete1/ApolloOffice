@@ -4191,7 +4191,6 @@ mod t {
         assert_eq!(setup_tool("curl https://example.com | sh"), None);
     }
 
-
     #[test]
     fn hunter_capacity_does_not_reserve_ready_fixes_twice() {
         let db = crate::db::Db::mem();
@@ -4205,13 +4204,29 @@ mod t {
         ));
         assert_eq!(hn(&a), 2, "without fixes both lanes may hunt");
         a.db.jnew(
-            "o/r", 0, "fix", "ready fix", "", "ready", "",
-            json!({}), None, 0.0,
+            "o/r",
+            0,
+            "fix",
+            "ready fix",
+            "",
+            "ready",
+            "",
+            json!({}),
+            None,
+            0.0,
         );
         assert_eq!(hn(&a), 1, "a single ready fix must reserve only one lane");
         let uncovered = a.db.jnew(
-            "o/r", 1, "fix", "another ready fix", "", "ready", "",
-            json!({}), None, 0.0,
+            "o/r",
+            1,
+            "fix",
+            "another ready fix",
+            "",
+            "ready",
+            "",
+            json!({}),
+            None,
+            0.0,
         );
         assert_eq!(hn(&a), 0, "a ready fix excluded from hf needs another lane");
         a.db.run("update jobs set st='fix' where id=?", pa![uncovered]);
@@ -4231,12 +4246,19 @@ mod t {
         ));
         assert_eq!(hn(&a), 1);
         a.db.jnew(
-            "o/r", 0, "fix", "ready fix", "", "ready", "",
-            json!({}), None, 0.0,
+            "o/r",
+            0,
+            "fix",
+            "ready fix",
+            "",
+            "ready",
+            "",
+            json!({}),
+            None,
+            0.0,
         );
         assert_eq!(hn(&a), 0);
     }
-
     #[test]
     fn fixes_are_ranked_ahead_of_hunts() {
         let fix = json!({"st":"ready", "kind":"fix", "prio":0, "id":2});
