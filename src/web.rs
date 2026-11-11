@@ -1261,7 +1261,9 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                     if let Some(j) = a.db.jg(id) {
                         if j.st == "drop" && j.kind == "fix" {
                             let mut d = j.d.clone();
-                            for k in ["h", "rs", "rp", "br", "f", "f0", "sq", "known", "vt", "failure"] {
+                            for k in [
+                                "h", "rs", "rp", "br", "f", "f0", "sq", "known", "vt", "failure",
+                            ] {
                                 d.as_object_mut().map(|o| o.remove(k));
                             }
                             a.db.kd(&format!("kill:{id}"));

@@ -3521,9 +3521,7 @@ async fn pick(a: &Ax, h: &str) -> Option<i64> {
         {
             continue;
         }
-        if j["kind"] == "hunt"
-            && (a.hold("hunter") || crate::hunt_health::blocked(a, &r))
-        {
+        if j["kind"] == "hunt" && (a.hold("hunter") || crate::hunt_health::blocked(a, &r)) {
             continue;
         }
         if !pin && (j["kind"] == "rebase" || j["kind"] == "review") {
@@ -3998,10 +3996,7 @@ mod t {
     #[tokio::test]
     async fn concurrent_creation_does_not_duplicate_hunts() {
         let db = crate::db::Db::mem();
-        db.run(
-            "insert into hs(id,ln,dk,on_) values('local',2,0,1)",
-            pa![],
-        );
+        db.run("insert into hs(id,ln,dk,on_) values('local',2,0,1)", pa![]);
         db.run(
             "insert into rp(full,ci,hunt,on_) values('o/r','true',1,1)",
             pa![],
@@ -4019,7 +4014,10 @@ mod t {
         let results = [first.join().unwrap(), second.join().unwrap()];
         assert_eq!(results.into_iter().filter(|created| *created).count(), 1);
         assert_eq!(
-            a.db.n("select count(*) from jobs where kind='hunt' and repo='o/r'", pa![]),
+            a.db.n(
+                "select count(*) from jobs where kind='hunt' and repo='o/r'",
+                pa![]
+            ),
             1
         );
     }

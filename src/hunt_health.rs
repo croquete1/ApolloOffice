@@ -231,7 +231,10 @@ mod tests {
             "long token with spaces",
             "github_pat_abcdefgh123456",
         ] {
-            assert!(!tail.contains(secret), "credential fragment leaked: {secret}");
+            assert!(
+                !tail.contains(secret),
+                "credential fragment leaked: {secret}"
+            );
         }
         assert!(tail.contains("github.example/repo.git"));
     }
