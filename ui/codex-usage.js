@@ -149,12 +149,17 @@
     renderWindow("weekly");
     renderForecast(live);
   };
-  A.subscribeState((s) => {
+  const receiveState = (s) => {
     serverTime = Number(s?.t);
     receivedAt = performance.now();
     usage = s?.codex_usage || null;
     refresh();
-  });
+  };
+  A.subscribeState(receiveState);
+  // O primeiro /api/state pode chegar antes de este script ser carregado.
+  // Reutilizar o snapshot existente evita deixar a previsão por inicializar
+  // até ao próximo polling/WebSocket.
+  if (A.S) receiveState(A.S);
   const timer = setInterval(() => {
     if (!panel.isConnected) { clearInterval(timer); return; }
     refresh();
