@@ -602,6 +602,9 @@ RUN set -eu; \
     rm -f "${archive}" SHASUMS256.txt; \
     test "$(/opt/node/bin/node --version)" = "v${NODE_VERSION}"
 ENV PATH="/opt/node/bin:${PATH}"
+# Persist npm's verified tarball cache on the apollo-office-npm named volume.
+# Altering DF also forces the worker image identifier to change.
+ENV npm_config_cache=/root/.npm
 RUN rustup component add rustfmt clippy && rustup target add wasm32-unknown-unknown && npm install -g pnpm yarn && pip3 install --break-system-packages pytest
 ENV CARGO_TERM_COLOR=never CARGO_INCREMENTAL=0 PIP_BREAK_SYSTEM_PACKAGES=1
 WORKDIR /work
@@ -764,6 +767,7 @@ mod t {
         assert!(!DF.contains("nodejs npm"));
         assert!(DF.contains("sha256sum -c -"));
         assert!(DF.contains("ENV PATH=\"/opt/node/bin:${PATH}\""));
+        assert!(DF.contains("ENV npm_config_cache=/root/.npm"));
         assert!(DF.contains("amd64) node_arch=x64"));
         assert!(DF.contains("arm64) node_arch=arm64"));
         assert!(DF.contains("ppc64el) node_arch=ppc64le"));
