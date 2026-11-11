@@ -445,6 +445,9 @@ mod t {
         assert!(!newer("0.4.0", "0.4.0"));
         assert!(newer("0.5.0", "0.5.0-rc1"));
         assert!(!newer("0.5.0-rc1", "0.5.0"));
+        // A primeira atualização assinada do fork parte da release 0.10.1.
+        assert!(newer("0.10.2", "0.10.1"));
+        assert!(!newer("0.10.1", "0.10.2"));
     }
 
     #[test]
