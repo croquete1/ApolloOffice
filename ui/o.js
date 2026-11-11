@@ -483,7 +483,7 @@
       t.querySelector(".sy").textContent = w.say || "…";
       t.className = "tile " + (wk ? "work" : "") + (w.hold ? " hold" : "");
       t.querySelector(".stt").textContent = w.hold ? "pausado" : wk ? "em trabalho" + (cn > 1 ? " ×" + cn : "") : w.st === "sleep" ? "em espera" : "inativo";
-      t.querySelector(".ft").textContent = w.tk ? kt(w.tk) + " tok" : (!wk ? w.idle_reason || "" : "");
+      t.querySelector(".ft").textContent = !wk && w.idle_reason ? w.idle_reason : (w.tk ? kt(w.tk) + " tok" : "");
       t.querySelector(".ft").title = w.idle_reason || "";
       t.title = (w.idle_reason && !wk ? w.idle_reason + " · " : "") + (w.hold ? "clique para retomar" : "clique para pausar");
     }
