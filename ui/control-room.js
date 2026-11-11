@@ -4,6 +4,10 @@
 (() => {
   "use strict";
   const A = window.AO;
+  // O ApolloOffice personalizado mantém o escritório pixelizado por omissão.
+  // A vista moderna só é carregada por pedido explícito: ?ui=modern.
+  const requestedUi = new URLSearchParams(window.location.search).get("ui");
+  if (requestedUi !== "modern") return;
   if (!A || document.querySelector(".ao-app")) return;
   const byId = (id) => document.getElementById(id);
   const escapeHTML = (value) => A.esc(value ?? "");
@@ -305,7 +309,9 @@
       el.dataset.mood = result;
       el.querySelector(".ao-result-mark").textContent = result === "ok" ? "✓" : result === "err" ? "!" : result === "sad" ? "!" : "";
       el.querySelector(".ao-station-state").textContent = statusText[state];
-      el.title = [names[role], statusText[state], resultText[result], w.say].filter(Boolean).join(" · ");
+      const idleReason = state !== "work" && typeof w.idle_reason === "string"
+        ? w.idle_reason.trim() : "";
+      el.title = [names[role], statusText[state], idleReason, resultText[result], w.say].filter(Boolean).join(" · ");
       const accessible = ["Ver agente " + names[role], statusText[state], resultText[result]].filter(Boolean).join(". ");
       if (el.getAttribute("aria-label") !== accessible) el.setAttribute("aria-label", accessible);
       const row = list.querySelector('[data-agent="' + role + '"]');
@@ -313,7 +319,9 @@
       const activity = row.querySelector(".ao-agent-activity");
       const model = row.querySelector(".ao-agent-model");
       const current = typeof w.say === "string" ? w.say.trim() : "";
-      const activityText = current ? (state === "work" ? current : "Último registo: " + current) : (state === "work" ? "Sem descrição da tarefa" : "Sem atividade registada");
+      const activityText = state === "work"
+        ? (current || "Sem descrição da tarefa")
+        : (idleReason || (current ? "Último registo: " + current : "Sem atividade registada"));
       const modelText = w.md && role !== "ci" && role !== "submit" && typeof A.mdn === "function"
         ? String(A.mdn(w.md)) : "";
       if (status.className !== "ao-agent-status ao-state-" + state) status.className = "ao-agent-status ao-state-" + state;
@@ -324,7 +332,9 @@
       model.hidden = !modelText;
     }
     byId("aoMetricWorkers").textContent = working + " / " + roles.length;
-    byId("aoAgentSummary").textContent = working + " em execução · " + (roles.length - working) + " restantes";
+    const suspended = safeArray(s.ops?.blocked_hunts).length;
+    byId("aoAgentSummary").textContent = working + " em execução · " + (roles.length - working) + " restantes" +
+      (suspended ? " · " + suspended + " pesquisa(s) suspensa(s)" : "");
   };
   const rowHTML = (label, caption, badge, attr, val, extraClass = "") => {
     const unavailable = attr === "data-pr-url" && !val;
@@ -587,7 +597,7 @@
     const jobs = safeArray(snapshot.q);
     const job = w.job != null ? jobs.find((j) => String(j.id) === String(w.job)) : null;
     const recent = lastCommands(w);
-    const signature = JSON.stringify([role, stage, stale, w.md, w.say, w.mood, recent, job?.id, job?.title]);
+    const signature = JSON.stringify([role, stage, stale, w.md, w.say, w.idle_reason, w.mood, recent, job?.id, job?.title]);
     if (!focus && signature === lastDetailSignature) return;
     lastDetailSignature = signature;
     const rows = [
@@ -595,6 +605,9 @@
       ["Modelo",w.md ? A.mdn(w.md) : "Sem modelo atribuído"],
       ["Atividade",w.say ? (stage === "work" ? w.say : "Último registo: " + w.say) : "Sem informação adicional"]
     ];
+    if (!stale && stage !== "work" && w.idle_reason) {
+      rows.push(["Motivo da espera", String(w.idle_reason)]);
+    }
     if (Object.hasOwn(resultText, w.mood)) rows.push(["Resultado recente", resultText[w.mood].replace("Último resultado: ", "")]);
     if (job) rows.push(["Tarefa",job.title]);
     byId("aoDetailBody").replaceChildren();

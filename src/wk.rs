@@ -747,6 +747,15 @@ async fn vet1(a: &Ax, id: i64) -> R<()> {
     Ok(())
 }
 
+/// Admits Vet work under the same shutdown barrier as other workers.
+pub(crate) fn admit_vet(a: &Ax, id: i64) -> bool {
+    let _transition = a.update_transition.lock().unwrap();
+    if a.drain.load(std::sync::atomic::Ordering::SeqCst) {
+        return false;
+    }
+    a.vtk.lock().unwrap().insert(id)
+}
+
 async fn vetl(a: Ax) {
     loop {
         a.held("vet").await;
@@ -758,8 +767,7 @@ async fn vetl(a: Ax) {
             if *fu.entry(r.clone()).or_insert_with(|| qn(&a, &r, "'ready'") >= 2 * bl(&a, &r)) {
                 continue;
             }
-            let mut t = a.vtk.lock().unwrap();
-            if t.insert(id) {
+            if admit_vet(&a, id) {
                 n = Some(id);
                 break;
             }

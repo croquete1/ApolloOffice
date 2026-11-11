@@ -89,6 +89,7 @@
 
   const repos = async () => {
     cfg = await get("/api/cfg");
+    const diagnostics = await get("/api/failures").catch(() => null);
     show("Repos", "repos");
     const rs = cfg.repos;
     let op = new Set();
@@ -99,6 +100,7 @@
       if (!yes(r.on_)) c.push(chip("", "paused", "Not active"));
       if (!r.ci) c.push(chip("bad", "no tests", "No test command"));
       if (x.red) c.push(chip("bad", "main red", "CI is red on the default branch, jobs wait"));
+      if (x.hunt_health?.blocked) c.push(chip("bad", "HUNT suspenso", "Falhas repetidas de preparação; consulte o diagnóstico"));
       if (yes(r.iss)) c.push(chip(x.iv > 0 ? "" : "info", x.iv > 0 ? `issues · every ${x.iv >= 60 ? x.iv / 60 + " h" : x.iv + " min"}` : "issues", x.iv > 0 ? "Issues here rarely become PRs, so the Scout checks less often" : "Works on open issues"));
       if (yes(r.hunt)) c.push(chip("info", "hunt", "Hunts for bugs itself"));
       if (yes(r.feat)) c.push(chip("info", "features", "Builds requested features"));
@@ -139,6 +141,40 @@
         <label>Your rules</label><textarea name="rules" placeholder="optional, e.g. never touch the plugin API">${esc(r.rules)}</textarea>
       </div>
       <div class="acts"><button class="pri" data-op="set" disabled>Saved</button><button type="button" data-op="detect">Detect test command</button><span class="sp"></span><button type="button" class="dng" data-op="del">Remove</button></div><div class="msg"></div></details></form>`).join("") || `<div class="empty">No repository yet.</div>`}</div>`;
+    if (!diagnostics || diagnostics.jobs?.length || diagnostics.blocked?.length) {
+      const section = document.createElement("section");
+      section.className = "sec";
+      const blocked = (diagnostics?.blocked || []).map(({ repo, health }) => {
+        const when = new Date(health.until).toLocaleString("pt-PT");
+        return `<div class="box"><b>${esc(repo)}</b><div class="warn">Hunter suspenso após ${Number(health.failures) || 0} falhas de ${esc(health.stage || "preparação")} · até ${esc(when)}</div><div class="acts"><button type="button" data-reset-hunt="${esc(repo)}">Repor após corrigir o ambiente</button></div></div>`;
+      }).join("");
+      const drops = (diagnostics?.jobs || []).map((j) =>
+        `<div class="ck"><span class="pill bad">DROP #${Number(j.id)}</span><div><a href="#" data-j="${Number(j.id)}">${esc(j.repo)} · ${esc(j.stage || "erro")}</a><div class="hint">${esc(j.why || "")}</div></div></div>`
+      ).join("");
+      section.innerHTML = `<h4>Diagnóstico de execução</h4><div class="hint">Falhas recentes e suspensões do Hunter. Os detalhes de cada trabalho incluem a fase, o código de saída e a mensagem sanitizada.</div>${blocked}<div class="box">${drops || '<div class="empty">Sem falhas recentes.</div>'}</div>`;
+      if (!diagnostics) {
+        section.innerHTML = '<h4>Diagnóstico de execução</h4><div class="box"><div class="warn">Não foi possível carregar os diagnósticos. O estado das suspensões é desconhecido.</div><div class="acts"><button type="button" data-retry-failures>Tentar novamente</button></div></div>';
+      }
+      B.prepend(section);
+      section.querySelector("[data-retry-failures]")?.addEventListener("click", () => {
+        repos().catch(() => {});
+      });
+      for (const button of section.querySelectorAll("[data-reset-hunt]")) {
+        button.onclick = async () => {
+          button.disabled = true;
+          const previousLabel = button.textContent;
+          try {
+            const result = await post({ a: "reset-hunt", repo: button.dataset.resetHunt });
+            if (result.error) throw new Error(result.error);
+            await repos();
+          } catch (error) {
+            button.textContent = error?.message || "Erro de ligação; tentar novamente";
+            button.title = previousLabel;
+            button.disabled = false;
+          }
+        };
+      }
+    }
     if ($("rq")) $("rq").oninput = (e) => { const q = e.target.value.trim().toLowerCase(); for (const f of B.querySelectorAll("form.rr")) f.hidden = q && !f.dataset.r.toLowerCase().includes(q); };
     for (const d of B.querySelectorAll("form.rr details")) d.ontoggle = () => {
       const k = d.closest("form").dataset.r;
@@ -351,7 +387,7 @@
         <div class="hint" style="margin-top:6px">Sentry: add an internal integration with this webhook URL and alert rule actions. GlitchTip: add it as a webhook alert. The office has to be reachable from the internet for this, for example through a tunnel; use that address instead of 127.0.0.1. The same error goes into one report. Senders that can set headers can pass the key as <code>X-Hook-Key</code> instead of in the URL. The key can only create reports; replace the link if it leaks.</div>
         <div class="hint">GitHub Actions: a failed run can report itself with <code>Silvertree2010/ApolloOffice/report</code>, see the README.</div>
         <div class="acts"><button type="button" id="hn">${cfg.hook.on ? "Replace link" : "Create link"}</button>${cfg.hook.on ? `<button type="button" class="dng" id="ho">Revoke</button>` : ""}</div></div></div>
-      <div data-tab="sys" class="sec"><h4>Updates</h4><div class="box">${tg("updates", u.configured && s.updates, "install verified fork updates automatically when the office is idle")}<div class="msg" id="um">${ust}</div><div class="acts">${u.configured ? '<button type="button" id="uc">Check now</button>' : ""}${nu ? `<button type="button" class="pri" id="ua">Install and restart</button>` : ""}</div></div></div>
+      <div data-tab="sys" class="sec"><h4>Atualizações</h4><div class="box">${tg("updates", u.configured && s.updates, "install verified fork updates automatically when the office is idle")}<div class="msg" id="um">${ust}</div><div class="acts">${u.configured ? '<button type="button" id="uc">Verificar atualizações</button>' : ""}${nu ? `<button type="button" class="pri" id="ua">Atualizar agora</button>` : ""}</div></div></div>
       <div data-tab="sys" class="sec"><h4>Export and import</h4><div class="box"><div class="ck">Settings, repositories, machines and models as a JSON file. API keys, tokens, logins and notification addresses are not included.</div>
         <div class="acts"><button type="button" id="ex">Export</button><button type="button" id="im">Import…</button><input type="file" id="imf" accept="application/json,.json" hidden></div><div class="msg" id="xm"></div></div></div>
       <div data-tab="sys" class="sec"><h4>This installation</h4><div class="box"><div class="fm" style="margin:0">
@@ -464,7 +500,17 @@
     if ($("ho")) $("ho").onclick = async (e) => { if (e.target.dataset.sure !== "1") { e.target.dataset.sure = "1"; e.target.textContent = "Click again to revoke"; return; } await post({ op: "off" }, "/api/hooktok"); settings(); };
     if ($("ao")) $("ao").onclick = async (e) => { if (e.target.dataset.sure !== "1") { e.target.dataset.sure = "1"; e.target.textContent = "Click again to revoke"; return; } await post({ op: "off" }, "/api/apitok"); settings(); };
     if ($("uc")) $("uc").onclick = async (e) => { busy(e.target, true, "Checking…"); const r = await post({ op: "check" }, "/api/update"); await settings(); $("um").textContent = r.ok ? (r.r.new ? `Update ${r.r.latest} downloaded.` : `Up to date (latest ${r.r.latest}).`) : r.m; };
-    if ($("ua")) $("ua").onclick = async (e) => { busy(e.target, true, "Restarting…"); await post({ op: "apply" }, "/api/update"); setTimeout(() => location.reload(), 6000); };
+    if ($("ua")) $("ua").onclick = async (e) => {
+      busy(e.target, true, "A verificar segurança…");
+      const r = await post({ op: "apply" }, "/api/update");
+      if (!r.ok) {
+        busy(e.target, false, "Atualizar agora");
+        $("um").className = "msg bad2";
+        $("um").textContent = r.error || r.m || "Não foi possível iniciar a atualização.";
+        return;
+      }
+      setTimeout(() => location.reload(), 6000);
+    };
   };
 
   const costs = async () => {
@@ -535,8 +581,12 @@
       };
       return;
     }
+    const failure = j.failure?.stage
+      ? `<div class="sec"><h4>Diagnóstico técnico</h4><div class="box"><div class="msg">Fase: ${esc(j.failure.stage)} · Saída: ${esc(j.failure.exit_code)} · Máquina: ${esc(j.failure.host || "—")}</div><pre class="df">${esc(j.failure.output || "Sem detalhes")}</pre></div></div>`
+      : "";
     B.innerHTML = `<div class="sec"><div class="box"><div class="hd2"><b>${esc(j.title)}</b><span class="pill">${esc(j.st)}</span></div><div class="msg">${esc(j.repo)} ${esc(tag)} · ${esc(j.kind)}${j.h ? " · " + esc(j.h) : ""}\n${esc(j.why || "")}</div>${cs}
       <div class="acts">${j.url ? `<button data-u="${esc(j.url)}">Open on GitHub</button>` : ""}${!["done", "drop"].includes(j.st) ? `<button class="dng" data-d="${id}">Drop</button>` : ""}${j.st === "drop" && j.kind === "fix" ? `<button data-rq="${id}">Try again</button>` : ""}</div>${j.st === "drop" && j.kind === "fix" ? `<div class="msg" data-requeue-message aria-live="polite"></div>` : ""}</div></div>
+      ${failure}
       ${j.df ? `<div class="sec"><h4>Diff</h4>${dview(j.df)}</div>` : ""}
       <div class="sec"><h4>Log</h4><div class="log">${ev || `<div class="empty">nothing yet</div>`}</div></div>`;
   };

@@ -38,7 +38,7 @@ A chave antiga continua recuperável no histórico Git, mas deixa de ser utiliz�
 
 ### Verificação da instalação personalizada
 
-Este fork ainda não publica binários de release próprios. **Não utilize a release do projeto oficial para atualizar esta instalação.** Compile o código deste repositório com `cargo build --release --locked`, pare a instância em execução e preserve uma cópia da pasta de dados e do executável anterior antes de substituir qualquer ficheiro. No reinício, mantenha a mesma configuração de `--data` e as variáveis de ambiente OAuth aplicáveis. Se existir arranque automático, confirme que aponta para o executável personalizado.
+Este fork publica releases Linux x64 assinadas com a sua própria chave Ed25519, começando por `fork-v0.10.1`. **Não utilize a release do projeto oficial para atualizar esta instalação.** Consulte [Atualizações do fork](fork-updates.md) para a configuração HTTPS e a chave pública de confiança. Quando compilar manualmente com `cargo build --release --locked`, pare a instância em execução e preserve uma cópia da pasta de dados e do executável anterior antes de substituir qualquer ficheiro. No reinício, mantenha a mesma configuração de `--data` e as variáveis de ambiente OAuth aplicáveis. Se existir arranque automático, confirme que aponta para o executável personalizado.
 
 Compilar o código no GitHub ou criar um PR **não atualiza o executável que já está instalado no computador**; essa operação exige acesso à máquina.
 

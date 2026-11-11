@@ -20,14 +20,18 @@ import threading
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 UI_DIR = Path(__file__).resolve().parent.parent / "ui"
 ROLES = ("scout", "guard", "vet", "watcher", "hunter", "repro", "fixer", "ci", "reviewer", "submit")
 
 
-def fixture(active: bool) -> dict:
-    """Construct an API-compatible snapshot with one optional local Qwen worker."""
+def fixture(active: bool, telemetry: str = "", quota: str = "normal") -> dict:
+    """Construct an API-compatible snapshot, optionally with telemetry anomalies."""
     stamp = int(time.time() * 1000)
+    if telemetry == "skew":
+        # Simula um servidor dez minutos atrás do relógio do navegador.
+        stamp -= 600_000
     workers = {
         role: {"st": "idle", "say": "", "job": None, "md": "", "hold": False,
                "t": stamp, "mood": "", "cmds": [], "tk": 0}
@@ -47,6 +51,34 @@ def fixture(active: bool) -> dict:
             "st": "fix", "why": "", "pr": None, "t0": stamp, "t1": 0,
         }]
         counts = {"fix": 1}
+    codex = {
+        "status": "ok", "updated_at": stamp,
+        "five_hour": {"remaining": 88, "resets_at": stamp // 1000 + 1800},
+        "weekly": {"remaining": 59, "resets_at": stamp // 1000 + 400_000},
+        "weekly_forecast": {"status":"insufficient", "observed_hours":0, "estimated":True},
+    }
+    if quota in ("forecast_risk", "forecast_on_track", "forecast_near", "forecast_low"):
+        mapping = {
+            "forecast_risk":"at_risk", "forecast_on_track":"on_track",
+            "forecast_near":"near_limit", "forecast_low":"low_use",
+        }
+        codex["weekly_forecast"] = {
+            "status": mapping[quota], "observed_hours": 12,
+            "projected_exhaust_at": stamp // 1000 + 72_000,
+            "estimated": True,
+        }
+    if quota == "unavailable":
+        codex = {"status": "unavailable"}
+    elif quota == "weekly_only":
+        codex["five_hour"] = None
+    elif quota in ("stale", "forecast_stale"):
+        codex["status"] = "stale"
+        codex["updated_at"] = stamp - 30 * 60_000
+        if quota == "forecast_stale":
+            codex["weekly_forecast"] = {
+                "status":"at_risk", "observed_hours":12,
+                "projected_exhaust_at":stamp // 1000 + 7200,
+            }
     return {
         "t": stamp, "v": "smoke-fixture", "nr": 1,
         "o": {"off": False, "man": False, "pause": "", "warn": False,
@@ -54,22 +86,46 @@ def fixture(active: bool) -> dict:
         "w": workers, "q": jobs, "dn": [], "pr": [],
         "mg": [], "ev": [], "n": counts, "fl": [], "ln": {}, "cil": {},
         "hs": [{"id": "local", "on_": 1}],
-        "hst": {"local": {"t": stamp, "cpu": 8, "mem": [16384, 8192]}},
+        "hst": {"local": {
+            "t": stamp - 130_000 if telemetry == "stale" else (
+                stamp + 300_000 if telemetry == "future" else stamp
+            ),
+            "cpu": 8, "load": 1.75,
+            "mem": [8192, 16384] if telemetry == "invalid" else [16384, 8192],
+            "disk": [40, 60] if telemetry == "invalid" else [100, 40],
+            "temp": 45,
+        }},
         "lm": None, "star": None,
+        # Valores sintéticos exclusivos dos testes, não dados da conta.
+        "codex_usage": codex,
     }
 
 
 class Handler(SimpleHTTPRequestHandler):
     """Serve the real files in ui/ and a controlled fixture API."""
     state: dict = {}
+    quota_mode = "normal"
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(UI_DIR), **kwargs)
 
     def do_GET(self):
-        if self.path in ("/", "/index.html"):
+        url = urlsplit(self.path)
+        query = parse_qs(url.query)
+        modern = query.get("ui", [""])[0] == "modern"
+        telemetry = query.get("pixel_telemetry", [""])[0]
+        if telemetry not in ("fresh", "stale", "skew", "invalid", "future"):
+            telemetry = ""
+        if url.path in ("/", "/index.html"):
             # Inject a browser-only smoke probe; the repository UI is unchanged.
             html = (UI_DIR / "index.html").read_text(encoding="utf-8")
+            if not modern and query.get("pixel_raf_block", [""])[0] == "1":
+                # Reproduz ambientes headless que suspendem RAF; o snapshot
+                # continua a ter de desenhar o rack, sem loop adicional.
+                html = html.replace("</head>", (
+                    "<script>window.requestAnimationFrame = function () { return 0; };"
+                    "</script></head>"
+                ))
             probe = """
 <script>
 (function () {
@@ -82,6 +138,26 @@ class Handler(SimpleHTTPRequestHandler):
       var overlay = document.getElementById("aoAgentOverlay");
       assert(Boolean(app), "Control Room indisponível");
       assert(Boolean(fixer), "Personagem Fixer em falta");
+      var quota = document.getElementById("codexQuota");
+      var quotaMode = "__QUOTA_EXPECT__";
+      if (quotaMode === "normal")
+        assert(quota && quota.textContent.includes("88% restante") &&
+               quota.textContent.includes("59% restante"),
+               "Limites Codex não apresentados na vista moderna");
+      else if (quotaMode === "unavailable")
+        assert(quota && quota.textContent.includes("Indisponível") &&
+               quota.querySelector("#codexQuotaStatus")?.textContent.includes("Sem ligação"),
+               "Valores inventados quando o Codex está indisponível");
+      else if (quotaMode === "weekly_only")
+        assert(quota && quota.textContent.includes("59% restante") &&
+               quota.textContent.includes("Indisponível"),
+               "Janela de 5 horas não aplicável foi inventada");
+      else if (quotaMode === "stale")
+        assert(quota && quota.querySelector("#codexQuotaStatus")?.textContent.includes("Dados anteriores"),
+               "Leitura anterior apresentada como atual");
+      else if (quotaMode === "forecast_risk")
+        assert(quota?.querySelector("#codexWeeklyForecast")?.textContent.includes("Risco de esgotamento"),
+               "Previsão de esgotamento em falta no dashboard moderno");
       var room = document.querySelector(".ao-office");
       assert(room && room.dataset.visualVersion === "2",
              "O escritório 2.5D premium não está ativo");
@@ -132,6 +208,149 @@ class Handler(SimpleHTTPRequestHandler):
 })();
 </script>
 """
+            if not modern:
+                probe = """
+<script>
+(function () {
+  // O canvas pode existir antes do primeiro frame. Validar que a
+  // interface recebeu dados e desenhou píxeis visíveis.
+  var started = Date.now();
+  function painted(canvas) {
+    if (!canvas || canvas.width <= 0 || canvas.height <= 0) return false;
+    var ctx = canvas.getContext("2d");
+    if (!ctx) return false;
+    var w = canvas.width, h = canvas.height;
+    var positions = [[0.25, 0.25], [0.5, 0.5], [0.75, 0.75]];
+    return positions.some(function (point) {
+      var pixel = ctx.getImageData(
+        Math.floor(w * point[0]), Math.floor(h * point[1]), 1, 1
+      ).data;
+      return pixel[3] > 0;
+    });
+  }
+  function hoverHost(canvas) {
+    // O primeiro frame pode ter sido desenhado antes da resposta /api/state.
+    // O rack só recebe a hitbox do host num frame seguinte.
+    if (!canvas) return "";
+    var rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return "";
+    canvas.dispatchEvent(new MouseEvent("mousemove", {
+      bubbles: true,
+      clientX: rect.left + rect.width * (272 / 400),
+      clientY: rect.top + rect.height * (80 / 258)
+    }));
+    var tooltip = document.getElementById("tip");
+    return tooltip && !tooltip.hidden ? tooltip.textContent : "";
+  }
+  function inspectTelemetry(canvas, errors) {
+    var scenario = "__PIXEL_TELEMETRY__";
+    if (!scenario || !canvas) return;
+    var text = hoverHost(canvas);
+    if (!text.includes("este computador"))
+      errors.push("Tooltip do host não abriu através do canvas");
+    if (scenario === "fresh" || scenario === "skew") {
+      if (!text.includes("online") || !text.includes("carga média") ||
+          !text.includes("RAM") || !text.includes("disco") ||
+          !text.includes("sensor não identificado"))
+        errors.push("Telemetria atual não foi apresentada corretamente");
+      if (scenario === "skew" && !text.includes("0s atrás"))
+        errors.push("Idade da telemetria afetada pelo relógio do navegador");
+    } else if (scenario === "stale" || scenario === "future") {
+      if (!text.includes("por confirmar") ||
+          !text.includes("sem telemetria recente") || text.includes("carga média"))
+        errors.push("Telemetria expirada ou futura não foi bloqueada");
+    } else if (scenario === "invalid") {
+      if (!text.includes("online") || text.includes("RAM") ||
+          text.includes("disco") || !text.includes("carga média"))
+        errors.push("Valores de RAM/disco fora dos limites foram apresentados");
+    }
+  }
+  function verify() {
+    var errors = [];
+    var canvas = document.getElementById("cv");
+    if (!canvas) errors.push("Canvas pixelizado indisponível");
+    if (document.getElementById("aoControlRoom"))
+      errors.push("Control Room montado sem opção explícita");
+    if (window.AO?.modernRoom === true)
+      errors.push("Vista moderna ativada por omissão");
+    if (canvas && getComputedStyle(canvas).display === "none")
+      errors.push("Canvas pixelizado oculto");
+    if (!window.AO?.S) errors.push("Estado real da interface não recebido");
+    var quota = document.getElementById("codexQuota");
+    var quotaMode = "__QUOTA_EXPECT__";
+    if (quotaMode === "normal" &&
+        (!quota || !quota.textContent.includes("88% restante") ||
+         !quota.textContent.includes("59% restante")))
+      errors.push("Limites Codex não apresentados na vista pixelizada");
+    if ("__PIXEL_TELEMETRY__" === "skew" &&
+        !quota?.querySelector("#codexQuotaStatus")?.textContent.includes("Atualizado"))
+      errors.push("Quota recente interpretada como antiga por divergência dos relógios");
+    if (quotaMode === "unavailable" &&
+        (!quota || !quota.textContent.includes("Indisponível") ||
+         !quota.querySelector("#codexQuotaStatus")?.textContent.includes("Sem ligação")))
+      errors.push("Quota inexistente apresentada como utilizável");
+    if (quotaMode === "weekly_only" &&
+        (!quota || !quota.textContent.includes("59% restante") ||
+         !quota.textContent.includes("Indisponível")))
+      errors.push("Janela 5h inexistente apresentada como disponível");
+    if (quotaMode === "stale" &&
+        (!quota || !quota.querySelector("#codexQuotaStatus")?.textContent.includes("Dados anteriores")))
+      errors.push("Quota antiga apresentada como atual");
+    var forecast = quota?.querySelector("#codexWeeklyForecast");
+    if (!forecast) errors.push("Nota de previsão semanal em falta");
+    if (quotaMode === "forecast_risk" &&
+        (!forecast?.textContent.includes("Risco de esgotamento") ||
+         forecast.dataset.risk !== "risk"))
+      errors.push("Risco de esgotamento não foi sinalizado");
+    if (quotaMode === "forecast_near" &&
+        (!forecast?.textContent.includes("Previsão próxima da reposição") ||
+         forecast.dataset.risk !== "near"))
+      errors.push("Risco próximo da reposição não foi sinalizado" +
+        " (estado: " + String(window.AO?.S?.codex_usage?.weekly_forecast?.status ?? "ausente") +
+        "; painel: " + String(forecast?.textContent ?? "ausente").slice(0, 160) + ")");
+    if (quotaMode === "forecast_on_track" &&
+        (!forecast?.textContent.includes("não deverá esgotar") ||
+         !forecast?.textContent.includes("Estimativa, não garantia")))
+      errors.push("Previsão sustentável apresentada sem ressalva");
+    if (quotaMode === "forecast_low" &&
+        !forecast?.textContent.includes("Consumo pouco significativo"))
+      errors.push("Consumo pouco significativo apresentado incorretamente");
+    if (quotaMode === "forecast_stale" &&
+        (!forecast?.textContent.includes("Previsão suspensa") ||
+         forecast?.dataset.risk === "risk"))
+      errors.push("Previsão antiga foi apresentada como risco atual");
+    try {
+      if (!painted(canvas)) errors.push("O escritório pixelizado não desenhou nenhum frame");
+      inspectTelemetry(canvas, errors);
+    } catch (error) {
+      errors.push("Falha ao ler o canvas pixelizado: " + String(error));
+    }
+    document.documentElement.setAttribute("data-ao-smoke",
+      errors.length ? "FAIL: " + errors.join(" | ") : "PASS");
+  }
+  (function waitForFrame() {
+    var canvas = document.getElementById("cv");
+    var quotaStatus = document.querySelector("#codexQuotaStatus")?.textContent;
+    // A pintura do canvas e a receção do snapshot podem ocorrer antes da
+    // montagem/atualização do painel Codex. Não testar a previsão prematuramente.
+    var quotaReady = Boolean(quotaStatus && quotaStatus !== "A consultar…");
+    var ready = window.AO?.S && painted(canvas) && quotaReady;
+    var expired = Date.now() - started >= 3500;
+    // O snapshot pode chegar depois do primeiro frame pintado: aguardar até
+    // a hitbox do host existir, sem dispensar os testes reais do tooltip.
+    if (ready && "__PIXEL_TELEMETRY__" &&
+        !hoverHost(canvas).includes("este computador") && !expired) {
+      setTimeout(waitForFrame, 100);
+      return;
+    }
+    if (ready || expired) verify();
+    else setTimeout(waitForFrame, 100);
+  })();
+})();
+</script>
+"""
+                probe = probe.replace("__PIXEL_TELEMETRY__", telemetry)
+            probe = probe.replace("__QUOTA_EXPECT__", self.quota_mode)
             html = html.replace("</body>", probe + "</body>")
             payload = html.encode("utf-8")
             self.send_response(200)
@@ -170,13 +389,19 @@ def choose_browser() -> str:
     raise RuntimeError("Chrome/Chromium não está instalado neste ambiente.")
 
 
-def run_case(browser: str, active: bool) -> None:
-    """Render a complete frontend page and verify real DOM and agent state."""
-    Handler.state = fixture(active)
+def run_case(browser: str, active: bool, modern: bool = True,
+             telemetry: str = "", query: str = "",
+             quota: str = "normal") -> None:
+    """Render the real frontend, selecting a view and optional telemetry fixture."""
+    Handler.state = fixture(active, telemetry, quota)
+    Handler.quota_mode = quota
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    url = f"http://127.0.0.1:{server.server_port}/"
+    suffix = query or ("?ui=modern" if modern else (
+        "?pixel_telemetry=" + telemetry if telemetry else ""
+    ))
+    url = f"http://127.0.0.1:{server.server_port}/" + suffix
     try:
         with tempfile.TemporaryDirectory(prefix="apollo-browser-") as profile:
             command = [
@@ -194,22 +419,31 @@ def run_case(browser: str, active: bool) -> None:
             if not smoke or smoke.group(1) != "PASS":
                 raise AssertionError("Interações do navegador falharam: " +
                                      (smoke.group(1) if smoke else "teste não executado"))
-            if 'id="aoControlRoom"' not in dom:
-                raise AssertionError("O Control Room não foi montado. " + dom[-1200:])
-            for role in ROLES:
-                if f'data-role="{role}"' not in dom:
-                    raise AssertionError("Posto em falta: " + role)
-            if len(re.findall(r'class="ao-pipeline-stage\b', dom)) != 10:
-                raise AssertionError("O pipeline não apresenta as dez fases reais.")
-            expected = "1 / 10" if active else "0 / 10"
-            if not re.search(r'id="aoMetricWorkers"[^>]*>\s*' + re.escape(expected), dom):
-                raise AssertionError("Contagem incorreta de agentes ativos: " + expected)
-            if active and "qwen3:8b" not in dom:
-                raise AssertionError("O modelo local Qwen 3 8B não aparece no dashboard.")
-            if "Ações Rápidas" in dom:
-                raise AssertionError("A interface ainda apresenta ações rápidas.")
-            label = "trabalho real" if active else "repouso"
-            print(f"PASS: Chrome/Chromium validou renderização e interações de {label}.")
+            if modern:
+                if 'id="aoControlRoom"' not in dom:
+                    raise AssertionError("O Control Room não foi montado. " + dom[-1200:])
+                for role in ROLES:
+                    if f'data-role="{role}"' not in dom:
+                        raise AssertionError("Posto em falta: " + role)
+                if len(re.findall(r'class="ao-pipeline-stage\b', dom)) != 10:
+                    raise AssertionError("O pipeline não apresenta as dez fases reais.")
+                expected = "1 / 10" if active else "0 / 10"
+                if not re.search(r'id="aoMetricWorkers"[^>]*>\s*' + re.escape(expected), dom):
+                    raise AssertionError("Contagem incorreta de agentes ativos: " + expected)
+                if active and "qwen3:8b" not in dom:
+                    raise AssertionError("O modelo local Qwen 3 8B não aparece no dashboard.")
+                if "Ações Rápidas" in dom:
+                    raise AssertionError("A interface ainda apresenta ações rápidas.")
+                label = "trabalho real" if active else "repouso"
+                print(f"PASS: Chrome/Chromium validou renderização e interações de {label}.")
+            else:
+                if 'id="aoControlRoom"' in dom:
+                    raise AssertionError("Vista moderna ativada sem autorização.")
+                if 'id="cv"' not in dom:
+                    raise AssertionError("Canvas pixelizado não encontrado.")
+                print("PASS: escritório pixelizado" +
+                      (f" · telemetria {telemetry}" if telemetry else
+                       (f" · consulta {query}" if query else " predefinido")) + ".")
     finally:
         server.shutdown()
         server.server_close()
@@ -217,14 +451,29 @@ def run_case(browser: str, active: bool) -> None:
 
 
 def main() -> int:
-    """Run both browser scenarios and fail loudly on missing capabilities."""
+    """Run the original pixel office and optional modern views in a real browser."""
     if not (UI_DIR / "control-room.js").is_file():
         raise RuntimeError("Os ficheiros reais da interface estão em falta.")
     browser = choose_browser()
     print("Browser:", browser)
-    run_case(browser, active=False)
-    run_case(browser, active=True)
-    print("PASS: 2 cenários de navegador, 10 agentes e pipeline de 10 fases.")
+    run_case(browser, active=False, modern=False)
+    run_case(browser, active=False, modern=True)
+    run_case(browser, active=True, modern=True)
+    for scenario in ("fresh", "stale", "skew", "invalid", "future"):
+        run_case(browser, active=False, modern=False, telemetry=scenario)
+    # As semelhanças textuais não podem ativar a vista moderna.
+    run_case(browser, active=False, modern=False, query="?ui=modern2")
+    run_case(browser, active=False, modern=False, query="?x=ui%3Dmodern")
+    run_case(browser, active=False, modern=False,
+             telemetry="fresh", query="?pixel_telemetry=fresh&pixel_raf_block=1")
+    for condition in ("unavailable", "weekly_only", "stale"):
+        run_case(browser, active=False, modern=False, quota=condition)
+    run_case(browser, active=False, modern=True, quota="unavailable")
+    for condition in ("forecast_risk", "forecast_on_track", "forecast_near",
+                      "forecast_low", "forecast_stale"):
+        run_case(browser, active=False, modern=False, quota=condition)
+    run_case(browser, active=False, modern=True, quota="forecast_risk")
+    print("PASS: 21 cenários: pixel/modern, quotas, previsões, telemetria e RAF.")
     return 0
 
 

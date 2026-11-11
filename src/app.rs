@@ -69,11 +69,14 @@ pub struct App {
     pub lv: Mutex<Lv>,
     pub hc: reqwest::Client,
     pub act: Mutex<HashSet<String>>,
+    // Serializes npm-cache maintenance with new work admission per host.
+    pub cache_maintenance: Mutex<HashSet<String>>,
     pub lk: Mutex<HashSet<i64>>,
     pub lanes: Mutex<HashSet<String>>,
     pub sem: Mutex<HashMap<String, usize>>,
     pub runs: Mutex<HashMap<String, Rn>>,
     pub cache: Mutex<HashMap<String, (i64, Value)>>,
+    pub codex_usage: Mutex<Value>,
     pub vtk: Mutex<HashSet<i64>>,
     pub sw: tokio::sync::Notify,
     pub steward_wake: tokio::sync::Notify,
@@ -82,6 +85,8 @@ pub struct App {
     pub quit: tokio::sync::Notify,
     pub restart: Mutex<bool>,
     pub drain: std::sync::atomic::AtomicBool,
+    // Serializes new work/merge admission with the update shutdown decision.
+    pub update_transition: Mutex<()>,
     pub oa: Mutex<HashMap<String, (String, String, i64)>>,
 }
 
@@ -173,6 +178,7 @@ pub fn dset() -> Value {
 }
 
 impl App {
+    /// Constructs application state with a process-wide update/work admission gate.
     pub fn new(db: Db, dd: PathBuf, port: u16, me: PathBuf) -> App {
         let mut lv = Lv::default();
         let ho = db.kg("hold");
@@ -201,11 +207,13 @@ impl App {
                 .build()
                 .unwrap(),
             act: Mutex::new(HashSet::new()),
+            cache_maintenance: Mutex::new(HashSet::new()),
             lk: Mutex::new(HashSet::new()),
             lanes: Mutex::new(HashSet::new()),
             sem: Mutex::new(HashMap::new()),
             runs: Mutex::new(HashMap::new()),
             cache: Mutex::new(HashMap::new()),
+            codex_usage: Mutex::new(json!({"status":"loading"})),
             vtk: Mutex::new(HashSet::new()),
             sw: tokio::sync::Notify::new(),
             steward_wake: tokio::sync::Notify::new(),
@@ -214,6 +222,7 @@ impl App {
             quit: tokio::sync::Notify::new(),
             restart: Mutex::new(false),
             drain: std::sync::atomic::AtomicBool::new(false),
+            update_transition: Mutex::new(()),
             oa: Mutex::new(HashMap::new()),
         }
     }

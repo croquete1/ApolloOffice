@@ -467,6 +467,33 @@ const ART: &[&str] = &[
     ".gradle/",
 ];
 
+/// Preflight only known command-line runtimes. Never execute a repository's
+/// custom setup command as part of this inexpensive environment check.
+fn setup_tool(setup: &str) -> Option<&'static str> {
+    match setup.split_whitespace().next()? {
+        "npm" => Some("npm"),
+        "pnpm" => Some("pnpm"),
+        "yarn" => Some("yarn"),
+        "cargo" => Some("cargo"),
+        "go" => Some("go"),
+        "python3" => Some("python3"),
+        "pip3" => Some("pip3"),
+        _ => None,
+    }
+}
+
+/// Identifica falhas de transporte antes de atribuir um erro de setup ao projeto.
+fn preflight_host_error(result: &Out) -> bool {
+    let error = format!("{}\n{}", result.o, result.e);
+    result.c < 0 || crate::app::hostish(&error) || crate::app::netish(&error)
+}
+
+/// Setup stdout may mention a network error without the worker being offline.
+/// Only inspect the transport's stderr or a failed process launch.
+fn setup_transport_error(result: &Out) -> bool {
+    result.c < 0 || crate::app::hostish(&result.e) || crate::app::netish(&result.e)
+}
+
 async fn prep(a: &Ax, j: &mut Job) -> R<()> {
     need(a, "repro", &[&j.h(), "gh"]).await?;
     if j.d["rp"].as_bool().unwrap_or(false) {
@@ -490,6 +517,44 @@ async fn prep(a: &Ax, j: &mut Job) -> R<()> {
                 Some(j.id),
             );
             return Ok(());
+        }
+    }
+    let su = rp(a, &j.repo)["setup"]
+        .as_str()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if let Some(tool) = setup_tool(&su) {
+        let cmd = if matches!(tool, "npm" | "pnpm" | "yarn") {
+            format!("command -v {tool} >/dev/null || {{ echo 'Falta: {tool}' >&2; exit 127; }}; command -v node >/dev/null || {{ echo 'Falta: node' >&2; exit 127; }}")
+        } else {
+            format!("command -v {tool} >/dev/null || {{ echo 'Falta: {tool}' >&2; exit 127; }}")
+        };
+        let preflight = hx(a, &j.h(), &cmd, 60).await;
+        if preflight.c != 0 {
+            let error = format!("{}\n{}", preflight.o, preflight.e);
+            if preflight_host_error(&preflight) {
+                // Transport/worker failures already have a bounded host retry
+                // path; they are not deterministic missing-tool errors.
+                return Err(X::Host(
+                    j.h(),
+                    format!(
+                        "preflight transport failed (exit {}): {}",
+                        preflight.c,
+                        crate::hunt_health::safe_tail(&error)
+                    ),
+                ));
+            }
+            return drop(crate::hunt_health::diagnostic(
+                a,
+                j,
+                "preflight",
+                preflight.c,
+                &format!(
+                    "Ferramenta {tool} (ou Node) indisponível no worker: {}",
+                    crate::hunt_health::safe_tail(&error)
+                ),
+            ));
         }
     }
     let mt = crate::gh::meta(a, &j.repo).await.map_err(X::E)?;
@@ -609,11 +674,6 @@ async fn prep(a: &Ax, j: &mut Job) -> R<()> {
         .await?;
         j.d["old"] = json!(ok(a, j, "git rev-parse HEAD", 60).await?);
     }
-    let su = rp(a, &j.repo)["setup"]
-        .as_str()
-        .unwrap_or("")
-        .trim()
-        .to_string();
     if !su.is_empty() {
         a.say(
             "repro",
@@ -624,17 +684,29 @@ async fn prep(a: &Ax, j: &mut Job) -> R<()> {
             a,
             j,
             &format!(
-                "to 1800 bash -c {} 2>&1 | tail -c 3000; exit ${{PIPESTATUS[0]}}",
+                "to 1800 bash -c {} 2>&1 | tail -c 12000; exit ${{PIPESTATUS[0]}}",
                 q(&su)
             ),
             1900,
         )
         .await;
         if r.c != 0 {
-            return drop(format!(
-                "setup command failed (exit {}): {}",
+            if setup_transport_error(&r) {
+                return Err(X::Host(
+                    j.h(),
+                    format!(
+                        "setup worker transport failed (exit {}): {}",
+                        r.c,
+                        crate::hunt_health::safe_tail(&r.e)
+                    ),
+                ));
+            }
+            return drop(crate::hunt_health::diagnostic(
+                a,
+                j,
+                "setup",
                 r.c,
-                crate::sh::last(r.o.trim(), 300)
+                &format!("{}\n{}", r.o, r.e),
             ));
         }
         ok(a, j, "git checkout -q -- . 2>/dev/null; true", 60).await?;
@@ -644,6 +716,9 @@ async fn prep(a: &Ax, j: &mut Job) -> R<()> {
     j.d["mn"] = json!(mn);
     j.d["base"] = json!(bs);
     a.db.jd(j);
+    if j.kind == "hunt" {
+        crate::hunt_health::success(a, &j.repo);
+    }
     Ok(())
 }
 
@@ -3226,22 +3301,30 @@ async fn go(a: &Ax, id: i64, h: &str) {
             let n = jj.d["ir"].as_i64().unwrap_or(0) + 1;
             idle_all(a, id);
             if n > 5 {
+                let detail = crate::hunt_health::safe_tail(&m);
+                crate::hunt_health::host_diagnostic(&mut jj, &hh, &detail);
                 a.db.jset(
                     id,
                     &[
                         ("st", json!("drop")),
+                        ("d", jj.d.clone()),
                         (
                             "why",
                             json!(format!(
                                 "machine kept failing: {}",
-                                crate::sh::head(&m, 260)
+                                crate::sh::head(&crate::hunt_health::safe_tail(&m), 260)
                             )),
                         ),
                     ],
                 );
                 a.say(
                     "submit",
-                    &format!("{} dropped after {} machine failures: {m}", jj.tag(), n - 1),
+                    &format!(
+                        "{} dropped after {} machine failures: {}",
+                        jj.tag(),
+                        n - 1,
+                        crate::sh::head(&crate::hunt_health::safe_tail(&m), 180)
+                    ),
                     Some(id),
                 );
             } else {
@@ -3278,8 +3361,27 @@ async fn go(a: &Ax, id: i64, h: &str) {
                 X::Drop(m) => m.clone(),
                 o => format!("error: {}", crate::sh::head(&o.to_string(), 300)),
             };
-            let jj = a.db.jg(id).unwrap_or(j.clone());
-            a.db.jset(id, &[("st", json!("drop")), ("why", json!(m.clone()))]);
+            let m = crate::hunt_health::safe_tail(&m);
+            let mut jj = a.db.jg(id).unwrap_or(j.clone());
+            if jj.d["failure"].is_null() {
+                let stage = jj.st.clone();
+                let host = jj.h();
+                jj.d["failure"] = json!({
+                    "stage": stage,
+                    "exit_code": Value::Null,
+                    "host": host,
+                    "at": now(),
+                    "output": m.clone(),
+                });
+            }
+            a.db.jset(
+                id,
+                &[
+                    ("st", json!("drop")),
+                    ("why", json!(crate::sh::last(&m, 300))),
+                    ("d", jj.d.clone()),
+                ],
+            );
             idle_all(a, id);
             a.say("submit", &format!("{} dropped: {m}", jj.tag()), Some(id));
             if Regex::new(r"faster|conflict|error|rounds|gave up|CI")
@@ -3357,6 +3459,82 @@ async fn red(a: &Ax, r: &str, h: &str) -> bool {
     !(h["s"].is_string() && cr["sha"].is_string() && h["s"] != cr["sha"])
 }
 
+// Work admission must hold the same transition guard as the updater and merges.
+// A preliminary drain check is only an optimization, never the authority.
+pub(crate) fn admit(a: &Ax, repo: &str, host: &str, id: i64) -> bool {
+    let _transition = a.update_transition.lock().unwrap();
+    if a.drain.load(std::sync::atomic::Ordering::SeqCst) {
+        return false;
+    }
+    let is_hunt = a.db.jg(id).is_some_and(|job| job.kind == "hunt");
+    if is_hunt && crate::hunt_health::blocked(a, repo) {
+        return false;
+    }
+    // Recheck the cap at admission, not only when creating a job:
+    // a blocked ready hunt may become eligible after another hunt started.
+    // Read capacity before holding the active/locked job mutexes.
+    let hunter_limit = if is_hunt { hn(a) } else { 0 };
+    // Idle npm maintenance must finish before this host can admit work.
+    if docker_cache_target(a, host)
+        .is_some_and(|target| a.cache_maintenance.lock().unwrap().contains(&target))
+    {
+        return false;
+    }
+    let mut active = a.act.lock().unwrap();
+    let mut locked = a.lk.lock().unwrap();
+    let claim = format!("{repo} {host}");
+    if active.contains(&claim) || locked.contains(&id) {
+        return false;
+    }
+    if is_hunt
+        && locked
+            .iter()
+            .filter(|other_id| a.db.jg(**other_id).is_some_and(|job| job.kind == "hunt"))
+            .count() as i64
+            >= hunter_limit
+    {
+        return false;
+    }
+    // A Hunter's checkout is shared with other tasks for this repository.
+    // Protect both admission orders: a Hunter after a fix and a fix after
+    // an active Hunter, including when the tasks target different hosts.
+    let active_repo = active
+        .iter()
+        .any(|entry| entry.split_once(' ').is_some_and(|(r, _)| r == repo));
+    if active_repo
+        && (is_hunt
+            || locked.iter().any(|other_id| {
+                a.db.jg(*other_id)
+                    .is_some_and(|job| job.repo == repo && job.kind == "hunt")
+            }))
+    {
+        return false;
+    }
+    active.insert(claim);
+    locked.insert(id);
+    true
+}
+
+/// Ordena trabalhos prontos sem deixar os Hunters ultrapassar as correções.
+fn job_rank(j: &Value) -> (i32, i32, f64, i64) {
+    let d = &j["d"];
+    (
+        if j["st"] == "submit" { 0 } else { 1 },
+        if d["rs"].as_bool().unwrap_or(false) || d["rp"].as_bool().unwrap_or(false) {
+            0
+        } else {
+            1
+        },
+        match j["kind"].as_str().unwrap_or("fix") {
+            "fix" => 1.0 + j["prio"].as_f64().unwrap_or(0.0).clamp(-500.0, 500.0) / 1000.0,
+            "hunt" => 2.0,
+            _ => 0.0,
+        },
+        j["id"].as_i64().unwrap_or(0),
+    )
+}
+
+/// Selects eligible work, reserving the final admission under update_transition.
 async fn pick(a: &Ax, h: &str) -> Option<i64> {
     if a.drain.load(std::sync::atomic::Ordering::Relaxed) {
         return None;
@@ -3365,26 +3543,9 @@ async fn pick(a: &Ax, h: &str) -> Option<i64> {
         "select * from jobs where st in ('ready','submit') order by id",
         pa![],
     );
-    let rk = |j: &Value| -> (i32, i32, f64, i64) {
-        let d = &j["d"];
-        (
-            if j["st"] == "submit" { 0 } else { 1 },
-            if d["rs"].as_bool().unwrap_or(false) || d["rp"].as_bool().unwrap_or(false) {
-                0
-            } else {
-                1
-            },
-            match j["kind"].as_str().unwrap_or("fix") {
-                "hunt" => 1.0,
-                "fix" => 2.0 + j["prio"].as_f64().unwrap_or(0.0) / 1000.0,
-                _ => 0.0,
-            },
-            j["id"].as_i64().unwrap_or(0),
-        )
-    };
     c.sort_by(|x, y| {
-        rk(x)
-            .partial_cmp(&rk(y))
+        job_rank(x)
+            .partial_cmp(&job_rank(y))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     for j in c {
@@ -3398,7 +3559,7 @@ async fn pick(a: &Ax, h: &str) -> Option<i64> {
         {
             continue;
         }
-        if j["kind"] == "hunt" && a.hold("hunter") {
+        if j["kind"] == "hunt" && (a.hold("hunter") || crate::hunt_health::blocked(a, &r)) {
             continue;
         }
         if !pin && (j["kind"] == "rebase" || j["kind"] == "review") {
@@ -3443,16 +3604,12 @@ async fn pick(a: &Ax, h: &str) -> Option<i64> {
                 continue;
             }
         }
-        {
-            let mut ac = a.act.lock().unwrap();
-            let mut lk = a.lk.lock().unwrap();
-            if ac.contains(&format!("{r} {h}")) || lk.contains(&id) {
-                continue;
-            }
-            ac.insert(format!("{r} {h}"));
-            lk.insert(id);
+        if admit(a, &r, h, id) {
+            return Some(id);
         }
-        return Some(id);
+        if a.drain.load(std::sync::atomic::Ordering::SeqCst) {
+            return None;
+        }
     }
     None
 }
@@ -3494,10 +3651,18 @@ fn hn(a: &Ax) -> i64 {
         .map(|h| h.ln)
         .sum();
     let hf: i64 = a.db.all("select repo, count(*) n from jobs where kind='fix' and num=0 and st in ('vet','ready') and json_extract(d,'$.ext') is null group by repo", pa![]).iter().map(|x| x["n"].as_i64().unwrap_or(0).min(2 * bl(a, x["repo"].as_str().unwrap_or("")))).sum();
-    if cap == 0 {
+    if cap == 0 || l == 0 {
         return 0;
     }
-    (l - 1 - hf).clamp(1, cap)
+    // hf already reserves lanes for eligible vet/ready fixes. Count only
+    // distinct work not covered by hf; otherwise a single ready fix
+    // reserves two lanes and can unnecessarily suppress Hunters.
+    let uncovered_fixes = a.db.n(
+        "select count(*) from jobs where kind='fix' and (st in ('repro','fix','ci','review','gate','submit') or (st='ready' and (num<>0 or json_extract(d,'$.ext') is not null)))",
+        pa![],
+    );
+    let reserved = hf + i64::from(uncovered_fixes > 0);
+    (l - reserved.max(0)).clamp(0, cap)
 }
 
 pub fn hy(a: &Ax, r: &str) -> f64 {
@@ -3514,12 +3679,27 @@ pub fn hy(a: &Ax, r: &str) -> f64 {
     (m as f64 + 1.0) / (h as f64 + 2.0) / (1.0 + s as f64 / 10.0)
 }
 
+/// Cria no máximo um Hunter elegível por repositório, com gate serializado.
 fn mk_hunt(a: &Ax) -> bool {
+    // Coordinate creation with admission and breaker updates across lanes.
+    let _transition = a.update_transition.lock().unwrap();
+    if a.drain.load(std::sync::atomic::Ordering::SeqCst) {
+        return false;
+    }
     let on = a.db.all(
-        "select repo from jobs where kind='hunt' and st not in ('done','drop','park')",
+        "select repo, st from jobs where kind='hunt' and st not in ('done','drop','park')",
         pa![],
     );
-    if on.len() as i64 >= hn(a) {
+    // A queued hunt blocked by the circuit breaker cannot use a lane.
+    // Keep it in 'on' for duplicate suppression, but exclude it from
+    // active capacity until its repository is no longer blocked.
+    let occupying = on
+        .iter()
+        .filter(|j| {
+            j["st"] != "ready" || !crate::hunt_health::blocked(a, j["repo"].as_str().unwrap_or(""))
+        })
+        .count() as i64;
+    if occupying >= hn(a) {
         return false;
     }
     let d0 = crate::db::day0();
@@ -3547,10 +3727,13 @@ fn mk_hunt(a: &Ax) -> bool {
     let mut c: Vec<String> = rs
         .into_iter()
         .filter(|r| {
-            !act.contains(r) && !on.iter().any(|x| x["repo"].as_str() == Some(r.as_str())) && {
-                let b = bl(a, r);
-                b > 0 && qn(a, r, "'vet','ready'") < 4 * b
-            }
+            !crate::hunt_health::blocked(a, r)
+                && !act.contains(r)
+                && !on.iter().any(|x| x["repo"].as_str() == Some(r.as_str()))
+                && {
+                    let b = bl(a, r);
+                    b > 0 && qn(a, r, "'vet','ready'") < 4 * b
+                }
         })
         .collect();
     let sc = |r: &str| (cnt(r) as f64 + 1.0) / hy(a, r);
@@ -3684,12 +3867,105 @@ async fn disk(a: &Ax, h: &crate::sh::Ho) -> Out {
     hx(a, &h.id, &s, 1200).await
 }
 
+/// Identifies the Docker daemon used by a configured host. Different host IDs
+/// pointing at the same local or SSH Docker target must share one reservation.
+fn docker_cache_target(a: &Ax, host: &str) -> Option<String> {
+    let configured = crate::sh::ho(a, host)?;
+    if !configured.dk {
+        return None;
+    }
+    let ssh = configured.ssh.trim();
+    Some(if ssh.is_empty() {
+        "docker:local".to_string()
+    } else {
+        format!("docker:ssh:{ssh}")
+    })
+}
+
+/// Reserves an idle host for cache maintenance; admission is blocked until Drop.
+struct IdleCacheGuard {
+    a: Ax,
+    target: String,
+}
+
+impl IdleCacheGuard {
+    fn claim(a: &Ax, host: &str) -> Option<Self> {
+        // The same lock serializes admission and cache-cleanup reservation.
+        let _transition = a.update_transition.lock().unwrap();
+        if a.drain.load(std::sync::atomic::Ordering::SeqCst) {
+            return None;
+        }
+        let target = docker_cache_target(a, host)?;
+        let active_hosts: Vec<String> = a
+            .act
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|claim| claim.rsplit_once(' ').map(|(_, h)| h.to_string()))
+            .collect();
+        if active_hosts
+            .iter()
+            .any(|active_host| docker_cache_target(a, active_host).as_deref() == Some(&target))
+        {
+            return None;
+        }
+        if !a.cache_maintenance.lock().unwrap().insert(target.clone()) {
+            return None;
+        }
+        Some(Self {
+            a: a.clone(),
+            target,
+        })
+    }
+}
+
+impl Drop for IdleCacheGuard {
+    fn drop(&mut self) {
+        self.a
+            .cache_maintenance
+            .lock()
+            .unwrap()
+            .remove(&self.target);
+    }
+}
+
+/// Clears an oversized npm download cache only while no work can enter the host.
+async fn clean_idle_npm_cache(a: &Ax, host: &crate::sh::Ho) {
+    if !host.dk {
+        return;
+    }
+    let Some(_reservation) = IdleCacheGuard::claim(a, &host.id) else {
+        return;
+    };
+    let result =
+        crate::sh::hx_maintenance(a, &host.id, &crate::sh::npm_cache_cleanup_cmd(), 600).await;
+    if result.c == 0 && result.o.contains("npm cache cleaned") {
+        a.say(
+            "ci",
+            &format!("[{}] npm cache above 4 GiB cleaned while idle", host.id),
+            None,
+        );
+    } else if result.c != 0 {
+        a.say(
+            "ci",
+            &format!(
+                "[{}] npm cache maintenance skipped (exit {})",
+                host.id, result.c
+            ),
+            None,
+        );
+    }
+}
+
 pub async fn guard(a: Ax) {
     loop {
         for h in hosts(&a) {
             if !h.on || !a.net(&h.id) {
                 continue;
             }
+            // Reclaim npm caches first; disk() may remove inactive worktrees
+            // when an oversized cache is the actual cause of low free space.
+            clean_idle_npm_cache(&a, &h).await;
             let r = disk(&a, &h).await;
             if r.c != 0 {
                 continue;
@@ -3790,6 +4066,410 @@ mod t {
         );
         assert_eq!(a.sem.lock().unwrap().get("local").copied(), Some(0));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn setup_transport_errors_are_not_inferred_from_script_stdout() {
+        let lost_worker = Out {
+            c: 125,
+            o: String::new(),
+            e: "docker: No such container".into(),
+        };
+        let failed_script = Out {
+            c: 1,
+            o: "test reported No such container".into(),
+            e: String::new(),
+        };
+        let cannot_spawn = Out {
+            c: -1,
+            o: String::new(),
+            e: "cannot spawn worker process".into(),
+        };
+        let ssh_reset = Out {
+            c: 255,
+            o: String::new(),
+            e: "ssh: Connection reset by peer".into(),
+        };
+        let stdout_only = Out {
+            c: 1,
+            o: "Connection reset by peer".into(),
+            e: String::new(),
+        };
+        assert!(setup_transport_error(&lost_worker));
+        assert!(!setup_transport_error(&failed_script));
+        assert!(setup_transport_error(&cannot_spawn));
+        assert!(setup_transport_error(&ssh_reset));
+        assert!(!setup_transport_error(&stdout_only));
+    }
+
+    #[test]
+    fn preflight_host_failures_are_not_missing_tool_failures() {
+        let unreachable = Out {
+            c: 255,
+            o: String::new(),
+            e: "ssh: connect to host failed".into(),
+        };
+        let missing = Out {
+            c: 127,
+            o: String::new(),
+            e: "Falta: node".into(),
+        };
+        let absent = Out {
+            c: -1,
+            o: String::new(),
+            e: "machine local is gone".into(),
+        };
+        assert!(preflight_host_error(&unreachable));
+        assert!(preflight_host_error(&absent));
+        assert!(!preflight_host_error(&missing));
+    }
+
+    #[tokio::test]
+    async fn a_blocked_hunt_cannot_be_admitted_and_active_hunts_do_not_overlap() {
+        let db = crate::db::Db::mem();
+        let first = db.jnew(
+            "o/r",
+            0,
+            "hunt",
+            "fixture",
+            "",
+            "ready",
+            "",
+            json!({}),
+            None,
+            99.0,
+        );
+        let second = db.jnew(
+            "o/r",
+            0,
+            "hunt",
+            "fixture",
+            "",
+            "ready",
+            "",
+            json!({}),
+            None,
+            99.0,
+        );
+        let fix = db.jnew(
+            "o/r",
+            1,
+            "fix",
+            "fixture",
+            "",
+            "ready",
+            "",
+            json!({}),
+            None,
+            0.0,
+        );
+        db.run(
+            "insert into hs(id,ln,dk,on_) values('worker1',1,0,1),('worker2',1,0,1)",
+            pa![],
+        );
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::path::PathBuf::from("/tmp/apollo-admit-hunt-tests"),
+            1,
+            "apollo-office".into(),
+        ));
+        assert!(admit(&a, "o/r", "worker1", first));
+        assert!(!admit(&a, "o/r", "worker2", second));
+        // Regression: a fix must not touch the checkout of an active Hunter.
+        assert!(!admit(&a, "o/r", "worker2", fix));
+        a.act.lock().unwrap().clear();
+        a.lk.lock().unwrap().clear();
+        // Preserve the reverse-order protection (Hunter after an active fix).
+        assert!(admit(&a, "o/r", "worker1", fix));
+        assert!(!admit(&a, "o/r", "worker2", first));
+        a.act.lock().unwrap().clear();
+        a.lk.lock().unwrap().clear();
+        for _ in 0..3 {
+            crate::hunt_health::fail(&a, "o/r", "setup", 1);
+        }
+        assert!(!admit(&a, "o/r", "worker1", first));
+        assert!(admit(&a, "o/r", "worker1", fix));
+        assert_eq!(a.db.jg(first).unwrap().st, "ready");
+    }
+
+    #[tokio::test]
+    async fn unblocked_ready_hunt_cannot_exceed_the_active_hunter_cap() {
+        let db = crate::db::Db::mem();
+        db.ks("set", &json!({"hunters": 1}));
+        db.run("insert into hs(id,ln,dk,on_) values('local',2,0,1)", pa![]);
+        let blocked_id = db.jnew(
+            "o/blocked",
+            0,
+            "hunt",
+            "blocked",
+            "",
+            "ready",
+            "",
+            json!({}),
+            None,
+            99.0,
+        );
+        let healthy_id = db.jnew(
+            "o/healthy",
+            0,
+            "hunt",
+            "healthy",
+            "",
+            "ready",
+            "",
+            json!({}),
+            None,
+            99.0,
+        );
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::path::PathBuf::from("/tmp/apollo-hunt-cap-admission-test"),
+            1,
+            "apollo-office".into(),
+        ));
+        for _ in 0..3 {
+            crate::hunt_health::fail(&a, "o/blocked", "setup", 1);
+        }
+        assert!(!admit(&a, "o/blocked", "local", blocked_id));
+        assert!(admit(&a, "o/healthy", "local", healthy_id));
+        crate::hunt_health::reset(&a, "o/blocked");
+        assert!(!admit(&a, "o/blocked", "local", blocked_id));
+        a.act.lock().unwrap().clear();
+        a.lk.lock().unwrap().clear();
+        assert!(admit(&a, "o/blocked", "local", blocked_id));
+        assert!(!admit(&a, "o/healthy", "local", healthy_id));
+    }
+
+    #[tokio::test]
+    async fn concurrent_creation_does_not_duplicate_hunts() {
+        let db = crate::db::Db::mem();
+        db.run("insert into hs(id,ln,dk,on_) values('local',2,0,1)", pa![]);
+        db.run(
+            "insert into rp(full,ci,hunt,on_) values('o/r','true',1,1)",
+            pa![],
+        );
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::path::PathBuf::from("/tmp/apollo-create-hunt-tests"),
+            1,
+            "apollo-office".into(),
+        ));
+        let a1 = a.clone();
+        let a2 = a.clone();
+        let first = std::thread::spawn(move || mk_hunt(&a1));
+        let second = std::thread::spawn(move || mk_hunt(&a2));
+        let results = [first.join().unwrap(), second.join().unwrap()];
+        assert_eq!(results.into_iter().filter(|created| *created).count(), 1);
+        assert_eq!(
+            a.db.n(
+                "select count(*) from jobs where kind='hunt' and repo='o/r'",
+                pa![]
+            ),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn blocked_ready_hunt_does_not_starve_a_healthy_repository() {
+        let db = crate::db::Db::mem();
+        db.ks("set", &json!({"hunters": 1}));
+        db.run("insert into hs(id,ln,dk,on_) values('local',1,0,1)", pa![]);
+        db.run(
+            "insert into rp(full,ci,hunt,on_) values('o/blocked','true',1,1),('o/healthy','true',1,1)",
+            pa![],
+        );
+        db.jnew(
+            "o/blocked",
+            0,
+            "hunt",
+            "waiting",
+            "",
+            "ready",
+            "",
+            json!({}),
+            None,
+            99.0,
+        );
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::path::PathBuf::from("/tmp/apollo-blocked-hunt-capacity-test"),
+            1,
+            "apollo-office".into(),
+        ));
+        for _ in 0..3 {
+            crate::hunt_health::fail(&a, "o/blocked", "setup", 1);
+        }
+        assert!(crate::hunt_health::blocked(&a, "o/blocked"));
+        assert!(
+            mk_hunt(&a),
+            "a blocked ready hunt must not occupy the only lane"
+        );
+        assert_eq!(
+            a.db.n(
+                "select count(*) from jobs where kind='hunt' and repo='o/healthy'",
+                pa![]
+            ),
+            1
+        );
+        assert!(!mk_hunt(&a), "the healthy hunt must still use its lane");
+        crate::hunt_health::success(&a, "o/blocked");
+        assert!(!mk_hunt(&a), "unblocked hunts count toward capacity again");
+    }
+
+    #[tokio::test]
+    async fn idle_cache_cleanup_blocks_admission_and_releases_on_drop() {
+        let db = crate::db::Db::mem();
+        db.run(
+            "insert into hs(id,ln,dk,on_) values('worker1',1,1,1)",
+            pa![],
+        );
+        let id = db.jnew(
+            "o/r",
+            0,
+            "fix",
+            "fixture",
+            "",
+            "ready",
+            "",
+            json!({}),
+            None,
+            0.0,
+        );
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::path::PathBuf::from("/tmp/apollo-idle-npm-guard-test"),
+            1,
+            "apollo-office".into(),
+        ));
+        let reservation = IdleCacheGuard::claim(&a, "worker1").unwrap();
+        assert!(IdleCacheGuard::claim(&a, "worker1").is_none());
+        assert!(!admit(&a, "o/r", "worker1", id));
+        std::mem::drop(reservation);
+        assert!(admit(&a, "o/r", "worker1", id));
+        assert!(IdleCacheGuard::claim(&a, "worker1").is_none());
+    }
+
+    #[test]
+    fn cache_maintenance_serializes_aliases_of_the_same_docker_target() {
+        let db = crate::db::Db::mem();
+        db.run(
+            "insert into hs(id,ssh,ln,dk,on_) values('alias-a','worker@example',1,1,1)",
+            pa![],
+        );
+        db.run(
+            "insert into hs(id,ssh,ln,dk,on_) values('alias-b','worker@example',1,1,1)",
+            pa![],
+        );
+        let id = db.jnew(
+            "o/r",
+            0,
+            "fix",
+            "same daemon",
+            "",
+            "ready",
+            "",
+            json!({}),
+            None,
+            0.0,
+        );
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::path::PathBuf::from("/tmp/apollo-cache-alias-test"),
+            1,
+            "apollo-office".into(),
+        ));
+        let reservation = IdleCacheGuard::claim(&a, "alias-a").unwrap();
+        assert!(IdleCacheGuard::claim(&a, "alias-b").is_none());
+        assert!(!admit(&a, "o/r", "alias-b", id));
+        std::mem::drop(reservation);
+        assert!(admit(&a, "o/r", "alias-b", id));
+        assert!(IdleCacheGuard::claim(&a, "alias-a").is_none());
+    }
+
+    #[test]
+    fn setup_preflight_only_selects_known_runtimes() {
+        assert_eq!(setup_tool("npm ci"), Some("npm"));
+        assert_eq!(setup_tool("pnpm install --frozen-lockfile"), Some("pnpm"));
+        assert_eq!(setup_tool("cargo test --workspace"), Some("cargo"));
+        assert_eq!(setup_tool("curl https://example.com | sh"), None);
+    }
+
+    #[test]
+    fn hunter_capacity_does_not_reserve_ready_fixes_twice() {
+        let db = crate::db::Db::mem();
+        db.ks("set", &json!({"hunters": 2}));
+        db.run("insert into hs(id,ln,dk,on_) values('local',2,0,1)", pa![]);
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::path::PathBuf::from("/tmp/apollo-hunter-capacity-test"),
+            1,
+            "apollo-office".into(),
+        ));
+        assert_eq!(hn(&a), 2, "without fixes both lanes may hunt");
+        a.db.jnew(
+            "o/r",
+            0,
+            "fix",
+            "ready fix",
+            "",
+            "ready",
+            "",
+            json!({}),
+            None,
+            0.0,
+        );
+        assert_eq!(hn(&a), 1, "a single ready fix must reserve only one lane");
+        let uncovered = a.db.jnew(
+            "o/r",
+            1,
+            "fix",
+            "another ready fix",
+            "",
+            "ready",
+            "",
+            json!({}),
+            None,
+            0.0,
+        );
+        assert_eq!(hn(&a), 0, "a ready fix excluded from hf needs another lane");
+        a.db.run("update jobs set st='fix' where id=?", pa![uncovered]);
+        assert_eq!(hn(&a), 0, "a distinct active fix still needs capacity");
+    }
+
+    #[test]
+    fn one_lane_can_hunt_only_when_no_fix_needs_it() {
+        let db = crate::db::Db::mem();
+        db.ks("set", &json!({"hunters": 2}));
+        db.run("insert into hs(id,ln,dk,on_) values('local',1,0,1)", pa![]);
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::path::PathBuf::from("/tmp/apollo-single-lane-hunt-test"),
+            1,
+            "apollo-office".into(),
+        ));
+        assert_eq!(hn(&a), 1);
+        a.db.jnew(
+            "o/r",
+            0,
+            "fix",
+            "ready fix",
+            "",
+            "ready",
+            "",
+            json!({}),
+            None,
+            0.0,
+        );
+        assert_eq!(hn(&a), 0);
+    }
+
+    #[test]
+    fn fixes_are_ranked_ahead_of_hunts() {
+        let fix = json!({"st":"ready", "kind":"fix", "prio":0, "id":2});
+        let hunt = json!({"st":"ready", "kind":"hunt", "prio":0, "id":1});
+        assert!(job_rank(&fix) < job_rank(&hunt));
+        let high_priority_number = json!({"st":"ready", "kind":"fix", "prio":100_000, "id":3});
+        assert!(job_rank(&high_priority_number) < job_rank(&hunt));
     }
 
     #[test]

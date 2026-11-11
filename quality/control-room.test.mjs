@@ -18,6 +18,16 @@ test("frontend scripts parse without extra dependencies", () => {
   assert.doesNotThrow(() => new Script(handoffs, { filename: "office-motion.js" }));
 });
 
+test("pixel-art office stays the default, modern dashboard requires explicit opt-in", () => {
+  assert.match(modern, /new URLSearchParams\(window\.location\.search\)\.get\("ui"\)/);
+  assert.match(modern, /if \(requestedUi !== "modern"\) return/);
+  assert.match(original, /requestAnimationFrame\(frame\)/);
+  assert.match(html, /<canvas id="cv"><\/canvas>/);
+});
+
+// As leituras e os limites da telemetria são agora testados no navegador,
+// com eventos de hover reais e snapshots frescos, antigos e inválidos.
+
 test("Control Room is loaded after the original application", () => {
   assert.match(html, /href="control-room\.css"/);
   const iO = html.indexOf('src="o.js"');

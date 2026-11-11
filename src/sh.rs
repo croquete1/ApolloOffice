@@ -501,11 +501,11 @@ pub async fn hxl(
     t: u64,
     ln: Option<&(dyn Fn(&str) + Send + Sync)>,
 ) -> Out {
-    hxo(a, id, s, t, ln, false).await
+    hxo(a, id, s, t, ln, false, true).await
 }
 
 pub async fn hxk(a: &App, id: &str, s: &str, t: u64) -> Out {
-    hxo(a, id, s, t, None, true).await
+    hxo(a, id, s, t, None, true, true).await
 }
 
 async fn hxo(
@@ -515,6 +515,7 @@ async fn hxo(
     t: u64,
     ln: Option<&(dyn Fn(&str) + Send + Sync)>,
     keep: bool,
+    isolate_npm: bool,
 ) -> Out {
     let Some(h) = ho(a, id) else {
         return Out {
@@ -527,8 +528,18 @@ async fn hxo(
     // GNU timeout runs on compatible workers; the outer process watchdog remains
     // active everywhere, including Windows/macOS without GNU coreutils timeout.
     let boundary = format!("APOLLO_JOB_{}", hex::encode(rand::random::<[u8; 16]>()));
-    let body=format!("if command -v timeout >/dev/null 2>&1 && timeout --version 2>/dev/null | head -n 1 | grep -q 'coreutils'; then exec timeout -k 5 {t}s bash -s; else exec bash -s; fi <<'{boundary}'\n{PRE}{s}\n{boundary}\n");
-    let i = format!("{PRE}{}{body}", jobs(a, &h));
+    let inner = if h.dk { "" } else { "exec " };
+    let body = format!(
+        "if command -v timeout >/dev/null 2>&1 && timeout --version 2>/dev/null | head -n 1 | grep -q 'coreutils'; then {inner}timeout -k 5 {t}s bash -s; else {inner}bash -s; fi <<'{boundary}'\n{PRE}{s}\n{boundary}\n"
+    );
+    // Separate npm exec/npx installations for each command. Only content-
+    // addressed downloads are shared; the wrapper removes its private cache.
+    let npm_env = if h.dk && isolate_npm {
+        isolated_npm_cache_setup(NPM_DOWNLOAD_CACHE_DIR)
+    } else {
+        String::new()
+    };
+    let i = format!("{PRE}{}{npm_env}{body}", jobs(a, &h));
     let mut command: Vec<String> = if h.dk {
         vec!["docker".into(), "exec".into(), "-i".into(), CT.into()]
     } else {
@@ -573,21 +584,125 @@ pub async fn hx(a: &App, id: &str, s: &str, t: u64) -> Out {
     hxl(a, id, s, t, None).await
 }
 
+/// Trusted disk-recovery command: avoids allocating another npm execution root
+/// when the disk is already full. Never use this for repository-controlled code.
+pub async fn hx_maintenance(a: &App, id: &str, s: &str, t: u64) -> Out {
+    hxo(a, id, s, t, None, false, false).await
+}
+
 pub const DF: &str = r#"FROM rust:1-trixie
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config libssl-dev clang cmake git curl ca-certificates procps xz-utils unzip libxdo-dev mesa-vulkan-drivers \
-    python3 python3-pip python3-venv python3-dev nodejs npm golang-go \
+    pkg-config libssl-dev clang cmake git curl ca-certificates procps util-linux xz-utils unzip libxdo-dev mesa-vulkan-drivers \
+    python3 python3-pip python3-venv python3-dev golang-go \
     libasound2-dev libfontconfig1-dev libfreetype-dev libgl1-mesa-dev libgtk-3-dev libwayland-dev \
     libx11-dev libxcursor-dev libxi-dev libxkbcommon-dev libxrandr-dev libudev-dev xvfb \
     && rm -rf /var/lib/apt/lists/*
+# Debian/Trixie provides Node 20; FixFlow requires >=24.22.1 <25.
+# Changing this Dockerfile also changes im(), forcing a new worker image.
+ARG NODE_VERSION=24.22.2
+RUN set -eu; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) node_arch=x64 ;; \
+      arm64) node_arch=arm64 ;; \
+      ppc64el) node_arch=ppc64le ;; \
+      s390x) node_arch=s390x ;; \
+      *) echo "Unsupported Node.js architecture" >&2; exit 1 ;; \
+    esac; \
+    archive="node-v${NODE_VERSION}-linux-${node_arch}.tar.xz"; \
+    url="https://nodejs.org/dist/v${NODE_VERSION}"; \
+    curl -fsSL --retry 3 -o "/tmp/${archive}" "${url}/${archive}"; \
+    curl -fsSL --retry 3 -o /tmp/SHASUMS256.txt "${url}/SHASUMS256.txt"; \
+    cd /tmp; \
+    grep -F "  ${archive}" SHASUMS256.txt | sha256sum -c -; \
+    mkdir -p /opt/node; \
+    tar -xJf "${archive}" -C /opt/node --strip-components=1; \
+    rm -f "${archive}" SHASUMS256.txt; \
+    test "$(/opt/node/bin/node --version)" = "v${NODE_VERSION}"
+ENV PATH="/opt/node/bin:${PATH}"
+# The build-time npm cache stays inside the image. At runtime, each command
+# uses an isolated ephemeral cache root while sharing only verified _cacache
+# downloads through the apollo-office-npm-downloads named volume.
+# Altering DF also changes the worker image identifier.
+ENV npm_config_cache=/root/.npm
 RUN rustup component add rustfmt clippy && rustup target add wasm32-unknown-unknown && npm install -g pnpm yarn && pip3 install --break-system-packages pytest
 ENV CARGO_TERM_COLOR=never CARGO_INCREMENTAL=0 PIP_BREAK_SYSTEM_PACKAGES=1
 WORKDIR /work
 "#;
 
+/// Only verified npm download blobs persist in this new named volume.
+/// The old volume may contain _npx executables and is deliberately not reused.
+pub const NPM_DOWNLOAD_CACHE_DIR: &str = "/var/cache/apollo-npm";
+
+/// Give every Docker job invocation its own npm executable-installation cache.
+/// The shared volume stores only npm's content-addressed tarballs. The wrapper
+/// is deliberately retained as a parent process so EXIT cleanup runs even if
+/// a nested command or coreutils timeout returns a non-zero status.
+fn isolated_npm_cache_setup(download_cache: &str) -> String {
+    let quoted = download_cache.replace("'", "'\\''");
+    format!(
+        "npm_job_cache=$(mktemp -d /tmp/apollo-npm-XXXXXXXX) || exit 1; \
+         if ! mkdir -p '{quoted}/_cacache' || ! ln -s '{quoted}/_cacache' \"$npm_job_cache/_cacache\"; then \
+         rm -rf -- \"$npm_job_cache\"; exit 1; fi; \
+         trap 'rm -rf -- \"$npm_job_cache\"' EXIT; \
+         command -v flock >/dev/null 2>&1 || exit 1; \
+         exec 9>\"$npm_job_cache/.owner.lock\" || exit 1; \
+         flock -x 9 || exit 1; \
+         export npm_config_cache=\"$npm_job_cache\";\n"
+    )
+}
+
+/// Bound the persistent npm tarball cache at 4 GiB when the worker is idle.
+pub const NPM_CACHE_LIMIT_KIB: u64 = 4 * 1024 * 1024;
+
+/// Builds the bounded cleanup command. The directory is a trusted internal path.
+fn npm_cache_cleanup_cmd_for(cache_dir: &str, limit_kib: u64) -> String {
+    let quoted = cache_dir.replace('\'', "'\\''");
+    format!(
+        "cache='{quoted}'; \
+         if [ -d \"$cache\" ]; then \
+         kb=$(du -sk \"$cache\" 2>/dev/null | awk '{{print $1}}'); \
+         case \"$kb\" in ''|*[!0-9]*) exit 1;; esac; \
+         if [ \"$kb\" -gt {limit_kib} ]; then \
+         npm_config_cache=\"$cache\" npm cache clean --force >/dev/null 2>&1 || exit 1; \
+         rm -rf -- \"$cache/_npx\" || exit 1; \
+         remaining=$(du -sk \"$cache\" 2>/dev/null | awk '{{print $1}}'); \
+         case \"$remaining\" in ''|*[!0-9]*) exit 1;; esac; \
+         [ \"$remaining\" -le {limit_kib} ] || exit 1; \
+         echo 'npm cache cleaned'; \
+         fi; fi"
+    )
+}
+
+/// Remove stale npm execution roots only when their lock is no longer held.
+/// A live wrapper and its descendants keep the same file descriptor open.
+/// Unmarked legacy roots are left untouched for controlled manual cleanup.
+fn npm_orphan_cleanup_cmd_for(tmp_dir: &str) -> String {
+    let quoted = tmp_dir.replace('\'', "'\\''");
+    format!(
+        "set -o pipefail; root='{quoted}'; \
+         command -v flock >/dev/null 2>&1 || exit 1; \
+         find \"$root\" -mindepth 1 -maxdepth 1 -type d \
+         -name 'apollo-npm-????????' -mmin +5 ! -path \"$npm_config_cache\" -print0 | \
+         while IFS= read -r -d '' candidate; do \
+         lock=\"$candidate/.owner.lock\"; \
+         [ -f \"$lock\" ] && [ ! -L \"$lock\" ] || continue; \
+         flock -n \"$lock\" rm -rf -- \"$candidate\" || :; \
+         done"
+    )
+}
+
+/// Command run inside the already-created idle worker; never deletes the volume.
+pub fn npm_cache_cleanup_cmd() -> String {
+    format!(
+        "{} || exit 1; {}",
+        npm_orphan_cleanup_cmd_for("/tmp"),
+        npm_cache_cleanup_cmd_for(NPM_DOWNLOAD_CACHE_DIR, NPM_CACHE_LIMIT_KIB)
+    )
+}
+
 pub fn dkup(h: &Ho, cpu: i64) -> String {
     format!(
-        "command -v docker >/dev/null || {{ echo 'docker is not installed'; exit 2; }}\ndocker info >/dev/null 2>&1 || {{ echo 'docker is not running'; exit 2; }}\nif ! docker image inspect {im} >/dev/null 2>&1; then docker build -q -t {im} - <<'DOCKERFILE'\n{DF}DOCKERFILE\nfi\nold=$(docker inspect -f '{{{{.Config.Image}}}}' {CT} 2>/dev/null)\nif [ -n \"$old\" ] && [ \"$old\" != {im} ]; then docker rm -f {CT} >/dev/null 2>&1; fi\nr=$(docker inspect -f '{{{{.State.Running}}}}' {CT} 2>/dev/null)\nm=$(( $(docker info --format '{{{{.MemTotal}}}}' 2>/dev/null || echo 0) / 1048576 - 3072 ))\n[ \"$m\" -lt 2048 ] && m=2048\nif [ -z \"$r\" ]; then docker run -d --name {CT} --restart unless-stopped --cpus {cpu} --cpu-shares 128 --memory \"$m\"m --memory-swap \"$m\"m -v apollo-office-work:/work -v apollo-office-cargo:/usr/local/cargo/registry {im} sleep infinity >/dev/null 2>&1 || [ \"$(docker inspect -f '{{{{.State.Running}}}}' {CT} 2>/dev/null)\" = true ] || docker start {CT} >/dev/null || exit 3; elif [ \"$r\" != true ]; then docker start {CT} >/dev/null || exit 3; fi\ndocker update --cpus {cpu} --cpu-shares 128 --memory \"$m\"m --memory-swap \"$m\"m {CT} >/dev/null 2>&1\ndocker images apollo-office-build --format '{{{{.Repository}}}}:{{{{.Tag}}}}' | grep -vx {im} | xargs -r docker rmi >/dev/null 2>&1\necho ok {}\n",
+        "command -v docker >/dev/null || {{ echo 'docker is not installed'; exit 2; }}\ndocker info >/dev/null 2>&1 || {{ echo 'docker is not running'; exit 2; }}\nif ! docker image inspect {im} >/dev/null 2>&1; then docker build -q -t {im} - <<'DOCKERFILE' || {{ echo 'worker image build failed; existing container preserved' >&2; exit 4; }}\n{DF}DOCKERFILE\nfi\ndocker image inspect {im} >/dev/null 2>&1 || {{ echo 'replacement worker image unavailable; existing container preserved' >&2; exit 4; }}\nold=$(docker inspect -f '{{{{.Config.Image}}}}' {CT} 2>/dev/null)\nif [ -n \"$old\" ] && [ \"$old\" != {im} ]; then docker rm -f {CT} >/dev/null 2>&1 || {{ echo 'cannot remove previous worker container' >&2; exit 5; }}; fi\nr=$(docker inspect -f '{{{{.State.Running}}}}' {CT} 2>/dev/null)\nm=$(( $(docker info --format '{{{{.MemTotal}}}}' 2>/dev/null || echo 0) / 1048576 - 3072 ))\n[ \"$m\" -lt 2048 ] && m=2048\nif [ -z \"$r\" ]; then docker run -d --name {CT} --restart unless-stopped --cpus {cpu} --cpu-shares 128 --memory \"$m\"m --memory-swap \"$m\"m -v apollo-office-work:/work -v apollo-office-cargo:/usr/local/cargo/registry -v apollo-office-npm-downloads:/var/cache/apollo-npm {im} sleep infinity >/dev/null 2>&1 || [ \"$(docker inspect -f '{{{{.State.Running}}}}' {CT} 2>/dev/null)\" = true ] || docker start {CT} >/dev/null || exit 3; elif [ \"$r\" != true ]; then docker start {CT} >/dev/null || exit 3; fi\ndocker update --cpus {cpu} --cpu-shares 128 --memory \"$m\"m --memory-swap \"$m\"m {CT} >/dev/null 2>&1\ndocker images apollo-office-build --format '{{{{.Repository}}}}:{{{{.Tag}}}}' | grep -vx {im} | xargs -r docker rmi >/dev/null 2>&1\necho ok {}\n",
         h.id,
         im = im()
     )
@@ -735,6 +850,259 @@ fn api_pages(output: &str) -> Result<Vec<Value>, String> {
 #[cfg(test)]
 mod t {
     use super::*;
+
+    #[test]
+    fn worker_image_uses_verified_node24_instead_of_debian_node20() {
+        assert!(DF.contains("ARG NODE_VERSION=24.22.2"));
+        assert!(!DF.contains("nodejs npm"));
+        assert!(DF.contains("sha256sum -c -"));
+        assert!(DF.contains("ENV PATH=\"/opt/node/bin:${PATH}\""));
+        assert!(DF.contains("ENV npm_config_cache=/root/.npm"));
+        assert!(DF.contains("amd64) node_arch=x64"));
+        assert!(DF.contains("arm64) node_arch=arm64"));
+        assert!(DF.contains("ppc64el) node_arch=ppc64le"));
+        assert!(DF.contains("s390x) node_arch=s390x"));
+    }
+
+    #[test]
+    fn cache_cleanup_only_targets_npm_downloads_after_limit() {
+        let cmd = npm_cache_cleanup_cmd();
+        assert_eq!(NPM_CACHE_LIMIT_KIB, 4 * 1024 * 1024);
+        assert!(cmd.contains("cache='/var/cache/apollo-npm'"));
+        assert!(cmd.contains("du -sk \"$cache\""));
+        assert!(cmd.contains("npm_config_cache=\"$cache\" npm cache clean --force"));
+        assert!(cmd.contains("rm -rf -- \"$cache/_npx\""));
+        assert!(cmd.contains("remaining=$(du -sk"));
+        assert!(cmd.contains("-gt 4194304"));
+        assert!(!cmd.contains("docker volume rm"));
+        assert!(!cmd.contains("node_modules"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn npm_cache_cleanup_only_reports_success_after_bounded_npx_removal() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "apollo-npm-cleanup-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let cache = root.join("cache");
+        let bin = root.join("bin");
+        std::fs::create_dir_all(cache.join("_npx")).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(cache.join("_npx/payload"), vec![0_u8; 256 * 1024]).unwrap();
+        let npm = bin.join("npm");
+        std::fs::write(&npm, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&npm, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let run = |limit| {
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg(npm_cache_cleanup_cmd_for(cache.to_str().unwrap(), limit))
+                .env(
+                    "PATH",
+                    format!(
+                        "{}:{}",
+                        bin.display(),
+                        std::env::var("PATH").unwrap_or_default()
+                    ),
+                )
+                .output()
+                .unwrap()
+        };
+
+        let below_limit = run(1024);
+        assert!(below_limit.status.success());
+        assert!(cache.join("_npx/payload").exists());
+        assert!(!String::from_utf8_lossy(&below_limit.stdout).contains("npm cache cleaned"));
+
+        let cleaned = run(64);
+        assert!(cleaned.status.success(), "{cleaned:?}");
+        assert!(!cache.join("_npx").exists());
+        assert!(String::from_utf8_lossy(&cleaned.stdout).contains("npm cache cleaned"));
+
+        std::fs::create_dir_all(cache.join("_npx")).unwrap();
+        std::fs::write(cache.join("_npx/payload"), vec![0_u8; 256 * 1024]).unwrap();
+        std::fs::write(&npm, "#!/bin/sh\nexit 4\n").unwrap();
+        let failed = run(64);
+        assert!(!failed.status.success());
+        assert!(cache.join("_npx/payload").exists());
+        assert!(!String::from_utf8_lossy(&failed.stdout).contains("npm cache cleaned"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn npx_installs_are_ephemeral_and_downloads_survive_multiple_jobs() {
+        let root = std::env::temp_dir().join(format!(
+            "apollo-npm-isolation-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let downloads = root.join("downloads");
+        std::fs::create_dir_all(&downloads).unwrap();
+        let mut paths = Vec::new();
+        for _ in 0..2 {
+            let script = format!(
+                "set -e; {}mkdir -p \"$npm_config_cache/_npx\"; \
+                 echo tampered > \"$npm_config_cache/_npx/executable\"; \
+                 echo cached > \"$npm_config_cache/_cacache/download\"; \
+                 printf '%s\\n' \"$npm_config_cache\"",
+                isolated_npm_cache_setup(downloads.to_str().unwrap())
+            );
+            let result = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(script)
+                .output()
+                .unwrap();
+            assert!(result.status.success(), "{result:?}");
+            let path = std::path::PathBuf::from(String::from_utf8(result.stdout).unwrap().trim());
+            assert!(!path.exists(), "the command's _npx tree must be removed");
+            paths.push(path);
+        }
+        assert_ne!(paths[0], paths[1]);
+        assert_eq!(
+            std::fs::read_to_string(downloads.join("_cacache/download")).unwrap(),
+            "cached\n"
+        );
+        assert!(!downloads.join("_npx").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn orphaned_npm_execution_caches_are_reclaimed_only_when_idle() {
+        use std::os::fd::AsRawFd;
+
+        let root = std::env::temp_dir().join(format!(
+            "apollo-npm-orphan-test-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let stale = root.join("apollo-npm-abcdefgh");
+        let active = root.join("apollo-npm-12345678");
+        let unmarked = root.join("apollo-npm-nomarker");
+        let unrelated = root.join("another-app-cache");
+        for path in [&stale, &active, &unmarked, &unrelated] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        std::fs::write(stale.join(".owner.lock"), "").unwrap();
+        let held_lock = std::fs::File::create(active.join(".owner.lock")).unwrap();
+        assert_eq!(
+            unsafe { libc::flock(held_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        for path in [&stale, &active, &unmarked] {
+            assert!(std::process::Command::new("touch")
+                .arg("-d")
+                .arg("10 minutes ago")
+                .arg(path)
+                .status()
+                .unwrap()
+                .success());
+        }
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(npm_orphan_cleanup_cmd_for(root.to_str().unwrap()))
+            .env("npm_config_cache", root.join("different-job"))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(!stale.exists(), "unlocked stale cache may be removed");
+        assert!(active.exists(), "a live lock must prevent cleanup");
+        assert!(unmarked.exists(), "unmarked legacy roots must fail closed");
+        assert!(unrelated.exists(), "unrelated /tmp entries are untouched");
+        unsafe { libc::flock(held_lock.as_raw_fd(), libc::LOCK_UN) };
+        drop(held_lock);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn worker_image_build_must_succeed_before_replacing_container() {
+        let host = Ho {
+            id: "test".into(),
+            ssh: String::new(),
+            dk: true,
+            ln: 1,
+            ci: 1,
+            gb: 5,
+            on: true,
+            no: vec![],
+            cpu: 0,
+        };
+        let script = dkup(&host, 1);
+        let build = script.find("docker build -q").unwrap();
+        let guarded = script
+            .find("worker image build failed; existing container preserved")
+            .unwrap();
+        let remove = script.find("docker rm -f").unwrap();
+        assert!(build < guarded && guarded < remove);
+        assert!(script.contains("exit 4; }"));
+        assert!(script.contains("replacement worker image unavailable"));
+        assert!(script.contains("cannot remove previous worker container"));
+        assert!(script.contains("-v apollo-office-npm-downloads:/var/cache/apollo-npm"));
+        assert!(!script.contains("-v apollo-office-npm:/root/.npm"));
+        assert!(!script.contains("-v apollo-office-npm-downloads:/root/.npm"));
+    }
+
+    /// Simulates a Docker image build failure without accessing real Docker.
+    /// A failed build must never reach docker rm for the existing worker.
+    #[cfg(unix)]
+    #[test]
+    fn failed_image_build_does_not_remove_existing_container() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "apollo-docker-build-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let docker = dir.join("docker");
+        let trace = dir.join("calls.txt");
+        std::fs::write(
+            &docker,
+            "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$APOLLO_DOCKER_TRACE\"\ncase \"$1\" in\n  info) exit 0 ;;\n  image) exit 1 ;;\n  build) exit 17 ;;\n  rm) exit 90 ;;\n  *) exit 0 ;;\nesac\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let host = Ho {
+            id: "local".into(),
+            ssh: String::new(),
+            dk: true,
+            ln: 1,
+            ci: 1,
+            gb: 5,
+            on: true,
+            no: vec![],
+            cpu: 0,
+        };
+        let mut paths = vec![dir.clone()];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(dkup(&host, 1))
+            .env("PATH", std::env::join_paths(paths).unwrap())
+            .env("APOLLO_DOCKER_TRACE", &trace)
+            .output()
+            .unwrap();
+        let calls = std::fs::read_to_string(&trace).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(
+            output.status.code(),
+            Some(4),
+            "unexpected shell status: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(calls.lines().any(|line| line == "build"));
+        assert!(!calls.lines().any(|line| line == "rm"));
+    }
 
     #[cfg(unix)]
     #[tokio::test]

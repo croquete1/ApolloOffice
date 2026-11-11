@@ -402,11 +402,12 @@
   };
 
   let last = performance.now();
-  const frame = () => {
-    // The modern office has its own lightweight animations. Preserve the legacy
-    // canvas for fallback, but avoid drawing hidden pixel art every frame.
+  const frame = (schedule = true) => {
+    // Um snapshot pode chegar quando o navegador suspendeu RAF (headless,
+    // separador em segundo plano ou poupança de energia). frame(false) desenha
+    // o estado recebido sem criar um segundo ciclo de animação.
     if (window.AO?.modernRoom || window.AO?.disablePixelArt) {
-      setTimeout(() => requestAnimationFrame(frame), 1500);
+      if (schedule !== false) setTimeout(() => requestAnimationFrame(frame), 1500);
       return;
     }
     const t = (performance.now() - t0) / 1000;
@@ -442,11 +443,11 @@
         mg.hidden = false;
       }
     } else if (!mg.hidden) mg.hidden = true;
-    requestAnimationFrame(frame);
+    if (schedule !== false) requestAnimationFrame(frame);
   };
 
-  const ago = (t) => {
-    const s = Math.max(0, (Date.now() - t) / 1000);
+  const ago = (t, nowMs = Date.now()) => {
+    const s = Math.max(0, (nowMs - t) / 1000);
     return s < 60 ? Math.round(s) + "s" : s < 3600 ? Math.round(s / 60) + "m" : s < 86400 ? Math.round(s / 3600) + "h" : Math.round(s / 86400) + "d";
   };
   const hm = (t) => new Date(t).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
@@ -481,9 +482,10 @@
       t.querySelector(".md").title = w.md || "";
       t.querySelector(".sy").textContent = w.say || "…";
       t.className = "tile " + (wk ? "work" : "") + (w.hold ? " hold" : "");
-      t.querySelector(".stt").textContent = w.hold ? "paused" : wk ? "work" + (cn > 1 ? " ×" + cn : "") : w.st === "sleep" ? "sleep" : "idle";
-      t.querySelector(".ft").textContent = w.tk ? kt(w.tk) + " tok" : "";
-      t.title = w.hold ? "click to resume" : "click to pause";
+      t.querySelector(".stt").textContent = w.hold ? "pausado" : wk ? "em trabalho" + (cn > 1 ? " ×" + cn : "") : w.st === "sleep" ? "em espera" : "inativo";
+      t.querySelector(".ft").textContent = !wk && w.idle_reason ? w.idle_reason : (w.tk ? kt(w.tk) + " tok" : "");
+      t.querySelector(".ft").title = w.idle_reason || "";
+      t.title = (w.idle_reason && !wk ? w.idle_reason + " · " : "") + (w.hold ? "clique para retomar" : "clique para pausar");
     }
   };
 
@@ -493,7 +495,9 @@
 
   const lists = () => {
     const q = S.q;
-    $("qn").textContent = q.length ? q.length + " jobs" : "";
+    const suspended = S.ops?.blocked_hunts?.length || 0;
+    $("qn").textContent = (q.length ? q.length + " trabalhos" : "") +
+      (suspended ? " · " + suspended + " Hunter(s) suspenso(s)" : "");
     const aps = q.filter((j) => j.st === "approve").map((j) => j.id);
     for (const k of [...sel]) if (!aps.includes(k)) sel.delete(k);
     const bk = aps.length > 1 ? `<div class="bkb"><label class="ck"><input type="checkbox" id="bkA" ${sel.size === aps.length ? "checked" : ""}> all ${aps.length}</label><span class="sp"></span>${sel.size ? `<button class="go" id="bkS">submit ${sel.size}</button><button class="dng" id="bkD">drop ${sel.size}</button>` : `<span class="k">select pull requests to submit together</span>`}</div>` : "";
@@ -548,7 +552,12 @@
   const apply = (s) => {
     if (!s || s.error) return;
     nt(s); S = s; last = performance.now(); err = 0;
-    if (!window.AO.modernRoom) { tiles(); lists(); tip(); }
+    if (!window.AO.modernRoom) {
+      tiles();
+      lists();
+      frame(false);
+      tip();
+    }
     chips();
     window.AO.S = s;
     try {
@@ -633,6 +642,7 @@
     const cs = (w.cmds || []).length ? w.cmds.slice(-4).reverse() : S.ev.filter((e) => e.w === h.n).slice(0, 3).map((e) => [e.t, e.m]);
     return `<div class="th"><b>${NM[h.n]}</b><span>${esc(mdn(w.md))}</span></div>`
       + tr("status", esc(st) + (w.tk ? ` · ${kt(w.tk)} tok today` : ""))
+      + (w.idle_reason && st !== "work" ? tr("motivo", esc(w.idle_reason)) : "")
       + (w.cs && (w.cs[0] || w.cs[1]) ? tr("cost", [w.cs[0] ? AO.usd(w.cs[0]) + " API" : "", w.cs[1] ? AO.usd(w.cs[1]) + " login value" : ""].filter(Boolean).join(" · ") + " today") : "")
       + (q ? tr("job", `${esc(rn(q))} · ${esc(q.title)} <span class="k">${esc(q.st)}</span>`) : "")
       + (w.say && !h.q ? tr("says", esc(w.say) + ` <span class="k">${ago(w.t)}</span>`) : "")
@@ -640,19 +650,69 @@
       + (q ? `<div class="tf">click to open the job</div>` : "");
   };
   const htip = (h) => {
-    const x = (S.hs || []).find((y) => y.id === h.h) || {}, m = S.hst?.[h.h], down = S.o.net?.[h.h] === false;
-    const js = S.q.filter((q) => q.h === h.h && ["repro", "fix", "ci", "review", "gate", "submit"].includes(q.st));
-    let r = `<div class="th"><b>${esc(h.h === "local" ? "this computer" : h.h)}</b><span>${x.dk ? "Docker" : "no Docker"}</span></div>`
-      + tr("status", down ? `<span class="bad2">offline</span>` : `<span class="ok2">online</span> · ${js.length}/${x.ln || 0} lanes busy`);
-    if (m) {
-      if (m.cpu) r += tr("cpu", `${m.cpu} cores · load ${m.load ?? "?"}${m.load != null ? bar(m.load, m.cpu) : ""}`);
-      if (m.mem) r += tr("ram", `${gb(m.mem[0] - m.mem[1])} / ${gb(m.mem[0])} GB${bar(m.mem[0] - m.mem[1], m.mem[0])}`);
-      if (m.disk) r += tr("disk", `${m.disk[1]} GB free of ${m.disk[0]}${bar(m.disk[0] - m.disk[1], m.disk[0])}`);
-      if (m.temp != null) r += tr("temp", `<span class="${m.temp >= 85 ? "bad2" : ""}">${m.temp} °C</span>`);
-      if (m.up) r += tr("up", esc(m.up) + ` <span class="k">· seen ${ago(m.t)} ago</span>`);
-    } else r += tr("", `<span class="k">no hardware data yet</span>`);
-    if (js.length) r += `<div class="tc">${js.map((q) => `<div><span class="k">${esc(q.st)}</span><span>${esc(rn(q))} · ${esc(q.title)}</span></div>`).join("")}</div>`;
-    return r + `<div class="tf">click to edit machines</div>`;
+    const x = (S.hs || []).find((y) => y.id === h.h) || {};
+    const m = S.hst?.[h.h];
+    const disabled = x.on_ === false || x.on_ === 0;
+    const down = S.o.net?.[h.h] === false;
+    const metric = (value) => value != null && value !== "" && Number.isFinite(Number(value))
+      ? Number(value) : null;
+    const lastSeen = metric(m?.t);
+    // Os relógios do navegador e do servidor podem divergir. Usar o tempo
+    // de servidor do snapshot e avançá-lo pelo relógio monotónico local.
+    // Sem hora de servidor válida, conservar o comportamento anterior.
+    const serverTime = metric(S.t);
+    const nowMs = serverTime != null && serverTime > 0
+      ? serverTime + Math.max(0, performance.now() - last) : Date.now();
+    const age = lastSeen == null ? Infinity : nowMs - lastSeen;
+    const recent = !disabled && !down && age >= 0 && age < 120000;
+    const jobs = S.q.filter((q) =>
+      q.h === h.h && ["repro", "fix", "ci", "review", "gate", "submit"].includes(q.st));
+    const status = disabled ? "desativada" : down ? "sem ligação" :
+      recent ? "online" : "por confirmar";
+    let text = '<div class="th"><b>' + esc(h.h === "local" ? "este computador" : h.h) +
+      '</b><span>' + (x.dk ? "Docker" : "sem Docker") + '</span></div>' +
+      tr("estado", '<span class="' + (recent ? "ok2" : "bad2") + '">' + status +
+        '</span>' + (recent ? ' · ' + jobs.length + (jobs.length === 1 ? ' tarefa visível' : ' tarefas visíveis') : ''));
+    if (recent && m) {
+      const cores = metric(m.cpu), load = metric(m.load);
+      if (cores != null && cores > 0) {
+        const label = cores.toLocaleString("pt-PT") + " núcleos" +
+          (load != null && load >= 0 ? " · carga média " +
+            load.toLocaleString("pt-PT", {maximumFractionDigits: 2}) : "");
+        text += tr("CPU", esc(label));
+      }
+      if (Array.isArray(m.mem)) {
+        const total = metric(m.mem[0]), available = metric(m.mem[1]);
+        if (total != null && total > 0 && available != null && available >= 0 && available <= total) {
+          const used = total - available;
+          text += tr("RAM", gb(used) + ' / ' + gb(total) + ' GiB' + bar(used, total));
+        }
+      }
+      if (Array.isArray(m.disk)) {
+        const total = metric(m.disk[0]), free = metric(m.disk[1]);
+        if (total != null && total > 0 && free != null && free >= 0 && free <= total) {
+          text += tr("disco", esc(free.toLocaleString("pt-PT")) + ' GB livres de ' +
+            esc(total.toLocaleString("pt-PT")) + bar(total - free, total));
+        }
+      }
+      const temp = metric(m.temp);
+      if (temp != null) {
+        text += tr("temp.", esc(temp.toLocaleString("pt-PT", {maximumFractionDigits: 1})) +
+          ' °C <span class="k">· sensor não identificado</span>');
+      }
+    } else {
+      text += tr("dados", '<span class="k">sem telemetria recente</span>');
+    }
+    if (m?.up) text += tr("ativo", esc(m.up));
+    if (lastSeen != null && lastSeen > 0) {
+      text += tr("leitura", '<span class="k">' + esc(ago(lastSeen, nowMs)) + ' atrás</span>');
+    }
+    if (jobs.length) {
+      text += '<div class="tc">' + jobs.map((q) =>
+        '<div><span class="k">' + esc(q.st) + '</span><span>' +
+        esc(rn(q)) + ' · ' + esc(q.title) + '</span></div>').join("") + '</div>';
+    }
+    return text + '<div class="tf">clique para configurar as máquinas</div>';
   };
   const tip = () => {
     const el = $("tip"), h = hov && hits.find((x) => x.k === hov);

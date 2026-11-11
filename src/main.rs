@@ -1,9 +1,12 @@
 mod ai;
 mod app;
+mod codex_forecast;
+mod codex_usage;
 mod db;
 mod drop_recovery;
 mod gh;
 mod goog;
+mod hunt_health;
 mod mcp;
 mod net;
 mod ntf;
@@ -133,6 +136,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(wk::vet(ax.clone()));
     tokio::spawn(wk::watch(ax.clone()));
     tokio::spawn(steward::run(ax.clone()));
+    tokio::spawn(codex_usage::watch(ax.clone()));
     if !a.quiet {
         println!(
             "\n  ApolloOffice {}\n\n  Open {}\n\n  Data: {}\n  Stop with Ctrl+C\n",
