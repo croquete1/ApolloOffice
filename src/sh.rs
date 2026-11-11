@@ -815,7 +815,6 @@ mod t {
         assert!(!cmd.contains("node_modules"));
     }
 
-
     #[cfg(unix)]
     #[test]
     fn npm_cache_cleanup_only_reports_success_after_bounded_npx_removal() {
@@ -870,7 +869,6 @@ mod t {
         assert!(!String::from_utf8_lossy(&failed.stdout).contains("npm cache cleaned"));
         std::fs::remove_dir_all(root).unwrap();
     }
-
     #[test]
     fn worker_image_build_must_succeed_before_replacing_container() {
         let host = Ho {
