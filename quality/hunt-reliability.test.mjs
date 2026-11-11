@@ -52,7 +52,9 @@ test("fix jobs outrank hunts and capacity is reserved for pending fixes", () => 
   assert.doesNotMatch(pipe, /hf \+ i64::from\(pending_fixes > 0\)/);
   assert.match(web, /"idle_reason"/);
   assert.match(web, /let admitted = a\.lk\.lock\(\)\.unwrap\(\)/);
-  assert.match(web, /job\["st"\] == "ready"/);
+  assert.match(web, /\.filter\(\|job\| !admitted\.contains\(&job\["id"\]\.as_i64\(\)\.unwrap_or\(0\)\)\)/);
+  assert.match(health, /DOCKER_AUTH_CONFIG/);
+  assert.match(health, /identitytoken/);
   assert.match(panels, /data-retry-failures/);
   assert.match(panels, /Não foi possível carregar os diagnósticos/);
   assert.match(web, /let reason = if !idle \{/);
