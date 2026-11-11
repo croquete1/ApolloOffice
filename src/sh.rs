@@ -669,8 +669,8 @@ fn npm_cache_cleanup_cmd_for(cache_dir: &str, limit_kib: u64) -> String {
 fn npm_orphan_cleanup_cmd_for(tmp_dir: &str) -> String {
     let quoted = tmp_dir.replace('\'', "'\\''");
     format!(
-        "find '{quoted}' -mindepth 1 -maxdepth 1 -type d \\
-         -name 'apollo-npm-????????' ! -path \\"$npm_config_cache\\" \\
+        "find '{quoted}' -mindepth 1 -maxdepth 1 -type d \
+         -name 'apollo-npm-????????' ! -path \"$npm_config_cache\" \
          -exec rm -rf -- {{}} + || exit 1"
     )
 }
