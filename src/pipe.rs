@@ -520,12 +520,31 @@ async fn prep(a: &Ax, j: &mut Job) -> R<()> {
         };
         let preflight = hx(a, &j.h(), &cmd, 60).await;
         if preflight.c != 0 {
+            let error = format!("{}\n{}", preflight.o, preflight.e);
+            if preflight.c < 0
+                || crate::app::hostish(&error)
+                || crate::app::netish(&error)
+            {
+                // Transport/worker failures already have a bounded host retry
+                // path; they are not deterministic missing-tool errors.
+                return Err(X::Host(
+                    j.h(),
+                    format!(
+                        "preflight transport failed (exit {}): {}",
+                        preflight.c,
+                        crate::hunt_health::safe_tail(&error)
+                    ),
+                ));
+            }
             return drop(crate::hunt_health::diagnostic(
                 a,
                 j,
                 "preflight",
                 preflight.c,
-                &format!("Ferramenta {tool} (e Node, quando necessário) não disponível no worker"),
+                &format!(
+                    "Ferramenta {tool} (ou Node) indisponível no worker: {}",
+                    crate::hunt_health::safe_tail(&error)
+                ),
             ));
         }
     }
@@ -3431,10 +3450,23 @@ pub(crate) fn admit(a: &Ax, repo: &str, host: &str, id: i64) -> bool {
     if a.drain.load(std::sync::atomic::Ordering::SeqCst) {
         return false;
     }
+    let is_hunt = a.db.jg(id).is_some_and(|job| job.kind == "hunt");
+    if is_hunt && crate::hunt_health::blocked(a, repo) {
+        return false;
+    }
     let mut active = a.act.lock().unwrap();
     let mut locked = a.lk.lock().unwrap();
     let claim = format!("{repo} {host}");
     if active.contains(&claim) || locked.contains(&id) {
+        return false;
+    }
+    // No concurrent Hunter and another active job from the same repository:
+    // preparation shares the checkout and can corrupt a second run.
+    if is_hunt
+        && active
+            .iter()
+            .any(|entry| entry.split_once(' ').is_some_and(|(r, _)| r == repo))
+    {
         return false;
     }
     active.insert(claim);
@@ -3485,7 +3517,9 @@ async fn pick(a: &Ax, h: &str) -> Option<i64> {
         {
             continue;
         }
-        if j["kind"] == "hunt" && a.hold("hunter") {
+        if j["kind"] == "hunt"
+            && (a.hold("hunter") || crate::hunt_health::blocked(a, &r))
+        {
             continue;
         }
         if !pin && (j["kind"] == "rebase" || j["kind"] == "review") {
@@ -3605,6 +3639,11 @@ pub fn hy(a: &Ax, r: &str) -> f64 {
 }
 
 fn mk_hunt(a: &Ax) -> bool {
+    // Coordinate creation with admission and breaker updates across lanes.
+    let _transition = a.update_transition.lock().unwrap();
+    if a.drain.load(std::sync::atomic::Ordering::SeqCst) {
+        return false;
+    }
     let on = a.db.all(
         "select repo from jobs where kind='hunt' and st not in ('done','drop','park')",
         pa![],

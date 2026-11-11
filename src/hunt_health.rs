@@ -47,23 +47,28 @@ pub fn blocked_repos(a: &Ax) -> Vec<Value> {
 }
 
 pub fn fail(a: &Ax, repo: &str, stage: &str, code: i32) {
-    let before = status(a, repo);
-    let failures = before["failures"].as_i64().unwrap_or(0).saturating_add(1);
-    let until = if failures >= LIMIT {
-        now().saturating_add(COOLDOWN_MS)
-    } else {
-        0
+    // The same gate is used for Hunter creation and final job admission.
+    let (failures, until, was_blocked) = {
+        let _transition = a.update_transition.lock().unwrap();
+        let before = status(a, repo);
+        let failures = before["failures"].as_i64().unwrap_or(0).saturating_add(1);
+        let until = if failures >= LIMIT {
+            now().saturating_add(COOLDOWN_MS)
+        } else {
+            0
+        };
+        a.db.ks(
+            &key(repo),
+            &json!({
+                "failures": failures,
+                "until": until,
+                "stage": stage,
+                "exit_code": code,
+            }),
+        );
+        (failures, until, before["blocked"] == true)
     };
-    a.db.ks(
-        &key(repo),
-        &json!({
-            "failures": failures,
-            "until": until,
-            "stage": stage,
-            "exit_code": code,
-        }),
-    );
-    if failures == LIMIT || (until > 0 && before["blocked"] != true) {
+    if failures == LIMIT || (until > 0 && !was_blocked) {
         a.say(
             "hunter",
             &format!(
@@ -80,9 +85,15 @@ pub fn fail(a: &Ax, repo: &str, stage: &str, code: i32) {
 }
 
 pub fn success(a: &Ax, repo: &str) {
-    let before = status(a, repo);
-    if before["failures"].as_i64().unwrap_or(0) > 0 {
-        a.db.kd(&key(repo));
+    let had_failures = {
+        let _transition = a.update_transition.lock().unwrap();
+        let failed = status(a, repo)["failures"].as_i64().unwrap_or(0) > 0;
+        if failed {
+            a.db.kd(&key(repo));
+        }
+        failed
+    };
+    if had_failures {
         a.say(
             "hunter",
             &format!("{repo}: preparação validada; contador de falhas limpo"),
@@ -92,7 +103,10 @@ pub fn success(a: &Ax, repo: &str) {
 }
 
 pub fn reset(a: &Ax, repo: &str) {
-    a.db.kd(&key(repo));
+    {
+        let _transition = a.update_transition.lock().unwrap();
+        a.db.kd(&key(repo));
+    }
     a.say(
         "hunter",
         &format!("{repo}: bloqueio de pesquisas reposto manualmente"),
@@ -100,13 +114,29 @@ pub fn reset(a: &Ax, repo: &str) {
     );
 }
 
-/// Restrict logs shown to the signed-in operator to a bounded, redacted tail.
+/// Redact common credentials before saving the bounded diagnostic tail.
 pub(crate) fn safe_tail(output: &str) -> String {
-    let credentials = Regex::new(
-        r"(?i)(authorization\s*[:=]\s*(?:bearer\s+)?\S+|github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{12,}|bearer\s+\S+|(?:api[_-]?key|token|password|secret)\s*[:=]\s*\S+)",
-    )
-    .expect("constant credential pattern");
-    let clean = credentials.replace_all(output, "[credencial ocultada]");
+    static PATTERNS: std::sync::LazyLock<Vec<Regex>> = std::sync::LazyLock::new(|| {
+        [
+            // Include the complete Basic/Bearer header value, never just its prefix.
+            r"(?im)\bauthorization[ \t]*[:=][ \t]*[^\r\n]*",
+            // Strip URL userinfo, including a password containing an extra @.
+            r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/]*@",
+            // Consume all quoted values rather than only the first word.
+            r#"(?i)(?:"|')?(?:api[_-]?key|token|password|secret)(?:"|')?[ \t]*[:=][ \t]*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)"#,
+            r"(?i)\bbearer[ \t]+[^\s,;]+",
+            r"(?i)(?:github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{12,})",
+        ]
+        .iter()
+        .map(|pattern| Regex::new(pattern).expect("constant credential pattern"))
+        .collect()
+    });
+    let mut clean = output.to_string();
+    for pattern in PATTERNS.iter() {
+        clean = pattern
+            .replace_all(&clean, "[credencial ocultada]")
+            .into_owned();
+    }
     crate::sh::last(&clean, 8_000)
 }
 
@@ -169,5 +199,31 @@ mod tests {
         assert!(!tail.contains("verysecret"));
         assert!(!tail.contains("abcdef012345"));
         assert!(tail.contains("setup failed"));
+    }
+
+    #[test]
+    fn complete_authorization_urls_and_quoted_secrets_are_redacted() {
+        let output = concat!(
+            "Authorization: Basic dXNlcjpwYXNz\n",
+            "authorization: Bearer abcdef012345 trailing-value\n",
+            "remote https://alice:my-password@github.example/repo.git\n",
+            "password='long password with spaces'\n",
+            "token=\"long token with spaces\"\n",
+            "github_pat_abcdefgh123456\n",
+        );
+        let tail = safe_tail(output);
+        for secret in [
+            "dXNlcjpwYXNz",
+            "abcdef012345",
+            "trailing-value",
+            "alice",
+            "my-password",
+            "long password with spaces",
+            "long token with spaces",
+            "github_pat_abcdefgh123456",
+        ] {
+            assert!(!tail.contains(secret), "credential fragment leaked: {secret}");
+        }
+        assert!(tail.contains("github.example/repo.git"));
     }
 }
