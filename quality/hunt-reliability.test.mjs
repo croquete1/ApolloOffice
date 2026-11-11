@@ -45,7 +45,9 @@ test("preflight runs before cloning and existing setup remains mandatory", () =>
 
 test("fix jobs outrank hunts and capacity is reserved for pending fixes", () => {
   assert.ok(pipe.indexOf('"fix" => 1.0') < pipe.indexOf('"hunt" => 2.0'));
-  assert.match(pipe, /pending_fixes > 0/);
+  assert.match(pipe, /uncovered_fixes > 0/);
+  assert.ok(pipe.includes("st='ready' and (num<>0 or json_extract(d,'$.ext') is not null)"));
+  assert.doesNotMatch(pipe, /hf \+ i64::from\(pending_fixes > 0\)/);
   assert.match(web, /"idle_reason"/);
   assert.match(original, /w\.idle_reason/);
   assert.match(modern, /w\.idle_reason/);
@@ -55,6 +57,8 @@ test("fix jobs outrank hunts and capacity is reserved for pending fixes", () => 
 test("npm cache is persistent and npm ci is never silently bypassed", () => {
   assert.match(shell, /apollo-office-npm:\/root\/\.npm/);
   assert.match(shell, /npm cache clean --force/);
+  assert.match(shell, /rm -rf --/);
+  assert.match(shell, /_npx/);
   assert.match(pipe, /clean_idle_npm_cache\(&a, &h\)\.await/);
   assert.match(pipe, /q\(&su\)/);
 });
