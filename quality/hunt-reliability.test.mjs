@@ -37,7 +37,9 @@ test("preflight runs before cloning and existing setup remains mandatory", () =>
   const prep = pipe.slice(pipe.indexOf("async fn prep("), pipe.indexOf("fn rn(", pipe.indexOf("async fn prep(")));
   assert.ok(prep.indexOf("setup_tool(&su)") < prep.indexOf("let mt = crate::gh::meta"));
   assert.match(prep, /command -v node/);
-  assert.match(prep, /crate::hunt_health::diagnostic\(a, j, "setup"/);
+  assert.match(prep, /crate::hunt_health::diagnostic/);
+  assert.match(prep, /setup_transport_error\(&r\)/);
+  assert.match(pipe, /crate::hunt_health::host_diagnostic/);
   assert.match(prep, /"to 1800 bash -c/);
 });
 

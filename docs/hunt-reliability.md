@@ -6,6 +6,7 @@ Esta implementação limita-se a seis objetivos: interromper HUNT:DROP consecuti
 
 - Três falhas consecutivas de **preflight** ou **setup**, no mesmo repositório e em jobs `hunt`, ativam uma suspensão de 30 minutos para novas pesquisas desse repositório.
 - A suspensão não elimina jobs, não impede correções `fix` e não desativa outros repositórios.
+- Falhas de transporte do worker durante o preflight ou setup seguem recuperação de máquina `X::Host` em vez de serem contabilizadas como falhas determinísticas do repositório. Se se esgotarem as tentativas da máquina, permanece diagnóstico na etapa `host`, sem avançar o contador do circuit breaker.
 - Um setup bem-sucedido de um novo `hunt` limpa o contador. Após o prazo, a pesquisa pode tentar novamente; se voltar a falhar, o período é renovado.
 - Em **Repositórios → Diagnóstico de execução**, o operador pode repor explicitamente o bloqueio **depois de corrigir o ambiente**. Este botão não força a execução de trabalho nem ignora os requisitos de autenticação.
 - A opção original `hunt for bugs itself` continua a controlar se o repositório pode ser pesquisado.

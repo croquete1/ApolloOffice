@@ -488,6 +488,12 @@ fn preflight_host_error(result: &Out) -> bool {
     result.c < 0 || crate::app::hostish(&error) || crate::app::netish(&error)
 }
 
+/// Setup stdout may mention a network error without the worker being offline.
+/// Only inspect the transport's stderr or a failed process launch.
+fn setup_transport_error(result: &Out) -> bool {
+    result.c < 0 || crate::app::hostish(&result.e)
+}
+
 async fn prep(a: &Ax, j: &mut Job) -> R<()> {
     need(a, "repro", &[&j.h(), "gh"]).await?;
     if j.d["rp"].as_bool().unwrap_or(false) {
@@ -685,7 +691,23 @@ async fn prep(a: &Ax, j: &mut Job) -> R<()> {
         )
         .await;
         if r.c != 0 {
-            return drop(crate::hunt_health::diagnostic(a, j, "setup", r.c, &r.o));
+            if setup_transport_error(&r) {
+                return Err(X::Host(
+                    j.h(),
+                    format!(
+                        "setup worker transport failed (exit {}): {}",
+                        r.c,
+                        crate::hunt_health::safe_tail(&r.e)
+                    ),
+                ));
+            }
+            return drop(crate::hunt_health::diagnostic(
+                a,
+                j,
+                "setup",
+                r.c,
+                &format!("{}\n{}", r.o, r.e),
+            ));
         }
         ok(a, j, "git checkout -q -- . 2>/dev/null; true", 60).await?;
     }
@@ -3280,16 +3302,7 @@ async fn go(a: &Ax, id: i64, h: &str) {
             idle_all(a, id);
             if n > 5 {
                 let detail = crate::hunt_health::safe_tail(&m);
-                jj.d["failure"] = json!({
-                    "stage": "host",
-                    "exit_code": Value::Null,
-                    "host": hh,
-                    "at": now(),
-                    "output": detail,
-                });
-                if jj.kind == "hunt" {
-                    crate::hunt_health::fail(a, &jj.repo, "host", 1);
-                }
+                crate::hunt_health::host_diagnostic(&mut jj, &hh, &detail);
                 a.db.jset(
                     id,
                     &[
@@ -4003,6 +4016,28 @@ mod t {
         );
         assert_eq!(a.sem.lock().unwrap().get("local").copied(), Some(0));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn setup_transport_errors_are_not_inferred_from_script_stdout() {
+        let lost_worker = Out {
+            c: 125,
+            o: String::new(),
+            e: "docker: No such container".into(),
+        };
+        let failed_script = Out {
+            c: 1,
+            o: "test reported No such container".into(),
+            e: String::new(),
+        };
+        let cannot_spawn = Out {
+            c: -1,
+            o: String::new(),
+            e: "cannot spawn worker process".into(),
+        };
+        assert!(setup_transport_error(&lost_worker));
+        assert!(!setup_transport_error(&failed_script));
+        assert!(setup_transport_error(&cannot_spawn));
     }
 
     #[test]

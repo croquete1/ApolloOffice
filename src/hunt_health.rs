@@ -147,6 +147,17 @@ pub(crate) fn safe_tail(output: &str) -> String {
     crate::sh::last(&clean, 8_000)
 }
 
+/// Record exhausted host retries without incrementing repository setup failures.
+pub fn host_diagnostic(job: &mut Job, host: &str, output: &str) {
+    job.d["failure"] = json!({
+        "stage": "host",
+        "exit_code": Value::Null,
+        "host": host,
+        "at": now(),
+        "output": safe_tail(output),
+    });
+}
+
 /// Persist stage, exit code, worker and a detailed tail before the job is dropped.
 pub fn diagnostic(a: &Ax, job: &mut Job, stage: &str, code: i32, output: &str) -> String {
     let detail = safe_tail(output);
@@ -196,6 +207,28 @@ mod tests {
         assert_eq!(status(&a, "example/one")["failures"], LIMIT);
         success(&a, "example/one");
         assert!(!blocked(&a, "example/one"));
+        assert_eq!(status(&a, "example/one")["failures"], 0);
+    }
+
+    #[tokio::test]
+    async fn host_failure_diagnostic_does_not_trip_setup_breaker() {
+        let a = app();
+        let id = a.db.jnew(
+            "example/one",
+            0,
+            "hunt",
+            "fixture",
+            "",
+            "ready",
+            "",
+            json!({}),
+            None,
+            99.0,
+        );
+        let mut job = a.db.jg(id).unwrap();
+        host_diagnostic(&mut job, "worker1", "docker: No such container");
+        assert_eq!(job.d["failure"]["stage"], "host");
+        assert_eq!(job.d["failure"]["host"], "worker1");
         assert_eq!(status(&a, "example/one")["failures"], 0);
     }
 
