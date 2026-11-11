@@ -44,6 +44,11 @@ No computador Linux x64 que publica a release:
    Repetir o incremento de versão em cada release; apenas o SHA de Git não
    é suficiente para atualizar o executável integrado.
 
+   A primeira release assinada `fork-v0.10.1` foi publicada em 11/11/2026.
+   A versão `0.10.2` é uma release de validação do percurso completo de
+   atualização nativa (0.10.1 → 0.10.2); a mudança de versão, por si só,
+   não implica novas funcionalidades. Não publicar sem passar os gates.
+
 3. Na raiz da `main` limpa, autenticado com `gh auth login`, executar:
 
    ```bash
@@ -92,7 +97,12 @@ serviço, restaurar a cópia `.old`, iniciar o serviço e investigar.
 
 ## 3. Estado de validação
 
-Alteração em branch de desenvolvimento: testes Rust/Chromium e publicação
-manual **não executados nesta sessão**, porque o ambiente não dispõe de Rust
-nem de acesso ao CachyOS do utilizador. Não publicar uma release nem ativar
-o canal antes de executar todos os gates e rever o diff.
+A versão `fork-v0.10.1` foi publicada e assinada localmente em 11/11/2026,
+com os três assets Linux x64 verificados e instalação do código da `main`
+confirmada no CachyOS. A atualização nativa pelo botão ainda necessita do
+teste end-to-end com a versão superior `0.10.2`, seguindo
+[o roteiro de validação](first-signed-upgrade-test.md).
+
+A versão `0.10.2` só pode ser publicada depois de integrar a respetiva PR
+com validação de Rustfmt, Clippy, Rust, Node, Python, Chromium e Release.
+As atualizações automáticas permanecem desligadas até o teste terminar.

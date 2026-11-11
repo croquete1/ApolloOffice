@@ -75,7 +75,7 @@ You need `git` (on Windows: Git for Windows), the [GitHub CLI][gh] logged in
 with `gh auth login`, and at least one provider: [Claude Code][cc] or Codex
 logged in, an API key, or Ollama. Docker is recommended.
 
-**Customized fork installation:** this repository does not currently publish release binaries. Do **not** install the official ApolloOffice release over this fork: it would replace our customizations. Compile this fork instead, using a Rust toolchain with Cargo:
+**Customized fork installation:** this fork publishes its own signed Linux x64 releases, independent of the official ApolloOffice channel. Do **not** install the official ApolloOffice release over this fork: it would replace our customizations. For the signed channel and its verification requirements, see [Fork updates](docs/fork-updates.md). To compile this fork manually, use a Rust toolchain with Cargo:
 
 ```sh
 git clone https://github.com/croquete1/ApolloOffice.git
