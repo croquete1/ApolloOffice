@@ -208,7 +208,9 @@ pub async fn check_main() -> Result<Value, String> {
         45,
     )
     .await?;
-    let tag = release["tag"].as_str().ok_or("A release GitHub não tem tag")?;
+    let tag = release["tag"]
+        .as_str()
+        .ok_or("A release GitHub não tem tag")?;
     if !tag.starts_with("fork-v")
         || tag["fork-v".len()..].split('.').count() != 3
         || !tag["fork-v".len()..]
@@ -540,12 +542,8 @@ mod t {
         assert_eq!(status["ahead"], 2);
         assert_eq!(status["tag"], "fork-v0.10.3");
         assert_eq!(status["installable"], false);
-        assert!(main_comparison(
-            &json!({"sha":"wrong"}), &release, &comparison
-        ).is_err());
-        assert!(main_comparison(
-            &main, &json!({"tag":"v0.10.3"}), &comparison
-        ).is_err());
+        assert!(main_comparison(&json!({"sha":"wrong"}), &release, &comparison).is_err());
+        assert!(main_comparison(&main, &json!({"tag":"v0.10.3"}), &comparison).is_err());
         let changed_head = json!({
             "status":"ahead", "ahead_by":2, "behind_by":0,
             "head":"ffffffffffffffffffffffffffffffffffffffff"
