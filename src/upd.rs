@@ -280,11 +280,11 @@ pub fn spawn(a: Ax) {
             }
             for _ in 0..(6 * 60) {
                 tokio::time::sleep(Duration::from_secs(60)).await;
-                if !on(&a) {
+                if !on(&a) || !ready(&a) || !writable(&a.me) {
                     cancel_watcher_drain(&a);
                     continue;
                 }
-                if ready(&a) && writable(&a.me) {
+                {
                     if request_drain(&a) {
                         a.say(
                             "submit",
