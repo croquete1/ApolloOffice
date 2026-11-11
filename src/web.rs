@@ -185,11 +185,11 @@ fn state(a: &Ax) -> Value {
         "select id, st from jobs where st in ('ready','submit')",
         pa![],
     );
-    // An admitted submission keeps st='submit' while executing.
+    // An admitted job can remain in 'ready' or 'submit' during execution.
     let admitted = a.lk.lock().unwrap();
     let waiting = queued
         .iter()
-        .filter(|job| job["st"] == "ready" || !admitted.contains(&job["id"].as_i64().unwrap_or(0)))
+        .filter(|job| !admitted.contains(&job["id"].as_i64().unwrap_or(0)))
         .count() as i64;
     std::mem::drop(admitted);
     let paused = o["man"] == true || o["pause"].as_str().is_some_and(|reason| !reason.is_empty());
