@@ -247,7 +247,6 @@ mod tests {
         assert!(tail.contains("setup failed"));
     }
 
-
     #[test]
     fn docker_auth_config_is_redacted_from_setup_failure_diagnostics() {
         let output = concat!(
