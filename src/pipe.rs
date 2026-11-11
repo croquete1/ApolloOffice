@@ -3681,8 +3681,7 @@ fn mk_hunt(a: &Ax) -> bool {
     let occupying = on
         .iter()
         .filter(|j| {
-            j["st"] != "ready"
-                || !crate::hunt_health::blocked(a, j["repo"].as_str().unwrap_or(""))
+            j["st"] != "ready" || !crate::hunt_health::blocked(a, j["repo"].as_str().unwrap_or(""))
         })
         .count() as i64;
     if occupying >= hn(a) {
@@ -4176,7 +4175,6 @@ mod t {
         );
     }
 
-
     #[tokio::test]
     async fn blocked_ready_hunt_does_not_starve_a_healthy_repository() {
         let db = crate::db::Db::mem();
@@ -4208,7 +4206,10 @@ mod t {
             crate::hunt_health::fail(&a, "o/blocked", "setup", 1);
         }
         assert!(crate::hunt_health::blocked(&a, "o/blocked"));
-        assert!(mk_hunt(&a), "a blocked ready hunt must not occupy the only lane");
+        assert!(
+            mk_hunt(&a),
+            "a blocked ready hunt must not occupy the only lane"
+        );
         assert_eq!(
             a.db.n(
                 "select count(*) from jobs where kind='hunt' and repo='o/healthy'",
