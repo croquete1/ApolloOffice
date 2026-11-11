@@ -30,6 +30,8 @@ test("repeated setup failures stop new hunts without disabling fixes", () => {
   assert.match(health, /pub fn success/);
   assert.match(pipe, /preflight_host_error\(&preflight\)/);
   assert.match(pipe, /crate::hunt_health::blocked\(a, repo\)/);
+  assert.match(pipe, /crate::app::netish\(&result\.e\)/);
+  assert.match(pipe, /let occupying = on/);
   assert.match(pipe, /let _transition = a.update_transition.lock\(\).unwrap\(\)/);
 });
 
@@ -49,6 +51,8 @@ test("fix jobs outrank hunts and capacity is reserved for pending fixes", () => 
   assert.ok(pipe.includes("st='ready' and (num<>0 or json_extract(d,'$.ext') is not null)"));
   assert.doesNotMatch(pipe, /hf \+ i64::from\(pending_fixes > 0\)/);
   assert.match(web, /"idle_reason"/);
+  assert.match(web, /let reason = if !idle \{/);
+  assert.match(original, /textContent = !wk && w\.idle_reason/);
   assert.match(original, /w\.idle_reason/);
   assert.match(modern, /w\.idle_reason/);
   assert.match(modern, /s\.ops\?\.blocked_hunts/);
