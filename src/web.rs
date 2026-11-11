@@ -189,12 +189,12 @@ fn state(a: &Ax) -> Value {
     let blocked_hunts = crate::hunt_health::blocked_repos(a);
     for role in WS {
         let idle = wv[*role]["st"] != "work";
-        let reason = if wv[*role]["hold"] == true {
+        let reason = if !idle {
+            ""
+        } else if wv[*role]["hold"] == true {
             "Agente pausado"
         } else if paused {
             "Escritório em pausa"
-        } else if !idle {
-            ""
         } else if wv[*role]["st"] == "sleep" {
             "Em espera; consultar o último evento do agente"
         } else if *role == "hunter" && !blocked_hunts.is_empty() {
