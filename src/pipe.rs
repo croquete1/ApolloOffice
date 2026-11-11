@@ -3470,6 +3470,10 @@ pub(crate) fn admit(a: &Ax, repo: &str, host: &str, id: i64) -> bool {
     if is_hunt && crate::hunt_health::blocked(a, repo) {
         return false;
     }
+    // Recheck the cap at admission, not only when creating a job:
+    // a blocked ready hunt may become eligible after another hunt started.
+    // Read capacity before holding the active/locked job mutexes.
+    let hunter_limit = if is_hunt { hn(a) } else { 0 };
     // Idle npm maintenance must finish before this host can admit work.
     if a.cache_maintenance.lock().unwrap().contains(host) {
         return false;
@@ -3478,6 +3482,18 @@ pub(crate) fn admit(a: &Ax, repo: &str, host: &str, id: i64) -> bool {
     let mut locked = a.lk.lock().unwrap();
     let claim = format!("{repo} {host}");
     if active.contains(&claim) || locked.contains(&id) {
+        return false;
+    }
+    if is_hunt
+        && locked
+            .iter()
+            .filter(|other_id| {
+                a.db.jg(**other_id)
+                    .is_some_and(|job| job.kind == "hunt")
+            })
+            .count() as i64
+            >= hunter_limit
+    {
         return false;
     }
     // A Hunter's checkout is shared with other tasks for this repository.
@@ -4121,6 +4137,10 @@ mod t {
             None,
             0.0,
         );
+        db.run(
+            "insert into hs(id,ln,dk,on_) values('worker1',1,0,1),('worker2',1,0,1)",
+            pa![],
+        );
         let a = std::sync::Arc::new(crate::app::App::new(
             db,
             std::path::PathBuf::from("/tmp/apollo-admit-hunt-tests"),
@@ -4144,6 +4164,38 @@ mod t {
         assert!(!admit(&a, "o/r", "worker1", first));
         assert!(admit(&a, "o/r", "worker1", fix));
         assert_eq!(a.db.jg(first).unwrap().st, "ready");
+    }
+
+    #[tokio::test]
+    async fn unblocked_ready_hunt_cannot_exceed_the_active_hunter_cap() {
+        let db = crate::db::Db::mem();
+        db.ks("set", &json!({"hunters": 1}));
+        db.run("insert into hs(id,ln,dk,on_) values('local',2,0,1)", pa![]);
+        let blocked_id = db.jnew(
+            "o/blocked", 0, "hunt", "blocked", "", "ready", "",
+            json!({}), None, 99.0,
+        );
+        let healthy_id = db.jnew(
+            "o/healthy", 0, "hunt", "healthy", "", "ready", "",
+            json!({}), None, 99.0,
+        );
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::path::PathBuf::from("/tmp/apollo-hunt-cap-admission-test"),
+            1,
+            "apollo-office".into(),
+        ));
+        for _ in 0..3 {
+            crate::hunt_health::fail(&a, "o/blocked", "setup", 1);
+        }
+        assert!(!admit(&a, "o/blocked", "local", blocked_id));
+        assert!(admit(&a, "o/healthy", "local", healthy_id));
+        crate::hunt_health::reset(&a, "o/blocked");
+        assert!(!admit(&a, "o/blocked", "local", blocked_id));
+        a.act.lock().unwrap().clear();
+        a.lk.lock().unwrap().clear();
+        assert!(admit(&a, "o/blocked", "local", blocked_id));
+        assert!(!admit(&a, "o/healthy", "local", healthy_id));
     }
 
     #[tokio::test]
