@@ -181,10 +181,20 @@ fn state(a: &Ax) -> Value {
     }
     // Distinguish an available agent from one that is deliberately paused,
     // waiting for admission or blocked by an environment failure.
-    let waiting = a.db.n(
-        "select count(*) from jobs where st in ('ready','submit')",
+    let queued = a.db.all(
+        "select id, st from jobs where st in ('ready','submit')",
         pa![],
     );
+    // An admitted submission keeps st='submit' while executing.
+    let admitted = a.lk.lock().unwrap();
+    let waiting = queued
+        .iter()
+        .filter(|job| {
+            job["st"] == "ready"
+                || !admitted.contains(&job["id"].as_i64().unwrap_or(0))
+        })
+        .count() as i64;
+    std::mem::drop(admitted);
     let paused = o["man"] == true || o["pause"].as_str().is_some_and(|reason| !reason.is_empty());
     let blocked_hunts = crate::hunt_health::blocked_repos(a);
     for role in WS {
