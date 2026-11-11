@@ -63,7 +63,13 @@ test("fix jobs outrank hunts and capacity is reserved for pending fixes", () => 
 });
 
 test("npm cache is persistent and npm ci is never silently bypassed", () => {
-  assert.match(shell, /apollo-office-npm:\/root\/\.npm/);
+  assert.match(shell, /apollo-office-npm-downloads:\/var\/cache\/apollo-npm/);
+  assert.doesNotMatch(shell, /-v apollo-office-npm:\/root\/\.npm/);
+  assert.match(shell, /fn isolated_npm_cache_setup\(/);
+  assert.match(shell, /mktemp -d \/tmp\/apollo-npm-/);
+  assert.match(shell, /ln -s/);
+  assert.match(shell, /export npm_config_cache/);
+  assert.match(shell, /trap 'rm -rf/);
   assert.match(shell, /npm cache clean --force/);
   assert.match(shell, /rm -rf --/);
   assert.match(shell, /_npx/);
