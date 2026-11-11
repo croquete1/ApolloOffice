@@ -125,6 +125,12 @@ pub fn reset(a: &Ax, repo: &str) {
 pub(crate) fn safe_tail(output: &str) -> String {
     static PATTERNS: std::sync::LazyLock<Vec<Regex>> = std::sync::LazyLock::new(|| {
         [
+            // The entire DOCKER_AUTH_CONFIG assignment can be a JSON object
+            // containing unrecognised registry auth formats. Redact its full
+            // line before running generic token patterns.
+            r#"(?im)(?:"|')?\bDOCKER_AUTH_CONFIG(?:"|')?[ \t]*[:=][ \t]*[^\r\n]*"#,
+            // Docker credentials can also be printed across several JSON lines.
+            r#"(?i)(?:"|')?(?:auth|identitytoken)(?:"|')?[ \t]*[:=][ \t]*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;}]+)"#,
             // Include the complete Basic/Bearer header value, never just its prefix.
             r#"(?im)(?:"|')?\bauthorization(?:"|')?[ \t]*[:=][ \t]*[^\r\n]*"#,
             // Strip URL userinfo, including a password containing an extra @.
@@ -239,6 +245,31 @@ mod tests {
         assert!(!tail.contains("verysecret"));
         assert!(!tail.contains("abcdef012345"));
         assert!(tail.contains("setup failed"));
+    }
+
+
+    #[test]
+    fn docker_auth_config_is_redacted_from_setup_failure_diagnostics() {
+        let output = concat!(
+            "DOCKER_AUTH_CONFIG={\"auths\":{\"registry.example\":{\"auth\":\"YWxpY2U6c2VjcmV0\"}}}\n",
+            "export DOCKER_AUTH_CONFIG='{\"auths\": {\"mirror.internal\": {\"auth\": \"more-secret\"}}}'\n",
+            "\"DOCKER_AUTH_CONFIG\": \"{\\\"auths\\\":{\\\"mirror\\\":{\\\"auth\\\":\\\"quoted-secret\\\"}}}\"\n",
+            "debug registry credentials:\n",
+            "{\n  \"auth\": \"multiline-secret\",\n  \"identitytoken\": \"multiline-token\"\n}\n",
+            "setup failed\n"
+        );
+        let tail = safe_tail(output);
+        for secret in [
+            "YWxpY2U6c2VjcmV0",
+            "more-secret",
+            "quoted-secret",
+            "multiline-secret",
+            "multiline-token",
+        ] {
+            assert!(!tail.contains(secret), "credential leaked: {secret}");
+        }
+        assert!(tail.contains("setup failed"));
+        assert!(tail.contains("[credencial ocultada]"));
     }
 
     #[test]
