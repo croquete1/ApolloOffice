@@ -193,6 +193,7 @@ fn state(a: &Ax) -> Value {
         "lm": if now() - lm["t"].as_i64().unwrap_or(0) < 180_000 { lm } else { Value::Null },
         "nr": a.db.n("select count(*) from rp", pa![]),
         "star": crate::star::show(a),
+        "codex_usage": a.codex_usage.lock().unwrap_or_else(|e| e.into_inner()).clone(),
     })
 }
 
@@ -409,9 +410,17 @@ fn sets(a: &Ax, b: &Value) {
     }
 }
 
+fn pr_lang(value: &str) -> &'static str {
+    if value == "pt-PT" {
+        "pt-PT"
+    } else {
+        "en"
+    }
+}
+
 const RPF: &[&str] = &[
     "iss", "hunt", "feat", "nm", "on_", "maxo", "maxd", "bud", "ci", "setup", "rules", "mode",
-    "skl",
+    "skl", "lang",
 ];
 const HSF: &[&str] = &["id", "ssh", "dk", "ln", "ci", "gb", "raw", "no", "cpu"];
 
@@ -474,6 +483,10 @@ fn import(a: &Ax, b: &Value) -> Result<String, String> {
         a.db.run("insert into rp(full,t0) values(?,?)", pa![f.clone(), now()]);
         for k in RPF {
             let v = &r[*k];
+            // Impedir que valores numéricos contaminem o idioma persistido.
+            if *k == "lang" && !v.is_string() {
+                continue;
+            }
             match v {
                 Value::Number(n) if n.is_i64() && *k != "bud" => {
                     a.db.run(
@@ -487,9 +500,11 @@ fn import(a: &Ax, b: &Value) -> Result<String, String> {
                         pa![n.as_f64().unwrap_or(0.0).clamp(0.0, 100_000.0), f.clone()],
                     );
                 }
-                Value::String(t) if ["ci", "setup", "rules", "mode"].contains(k) => {
+                Value::String(t) if ["ci", "setup", "rules", "mode", "lang"].contains(k) => {
                     let t = if *k == "mode" && t != "auto" {
                         "ask".to_string()
+                    } else if *k == "lang" {
+                        pr_lang(t).to_string()
                     } else {
                         crate::sh::head(t.trim(), 4000)
                     };
@@ -1104,6 +1119,7 @@ fn rid(s: &str) -> Option<String> {
     }
 }
 
+/// Routes authenticated application commands, including safe manual updates.
 async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
     let qv = |k: &str| {
         q.split('&')
@@ -1263,6 +1279,9 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                         ("feat", 0),
                         ("nm", 0),
                         ("on_", 0),
+                        ("auto_merge", 0),
+                        ("local_merge", 0),
+                        ("steward_repair", 0),
                         ("maxo", 1),
                         ("maxd", 1),
                         ("bud", 3),
@@ -1271,6 +1290,7 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                         ("rules", 2),
                         ("mode", 2),
                         ("skl", 2),
+                        ("lang", 2),
                     ] {
                         let v = &b[k];
                         if v.is_null() {
@@ -1307,6 +1327,9 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                                 let mut s = v.as_str().unwrap_or("").trim().to_string();
                                 if k == "mode" && s != "auto" {
                                     s = "ask".into();
+                                }
+                                if k == "lang" {
+                                    s = pr_lang(&s).into();
                                 }
                                 s = crate::sh::head(&s, 4000);
                                 a.db.run(
@@ -1422,6 +1445,21 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                 Err(e) => js(json!({"ok": false, "m": crate::wk::errm(&e)})),
             }
         }
+        ("GET", "/api/steward") => js(json!({
+            "repos": a.db.all("select full from rp where on_=1 order by full", pa![])
+                .iter()
+                .map(|row| {
+                    let repo = row["full"].as_str().unwrap_or("");
+                    json!({
+                        "repo": repo,
+                        "report": a.db.kg(&format!("steward:{repo}")),
+                        "error": a.db.kg(&format!("steward:error:{repo}")),
+                        "merge_error": a.db.kg(&format!("steward:merge_error:{repo}")),
+                        "repair_error": a.db.kg(&format!("steward:repair_error:{repo}"))
+                    })
+                })
+                .collect::<Vec<Value>>()
+        })),
         ("GET", "/api/cost") => js(costs(a)),
         ("GET", "/api/health") => js(health(a, qv("f") == "1").await),
         ("GET", "/api/export") => js(export(a)),
@@ -1540,9 +1578,23 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
             },
             "apply" => {
                 if !crate::upd::ready(a) {
-                    return er(StatusCode::CONFLICT, "no update downloaded");
+                    return er(StatusCode::CONFLICT, "no trusted update downloaded");
                 }
-                crate::upd::apply(a);
+                if !crate::upd::manually_paused(a) {
+                    return er(
+                        StatusCode::CONFLICT,
+                        "Select Pause office before installing an update",
+                    );
+                }
+                if !crate::upd::idle(a) {
+                    return er(
+                        StatusCode::CONFLICT,
+                        "Wait for all running jobs and merges to finish",
+                    );
+                }
+                if !crate::upd::apply(a, true) {
+                    return er(StatusCode::CONFLICT, "Update interrupted by a running task");
+                }
                 js(json!({"ok": true}))
             }
             _ => er(StatusCode::BAD_REQUEST, "unknown op"),
@@ -1823,6 +1875,41 @@ mod t {
         )
         .unwrap();
         assert_ne!(x["id"], z["id"]);
+    }
+
+    #[test]
+    fn import_skips_non_string_pull_request_language() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            47302,
+            "apollo-office".into(),
+        ));
+        import(
+            &a,
+            &json!({
+                "apollo_office": "0.10.0",
+                "set": {},
+                "repos": [{"full": "owner/repo", "lang": 1}],
+                "hosts": []
+            }),
+        )
+        .unwrap();
+        let row =
+            a.db.one(
+                "select lang from rp where full=?",
+                pa!["owner/repo".to_string()],
+            )
+            .unwrap();
+        assert_eq!(row["lang"], "en");
+    }
+
+    #[test]
+    fn pull_request_language_has_a_strict_fallback() {
+        assert_eq!(pr_lang("pt-PT"), "pt-PT");
+        for invalid in ["", "pt", "pt-BR", "en-US", "../pt-PT"] {
+            assert_eq!(pr_lang(invalid), "en");
+        }
     }
 
     #[test]

@@ -312,7 +312,7 @@ async fn full_run(pv: bool) {
         .unwrap();
     let m = String::from_utf8_lossy(&o.stdout).to_string();
     assert!(
-        m.starts_with("Make add sum its arguments\n\nFixes #1"),
+        m.starts_with("fix: Make add sum its arguments\n\nFixes #1"),
         "{m}"
     );
     assert!(

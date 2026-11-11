@@ -10,6 +10,7 @@ use std::time::Duration;
 // This customized fork must never silently install releases signed for upstream.
 // Operators may opt in to a separately signed, HTTPS-only fork release channel.
 
+/// Selects the release asset for the current target operating system.
 pub fn asset() -> &'static str {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("windows", "aarch64") => "apollo-office-windows-arm64.exe",
@@ -23,6 +24,7 @@ pub fn asset() -> &'static str {
 
 static CK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// Compares the three semver components and prefers stable releases.
 pub fn newer(a: &str, b: &str) -> bool {
     let p = |s: &str| -> (Vec<u64>, bool) {
         let s = s.trim().trim_start_matches('v');
@@ -41,6 +43,7 @@ pub fn newer(a: &str, b: &str) -> bool {
     p(a) > p(b)
 }
 
+/// Confirms that the executable directory allows atomic replacement.
 fn writable(me: &Path) -> bool {
     let Some(d) = me.parent() else { return false };
     let f = d.join(format!(".apollo-office-w{}", std::process::id()));
@@ -49,6 +52,7 @@ fn writable(me: &Path) -> bool {
     ok
 }
 
+/// Verifies the exact manifest bytes against the pinned fork signing key.
 pub fn check_sig(pk: &str, body: &[u8], sig: &str) -> Result<Value, String> {
     let k: [u8; 32] = hex::decode(pk)
         .map_err(|_| "key")?
@@ -73,6 +77,7 @@ fn st(a: &Ax, f: impl FnOnce(&mut Value)) {
     a.db.ks("upd", &v);
 }
 
+/// Rejects update channels without an explicit HTTPS origin and Ed25519 key.
 fn trusted_channel_inputs(
     url: Option<&str>,
     key: Option<&str>,
@@ -136,22 +141,34 @@ pub fn info(a: &Ax) -> Value {
     v
 }
 
-async fn get(a: &Ax, u: &str) -> Result<Vec<u8>, String> {
-    let r =
+/// Downloads a bounded asset, including when Content-Length is absent.
+async fn get(a: &Ax, u: &str, limit: usize) -> Result<Vec<u8>, String> {
+    let mut r =
         a.hc.get(u)
             .timeout(Duration::from_secs(300))
             .send()
             .await
             .map_err(|e| e.to_string())?;
     if r.status().as_u16() == 404 {
-        return Err("no published release found (the repository may still be private)".into());
+        return Err("no signed fork release published".into());
     }
     if !r.status().is_success() {
         return Err(format!("HTTP {} for {u}", r.status().as_u16()));
     }
-    Ok(r.bytes().await.map_err(|e| e.to_string())?.to_vec())
+    if r.content_length().is_some_and(|size| size > limit as u64) {
+        return Err("update download exceeds size limit".into());
+    }
+    let mut out = Vec::new();
+    while let Some(chunk) = r.chunk().await.map_err(|e| e.to_string())? {
+        if chunk.len() > limit.saturating_sub(out.len()) {
+            return Err("update download exceeds size limit".into());
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
 }
 
+/// Stages only a signed, integrity-checked update for this installation.
 pub async fn check(a: &Ax) -> Result<Value, String> {
     let _g = CK.lock().await;
     // No network access or staged binary mutation without an explicit
@@ -159,9 +176,9 @@ pub async fn check(a: &Ax) -> Result<Value, String> {
     let (b, key) = channel()?;
     let cid = channel_id(&b, &key);
     let r: Result<Value, String> = async {
-        let body = get(a, &format!("{b}/latest.json")).await?;
-        let sig =
-            String::from_utf8_lossy(&get(a, &format!("{b}/latest.json.sig")).await?).to_string();
+        let body = get(a, &format!("{b}/latest.json"), 128 * 1024).await?;
+        let sig_bytes = get(a, &format!("{b}/latest.json.sig"), 4 * 1024).await?;
+        let sig = String::from_utf8_lossy(&sig_bytes).to_string();
         let m = check_sig(&key, &body, &sig)?;
         let v = m["v"].as_str().unwrap_or("").to_string();
         st(a, |x| {
@@ -174,7 +191,7 @@ pub async fn check(a: &Ax) -> Result<Value, String> {
             .as_str()
             .ok_or("no build for this system in the release")?
             .to_string();
-        let bin = get(a, &format!("{b}/{}", asset())).await?;
+        let bin = get(a, &format!("{b}/{}", asset()), 128 * 1024 * 1024).await?;
         if hex::encode(Sha256::digest(&bin)) != want {
             return Err("downloaded update does not match the signed checksum".into());
         }
@@ -210,6 +227,7 @@ pub fn staged(a: &Ax) -> PathBuf {
     })
 }
 
+/// Checks that the staged update matches the current trusted channel.
 pub fn ready(a: &Ax) -> bool {
     let Ok((url, key)) = channel() else {
         return false;
@@ -223,10 +241,36 @@ pub fn ready(a: &Ax) -> bool {
         && staged(a).exists()
 }
 
-fn idle(a: &Ax) -> bool {
-    a.act.lock().unwrap().is_empty() && a.lk.lock().unwrap().is_empty()
+/// Reports whether no admitted job or merge is still running.
+pub fn idle(a: &Ax) -> bool {
+    // Release each mutex before checking the SQLite state: workers may lock
+    // these structures in a different order.
+    if !a.act.lock().unwrap().is_empty() {
+        return false;
+    }
+    if !a.lk.lock().unwrap().is_empty() {
+        return false;
+    }
+    if !a.merge_in_progress.lock().unwrap().is_empty() {
+        return false;
+    }
+    if !a.vtk.lock().unwrap().is_empty() {
+        return false;
+    }
+    // A queued 'submit' row may be retried after a machine error. Only
+    // admitted work (act/lk) can prevent shutdown in that state.
+    a.db.n(
+        "select count(*) from jobs where st in ('hunt','repro','fix','ci','review','gate')",
+        crate::pa![],
+    ) == 0
 }
 
+/// Requires the explicit Pause office switch for manual installation.
+pub fn manually_paused(a: &Ax) -> bool {
+    a.lv.lock().unwrap().o.man
+}
+
+/// Watches the signed channel and drains jobs before a safe idle restart.
 pub fn spawn(a: Ax) {
     // Start the watcher whenever a trusted channel exists: the user's
     // automatic-updates switch may be enabled later without restarting.
@@ -241,27 +285,58 @@ pub fn spawn(a: Ax) {
             }
             for _ in 0..(6 * 60) {
                 tokio::time::sleep(Duration::from_secs(60)).await;
-                if on(&a) && ready(&a) && writable(&a.me) {
-                    if !a.drain.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                        a.say(
-                            "submit",
-                            "update ready: finishing running jobs, then restarting",
-                            None,
-                        );
-                    }
-                    if idle(&a) {
-                        apply(&a);
-                        return;
-                    }
+                if !on(&a) || !ready(&a) || !writable(&a.me) {
+                    cancel_watcher_drain(&a);
+                    continue;
+                }
+                if request_drain(&a) {
+                    a.say(
+                        "submit",
+                        "update ready: finishing running jobs, then restarting",
+                        None,
+                    );
+                }
+                if apply(&a, false) {
+                    return;
                 }
             }
         }
     });
 }
 
-pub fn apply(a: &Ax) {
-    if !ready(a) {
-        return;
+/// Reserves the update drain under the work-admission lock.
+/// A failed manual request never clears a drain owned by the automatic watcher.
+fn request_drain(a: &Ax) -> bool {
+    let _transition = a.update_transition.lock().unwrap();
+    !a.drain.swap(true, std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Releases a watcher-owned drain when automatic updates are turned off.
+/// A committed restart is never cancelled while shutdown is in progress.
+fn cancel_watcher_drain(a: &Ax) {
+    let _transition = a.update_transition.lock().unwrap();
+    if !*a.restart.lock().unwrap() {
+        a.drain.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Prevents new jobs and merges atomically with the final idle decision.
+/// The manual path additionally requires an explicit operator pause.
+fn reserve_install(a: &Ax, manual: bool) -> bool {
+    let _transition = a.update_transition.lock().unwrap();
+    if (manual && !manually_paused(a)) || !idle(a) {
+        return false;
+    }
+    // Do not allow drain cancellation between claiming the update and shutdown.
+    a.drain.store(true, std::sync::atomic::Ordering::SeqCst);
+    *a.restart.lock().unwrap() = true;
+    true
+}
+
+/// Only an authenticated, verified, idle update can request process replacement.
+pub fn apply(a: &Ax, manual: bool) -> bool {
+    if !ready(a) || !writable(&a.me) || !reserve_install(a, manual) {
+        return false;
     }
     let v = a.db.kg("upd")["ready"].as_str().unwrap_or("").to_string();
     a.say(
@@ -269,10 +344,11 @@ pub fn apply(a: &Ax) {
         &format!("installing update {} -> {v}, restarting", crate::app::V),
         None,
     );
-    *a.restart.lock().unwrap() = true;
     a.quit.notify_waiters();
+    true
 }
 
+/// Installs the hash-verified staged binary, preserving the previous executable.
 pub fn install(a: &Ax) -> std::io::Result<()> {
     if !ready(a) {
         return Err(std::io::Error::other(
@@ -305,12 +381,29 @@ pub fn install(a: &Ax) -> std::io::Result<()> {
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755))?;
+            // Persist the replacement before making it the executable.
+            std::fs::File::open(&f)?.sync_all()?;
+            // Preserve the previous executable before replacing its directory
+            // entry. An atomic rename alone does not make backup data durable.
+            let dir = std::fs::File::open(
+                me.parent()
+                    .ok_or_else(|| std::io::Error::other("no executable directory"))?,
+            )?;
+            let backup_tmp = me.with_extension("old.part");
+            std::fs::copy(me, &backup_tmp)?;
+            std::fs::File::open(&backup_tmp)?.sync_all()?;
+            std::fs::rename(&backup_tmp, me.with_extension("old"))?;
+            dir.sync_all()?;
+            std::fs::rename(&f, me)?;
+            dir.sync_all()?;
         }
+        #[cfg(not(unix))]
         std::fs::rename(&f, me)?;
     }
     Ok(())
 }
 
+/// Reexecutes the updated program; on Unix exec failure, restores the old binary.
 pub fn relaunch(me: &Path) -> ! {
     let args: Vec<String> = std::env::args().skip(1).collect();
     #[cfg(unix)]
@@ -318,6 +411,12 @@ pub fn relaunch(me: &Path) -> ! {
         use std::os::unix::process::CommandExt;
         let e = std::process::Command::new(me).args(&args).exec();
         eprintln!("restart failed: {e}");
+        let old = me.with_extension("old");
+        if old.exists() && std::fs::rename(&old, me).is_ok() {
+            eprintln!("restored previous Apollo Office executable");
+            let fallback = std::process::Command::new(me).args(&args).exec();
+            eprintln!("rollback restart failed: {fallback}");
+        }
         std::process::exit(1);
     }
     #[cfg(not(unix))]
@@ -327,6 +426,7 @@ pub fn relaunch(me: &Path) -> ! {
     }
 }
 
+/// Removes Windows restart leftovers after a successful new process launch.
 pub fn cleanup(me: &Path) {
     if cfg!(windows) {
         let _ = std::fs::remove_file(me.with_extension("old.exe"));
@@ -345,6 +445,119 @@ mod t {
         assert!(!newer("0.4.0", "0.4.0"));
         assert!(newer("0.5.0", "0.5.0-rc1"));
         assert!(!newer("0.5.0-rc1", "0.5.0"));
+        // A primeira atualização assinada do fork parte da release 0.10.1.
+        assert!(newer("0.10.2", "0.10.1"));
+        assert!(!newer("0.10.1", "0.10.2"));
+    }
+
+    #[test]
+    fn running_work_or_merge_blocks_update() {
+        let db = crate::db::Db::mem();
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            PathBuf::from("/tmp/apollo-upd-test"),
+            47300,
+            PathBuf::from("/tmp/apollo-upd-test/apollo-office"),
+        ));
+        assert!(idle(&a));
+        assert!(!manually_paused(&a));
+        assert!(!apply(&a, true));
+        assert!(!a.drain.load(std::sync::atomic::Ordering::SeqCst));
+        a.db.run("insert into jobs(st) values('fix')", crate::pa![]);
+        assert!(!idle(&a));
+        a.db.run("delete from jobs", crate::pa![]);
+        a.merge_in_progress.lock().unwrap().insert("test".into());
+        assert!(!idle(&a));
+        a.merge_in_progress.lock().unwrap().clear();
+        a.act.lock().unwrap().insert("test".into());
+        assert!(!idle(&a));
+        a.act.lock().unwrap().clear();
+        a.lv.lock().unwrap().o.man = true;
+        assert!(manually_paused(&a));
+        assert!(idle(&a));
+    }
+
+    #[test]
+    fn manual_failure_never_clears_auto_drain() {
+        let db = crate::db::Db::mem();
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            PathBuf::from("/tmp/apollo-drain-test"),
+            47300,
+            PathBuf::from("/tmp/apollo-drain-test/apollo-office"),
+        ));
+        assert!(crate::pipe::admit(&a, "sample/repo", "local", 42));
+        assert!(request_drain(&a));
+        assert!(!reserve_install(&a, false));
+        assert!(a.drain.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!crate::pipe::admit(&a, "other/repo", "local", 43));
+        a.act.lock().unwrap().clear();
+        a.lk.lock().unwrap().clear();
+        assert!(reserve_install(&a, false));
+        assert!(a.drain.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(*a.restart.lock().unwrap());
+        cancel_watcher_drain(&a);
+        assert!(a.drain.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn disabling_automatic_updates_releases_uncommitted_drain() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            PathBuf::from("/tmp/apollo-cancel-test"),
+            47300,
+            PathBuf::from("/tmp/apollo-cancel-test/apollo-office"),
+        ));
+        assert!(request_drain(&a));
+        cancel_watcher_drain(&a);
+        assert!(!a.drain.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(crate::pipe::admit(&a, "sample/repo", "local", 42));
+    }
+
+    #[test]
+    fn queued_submit_does_not_block_update_when_not_admitted() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            PathBuf::from("/tmp/apollo-submit-test"),
+            47300,
+            PathBuf::from("/tmp/apollo-submit-test/apollo-office"),
+        ));
+        a.db.run("insert into jobs(st) values('submit')", crate::pa![]);
+        assert!(idle(&a));
+        assert!(reserve_install(&a, false));
+        assert!(a.drain.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn admitted_vet_work_prevents_update_until_completion() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            PathBuf::from("/tmp/apollo-vet-test"),
+            47300,
+            PathBuf::from("/tmp/apollo-vet-test/apollo-office"),
+        ));
+        assert!(crate::wk::admit_vet(&a, 42));
+        assert!(!idle(&a));
+        assert!(!reserve_install(&a, false));
+        a.vtk.lock().unwrap().remove(&42);
+        assert!(reserve_install(&a, false));
+        assert!(!crate::wk::admit_vet(&a, 43));
+    }
+
+    #[test]
+    fn manual_update_requires_pause_and_blocks_admission() {
+        let db = crate::db::Db::mem();
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            PathBuf::from("/tmp/apollo-manual-test"),
+            47300,
+            PathBuf::from("/tmp/apollo-manual-test/apollo-office"),
+        ));
+        assert!(!reserve_install(&a, true));
+        assert!(!a.drain.load(std::sync::atomic::Ordering::SeqCst));
+        a.lv.lock().unwrap().o.man = true;
+        assert!(reserve_install(&a, true));
+        assert!(!crate::pipe::admit(&a, "sample/repo", "local", 42));
     }
 
     #[test]

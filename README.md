@@ -75,7 +75,7 @@ You need `git` (on Windows: Git for Windows), the [GitHub CLI][gh] logged in
 with `gh auth login`, and at least one provider: [Claude Code][cc] or Codex
 logged in, an API key, or Ollama. Docker is recommended.
 
-**Customized fork installation:** this repository does not currently publish release binaries. Do **not** install the official ApolloOffice release over this fork: it would replace our customizations. Compile this fork instead, using a Rust toolchain with Cargo:
+**Customized fork installation:** this fork publishes its own signed Linux x64 releases, independent of the official ApolloOffice channel. Do **not** install the official ApolloOffice release over this fork: it would replace our customizations. For the signed channel and its verification requirements, see [Fork updates](docs/fork-updates.md). To compile this fork manually, use a Rust toolchain with Cargo:
 
 ```sh
 git clone https://github.com/croquete1/ApolloOffice.git
@@ -167,3 +167,21 @@ always on: many projects require it, and hiding it can get you banned.
 
 [gh]: https://cli.github.com
 [cc]: https://claude.com/claude-code
+
+### Pull Requests em português (FixFlow)
+
+Em **Repos → croquete1/FixFlow-novo**, escolher **PR language →
+Português de Portugal (PT-PT)** e gravar. O idioma é uma definição de cada
+repositório, persistida e incluída na exportação/importação de configurações.
+O valor predefinido para os restantes repositórios continua a ser inglês.
+
+Em PT-PT, o ApolloOffice usa secções de PR em português, traduz o aviso de
+assistência de IA sem o remover e instrui o modelo a produzir título e textos
+em português europeu. As palavras-chave técnicas `Fixes #N`/`Closes #N`
+e `Co-Authored-By` mantêm-se para integração com GitHub. O modelo da PR
+do FixFlow, quando existir, deve ter secções em PT-PT; uma resposta do modelo
+com cabeçalhos ingleses é rejeitada a favor do corpo determinístico.
+
+A geração por modelos não garante a deteção de todas as expressões inglesas
+em prosa: rever sempre o conteúdo final quando a língua for um requisito
+contratual. Nenhuma alteração neste fluxo autoriza `merge` ou `deploy`.

@@ -314,13 +314,105 @@ fn trs(j: &Job) -> Vec<String> {
 
 pub const FOOT: &str = "🤖 Generated with AI by [ApolloOffice](https://github.com/Silvertree2010/ApolloOffice), see the Co-Authored-By trailers for the models";
 pub const FOOT0: &str = "🤖 Generated with AI, see the Co-Authored-By trailers for the models";
+pub const FOOT_PT: &str = "🤖 Gerado com assistência de IA pelo [ApolloOffice](https://github.com/Silvertree2010/ApolloOffice); modelos identificados nos trailers Co-Authored-By.";
+pub const FOOT0_PT: &str =
+    "🤖 Gerado com assistência de IA; modelos identificados nos trailers Co-Authored-By.";
+
+fn pr_pt(a: &Ax, j: &Job) -> bool {
+    rp(a, &j.repo)["lang"].as_str() == Some("pt-PT")
+}
+
+// Manter o rodapé que acompanhou o corpo aprovado, mesmo após mudar o idioma.
+fn stored_pr_footer(j: &Job, configured: &str) -> String {
+    let supported = [FOOT, FOOT0, FOOT_PT, FOOT0_PT];
+    if let Some(saved) = j.d["pb_footer"]
+        .as_str()
+        .filter(|saved| supported.contains(saved))
+    {
+        return saved.to_string();
+    }
+    if let Some(body) = j.d["pb"].as_str() {
+        if let Some(legacy) = supported.into_iter().find(|footer| body.contains(*footer)) {
+            return legacy.to_string();
+        }
+    }
+    configured.to_string()
+}
+
+// Não aceitar os cabeçalhos ingleses comuns que o preenchimento do template
+// pode reintroduzir numa PR configurada para PT-PT.
+fn english_pr_heading(body: &str) -> bool {
+    let english = [
+        "Cause",
+        "Fix",
+        "Verified",
+        "Not changed",
+        "Why",
+        "Change",
+        "Summary",
+        "Testing",
+        "Tests",
+        "Test plan",
+        "Description",
+        "Changes",
+    ];
+    body.lines().any(|line| {
+        let line = line.trim_start();
+        let Some(heading) = line.strip_prefix("## ") else {
+            return false;
+        };
+        english
+            .iter()
+            .any(|word| heading.trim().eq_ignore_ascii_case(word))
+    })
+}
 
 fn fo(a: &Ax, j: &Job) -> &'static str {
-    if rp(a, &j.repo)["nm"].as_i64().unwrap_or(1) == 1 {
-        FOOT
-    } else {
-        FOOT0
+    let branded = rp(a, &j.repo)["nm"].as_i64().unwrap_or(1) == 1;
+    match (pr_pt(a, j), branded) {
+        (true, true) => FOOT_PT,
+        (true, false) => FOOT0_PT,
+        (false, true) => FOOT,
+        (false, false) => FOOT0,
     }
+}
+
+fn pr_title(preferred: Option<&str>, f: &Value, fallback: &str) -> R<String> {
+    for value in [preferred, f["title"].as_str(), Some(fallback)]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(title) = value.lines().find(|line| !line.trim().is_empty()) {
+            return Ok(title.trim().to_string());
+        }
+    }
+    e("cannot publish a pull request without a title")
+}
+
+fn commit_subject(title: &str, feature: bool) -> R<String> {
+    let title = title
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    if title.is_empty() {
+        return e("cannot create a commit without a subject");
+    }
+    // A PR title is not necessarily a Conventional Commit subject. FixFlow
+    // enforces Conventional Commits in its commit-msg hook. Do not disable hooks.
+    let conventional = Regex::new(
+        r"^(?:feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(?:\([A-Za-z0-9_.-]+\))?!?:\s+\S",
+    )
+    .unwrap();
+    let kind = if feature { "feat" } else { "fix" };
+    let subject = if conventional.is_match(title) {
+        title.to_string()
+    } else {
+        format!("{kind}: {title}")
+    };
+    // The FixFlow commitlint configuration enforces a 120-character header.
+    let header = subject.chars().take(120).collect::<String>();
+    Ok(header.trim_end().to_string())
 }
 
 fn kill(a: &Ax, j: &Job) -> R<()> {
@@ -980,6 +1072,46 @@ async fn ci(a: &Ax, j: &mut Job) -> R<String> {
     ci0(a, j).await
 }
 
+// A evidência mantém a identidade do mesmo commit, incluindo nas reexecuções
+// para excluir testes instáveis. Um mergecheck não tem proof.fix_commit.
+fn ci_evidence(
+    kind: &str,
+    data: &Value,
+    command: &str,
+    exit: i32,
+    output: &str,
+    rerun: bool,
+) -> Value {
+    let candidate = if kind == "mergecheck" {
+        data["expected_head"].clone()
+    } else {
+        data["proof"]["fix_commit"].clone()
+    };
+    let mut result = json!({
+        "command": command,
+        "exit": exit,
+        "output_tail": crate::sh::last(output, 4000),
+        "candidate": candidate,
+    });
+    if rerun {
+        result["rerun"] = json!(true);
+    }
+    result
+}
+
+// A CI positiva, incluindo a repetição após um possível teste instável,
+// precisa da mesma prova de árvore e instante para os gates posteriores.
+async fn record_ci_success(a: &Ax, j: &mut Job) -> R<()> {
+    let tree = ok(a, j, "git rev-parse HEAD^{tree}", 60).await?;
+    if tree.is_empty() {
+        return drop("CI sem árvore Git verificável");
+    }
+    j.d["ci_tree"] = json!(tree);
+    j.d["ci_verified_at"] = json!(now());
+    a.db.jd(j);
+    Ok(())
+}
+
 async fn ci0(a: &Ax, j: &mut Job) -> R<String> {
     a.db.jset(j.id, &[("st", json!("ci"))]);
     a.st("ci", "work", Some(j.id), "");
@@ -993,10 +1125,13 @@ async fn ci0(a: &Ax, j: &mut Job) -> R<String> {
         a.say("ci", &format!("{c} running for {}", j.tag()), Some(j.id));
         let t0 = now();
         let (ec, o) = cirun(a, j, None).await;
-        j.d["ci_evidence"] = json!({"command":c,"exit":ec,"output_tail":crate::sh::last(&o,4000),"candidate":j.d["proof"]["fix_commit"]});
+        j.d["ci_evidence"] = ci_evidence(&j.kind, &j.d, &c, ec, &o, false);
         a.db.jd(j);
         let m = (now() - t0) / 60000;
         if ec == 0 {
+            // A prova local de integração vincula testes à árvore concreta,
+            // não ao SHA que muda quando se faz squash dos commits da PR.
+            record_ci_success(a, j).await?;
             a.st("ci", "idle", None, "ok");
             a.say("ci", &format!("green after {m} min"), Some(j.id));
             return Ok(String::new());
@@ -1109,9 +1244,10 @@ async fn ci0(a: &Ax, j: &mut Job) -> R<String> {
                     Some(j.id),
                 );
                 let (e2, o2) = cirun(a, j, None).await;
-                j.d["ci_evidence"] = json!({"command":c,"exit":e2,"output_tail":crate::sh::last(&o2,4000),"candidate":j.d["proof"]["fix_commit"],"rerun":true});
+                j.d["ci_evidence"] = ci_evidence(&j.kind, &j.d, &c, e2, &o2, true);
                 a.db.jd(j);
                 if e2 == 0 {
+                    record_ci_success(a, j).await?;
                     a.st("ci", "idle", None, "ok");
                     a.say("ci", "green on rerun (flaky test)", Some(j.id));
                     return Ok(String::new());
@@ -1182,7 +1318,7 @@ fn san(s: &str) -> String {
         .to_string()
 }
 
-pub fn body(j: &Job, f: &Value, ci: &str, ft: &str) -> String {
+fn body_lang(j: &Job, f: &Value, ci: &str, ft: &str, pt: bool) -> String {
     let g = |k: &str| {
         let s = f[k].as_str().unwrap_or("").to_string();
         if j.own() {
@@ -1210,13 +1346,28 @@ pub fn body(j: &Job, f: &Value, ci: &str, ft: &str) -> String {
     let mut v = vec![];
     if j.kind == "fix" {
         if j.hunt() {
-            v.push(format!(
-                "Found while testing `{}` (no existing issue): {}.",
-                j.d["hunt"]["where"].as_str().unwrap_or(""),
-                j.d["hunt"]["title"].as_str().unwrap_or("")
-            ));
+            v.push(if pt {
+                format!(
+                    "Encontrado durante os testes de `{}` (sem Issue existente): {}.",
+                    j.d["hunt"]["where"].as_str().unwrap_or(""),
+                    j.d["hunt"]["title"].as_str().unwrap_or("")
+                )
+            } else {
+                format!(
+                    "Found while testing `{}` (no existing issue): {}.",
+                    j.d["hunt"]["where"].as_str().unwrap_or(""),
+                    j.d["hunt"]["title"].as_str().unwrap_or("")
+                )
+            });
         } else if j.ext() {
-            v.push("Reported to us directly (no existing issue).".to_string());
+            v.push(
+                (if pt {
+                    "Reportado diretamente (sem Issue existente)."
+                } else {
+                    "Reported to us directly (no existing issue)."
+                })
+                .into(),
+            );
         } else if j.feat() {
             v.push(format!("Closes #{}", j.num));
         } else {
@@ -1226,44 +1377,103 @@ pub fn body(j: &Job, f: &Value, ci: &str, ft: &str) -> String {
     }
     let fe = j.feat();
     v.extend([
-        if fe { "## Why" } else { "## Cause" }.into(),
+        (if pt {
+            if fe {
+                "## Motivo"
+            } else {
+                "## Causa"
+            }
+        } else if fe {
+            "## Why"
+        } else {
+            "## Cause"
+        })
+        .into(),
         g("cause"),
         String::new(),
-        if fe { "## Change" } else { "## Fix" }.into(),
+        (if pt {
+            if fe {
+                "## Alterações"
+            } else {
+                "## Correção"
+            }
+        } else if fe {
+            "## Change"
+        } else {
+            "## Fix"
+        })
+        .into(),
         g("fix"),
         String::new(),
-        "## Verified".into(),
+        (if pt { "## Validação" } else { "## Verified" }).into(),
     ]);
     if !ts.is_empty() {
-        v.push(format!(
-            "- {}{} {}: fail{} on `{mn}` without the {} and pass{} with it (`{}`).",
-            if fe { "Test" } else { "Regression test" },
-            if pl { "s" } else { "" },
-            ts.iter()
-                .map(|t| format!("`{t}`"))
-                .collect::<Vec<_>>()
-                .join(", "),
-            if pl { "" } else { "s" },
-            if fe { "change" } else { "fix" },
-            if pl { "" } else { "es" },
-            f["test_cmd"].as_str().unwrap_or("")
-        ));
+        let names = ts
+            .iter()
+            .map(|t| format!("`{t}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if pt {
+            v.push(format!(
+                "- {} {names}: {} em `{mn}` sem a alteração e {} com ela (`{}`).",
+                if fe {
+                    if pl {
+                        "Testes"
+                    } else {
+                        "Teste"
+                    }
+                } else if pl {
+                    "Testes de regressão"
+                } else {
+                    "Teste de regressão"
+                },
+                if pl { "falham" } else { "falha" },
+                if pl { "passam" } else { "passa" },
+                f["test_cmd"].as_str().unwrap_or("")
+            ));
+        } else {
+            v.push(format!(
+                "- {}{} {names}: fail{} on `{mn}` without the {} and pass{} with it (`{}`).",
+                if fe { "Test" } else { "Regression test" },
+                if pl { "s" } else { "" },
+                if pl { "" } else { "s" },
+                if fe { "change" } else { "fix" },
+                if pl { "" } else { "es" },
+                f["test_cmd"].as_str().unwrap_or("")
+            ));
+        }
     }
     if kn.is_empty() {
-        v.push(format!("- `{ci}` passes."));
+        v.push(if pt {
+            format!("- `{ci}`: aprovado.")
+        } else {
+            format!("- `{ci}` passes.")
+        });
     } else {
-        v.push(format!(
-            "- `{ci}` passes except {}, which also fail{} on `{mn}` without this change.",
-            kn.iter()
-                .map(|n| format!("`{n}`"))
-                .collect::<Vec<_>>()
-                .join(", "),
-            if kn.len() > 1 { "" } else { "s" }
-        ));
+        let names = kn
+            .iter()
+            .map(|n| format!("`{n}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        v.push(if pt {
+            format!("- `{ci}`: aprovado, exceto {names}, que também falham em `{mn}` sem esta alteração.")
+        } else {
+            format!("- `{ci}` passes except {names}, which also fail{} on `{mn}` without this change.",
+                if kn.len() > 1 { "" } else { "s" })
+        });
     }
     let u = g("untouched");
     if !u.trim().is_empty() {
-        v.extend([String::new(), "## Not changed".into(), u]);
+        v.extend([
+            String::new(),
+            (if pt {
+                "## Fora do âmbito"
+            } else {
+                "## Not changed"
+            })
+            .into(),
+            u,
+        ]);
     }
     if !ft.is_empty() {
         v.extend([String::new(), ft.into()]);
@@ -1304,11 +1514,11 @@ async fn review_mode(a: &Ax, j: &mut Job, f: &mut Value, diagnostic: bool) -> R<
     let p = format!(
         "Repository {}, {}.\n\n{}\n\n{}Commit messages:\n{lg}\n\nPR title: {}\nPR body:\n{}\n\nDiff:\n{df}{}",
         j.repo,
-        if j.own() { "no GitHub issue (the PR must not reference any issue number)".to_string() } else { format!("issue #{}", j.num) },
+        if j.kind == "mergecheck" { format!("PR #{} — validação para possível merge", j.pr.unwrap_or(0)) } else if j.own() { "no GitHub issue (the PR must not reference any issue number)".to_string() } else { format!("issue #{}", j.num) },
         wrap("issue", &format!("{}\n\n{}", j.title, crate::sh::head(&j.s("body"), 4000))),
         if j.kind == "review" { format!("{}\n\n", wrap("request", &j.s("change"))) } else if j.feat() { "This PR implements a requested FEATURE, not a bug fix. Judge it as a feature: it does what the issue asks, completely but minimally; the tests check the new behaviour (on the test commit they may fail to compile because the new API is missing); no unrelated changes; no surprising changes to defaults, file formats or visible design beyond what the issue asks.\n\n".to_string() } else { String::new() },
         f["title"].as_str().unwrap_or(""),
-        body(j, f, &ci, ""),
+        body_lang(j, f, &ci, "", pr_pt(a, j)),
         if crate::quality::enabled(a) && j.kind == "fix" { format!("{}{}\nIndependent acceptance evidence: {}\nFrozen verifier (untrusted code): {}\nCheck that this verifier exercises actual production code and the reported behavior, rather than copying logic or merely matching source text. Reject inadequate coverage or unsupported claims.",rules(a, j),crate::quality::context(j),wrap("acceptance-evidence",&j.d["acceptance_proof"].to_string()),wrap("frozen-verifier",j.d["acceptance"]["script"].as_str().unwrap_or(""))) } else { rules(a, j) }
     );
     let author = j.d["author"].as_str().unwrap_or("").to_string();
@@ -1966,7 +2176,7 @@ async fn mkbody(a: &Ax, j: &mut Job) -> R<()> {
     let f = j.d["f"].clone();
     let ci = rp(a, &j.repo)["ci"].as_str().unwrap_or("").to_string();
     let ft = fo(a, j);
-    let mut b = body(j, &f, &ci, ft);
+    let mut b = body_lang(j, &f, &ci, ft, pr_pt(a, j));
     if j.kind == "fix" {
         if let Some(t) = tmpl(&j.repo).await {
             a.say(
@@ -1975,24 +2185,53 @@ async fn mkbody(a: &Ax, j: &mut Job) -> R<()> {
                 Some(j.id),
             );
             let md = a.md("reviewer");
-            let mut o = Ask::new("submit", md, P("desc"), format!("Fill in this repository's pull request template for the change below. Keep the template's headings and checklist structure. Tick a checkbox only when the facts below prove it (tests added, tests pass, CI command passes, linked issue). Remove instructions and HTML comments that are meant for the author. Put the facts into the matching sections; if a fact has no section, keep it in a section at the end. Use only the facts given, never invent. Answer only with JSON {{\"body\": \"the filled template in Markdown\"}}.\n\n{}\n\nFacts (our PR text):\n{}", wrap("template", &crate::sh::head(&t, 8000)), body(j, &f, &ci, "")));
+            let instructions = if pr_pt(a, j) {
+                "Preencha o modelo de Pull Request com a informação abaixo. Preserve a estrutura e os títulos em PT-PT. Todo o texto narrativo deve estar em português de Portugal, incluindo títulos e listas. Assinale uma checkbox apenas quando os factos provarem o respetivo resultado. Remova instruções e comentários HTML do modelo. Nunca invente testes ou aprovações. Preserve identificadores técnicos, comandos e a referência 'Fixes #N'. Responda apenas com JSON de chave 'body' e valor Markdown."
+            } else {
+                "Fill in this repository's pull request template for the change below. Keep the template's headings and checklist structure. Tick a checkbox only when the facts below prove it (tests added, tests pass, CI command passes, linked issue). Remove instructions and HTML comments that are meant for the author. Put the facts into the matching sections; if a fact has no section, keep it in a section at the end. Use only the facts given, never invent. Answer only with JSON with key 'body' and Markdown string value."
+            };
+            let mut o = Ask::new(
+                "submit",
+                md,
+                P("desc"),
+                format!(
+                    "{instructions}\n\n{}\n\nFacts (our PR text):\n{}",
+                    wrap("template", &crate::sh::head(&t, 8000)),
+                    body_lang(j, &f, &ci, "", pr_pt(a, j))
+                ),
+            );
             o.job = Some(j.id);
             o.ef = Some("low");
             if let Ok((_, js)) = ask(a, o).await {
                 if let Some(s) = js["body"].as_str().filter(|s| s.len() > 40) {
-                    b = s.trim().to_string();
-                    if j.own() {
-                        b = san(&b);
-                    }
-                    if !b.contains(ft) {
-                        b = format!("{b}\n\n{ft}");
+                    // A template model must not silently reintroduce English headings.
+                    let wrong_language = pr_pt(a, j) && english_pr_heading(s);
+                    let missing_reference = j.kind == "fix"
+                        && !j.own()
+                        && !s.contains(&format!(
+                            "{} #{}",
+                            if j.feat() { "Closes" } else { "Fixes" },
+                            j.num
+                        ));
+                    if wrong_language || missing_reference {
+                        a.say("submit", "modelo de PR rejeitado por idioma ou referência em falta; usado o corpo estruturado", Some(j.id));
+                    } else {
+                        b = s.trim().to_string();
+                        if j.own() {
+                            b = san(&b);
+                        }
+                        if !b.contains(ft) {
+                            b = format!("{b}\n\n{ft}");
+                        }
                     }
                 }
             }
             a.st("submit", "work", Some(j.id), "");
         }
     }
-    j.d["pt"] = json!(f["title"].as_str().unwrap_or(&j.title));
+    let title = pr_title(None, &f, &j.title)?;
+    j.d["pt"] = json!(title);
+    j.d["pb_footer"] = json!(ft);
     j.d["pb"] = json!(b);
     j.d["df"] = json!(ok(
         a,
@@ -2023,8 +2262,11 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
         );
         let f = j.d["f"].clone();
         let ci = rp(a, &j.repo)["ci"].as_str().unwrap_or("").to_string();
-        j.d["pt"] = json!(f["title"].as_str().unwrap_or(&j.title));
-        j.d["pb"] = json!(body(j, &f, &ci, fo(a, j)));
+        let title = pr_title(j.d["pt"].as_str(), &f, &j.title)?;
+        j.d["pt"] = json!(title);
+        let footer = fo(a, j);
+        j.d["pb_footer"] = json!(footer);
+        j.d["pb"] = json!(body_lang(j, &f, &ci, footer, pr_pt(a, j)));
         let tip = if j.s("br").is_empty() {
             "HEAD".to_string()
         } else {
@@ -2050,26 +2292,33 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
     a.flow("reviewer", "submit", &j.tag());
     need(a, "submit", &["gh", &j.h()]).await?;
     let f = j.d["f"].clone();
-    let ft = fo(a, j);
+    let ft = stored_pr_footer(j, fo(a, j));
     let tr = trs(j);
-    let ti = j.d["pt"]
-        .as_str()
-        .map(String::from)
-        .filter(|x| !x.trim().is_empty())
-        .unwrap_or(f["title"].as_str().unwrap_or(&j.title).to_string());
+    let ti = pr_title(j.d["pt"].as_str(), &f, &j.title)?;
     if j.kind == "fix" && !j.d["sq"].as_bool().unwrap_or(false) {
         let rf = if j.ext() {
-            "Reported to us directly".to_string()
+            (if pr_pt(a, j) {
+                "Reportado diretamente"
+            } else {
+                "Reported to us directly"
+            })
+            .to_string()
         } else if j.hunt() || j.num == 0 {
-            format!("Found while testing {}", j.wh())
+            if pr_pt(a, j) {
+                format!("Encontrado durante os testes de {}", j.wh())
+            } else {
+                format!("Found while testing {}", j.wh())
+            }
         } else {
+            // Keep the GitHub auto-close keyword intact in every language.
             format!("Fixes #{}", j.num)
         };
+        let subject = commit_subject(&ti, j.feat())?;
         ok(
             a,
             j,
             &format!(
-                "git reset -q --soft {} && git commit -q -F - <<'MSG'\n{ti}\n\n{rf}\n\n{}\nMSG",
+                "git reset -q --soft {} && git commit -q -F - <<'MSG'\n{subject}\n\n{rf}\n\n{}\nMSG",
                 j.s("base"),
                 tr.join("\n")
             ),
@@ -2100,16 +2349,26 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
         a.db.jd(j);
     }
     let sha = ok(a, j, "git rev-parse HEAD", 60).await?;
-    let pb = j.d["pb"]
-        .as_str()
-        .map(String::from)
-        .unwrap_or_else(|| body(j, &f, rp(a, &j.repo)["ci"].as_str().unwrap_or(""), ft));
+    // Prova de publicação: árvore da PR final e commit explícitos.
+    // É necessário que o CI tenha executado nesta mesma árvore.
+    let publish_tree = ok(a, j, "git rev-parse HEAD^{tree}", 60).await?;
+    j.d["publish_tree"] = json!(publish_tree);
+    a.db.jd(j);
+    let pb = j.d["pb"].as_str().map(String::from).unwrap_or_else(|| {
+        body_lang(
+            j,
+            &f,
+            rp(a, &j.repo)["ci"].as_str().unwrap_or(""),
+            ft.as_str(),
+            pr_pt(a, j),
+        )
+    });
     let msg = ok(a, j, "git log -1 --format=%B", 60).await?;
     if Regex::new(r"#0\b").unwrap().is_match(&pb) || Regex::new(r"#0\b").unwrap().is_match(&msg) {
         return drop("PR text or commit still references #0, not pushing");
     }
     if (j.kind != "rebase" || !j.s("fx").is_empty())
-        && (!tr.iter().all(|t| msg.contains(t)) || j.kind == "fix" && !pb.contains(ft))
+        && (!tr.iter().all(|t| msg.contains(t)) || j.kind == "fix" && !pb.contains(ft.as_str()))
     {
         return drop("AI disclosure missing (Co-Authored-By trailer or footer), not pushing");
     }
@@ -2273,6 +2532,9 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
     if r2 != sha {
         return e("push did not arrive");
     }
+    // Apenas o SHA confirmado no GitHub pode ser usado por um futuro merge.
+    j.d["published_sha"] = json!(sha);
+    a.db.jd(j);
     let pn = j.pr.unwrap_or(0);
     if j.kind == "rebase" || j.kind == "review" {
         let u = format!("https://github.com/{}/pull/{pn}", j.repo);
@@ -2568,7 +2830,12 @@ async fn desc(a: &Ax, j: &mut Job) -> R<Value> {
         60,
     )
     .await?;
-    let mut o = Ask::new("fixer", a.md("reviewer"), P("desc"), format!("Repository {}. {}\n\nProof lines from the verification run:\n{}\n\nCommits:\n{lg}\n\nDiff:\n{df}\n\nAnswer with {{\"title\": \"PR title, imperative, max 72 chars\", \"cause\": \"root cause, 1-3 sentences\", \"fix\": \"what changed, 1-3 sentences\", \"untouched\": \"\", \"tests\": [\"exact names of the regression tests added in the diff\"], \"test_cmd\": \"exact shell command from the repo root that runs only those tests\"}}", j.repo, wrap("issue", &format!("{}\n\n{}", j.title, crate::sh::head(&j.s("body"), 3000))), j.d["proof"]));
+    let locale = if pr_pt(a, j) {
+        "Idioma obrigatório: português de Portugal (PT-PT). O título, a causa, a correção e o texto fora do âmbito devem estar integralmente em PT-PT. Preservar comandos, nomes técnicos, identificadores dos testes e as chaves JSON. Não traduzir código.\n\n"
+    } else {
+        ""
+    };
+    let mut o = Ask::new("fixer", a.md("reviewer"), P("desc"), format!("{locale}Repository {}. {}\n\nProof lines from the verification run:\n{}\n\nCommits:\n{lg}\n\nDiff:\n{df}\n\nAnswer with {{\"title\": \"PR title, imperative, max 72 chars\", \"cause\": \"root cause, 1-3 sentences\", \"fix\": \"what changed, 1-3 sentences\", \"untouched\": \"\", \"tests\": [\"exact names of the regression tests added in the diff\"], \"test_cmd\": \"exact shell command from the repo root that runs only those tests\"}}", j.repo, wrap("issue", &format!("{}\n\n{}", j.title, crate::sh::head(&j.s("body"), 3000))), j.d["proof"]));
     o.job = Some(j.id);
     o.ef = Some("medium");
     let (_, js) = ask(a, o).await?;
@@ -2628,6 +2895,114 @@ fn idle_all(a: &Ax, id: i64) {
     }
 }
 
+/// Revalidação de uma PR existente, sem criar commits nem publicar alterações.
+/// Usa o mesmo worker e a mesma CI do pipeline normal.
+async fn mergecheck(a: &Ax, j: &mut Job) -> R<()> {
+    let head = j.s("expected_head");
+    let base = j.s("expected_base");
+    let branch = j.s("branch");
+    let valid_sha = |s: &str| s.len() == 40 && s.bytes().all(|c| c.is_ascii_hexdigit());
+    if !valid_sha(&head)
+        || !valid_sha(&base)
+        || branch.is_empty()
+        || j.pr.is_none()
+        || j.s("author").is_empty()
+    {
+        return drop("provas insuficientes para revalidar PR");
+    }
+    let number = j.pr.unwrap_or(0);
+    let before = ghj(&["api", &format!("repos/{}/pulls/{number}", j.repo)], 45)
+        .await
+        .map_err(X::E)?;
+    if before["head"]["sha"] != head
+        || before["base"]["sha"] != base
+        || before["head"]["ref"] != branch
+        || before["head"]["repo"]["full_name"] != j.repo
+        || before["state"] != "open"
+        || before["draft"] != false
+    {
+        return drop("PR mudou antes de executar testes locais");
+    }
+
+    prep(a, j).await?;
+    let actual_head = ok(a, j, "git rev-parse HEAD", 60).await?;
+    let main = crate::gh::meta(a, &j.repo).await.map_err(X::E)?["main"]
+        .as_str()
+        .unwrap_or("main")
+        .to_string();
+    let actual_base = ok(a, j, &format!("git rev-parse origin/{}", q(&main)), 60).await?;
+    if actual_head != head || actual_base != base {
+        return drop("checkout da PR ou da main difere dos SHAs esperados");
+    }
+
+    // A comparação para o Reviewer deve usar a main, não o HEAD da própria PR.
+    j.d["base"] = json!(base);
+    j.d["body"] = before["body"].clone();
+    a.db.jd(j);
+    let ci_result = ci(a, j).await?;
+    if !ci_result.is_empty() {
+        return drop(format!(
+            "CI reprovada na revalidação: {}",
+            crate::sh::head(&ci_result, 700)
+        ));
+    }
+    let mut report = json!({
+        "title":j.title,
+        "tests":[],
+        "test_cmd":rp(a, &j.repo)["ci"],
+        "cause":"Revisão de integração existente",
+        "fix":"Código existente sob revisão"
+    });
+    let feedback = review(a, j, &mut report).await?;
+    if !feedback.is_empty() {
+        return drop(format!(
+            "Reviewer reprovou: {}",
+            crate::sh::head(&feedback, 700)
+        ));
+    }
+
+    let actual_head = ok(a, j, "git rev-parse HEAD", 60).await?;
+    let tree = ok(a, j, "git rev-parse HEAD^{tree}", 60).await?;
+    let fresh = ghj(&["api", &format!("repos/{}/pulls/{number}", j.repo)], 45)
+        .await
+        .map_err(X::E)?;
+    if actual_head != head
+        || j.d["ci_tree"] != tree
+        || fresh["head"]["sha"] != head
+        || fresh["base"]["sha"] != base
+        || fresh["state"] != "open"
+        || fresh["draft"] != false
+    {
+        return drop("PR mudou entre testes, revisão e revalidação final");
+    }
+    j.d["published_sha"] = json!(head);
+    j.d["publish_tree"] = json!(tree);
+    a.db.jd(j);
+    a.db.jset(
+        j.id,
+        &[
+            ("st", json!("done")),
+            (
+                "why",
+                json!("revalidação local concluída; aguarda gate de merge"),
+            ),
+        ],
+    );
+    a.say(
+        "reviewer",
+        &format!(
+            "{}#{number}: CI e revisão independente aprovadas no HEAD atual",
+            j.repo
+        ),
+        Some(j.id),
+    );
+    clean(a, j).await;
+    // Só acorda o Steward depois de persistir CI, revisão e job concluído.
+    // A decisão de merge continua a passar por todos os gates do try_one().
+    a.steward_wake.notify_one();
+    Ok(())
+}
+
 async fn go(a: &Ax, id: i64, h: &str) {
     let Some(mut j) = a.db.jg(id) else { return };
     let rs = j.d["rs"].as_bool().unwrap_or(false);
@@ -2638,6 +3013,10 @@ async fn go(a: &Ax, id: i64, h: &str) {
     }
     a.say("repro", &format!("[{h}] takes {}", j.tag()), Some(id));
     let r: R<()> = async {
+        if j.kind == "mergecheck" {
+            mergecheck(a, &mut j).await?;
+            return Ok(());
+        }
         if j.st == "submit" {
             ok(a, &j, &format!("git checkout -q {}", q(&j.s("br"))), 120).await?;
             stage(a, "submit", || {
@@ -2978,6 +3357,25 @@ async fn red(a: &Ax, r: &str, h: &str) -> bool {
     !(h["s"].is_string() && cr["sha"].is_string() && h["s"] != cr["sha"])
 }
 
+// Work admission must hold the same transition guard as the updater and merges.
+// A preliminary drain check is only an optimization, never the authority.
+pub(crate) fn admit(a: &Ax, repo: &str, host: &str, id: i64) -> bool {
+    let _transition = a.update_transition.lock().unwrap();
+    if a.drain.load(std::sync::atomic::Ordering::SeqCst) {
+        return false;
+    }
+    let mut active = a.act.lock().unwrap();
+    let mut locked = a.lk.lock().unwrap();
+    let claim = format!("{repo} {host}");
+    if active.contains(&claim) || locked.contains(&id) {
+        return false;
+    }
+    active.insert(claim);
+    locked.insert(id);
+    true
+}
+
+/// Selects eligible work, reserving the final admission under update_transition.
 async fn pick(a: &Ax, h: &str) -> Option<i64> {
     if a.drain.load(std::sync::atomic::Ordering::Relaxed) {
         return None;
@@ -3049,22 +3447,33 @@ async fn pick(a: &Ax, h: &str) -> Option<i64> {
         if !pin && j["kind"] == "fix" {
             let mo = rr["maxo"].as_i64().unwrap_or(3);
             let md = rr["maxd"].as_i64().unwrap_or(5);
-            if crate::gh::opened(a, &r).await + a.db.n("select count(*) from jobs where repo=? and kind='fix' and st in ('repro','fix','ci','review','gate','submit')", pa![r.clone()]) >= mo || crate::gh::today(a, &r).await >= md {
+            // Zero disables the respective PR quota without disabling the queue gates.
+            let open_full = mo > 0
+                && pr_quota_hit(
+                    mo,
+                    crate::gh::opened(a, &r).await
+                        + a.db.n(
+                            "select count(*) from jobs where repo=? and kind='fix' and st in ('repro','fix','ci','review','gate','submit')",
+                            pa![r.clone()],
+                        ),
+                );
+            let daily_full = md > 0 && pr_quota_hit(md, crate::gh::today(a, &r).await);
+            if open_full || daily_full {
                 continue;
             }
         }
-        {
-            let mut ac = a.act.lock().unwrap();
-            let mut lk = a.lk.lock().unwrap();
-            if ac.contains(&format!("{r} {h}")) || lk.contains(&id) {
-                continue;
-            }
-            ac.insert(format!("{r} {h}"));
-            lk.insert(id);
+        if admit(a, &r, h, id) {
+            return Some(id);
         }
-        return Some(id);
+        if a.drain.load(std::sync::atomic::Ordering::SeqCst) {
+            return None;
+        }
     }
     None
+}
+
+fn pr_quota_hit(limit: i64, used: i64) -> bool {
+    limit > 0 && used >= limit
 }
 
 pub fn bl(a: &Ax, r: &str) -> i64 {
@@ -3325,6 +3734,38 @@ pub async fn guard(a: Ax) {
 mod t {
     use super::*;
 
+    #[test]
+    fn mergecheck_retry_preserves_head_sha_and_negative_ci_evidence() {
+        let head = "0123456789abcdef0123456789abcdef01234567";
+        let data = json!({"expected_head":head, "proof":{"fix_commit":null}});
+        let kind = "mergecheck";
+        let command = "node --test";
+        let output = "not ok 1\n# fail 1";
+        let first = ci_evidence(kind, &data, command, 1, output, false);
+        let retry = ci_evidence(kind, &data, command, 1, output, true);
+        assert_eq!(first["candidate"], json!(head));
+        assert_eq!(retry["candidate"], json!(head));
+        assert_eq!(retry["exit"], 1);
+        assert_eq!(retry["command"], command);
+        assert_eq!(retry["rerun"], true);
+        let tail = retry["output_tail"].as_str().unwrap();
+        assert!(tail.contains("# fail 1"));
+    }
+
+    #[test]
+    fn own_fix_ci_evidence_keeps_its_fix_commit_and_green_retry_sha() {
+        let fix = "fedcba9876543210fedcba9876543210fedcba98";
+        let data = json!({"expected_head":null,"proof":{"fix_commit":fix}});
+        let kind = "fix";
+        let first = ci_evidence(kind, &data, "", 1, "", false);
+        let retry = ci_evidence(kind, &data, "", 0, "", true);
+        assert_eq!(first["candidate"], json!(fix));
+        assert_eq!(retry["candidate"], json!(fix));
+        assert_eq!(retry["exit"], 0);
+        assert_eq!(retry["rerun"], true);
+        assert!(first.get("rerun").is_none());
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn cancelled_ci_releases_build_capacity() {
@@ -3451,27 +3892,89 @@ mod t {
     }
 
     #[test]
+    fn pr_quota_zero_means_unlimited() {
+        // A missing cap does not block either new PRs or work already in flight.
+        assert!(!pr_quota_hit(0, 0));
+        assert!(!pr_quota_hit(0, 2));
+        assert!(!pr_quota_hit(0, 1_000_000));
+        // Positive caps retain the existing inclusive boundary.
+        assert!(!pr_quota_hit(2, 1));
+        assert!(pr_quota_hit(2, 2));
+        assert!(pr_quota_hit(2, 3));
+        assert!(!pr_quota_hit(5, 4));
+        assert!(pr_quota_hit(5, 5));
+    }
+
+    #[test]
+    fn conventional_commit_subject_is_distinct_from_pull_request_title() {
+        let portuguese = "Rejeitar datas civis inválidas nas entregas RMA";
+        let title = pr_title(None, &json!({"title": portuguese}), "outra causa").unwrap();
+        let subject = commit_subject(&title, false).unwrap();
+        assert_eq!(
+            subject,
+            "fix: Rejeitar datas civis inválidas nas entregas RMA"
+        );
+        // PR titles remain human-readable and do not acquire a forced prefix.
+        assert_eq!(title, portuguese);
+        assert_eq!(
+            commit_subject("fix(rma): validar datas civis", false).unwrap(),
+            "fix(rma): validar datas civis"
+        );
+        assert_eq!(
+            commit_subject("Adicionar avisos de RMA", true).unwrap(),
+            "feat: Adicionar avisos de RMA"
+        );
+        assert_eq!(
+            commit_subject("Corrigir falha\nMSG\ncomando inesperado", false).unwrap(),
+            "fix: Corrigir falha"
+        );
+        assert!(commit_subject("   \n ", false).is_err());
+        let long = "x".repeat(200);
+        assert_eq!(commit_subject(&long, false).unwrap().chars().count(), 120);
+    }
+
+    #[test]
+    fn pull_request_title_falls_back_when_generated_title_is_blank() {
+        let description = json!({"title": "   "});
+        assert_eq!(
+            pr_title(None, &description, "Datas de RMA inválidas").unwrap(),
+            "Datas de RMA inválidas"
+        );
+        assert_eq!(
+            pr_title(Some("Título aprovado"), &description, "Outro").unwrap(),
+            "Título aprovado"
+        );
+        assert_eq!(
+            pr_title(None, &json!({"title": "  Linha útil\nMSG"}), "").unwrap(),
+            "Linha útil"
+        );
+        assert!(pr_title(None, &json!({"title": ""}), "  ").is_err());
+    }
+
+    #[test]
     fn bodies() {
         let j = Job::of(
             json!({"id": 5, "repo": "o/r", "num": 12, "kind": "fix", "title": "T", "d": {"mn": "main", "known": []}}),
         );
         let f = json!({"cause": "c", "fix": "f", "tests": ["t1"], "test_cmd": "cargo test t1", "untouched": ""});
-        let b = body(&j, &f, "cargo test", FOOT);
+        let b = body_lang(&j, &f, "cargo test", FOOT, false);
         assert!(b.starts_with("Fixes #12"));
         assert!(b.contains("`t1`: fails on `main`"));
         assert!(b.ends_with(FOOT));
-        assert!(!body(&j, &f, "cargo test", "").contains(FOOT));
+        assert!(!body_lang(&j, &f, "cargo test", "", false).contains(FOOT));
         assert!(
-            body(&j, &f, "cargo test", FOOT0).ends_with(FOOT0) && !FOOT0.contains("ApolloOffice")
+            body_lang(&j, &f, "cargo test", FOOT0, false).ends_with(FOOT0)
+                && !FOOT0.contains("ApolloOffice")
         );
         let h = Job::of(
             json!({"id": 6, "repo": "o/r", "num": 0, "kind": "fix", "title": "T", "d": {"mn": "main", "hunt": {"where": "a.rs:3", "title": "x"}}}),
         );
-        let b = body(
+        let b = body_lang(
             &h,
             &json!({"cause": "Fixes #0. c", "fix": "f", "tests": ["a", "b"], "test_cmd": "t"}),
             "make test",
             FOOT,
+            false,
         );
         assert!(b.starts_with("Found while testing `a.rs:3`"));
         assert!(!b.contains("#0"));
@@ -3479,10 +3982,53 @@ mod t {
         let fj = Job::of(
             json!({"id": 7, "repo": "o/r", "num": 9, "kind": "fix", "title": "T", "d": {"mn": "main", "feat": true}}),
         );
-        let b = body(&fj, &f, "cargo test", "");
+        let b = body_lang(&fj, &f, "cargo test", "", false);
         assert!(b.starts_with("Closes #9"));
         assert!(b.contains("## Why") && b.contains("## Change") && !b.contains("## Cause"));
         assert!(b.contains("Test `t1`: fails on `main` without the change"));
+    }
+
+    #[test]
+    fn portuguese_template_rejects_common_english_headings() {
+        assert!(english_pr_heading(
+            "Fixes #12\n\n## Summary\n...\n## Testing\n..."
+        ));
+        assert!(english_pr_heading("## testing\nTestes executados"));
+        assert!(!english_pr_heading("Fixes #12\n## Resumo\n## Validação"));
+    }
+
+    #[test]
+    fn approved_pr_footer_survives_language_changes() {
+        let mut j = Job::of(json!({
+            "id": 88, "repo": "o/r", "num": 12, "kind": "fix", "title": "T",
+            "d": {"pb_footer": FOOT_PT, "pb": format!("Fixes #12\n\n{FOOT_PT}")}
+        }));
+        assert_eq!(stored_pr_footer(&j, FOOT), FOOT_PT);
+        j.d.as_object_mut().unwrap().remove("pb_footer");
+        assert_eq!(stored_pr_footer(&j, FOOT), FOOT_PT);
+        j.d["pb"] = json!("sem rodapé");
+        assert_eq!(stored_pr_footer(&j, FOOT), FOOT);
+        j.d["pb_footer"] = json!("rodapé arbitrário");
+        assert_eq!(stored_pr_footer(&j, FOOT), FOOT);
+    }
+
+    #[test]
+    fn portuguese_pr_body_preserves_github_linkage_and_disclosure() {
+        let j = Job::of(
+            json!({"id": 50, "repo": "o/r", "num": 42, "kind": "fix", "title": "T",
+                "d": {"mn": "main", "known": []}}),
+        );
+        let f = json!({"cause": "A causa.", "fix": "A correção.", "tests": ["teste_repro"],
+            "test_cmd": "npm test", "untouched": "Sem alterações financeiras."});
+        let b = body_lang(&j, &f, "npm run test:smoke", FOOT_PT, true);
+        assert!(b.starts_with("Fixes #42"));
+        assert!(b.contains("## Causa\nA causa."));
+        assert!(b.contains("## Correção\nA correção."));
+        assert!(b.contains("## Validação"));
+        assert!(b.contains("Teste de regressão `teste_repro`: falha em `main`"));
+        assert!(b.contains("## Fora do âmbito"));
+        assert!(b.ends_with(FOOT_PT));
+        assert!(!b.contains("## Verified"));
     }
 
     #[test]

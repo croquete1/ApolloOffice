@@ -122,9 +122,16 @@
         <div class="hint">Runs from the repository root. A fix is only submitted when this passes.</div>
         <label>Setup command</label><input type="text" name="setup" value="${esc(r.setup)}" placeholder="optional, e.g. npm ci">
         <div class="hint">Runs before every job, after checkout.</div>
+        <label>PR language</label><select name="lang" aria-label="Idioma das Pull Requests"><option value="en" ${r.lang !== "pt-PT" ? "selected" : ""}>English</option><option value="pt-PT" ${r.lang === "pt-PT" ? "selected" : ""}>Português de Portugal (PT-PT)</option></select>
         <label>Pull requests</label><select name="mode"><option value="ask" ${r.mode !== "auto" ? "selected" : ""}>wait for my approval</option><option value="auto" ${r.mode === "auto" ? "selected" : ""}>submit automatically</option></select>
+        <label>Encaminhar revisões para correção</label>${tg("steward_repair", r.steward_repair, "Criar trabalhos de revisão apenas para PRs próprias com pedidos humanos validados")}
+        <div class="hint">Desligado por defeito. Requer pedido CHANGES_REQUESTED no HEAD atual, autor com permissões, Guard aprovado, ausência de duplicações e de trabalho de revisão pendente. Encaminha para o Fixer e os gates habituais; não faz merge.</div>
+        <label>Integração automática (restrita)</label>${tg("auto_merge", r.auto_merge, "Integrar PRs elegíveis após verificar os requisitos")}
+        <div class="hint">Quando a branch é protegida, exige checks GitHub obrigatórios e aprovação humana independente.</div>
+        <label>Modo local sem plano GitHub pago</label>${tg("local_merge", r.local_merge, "Permitir integrações com provas de CI e revisão independente guardadas no ApolloOffice")}
+        <div class="warn">Exige também Integração automática ativada. Só considera PRs criadas e acompanhadas pelo ApolloOffice, no HEAD e base verificados, com testes bem-sucedidos e parecer independente no mesmo conteúdo, sem comentários pendentes, conflitos, sobreposições ou ficheiros sensíveis. A proteção local NÃO impede pushes diretos nem substitui a proteção GitHub. Desligado por defeito.</div>
         <label>Limits</label><div class="lm"><span>open</span><input type="number" name="maxo" min="0" max="10000" value="${r.maxo}"><span>new per day</span><input type="number" name="maxd" min="0" max="10000" value="${r.maxd}"><span>USD per day</span><input type="number" name="bud" min="0" step="0.01" value="${r.bud || 0}"></div>
-        <div class="hint">Most open PRs at once and new PRs per day. The daily budget counts API keys only, 0 = no limit.</div>
+        <div class="hint">Set open or new per day to 0 for unlimited PRs. Queue capacity, CI and review still apply. The daily budget counts API keys only; 0 = no limit.</div>
         <label>PR footer</label>${tg("nm", r.nm ?? 1, "mention ApolloOffice with a link")}
         <div class="hint">The AI note and the Co-Authored-By trailers are always added.</div>
         <label>Your rules</label><textarea name="rules" placeholder="optional, e.g. never touch the plugin API">${esc(r.rules)}</textarea>
@@ -342,7 +349,7 @@
         <div class="hint" style="margin-top:6px">Sentry: add an internal integration with this webhook URL and alert rule actions. GlitchTip: add it as a webhook alert. The office has to be reachable from the internet for this, for example through a tunnel; use that address instead of 127.0.0.1. The same error goes into one report. Senders that can set headers can pass the key as <code>X-Hook-Key</code> instead of in the URL. The key can only create reports; replace the link if it leaks.</div>
         <div class="hint">GitHub Actions: a failed run can report itself with <code>Silvertree2010/ApolloOffice/report</code>, see the README.</div>
         <div class="acts"><button type="button" id="hn">${cfg.hook.on ? "Replace link" : "Create link"}</button>${cfg.hook.on ? `<button type="button" class="dng" id="ho">Revoke</button>` : ""}</div></div></div>
-      <div data-tab="sys" class="sec"><h4>Updates</h4><div class="box">${tg("updates", u.configured && s.updates, "install verified fork updates automatically when the office is idle")}<div class="msg" id="um">${ust}</div><div class="acts">${u.configured ? '<button type="button" id="uc">Check now</button>' : ""}${nu ? `<button type="button" class="pri" id="ua">Install and restart</button>` : ""}</div></div></div>
+      <div data-tab="sys" class="sec"><h4>Atualizações</h4><div class="box">${tg("updates", u.configured && s.updates, "install verified fork updates automatically when the office is idle")}<div class="msg" id="um">${ust}</div><div class="acts">${u.configured ? '<button type="button" id="uc">Verificar atualizações</button>' : ""}${nu ? `<button type="button" class="pri" id="ua">Atualizar agora</button>` : ""}</div></div></div>
       <div data-tab="sys" class="sec"><h4>Export and import</h4><div class="box"><div class="ck">Settings, repositories, machines and models as a JSON file. API keys, tokens, logins and notification addresses are not included.</div>
         <div class="acts"><button type="button" id="ex">Export</button><button type="button" id="im">Import…</button><input type="file" id="imf" accept="application/json,.json" hidden></div><div class="msg" id="xm"></div></div></div>
       <div data-tab="sys" class="sec"><h4>This installation</h4><div class="box"><div class="fm" style="margin:0">
@@ -455,7 +462,17 @@
     if ($("ho")) $("ho").onclick = async (e) => { if (e.target.dataset.sure !== "1") { e.target.dataset.sure = "1"; e.target.textContent = "Click again to revoke"; return; } await post({ op: "off" }, "/api/hooktok"); settings(); };
     if ($("ao")) $("ao").onclick = async (e) => { if (e.target.dataset.sure !== "1") { e.target.dataset.sure = "1"; e.target.textContent = "Click again to revoke"; return; } await post({ op: "off" }, "/api/apitok"); settings(); };
     if ($("uc")) $("uc").onclick = async (e) => { busy(e.target, true, "Checking…"); const r = await post({ op: "check" }, "/api/update"); await settings(); $("um").textContent = r.ok ? (r.r.new ? `Update ${r.r.latest} downloaded.` : `Up to date (latest ${r.r.latest}).`) : r.m; };
-    if ($("ua")) $("ua").onclick = async (e) => { busy(e.target, true, "Restarting…"); await post({ op: "apply" }, "/api/update"); setTimeout(() => location.reload(), 6000); };
+    if ($("ua")) $("ua").onclick = async (e) => {
+      busy(e.target, true, "A verificar segurança…");
+      const r = await post({ op: "apply" }, "/api/update");
+      if (!r.ok) {
+        busy(e.target, false, "Atualizar agora");
+        $("um").className = "msg bad2";
+        $("um").textContent = r.error || r.m || "Não foi possível iniciar a atualização.";
+        return;
+      }
+      setTimeout(() => location.reload(), 6000);
+    };
   };
 
   const costs = async () => {
@@ -548,7 +565,48 @@
     $("bp").onclick = repos;
   };
 
+  const steward = async () => {
+    show("Gestão de PRs · diagnóstico", "steward");
+    B.innerHTML = '<div class="msg">A consultar a fila de revisão…</div>';
+    const data = await get("/api/steward");
+    const reports = data.repos || [];
+    B.innerHTML = `<div class="sec"><div class="box">
+      <b>PR Steward — análise automática</b>
+      <div class="hint">Consulta o GitHub periodicamente. Identifica duplicações, conflitos, checks e revisões pendentes. O estado «CI: aprovado» não dispensa provas de testes completos nem as regras de proteção da branch. CodeRabbit isolado não é CI. A integração é opcional e fica desligada por omissão.</div>
+      <div class="acts"><button id="steRefresh" type="button">Atualizar painel</button></div>
+    </div></div>
+    ${reports.map(({ repo, report, error, merge_error, repair_error }) => {
+      const rows = [...(report?.prs || [])].sort((a,b) => (Number(a.priority ?? 9) - Number(b.priority ?? 9)) || (Number(b.number) - Number(a.number)));
+      const at = report?.at ? new Date(report.at).toLocaleString("pt-PT") : "sem leitura";
+      const mode = !report?.merge_enabled
+        ? "Apenas auditoria — integrações desativadas"
+        : report?.local_merge_enabled
+          ? "Integração local com provas obrigatórias (sem proteção GitHub)"
+          : "Integração com proteção GitHub obrigatória";
+      const repairs = report?.repair_enabled ? "Encaminhamento de revisões ativo (só PRs próprias)" : "Encaminhamento de revisões desativado";
+      return `<div class="sec"><h4>${esc(repo)}</h4><div class="box">
+        <div class="msg">${rows.length} PRs abertas · ${esc(at)} · ${esc(mode)} · ${esc(repairs)}${error?.error ? " · Último erro: " + esc(error.error) : ""}</div>
+        ${repair_error?.error ? `<div class="warn">Revisão não encaminhada: ${esc(repair_error.error)}</div>` : ""}
+        ${merge_error?.reason ? `<div class="warn">Integração bloqueada: ${esc(merge_error.reason)}</div>` : ""}
+        ${!report || report.error ? '<div class="warn">Sem diagnóstico completo. Não é possível concluir que alguma PR esteja pronta.</div>' : ""}
+        ${rows.length ? rows.map((p) => `<div class="ck" style="margin:5px 0;align-items:flex-start;gap:8px">
+          <span class="pill">${esc(String(p.number))}</span>
+          <div style="flex:1;min-width:0">
+            <a href="${esc(p.url || "#")}" target="_blank" rel="noopener noreferrer"><b>${esc(p.title || "PR")}</b></a>
+            <div class="hint">Prioridade P${esc(String(p.priority ?? 9))} · Estado: ${esc(p.state)} · CI: ${esc(p.checks)} · Revisão: ${esc(p.review || "não verificada")}</div>
+            <div class="hint">Próximo passo: ${esc(p.next_action || "Rever PR")}</div>
+            ${p.overlaps?.length ? `<div class="hint bad2">Ficheiros em comum com: #${p.overlaps.map(Number).join(", #")}</div>` : ""}
+            ${p.possible_duplicates?.length ? `<div class="hint bad2">Possível duplicação da mesma issue: #${p.possible_duplicates.map(Number).join(", #")}</div>` : ""}
+          </div>
+        </div>`).join("") : '<div class="empty">Não foram identificadas PRs nesta leitura.</div>'}
+      </div></div>`;
+    }).join("") || '<div class="empty">Não existem repositórios ativos.</div>'}`;
+    B.querySelector("#steRefresh").onclick = steward;
+  };
+  A.steward = steward;
+
   $("bRepos").onclick = repos;
+  $("bSteward").onclick = steward;
   $("bCost").onclick = costs;
   $("bHosts").onclick = hosts;
   A.hosts = hosts;
