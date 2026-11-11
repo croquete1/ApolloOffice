@@ -527,8 +527,18 @@ async fn hxo(
     // GNU timeout runs on compatible workers; the outer process watchdog remains
     // active everywhere, including Windows/macOS without GNU coreutils timeout.
     let boundary = format!("APOLLO_JOB_{}", hex::encode(rand::random::<[u8; 16]>()));
-    let body=format!("if command -v timeout >/dev/null 2>&1 && timeout --version 2>/dev/null | head -n 1 | grep -q 'coreutils'; then exec timeout -k 5 {t}s bash -s; else exec bash -s; fi <<'{boundary}'\n{PRE}{s}\n{boundary}\n");
-    let i = format!("{PRE}{}{body}", jobs(a, &h));
+    let inner = if h.dk { "" } else { "exec " };
+    let body = format!(
+        "if command -v timeout >/dev/null 2>&1 && timeout --version 2>/dev/null | head -n 1 | grep -q 'coreutils'; then {inner}timeout -k 5 {t}s bash -s; else {inner}bash -s; fi <<'{boundary}'\n{PRE}{s}\n{boundary}\n"
+    );
+    // Separate npm exec/npx installations for each command. Only content-
+    // addressed downloads are shared; the wrapper removes its private cache.
+    let npm_env = if h.dk {
+        isolated_npm_cache_setup(NPM_DOWNLOAD_CACHE_DIR)
+    } else {
+        String::new()
+    };
+    let i = format!("{PRE}{}{npm_env}{body}", jobs(a, &h));
     let mut command: Vec<String> = if h.dk {
         vec!["docker".into(), "exec".into(), "-i".into(), CT.into()]
     } else {
@@ -610,7 +620,26 @@ ENV CARGO_TERM_COLOR=never CARGO_INCREMENTAL=0 PIP_BREAK_SYSTEM_PACKAGES=1
 WORKDIR /work
 "#;
 
-/// Bound the persistent npm cache at 4 GiB when a worker is idle.
+/// Only verified npm download blobs persist in this new named volume.
+/// The old volume may contain _npx executables and is deliberately not reused.
+pub const NPM_DOWNLOAD_CACHE_DIR: &str = "/var/cache/apollo-npm";
+
+/// Give every Docker job invocation its own npm executable-installation cache.
+/// The shared volume stores only npm's content-addressed tarballs. The wrapper
+/// is deliberately retained as a parent process so EXIT cleanup runs even if
+/// a nested command or coreutils timeout returns a non-zero status.
+fn isolated_npm_cache_setup(download_cache: &str) -> String {
+    let quoted = download_cache.replace("'", "'\\''");
+    format!(
+        "npm_job_cache=$(mktemp -d /tmp/apollo-npm-XXXXXXXX) || exit 1; \
+         if ! mkdir -p '{quoted}/_cacache' || ! ln -s '{quoted}/_cacache' \"$npm_job_cache/_cacache\"; then \
+         rm -rf -- \"$npm_job_cache\"; exit 1; fi; \
+         export npm_config_cache=\"$npm_job_cache\"; \
+         trap 'rm -rf -- \"$npm_job_cache\"' EXIT;\n"
+    )
+}
+
+/// Bound the persistent npm tarball cache at 4 GiB when the worker is idle.
 pub const NPM_CACHE_LIMIT_KIB: u64 = 4 * 1024 * 1024;
 
 /// Builds the bounded cleanup command. The directory is a trusted internal path.
@@ -622,7 +651,7 @@ fn npm_cache_cleanup_cmd_for(cache_dir: &str, limit_kib: u64) -> String {
          kb=$(du -sk \"$cache\" 2>/dev/null | awk '{{print $1}}'); \
          case \"$kb\" in ''|*[!0-9]*) exit 1;; esac; \
          if [ \"$kb\" -gt {limit_kib} ]; then \
-         npm cache clean --force >/dev/null 2>&1 || exit 1; \
+         npm_config_cache="$cache" npm cache clean --force >/dev/null 2>&1 || exit 1; \
          rm -rf -- \"$cache/_npx\" || exit 1; \
          remaining=$(du -sk \"$cache\" 2>/dev/null | awk '{{print $1}}'); \
          case \"$remaining\" in ''|*[!0-9]*) exit 1;; esac; \
@@ -634,12 +663,12 @@ fn npm_cache_cleanup_cmd_for(cache_dir: &str, limit_kib: u64) -> String {
 
 /// Command run inside the already-created idle worker; never deletes the volume.
 pub fn npm_cache_cleanup_cmd() -> String {
-    npm_cache_cleanup_cmd_for("/root/.npm", NPM_CACHE_LIMIT_KIB)
+    npm_cache_cleanup_cmd_for(NPM_DOWNLOAD_CACHE_DIR, NPM_CACHE_LIMIT_KIB)
 }
 
 pub fn dkup(h: &Ho, cpu: i64) -> String {
     format!(
-        "command -v docker >/dev/null || {{ echo 'docker is not installed'; exit 2; }}\ndocker info >/dev/null 2>&1 || {{ echo 'docker is not running'; exit 2; }}\nif ! docker image inspect {im} >/dev/null 2>&1; then docker build -q -t {im} - <<'DOCKERFILE' || {{ echo 'worker image build failed; existing container preserved' >&2; exit 4; }}\n{DF}DOCKERFILE\nfi\ndocker image inspect {im} >/dev/null 2>&1 || {{ echo 'replacement worker image unavailable; existing container preserved' >&2; exit 4; }}\nold=$(docker inspect -f '{{{{.Config.Image}}}}' {CT} 2>/dev/null)\nif [ -n \"$old\" ] && [ \"$old\" != {im} ]; then docker rm -f {CT} >/dev/null 2>&1 || {{ echo 'cannot remove previous worker container' >&2; exit 5; }}; fi\nr=$(docker inspect -f '{{{{.State.Running}}}}' {CT} 2>/dev/null)\nm=$(( $(docker info --format '{{{{.MemTotal}}}}' 2>/dev/null || echo 0) / 1048576 - 3072 ))\n[ \"$m\" -lt 2048 ] && m=2048\nif [ -z \"$r\" ]; then docker run -d --name {CT} --restart unless-stopped --cpus {cpu} --cpu-shares 128 --memory \"$m\"m --memory-swap \"$m\"m -v apollo-office-work:/work -v apollo-office-cargo:/usr/local/cargo/registry -v apollo-office-npm:/root/.npm {im} sleep infinity >/dev/null 2>&1 || [ \"$(docker inspect -f '{{{{.State.Running}}}}' {CT} 2>/dev/null)\" = true ] || docker start {CT} >/dev/null || exit 3; elif [ \"$r\" != true ]; then docker start {CT} >/dev/null || exit 3; fi\ndocker update --cpus {cpu} --cpu-shares 128 --memory \"$m\"m --memory-swap \"$m\"m {CT} >/dev/null 2>&1\ndocker images apollo-office-build --format '{{{{.Repository}}}}:{{{{.Tag}}}}' | grep -vx {im} | xargs -r docker rmi >/dev/null 2>&1\necho ok {}\n",
+        "command -v docker >/dev/null || {{ echo 'docker is not installed'; exit 2; }}\ndocker info >/dev/null 2>&1 || {{ echo 'docker is not running'; exit 2; }}\nif ! docker image inspect {im} >/dev/null 2>&1; then docker build -q -t {im} - <<'DOCKERFILE' || {{ echo 'worker image build failed; existing container preserved' >&2; exit 4; }}\n{DF}DOCKERFILE\nfi\ndocker image inspect {im} >/dev/null 2>&1 || {{ echo 'replacement worker image unavailable; existing container preserved' >&2; exit 4; }}\nold=$(docker inspect -f '{{{{.Config.Image}}}}' {CT} 2>/dev/null)\nif [ -n \"$old\" ] && [ \"$old\" != {im} ]; then docker rm -f {CT} >/dev/null 2>&1 || {{ echo 'cannot remove previous worker container' >&2; exit 5; }}; fi\nr=$(docker inspect -f '{{{{.State.Running}}}}' {CT} 2>/dev/null)\nm=$(( $(docker info --format '{{{{.MemTotal}}}}' 2>/dev/null || echo 0) / 1048576 - 3072 ))\n[ \"$m\" -lt 2048 ] && m=2048\nif [ -z \"$r\" ]; then docker run -d --name {CT} --restart unless-stopped --cpus {cpu} --cpu-shares 128 --memory \"$m\"m --memory-swap \"$m\"m -v apollo-office-work:/work -v apollo-office-cargo:/usr/local/cargo/registry -v apollo-office-npm-downloads:/var/cache/apollo-npm {im} sleep infinity >/dev/null 2>&1 || [ \"$(docker inspect -f '{{{{.State.Running}}}}' {CT} 2>/dev/null)\" = true ] || docker start {CT} >/dev/null || exit 3; elif [ \"$r\" != true ]; then docker start {CT} >/dev/null || exit 3; fi\ndocker update --cpus {cpu} --cpu-shares 128 --memory \"$m\"m --memory-swap \"$m\"m {CT} >/dev/null 2>&1\ndocker images apollo-office-build --format '{{{{.Repository}}}}:{{{{.Tag}}}}' | grep -vx {im} | xargs -r docker rmi >/dev/null 2>&1\necho ok {}\n",
         h.id,
         im = im()
     )
@@ -805,9 +834,9 @@ mod t {
     fn cache_cleanup_only_targets_npm_downloads_after_limit() {
         let cmd = npm_cache_cleanup_cmd();
         assert_eq!(NPM_CACHE_LIMIT_KIB, 4 * 1024 * 1024);
-        assert!(cmd.contains("cache='/root/.npm'"));
+        assert!(cmd.contains("cache='/var/cache/apollo-npm'"));
         assert!(cmd.contains("du -sk \"$cache\""));
-        assert!(cmd.contains("npm cache clean --force"));
+        assert!(cmd.contains("npm_config_cache=\\\"$cache\\\" npm cache clean --force"));
         assert!(cmd.contains("rm -rf -- \"$cache/_npx\""));
         assert!(cmd.contains("remaining=$(du -sk"));
         assert!(cmd.contains("-gt 4194304"));
@@ -870,6 +899,46 @@ mod t {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn npx_installs_are_ephemeral_and_downloads_survive_multiple_jobs() {
+        let root = std::env::temp_dir().join(format!(
+            "apollo-npm-isolation-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let downloads = root.join("downloads");
+        std::fs::create_dir_all(&downloads).unwrap();
+        let mut paths = Vec::new();
+        for _ in 0..2 {
+            let script = format!(
+                "set -e; {}mkdir -p \"$npm_config_cache/_npx\"; \
+                 echo tampered > \"$npm_config_cache/_npx/executable\"; \
+                 echo cached > \"$npm_config_cache/_cacache/download\"; \
+                 printf '%s\\n' \"$npm_config_cache\"",
+                isolated_npm_cache_setup(downloads.to_str().unwrap())
+            );
+            let result = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(script)
+                .output()
+                .unwrap();
+            assert!(result.status.success(), "{result:?}");
+            let path = std::path::PathBuf::from(
+                String::from_utf8(result.stdout).unwrap().trim(),
+            );
+            assert!(!path.exists(), "the command's _npx tree must be removed");
+            paths.push(path);
+        }
+        assert_ne!(paths[0], paths[1]);
+        assert_eq!(
+            std::fs::read_to_string(downloads.join("_cacache/download")).unwrap(),
+            "cached\n"
+        );
+        assert!(!downloads.join("_npx").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn worker_image_build_must_succeed_before_replacing_container() {
         let host = Ho {
@@ -893,7 +962,9 @@ mod t {
         assert!(script.contains("exit 4; }"));
         assert!(script.contains("replacement worker image unavailable"));
         assert!(script.contains("cannot remove previous worker container"));
-        assert!(script.contains("-v apollo-office-npm:/root/.npm"));
+        assert!(script.contains("-v apollo-office-npm-downloads:/var/cache/apollo-npm"));
+        assert!(!script.contains("-v apollo-office-npm:/root/.npm"));
+        assert!(!script.contains("-v apollo-office-npm-downloads:/root/.npm"));
     }
 
     /// Simulates a Docker image build failure without accessing real Docker.
