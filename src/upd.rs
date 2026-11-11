@@ -10,6 +10,7 @@ use std::time::Duration;
 // This customized fork must never silently install releases signed for upstream.
 // Operators may opt in to a separately signed, HTTPS-only fork release channel.
 
+/// Selects the release asset for the current target operating system.
 pub fn asset() -> &'static str {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("windows", "aarch64") => "apollo-office-windows-arm64.exe",
@@ -23,6 +24,7 @@ pub fn asset() -> &'static str {
 
 static CK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// Compares the three semver components and prefers stable releases.
 pub fn newer(a: &str, b: &str) -> bool {
     let p = |s: &str| -> (Vec<u64>, bool) {
         let s = s.trim().trim_start_matches('v');
@@ -41,6 +43,7 @@ pub fn newer(a: &str, b: &str) -> bool {
     p(a) > p(b)
 }
 
+/// Confirms that the executable directory allows atomic replacement.
 fn writable(me: &Path) -> bool {
     let Some(d) = me.parent() else { return false };
     let f = d.join(format!(".apollo-office-w{}", std::process::id()));
@@ -49,6 +52,7 @@ fn writable(me: &Path) -> bool {
     ok
 }
 
+/// Verifies the exact manifest bytes against the pinned fork signing key.
 pub fn check_sig(pk: &str, body: &[u8], sig: &str) -> Result<Value, String> {
     let k: [u8; 32] = hex::decode(pk)
         .map_err(|_| "key")?
@@ -73,6 +77,7 @@ fn st(a: &Ax, f: impl FnOnce(&mut Value)) {
     a.db.ks("upd", &v);
 }
 
+/// Rejects update channels without an explicit HTTPS origin and Ed25519 key.
 fn trusted_channel_inputs(
     url: Option<&str>,
     key: Option<&str>,
@@ -136,6 +141,7 @@ pub fn info(a: &Ax) -> Value {
     v
 }
 
+/// Downloads a bounded asset, including when Content-Length is absent.
 async fn get(a: &Ax, u: &str, limit: usize) -> Result<Vec<u8>, String> {
     let mut r = a.hc.get(u)
         .timeout(Duration::from_secs(300))
@@ -161,6 +167,7 @@ async fn get(a: &Ax, u: &str, limit: usize) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+/// Stages only a signed, integrity-checked update for this installation.
 pub async fn check(a: &Ax) -> Result<Value, String> {
     let _g = CK.lock().await;
     // No network access or staged binary mutation without an explicit
@@ -220,6 +227,7 @@ pub fn staged(a: &Ax) -> PathBuf {
     })
 }
 
+/// Checks that the staged update matches the current trusted channel.
 pub fn ready(a: &Ax) -> bool {
     let Ok((url, key)) = channel() else {
         return false;
@@ -233,6 +241,7 @@ pub fn ready(a: &Ax) -> bool {
         && staged(a).exists()
 }
 
+/// Reports whether no admitted job or merge is still running.
 pub fn idle(a: &Ax) -> bool {
     // Release each mutex before checking the SQLite state: workers may lock
     // these structures in a different order.
@@ -251,10 +260,12 @@ pub fn idle(a: &Ax) -> bool {
     ) == 0
 }
 
+/// Requires the explicit Pause office switch for manual installation.
 pub fn manually_paused(a: &Ax) -> bool {
     a.lv.lock().unwrap().o.man
 }
 
+/// Watches the signed channel and drains jobs before a safe idle restart.
 pub fn spawn(a: Ax) {
     // Start the watcher whenever a trusted channel exists: the user's
     // automatic-updates switch may be enabled later without restarting.
@@ -269,7 +280,11 @@ pub fn spawn(a: Ax) {
             }
             for _ in 0..(6 * 60) {
                 tokio::time::sleep(Duration::from_secs(60)).await;
-                if on(&a) && ready(&a) && writable(&a.me) {
+                if !on(&a) {
+                    cancel_watcher_drain(&a);
+                    continue;
+                }
+                if ready(&a) && writable(&a.me) {
                     if request_drain(&a) {
                         a.say(
                             "submit",
@@ -293,6 +308,15 @@ fn request_drain(a: &Ax) -> bool {
     !a.drain.swap(true, std::sync::atomic::Ordering::SeqCst)
 }
 
+/// Releases a watcher-owned drain when automatic updates are turned off.
+/// A committed restart is never cancelled while shutdown is in progress.
+fn cancel_watcher_drain(a: &Ax) {
+    let _transition = a.update_transition.lock().unwrap();
+    if !*a.restart.lock().unwrap() {
+        a.drain.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// Prevents new jobs and merges atomically with the final idle decision.
 /// The manual path additionally requires an explicit operator pause.
 fn reserve_install(a: &Ax, manual: bool) -> bool {
@@ -300,7 +324,9 @@ fn reserve_install(a: &Ax, manual: bool) -> bool {
     if (manual && !manually_paused(a)) || !idle(a) {
         return false;
     }
+    // Do not allow drain cancellation between claiming the update and shutdown.
     a.drain.store(true, std::sync::atomic::Ordering::SeqCst);
+    *a.restart.lock().unwrap() = true;
     true
 }
 
@@ -315,11 +341,11 @@ pub fn apply(a: &Ax, manual: bool) -> bool {
         &format!("installing update {} -> {v}, restarting", crate::app::V),
         None,
     );
-    *a.restart.lock().unwrap() = true;
     a.quit.notify_waiters();
     true
 }
 
+/// Installs the hash-verified staged binary, preserving the previous executable.
 pub fn install(a: &Ax) -> std::io::Result<()> {
     if !ready(a) {
         return Err(std::io::Error::other(
@@ -361,6 +387,7 @@ pub fn install(a: &Ax) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Reexecutes the updated program; on Unix exec failure, restores the old binary.
 pub fn relaunch(me: &Path) -> ! {
     let args: Vec<String> = std::env::args().skip(1).collect();
     #[cfg(unix)]
@@ -383,6 +410,7 @@ pub fn relaunch(me: &Path) -> ! {
     }
 }
 
+/// Removes Windows restart leftovers after a successful new process launch.
 pub fn cleanup(me: &Path) {
     if cfg!(windows) {
         let _ = std::fs::remove_file(me.with_extension("old.exe"));
@@ -444,6 +472,23 @@ mod t {
         a.lk.lock().unwrap().clear();
         assert!(reserve_install(&a, false));
         assert!(a.drain.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(*a.restart.lock().unwrap());
+        cancel_watcher_drain(&a);
+        assert!(a.drain.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn disabling_automatic_updates_releases_uncommitted_drain() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            PathBuf::from("/tmp/apollo-cancel-test"),
+            47300,
+            PathBuf::from("/tmp/apollo-cancel-test/apollo-office"),
+        ));
+        assert!(request_drain(&a));
+        cancel_watcher_drain(&a);
+        assert!(!a.drain.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(crate::pipe::admit(&a, "sample/repo", "local", 42));
     }
 
     #[test]
