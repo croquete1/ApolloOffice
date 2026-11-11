@@ -838,7 +838,7 @@ mod t {
         assert_eq!(NPM_CACHE_LIMIT_KIB, 4 * 1024 * 1024);
         assert!(cmd.contains("cache='/var/cache/apollo-npm'"));
         assert!(cmd.contains("du -sk \"$cache\""));
-        assert!(cmd.contains("npm_config_cache=\\\"$cache\\\" npm cache clean --force"));
+        assert!(cmd.contains("npm_config_cache=\"$cache\" npm cache clean --force"));
         assert!(cmd.contains("rm -rf -- \"$cache/_npx\""));
         assert!(cmd.contains("remaining=$(du -sk"));
         assert!(cmd.contains("-gt 4194304"));
