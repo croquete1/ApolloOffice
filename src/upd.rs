@@ -270,14 +270,14 @@ pub fn spawn(a: Ax) {
             for _ in 0..(6 * 60) {
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 if on(&a) && ready(&a) && writable(&a.me) {
-                    if !a.drain.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    if request_drain(&a) {
                         a.say(
                             "submit",
                             "update ready: finishing running jobs, then restarting",
                             None,
                         );
                     }
-                    if idle(&a) && apply(&a) {
+                    if apply(&a, false) {
                         return;
                     }
                 }
@@ -286,14 +286,27 @@ pub fn spawn(a: Ax) {
     });
 }
 
-pub fn apply(a: &Ax) -> bool {
-    if !ready(a) || !idle(a) || !writable(&a.me) {
+/// Reserves the update drain under the work-admission lock.
+/// A failed manual request never clears a drain owned by the automatic watcher.
+fn request_drain(a: &Ax) -> bool {
+    let _transition = a.update_transition.lock().unwrap();
+    !a.drain.swap(true, std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Prevents new jobs and merges atomically with the final idle decision.
+/// The manual path additionally requires an explicit operator pause.
+fn reserve_install(a: &Ax, manual: bool) -> bool {
+    let _transition = a.update_transition.lock().unwrap();
+    if (manual && !manually_paused(a)) || !idle(a) {
         return false;
     }
-    // Prevent workers from starting between the idle check and shutdown.
     a.drain.store(true, std::sync::atomic::Ordering::SeqCst);
-    if !idle(a) {
-        a.drain.store(false, std::sync::atomic::Ordering::SeqCst);
+    true
+}
+
+/// Only an authenticated, verified, idle update can request process replacement.
+pub fn apply(a: &Ax, manual: bool) -> bool {
+    if !ready(a) || !writable(&a.me) || !reserve_install(a, manual) {
         return false;
     }
     let v = a.db.kg("upd")["ready"].as_str().unwrap_or("").to_string();
@@ -399,7 +412,7 @@ mod t {
         ));
         assert!(idle(&a));
         assert!(!manually_paused(&a));
-        assert!(!apply(&a));
+        assert!(!apply(&a, true));
         assert!(!a.drain.load(std::sync::atomic::Ordering::SeqCst));
         a.db.run("insert into jobs(st) values('fix')", crate::pa![]);
         assert!(!idle(&a));
@@ -413,6 +426,38 @@ mod t {
         a.lv.lock().unwrap().o.man = true;
         assert!(manually_paused(&a));
         assert!(idle(&a));
+    }
+
+    #[test]
+    fn manual_failure_never_clears_auto_drain() {
+        let db = crate::db::Db::mem();
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db, PathBuf::from("/tmp/apollo-drain-test"), 47300,
+            PathBuf::from("/tmp/apollo-drain-test/apollo-office"),
+        ));
+        assert!(crate::pipe::admit(&a, "sample/repo", "local", 42));
+        assert!(request_drain(&a));
+        assert!(!reserve_install(&a, false));
+        assert!(a.drain.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!crate::pipe::admit(&a, "other/repo", "local", 43));
+        a.act.lock().unwrap().clear();
+        a.lk.lock().unwrap().clear();
+        assert!(reserve_install(&a, false));
+        assert!(a.drain.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn manual_update_requires_pause_and_blocks_admission() {
+        let db = crate::db::Db::mem();
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db, PathBuf::from("/tmp/apollo-manual-test"), 47300,
+            PathBuf::from("/tmp/apollo-manual-test/apollo-office"),
+        ));
+        assert!(!reserve_install(&a, true));
+        assert!(!a.drain.load(std::sync::atomic::Ordering::SeqCst));
+        a.lv.lock().unwrap().o.man = true;
+        assert!(reserve_install(&a, true));
+        assert!(!crate::pipe::admit(&a, "sample/repo", "local", 42));
     }
 
     #[test]
