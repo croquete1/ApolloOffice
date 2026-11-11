@@ -25,6 +25,17 @@ test("job details retain failure diagnostics and show blocked retry errors", () 
   assert.match(controls, /result\.error/);
 });
 
+test("successful requeue clears the previous visible error before refreshing the state", () => {
+  const start = controls.indexOf('const rq = e.target.closest("[data-rq]")');
+  const end = controls.indexOf('const jb = e.target.closest("[data-j]")', start);
+  assert.ok(start >= 0 && end > start);
+  const handler = controls.slice(start, end);
+  const success = handler.slice(handler.indexOf("} else {"), handler.indexOf("}).catch(", handler.indexOf("} else {")));
+  assert.match(success, /reason\.textContent = ""/);
+  assert.match(success, /reason\.classList\.remove\("bad2"\)/);
+  assert.ok(success.indexOf('classList.remove("bad2")') < success.indexOf("apply(result)"));
+});
+
 test("new main diagnostics API survives integration with safe dropped-job recovery", () => {
   assert.match(web, /\("GET", "\/api\/failures"\)/);
   assert.match(web, /coalesce\(why,''\) not in \('dropped by the owner','repository removed'\)/);

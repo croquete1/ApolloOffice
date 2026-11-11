@@ -596,7 +596,11 @@
         if (result.error) {
           const reason = (rq.closest(".row")?.querySelector(".w") || rq.closest(".box")?.querySelector("[data-requeue-message]"));
           if (reason) { reason.textContent = result.error; reason.classList.add("bad2"); }
-        } else apply(result);
+        } else {
+          const reason = (rq.closest(".row")?.querySelector(".w") || rq.closest(".box")?.querySelector("[data-requeue-message]"));
+          if (reason) { reason.textContent = ""; reason.classList.remove("bad2"); }
+          apply(result);
+        }
       }).catch((error) => {
         rq.disabled = false;
         const reason = (rq.closest(".row")?.querySelector(".w") || rq.closest(".box")?.querySelector("[data-requeue-message]"));
