@@ -51,6 +51,10 @@ test("fix jobs outrank hunts and capacity is reserved for pending fixes", () => 
   assert.ok(pipe.includes("st='ready' and (num<>0 or json_extract(d,'$.ext') is not null)"));
   assert.doesNotMatch(pipe, /hf \+ i64::from\(pending_fixes > 0\)/);
   assert.match(web, /"idle_reason"/);
+  assert.match(web, /let admitted = a\.lk\.lock\(\)\.unwrap\(\)/);
+  assert.match(web, /job\["st"\] == "ready"/);
+  assert.match(panels, /data-retry-failures/);
+  assert.match(panels, /Não foi possível carregar os diagnósticos/);
   assert.match(web, /let reason = if !idle \{/);
   assert.match(original, /textContent = !wk && w\.idle_reason/);
   assert.match(original, /w\.idle_reason/);
