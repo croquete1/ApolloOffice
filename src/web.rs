@@ -1168,7 +1168,7 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
         ("GET", "/api/check") => js(checks(a).await),
         ("GET", "/api/failures") => js(json!({
             "jobs": a.db.all(
-                "select id,repo,kind,title,why,t1, json_extract(d,'$.failure.stage') stage, json_extract(d,'$.failure.exit_code') exit_code from jobs where st='drop' order by t1 desc limit 80",
+                "select id,repo,kind,title,why,t1, json_extract(d,'$.failure.stage') stage, json_extract(d,'$.failure.exit_code') exit_code from jobs where st='drop' and coalesce(why,'') not in ('dropped by the owner','repository removed') order by t1 desc limit 80",
                 pa![],
             ),
             "blocked": crate::hunt_health::blocked_repos(a),

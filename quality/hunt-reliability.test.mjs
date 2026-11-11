@@ -22,6 +22,16 @@ test("diagnostic UI scripts parse and expose authenticated error history", () =>
   assert.match(panels, /Diagnóstico técnico/);
 });
 
+test("failure diagnostics exclude intentional drops without hiding execution failures", () => {
+  const query = web.match(/select id,repo,kind,title,why,t1,[^"\n]*from jobs where st='drop'[^"\n]*limit 80/)?.[0];
+  assert.ok(query, "the authenticated failures endpoint must keep its bounded query");
+  assert.match(query, /coalesce\(why,''\) not in \('dropped by the owner','repository removed'\)/);
+  assert.match(query, /order by t1 desc limit 80/);
+  assert.doesNotMatch(query, /json_extract\(d,'\$\.failure\.stage'\) is not null/);
+  assert.match(web, /"why", json!\("dropped by the owner"\)/);
+  assert.match(web, /why='repository removed'/);
+});
+
 test("repeated setup failures stop new hunts without disabling fixes", () => {
   assert.match(pipe, /crate::hunt_health::blocked\(a, r\)/);
   assert.match(pipe, /j\.kind == "hunt"/);

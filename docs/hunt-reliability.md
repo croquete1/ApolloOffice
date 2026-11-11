@@ -13,7 +13,7 @@ Esta implementação limita-se a seis objetivos: interromper HUNT:DROP consecuti
 
 ## Diagnóstico de erros (P0)
 
-- `GET /api/failures` devolve os últimos 80 trabalhos `drop`, com identificador, repositório, fase, código de saída e razão; exige login.
+- `GET /api/failures` devolve até 80 falhas reais de execução (`drop`), com identificador, repositório, fase, código de saída e razão; exige login. Exclui cancelamentos explícitos pelo operador (`dropped by the owner`) e remoções de repositórios (`repository removed`), sem esconder falhas anteriores que não tenham diagnóstico estruturado.
 - `GET /api/job?id=N` inclui `failure` com fase, código de saída, máquina, data e cauda detalhada, limitada a 8 KiB.
 - O backend oculta padrões comuns de credenciais antes de persistir a cauda, incluindo atribuições `DOCKER_AUTH_CONFIG` com JSON de autenticação e os campos `auth`/`identitytoken`. Isto **não substitui** o cuidado na produção de logs nem uma auditoria específica dos segredos em formatos imprevistos.
 - O diálogo de cada trabalho mostra os detalhes. O painel de repositórios apresenta o histórico sem exigir comandos SQLite.
