@@ -154,13 +154,16 @@
       for (const button of section.querySelectorAll("[data-reset-hunt]")) {
         button.onclick = async () => {
           button.disabled = true;
-          const result = await post({ a: "reset-hunt", repo: button.dataset.resetHunt });
-          if (result.error) {
+          const previousLabel = button.textContent;
+          try {
+            const result = await post({ a: "reset-hunt", repo: button.dataset.resetHunt });
+            if (result.error) throw new Error(result.error);
+            await repos();
+          } catch (error) {
+            button.textContent = error?.message || "Erro de ligação; tentar novamente";
+            button.title = previousLabel;
             button.disabled = false;
-            button.textContent = result.error;
-            return;
           }
-          await repos();
         };
       }
     }

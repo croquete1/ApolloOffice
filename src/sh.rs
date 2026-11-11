@@ -610,6 +610,16 @@ ENV CARGO_TERM_COLOR=never CARGO_INCREMENTAL=0 PIP_BREAK_SYSTEM_PACKAGES=1
 WORKDIR /work
 "#;
 
+/// Bound the persistent npm cache at 4 GiB when a worker is idle.
+pub const NPM_CACHE_LIMIT_KIB: u64 = 4 * 1024 * 1024;
+
+/// Command run inside the already-created worker; never deletes the volume.
+pub fn npm_cache_cleanup_cmd() -> String {
+    format!(
+        "if [ -d /root/.npm ]; then kb=$(du -sk /root/.npm 2>/dev/null | awk '{{print $1}}'); case \"$kb\" in ''|*[!0-9]*) exit 0;; esac; if [ \"$kb\" -gt {NPM_CACHE_LIMIT_KIB} ]; then npm cache clean --force >/dev/null 2>&1 && echo 'npm cache cleaned'; fi; fi"
+    )
+}
+
 pub fn dkup(h: &Ho, cpu: i64) -> String {
     format!(
         "command -v docker >/dev/null || {{ echo 'docker is not installed'; exit 2; }}\ndocker info >/dev/null 2>&1 || {{ echo 'docker is not running'; exit 2; }}\nif ! docker image inspect {im} >/dev/null 2>&1; then docker build -q -t {im} - <<'DOCKERFILE' || {{ echo 'worker image build failed; existing container preserved' >&2; exit 4; }}\n{DF}DOCKERFILE\nfi\ndocker image inspect {im} >/dev/null 2>&1 || {{ echo 'replacement worker image unavailable; existing container preserved' >&2; exit 4; }}\nold=$(docker inspect -f '{{{{.Config.Image}}}}' {CT} 2>/dev/null)\nif [ -n \"$old\" ] && [ \"$old\" != {im} ]; then docker rm -f {CT} >/dev/null 2>&1 || {{ echo 'cannot remove previous worker container' >&2; exit 5; }}; fi\nr=$(docker inspect -f '{{{{.State.Running}}}}' {CT} 2>/dev/null)\nm=$(( $(docker info --format '{{{{.MemTotal}}}}' 2>/dev/null || echo 0) / 1048576 - 3072 ))\n[ \"$m\" -lt 2048 ] && m=2048\nif [ -z \"$r\" ]; then docker run -d --name {CT} --restart unless-stopped --cpus {cpu} --cpu-shares 128 --memory \"$m\"m --memory-swap \"$m\"m -v apollo-office-work:/work -v apollo-office-cargo:/usr/local/cargo/registry -v apollo-office-npm:/root/.npm {im} sleep infinity >/dev/null 2>&1 || [ \"$(docker inspect -f '{{{{.State.Running}}}}' {CT} 2>/dev/null)\" = true ] || docker start {CT} >/dev/null || exit 3; elif [ \"$r\" != true ]; then docker start {CT} >/dev/null || exit 3; fi\ndocker update --cpus {cpu} --cpu-shares 128 --memory \"$m\"m --memory-swap \"$m\"m {CT} >/dev/null 2>&1\ndocker images apollo-office-build --format '{{{{.Repository}}}}:{{{{.Tag}}}}' | grep -vx {im} | xargs -r docker rmi >/dev/null 2>&1\necho ok {}\n",
@@ -772,6 +782,17 @@ mod t {
         assert!(DF.contains("arm64) node_arch=arm64"));
         assert!(DF.contains("ppc64el) node_arch=ppc64le"));
         assert!(DF.contains("s390x) node_arch=s390x"));
+    }
+
+    #[test]
+    fn cache_cleanup_only_targets_npm_downloads_after_limit() {
+        let cmd = npm_cache_cleanup_cmd();
+        assert_eq!(NPM_CACHE_LIMIT_KIB, 4 * 1024 * 1024);
+        assert!(cmd.contains("du -sk /root/.npm"));
+        assert!(cmd.contains("npm cache clean --force"));
+        assert!(cmd.contains("-gt 4194304"));
+        assert!(!cmd.contains("docker volume rm"));
+        assert!(!cmd.contains("node_modules"));
     }
 
     #[test]

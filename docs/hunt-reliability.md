@@ -35,6 +35,7 @@ Esta implementação limita-se a seis objetivos: interromper HUNT:DROP consecuti
 ## Preparação mais económica (P2)
 
 - O worker Docker passa a manter um volume nomeado `apollo-office-npm` em `/root/.npm` para reutilizar downloads validados pela cache do npm.
+- A manutenção periódica verifica, a cada ciclo do guard de disco, se a cache ultrapassa 4 GiB. Só executa `npm cache clean --force` quando o worker Docker está sem tarefas ativas. Um bloqueio transitório de admissão impede que uma nova tarefa arranque durante essa manutenção; o bloqueio é libertado também se a operação for cancelada. Nunca apaga `node_modules`, repositórios ou o volume nomeado. A cache poderá ser repopulada por futuras instalações, através do `npm ci`.
 - O `npm ci` **não é omitido**: continua a aplicar o `package-lock.json` em cada setup, sem reutilizar cegamente uma árvore `node_modules` de tarefas anteriores.
 - O volume soma-se a `apollo-office-work` e `apollo-office-cargo`; a alteração do Dockerfile/identificador da imagem na versão 0.10.4 deve ser aplicada apenas com o escritório pausado e sem jobs em execução.
 - O benefício principal é reduzir descarregamentos e tráfego, não prometer que o custo total da instalação passa a zero.

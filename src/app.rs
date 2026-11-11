@@ -69,6 +69,8 @@ pub struct App {
     pub lv: Mutex<Lv>,
     pub hc: reqwest::Client,
     pub act: Mutex<HashSet<String>>,
+    // Serializes npm-cache maintenance with new work admission per host.
+    pub cache_maintenance: Mutex<HashSet<String>>,
     pub lk: Mutex<HashSet<i64>>,
     pub lanes: Mutex<HashSet<String>>,
     pub sem: Mutex<HashMap<String, usize>>,
@@ -205,6 +207,7 @@ impl App {
                 .build()
                 .unwrap(),
             act: Mutex::new(HashSet::new()),
+            cache_maintenance: Mutex::new(HashSet::new()),
             lk: Mutex::new(HashSet::new()),
             lanes: Mutex::new(HashSet::new()),
             sem: Mutex::new(HashMap::new()),

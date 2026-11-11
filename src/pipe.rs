@@ -687,9 +687,6 @@ async fn prep(a: &Ax, j: &mut Job) -> R<()> {
         if r.c != 0 {
             return drop(crate::hunt_health::diagnostic(a, j, "setup", r.c, &r.o));
         }
-        if j.kind == "hunt" {
-            crate::hunt_health::success(a, &j.repo);
-        }
         ok(a, j, "git checkout -q -- . 2>/dev/null; true", 60).await?;
     }
     let bs = ok(a, j, "git rev-parse HEAD", 60).await?;
@@ -697,6 +694,9 @@ async fn prep(a: &Ax, j: &mut Job) -> R<()> {
     j.d["mn"] = json!(mn);
     j.d["base"] = json!(bs);
     a.db.jd(j);
+    if j.kind == "hunt" {
+        crate::hunt_health::success(a, &j.repo);
+    }
     Ok(())
 }
 
@@ -3457,6 +3457,10 @@ pub(crate) fn admit(a: &Ax, repo: &str, host: &str, id: i64) -> bool {
     if is_hunt && crate::hunt_health::blocked(a, repo) {
         return false;
     }
+    // Idle npm maintenance must finish before this host can admit work.
+    if a.cache_maintenance.lock().unwrap().contains(host) {
+        return false;
+    }
     let mut active = a.act.lock().unwrap();
     let mut locked = a.lk.lock().unwrap();
     let claim = format!("{repo} {host}");
@@ -3825,6 +3829,73 @@ async fn disk(a: &Ax, h: &crate::sh::Ho) -> Out {
     hx(a, &h.id, &s, 1200).await
 }
 
+/// Reserves an idle host for cache maintenance; admission is blocked until Drop.
+struct IdleCacheGuard {
+    a: Ax,
+    host: String,
+}
+
+impl IdleCacheGuard {
+    fn claim(a: &Ax, host: &str) -> Option<Self> {
+        // The same lock serializes admission and cache-cleanup reservation.
+        let _transition = a.update_transition.lock().unwrap();
+        if a.drain.load(std::sync::atomic::Ordering::SeqCst) {
+            return None;
+        }
+        let active = a
+            .act
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|claim| claim.rsplit_once(' ').is_some_and(|(_, h)| h == host));
+        if active {
+            return None;
+        }
+        if !a
+            .cache_maintenance
+            .lock()
+            .unwrap()
+            .insert(host.to_string())
+        {
+            return None;
+        }
+        Some(Self {
+            a: a.clone(),
+            host: host.to_string(),
+        })
+    }
+}
+
+impl Drop for IdleCacheGuard {
+    fn drop(&mut self) {
+        self.a.cache_maintenance.lock().unwrap().remove(&self.host);
+    }
+}
+
+/// Clears an oversized npm download cache only while no work can enter the host.
+async fn clean_idle_npm_cache(a: &Ax, host: &crate::sh::Ho) {
+    if !host.dk {
+        return;
+    }
+    let Some(_reservation) = IdleCacheGuard::claim(a, &host.id) else {
+        return;
+    };
+    let result = hx(a, &host.id, &crate::sh::npm_cache_cleanup_cmd(), 600).await;
+    if result.c == 0 && result.o.contains("npm cache cleaned") {
+        a.say(
+            "ci",
+            &format!("[{}] npm cache above 4 GiB cleaned while idle", host.id),
+            None,
+        );
+    } else if result.c != 0 {
+        a.say(
+            "ci",
+            &format!("[{}] npm cache maintenance skipped (exit {})", host.id, result.c),
+            None,
+        );
+    }
+}
+
 pub async fn guard(a: Ax) {
     loop {
         for h in hosts(&a) {
@@ -3851,6 +3922,7 @@ pub async fn guard(a: Ax) {
                     4,
                 );
             }
+            clean_idle_npm_cache(&a, &h).await;
         }
         sl(300_000).await;
     }
@@ -4046,6 +4118,35 @@ mod t {
             ),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn idle_cache_cleanup_blocks_admission_and_releases_on_drop() {
+        let db = crate::db::Db::mem();
+        let id = db.jnew(
+            "o/r",
+            0,
+            "fix",
+            "fixture",
+            "",
+            "ready",
+            "",
+            json!({}),
+            None,
+            0.0,
+        );
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::path::PathBuf::from("/tmp/apollo-idle-npm-guard-test"),
+            1,
+            "apollo-office".into(),
+        ));
+        let reservation = IdleCacheGuard::claim(&a, "worker1").unwrap();
+        assert!(IdleCacheGuard::claim(&a, "worker1").is_none());
+        assert!(!admit(&a, "o/r", "worker1", id));
+        drop(reservation);
+        assert!(admit(&a, "o/r", "worker1", id));
+        assert!(IdleCacheGuard::claim(&a, "worker1").is_none());
     }
 
     #[test]
