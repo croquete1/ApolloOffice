@@ -3452,7 +3452,7 @@ fn job_rank(j: &Value) -> (i32, i32, f64, i64) {
             1
         },
         match j["kind"].as_str().unwrap_or("fix") {
-            "fix" => 1.0 + j["prio"].as_f64().unwrap_or(0.0) / 1000.0,
+            "fix" => 1.0 + j["prio"].as_f64().unwrap_or(0.0).clamp(-500.0, 500.0) / 1000.0,
             "hunt" => 2.0,
             _ => 0.0,
         },
@@ -3898,6 +3898,8 @@ mod t {
         let fix = json!({"st":"ready", "kind":"fix", "prio":0, "id":2});
         let hunt = json!({"st":"ready", "kind":"hunt", "prio":0, "id":1});
         assert!(job_rank(&fix) < job_rank(&hunt));
+        let high_priority_number = json!({"st":"ready", "kind":"fix", "prio":100_000, "id":3});
+        assert!(job_rank(&high_priority_number) < job_rank(&hunt));
     }
 
     #[test]
