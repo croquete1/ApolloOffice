@@ -988,15 +988,13 @@ mod t {
             0
         );
         for path in [&stale, &active, &unmarked] {
-            assert!(
-                std::process::Command::new("touch")
-                    .arg("-d")
-                    .arg("10 minutes ago")
-                    .arg(path)
-                    .status()
-                    .unwrap()
-                    .success()
-            );
+            assert!(std::process::Command::new("touch")
+                .arg("-d")
+                .arg("10 minutes ago")
+                .arg(path)
+                .status()
+                .unwrap()
+                .success());
         }
         let output = std::process::Command::new("bash")
             .arg("-c")
