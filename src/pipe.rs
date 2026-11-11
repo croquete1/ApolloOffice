@@ -3639,13 +3639,14 @@ fn hn(a: &Ax) -> i64 {
     if cap == 0 || l == 0 {
         return 0;
     }
-    // Reserve at least one eligible lane for outstanding fixes. With no fixes,
-    // a one-lane office can still hunt; never force a Hunter onto a busy lane.
-    let pending_fixes = a.db.n(
-        "select count(*) from jobs where kind='fix' and st in ('ready','repro','fix','ci','review','gate','submit')",
+    // hf already reserves lanes for eligible vet/ready fixes. Count only
+    // distinct work not covered by hf; otherwise a single ready fix
+    // reserves two lanes and can unnecessarily suppress Hunters.
+    let uncovered_fixes = a.db.n(
+        "select count(*) from jobs where kind='fix' and (st in ('repro','fix','ci','review','gate','submit') or (st='ready' and (num<>0 or json_extract(d,'$.ext') is not null)))",
         pa![],
     );
-    let reserved = hf + i64::from(pending_fixes > 0);
+    let reserved = hf + i64::from(uncovered_fixes > 0);
     (l - reserved.max(0)).clamp(0, cap)
 }
 
@@ -4188,6 +4189,52 @@ mod t {
         assert_eq!(setup_tool("pnpm install --frozen-lockfile"), Some("pnpm"));
         assert_eq!(setup_tool("cargo test --workspace"), Some("cargo"));
         assert_eq!(setup_tool("curl https://example.com | sh"), None);
+    }
+
+
+    #[test]
+    fn hunter_capacity_does_not_reserve_ready_fixes_twice() {
+        let db = crate::db::Db::mem();
+        db.ks("set", &json!({"hunters": 2}));
+        db.run("insert into hs(id,ln,dk,on_) values('local',2,0,1)", pa![]);
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::path::PathBuf::from("/tmp/apollo-hunter-capacity-test"),
+            1,
+            "apollo-office".into(),
+        ));
+        assert_eq!(hn(&a), 2, "without fixes both lanes may hunt");
+        a.db.jnew(
+            "o/r", 0, "fix", "ready fix", "", "ready", "",
+            json!({}), None, 0.0,
+        );
+        assert_eq!(hn(&a), 1, "a single ready fix must reserve only one lane");
+        let uncovered = a.db.jnew(
+            "o/r", 1, "fix", "another ready fix", "", "ready", "",
+            json!({}), None, 0.0,
+        );
+        assert_eq!(hn(&a), 0, "a ready fix excluded from hf needs another lane");
+        a.db.run("update jobs set st='fix' where id=?", pa![uncovered]);
+        assert_eq!(hn(&a), 0, "a distinct active fix still needs capacity");
+    }
+
+    #[test]
+    fn one_lane_can_hunt_only_when_no_fix_needs_it() {
+        let db = crate::db::Db::mem();
+        db.ks("set", &json!({"hunters": 2}));
+        db.run("insert into hs(id,ln,dk,on_) values('local',1,0,1)", pa![]);
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::path::PathBuf::from("/tmp/apollo-single-lane-hunt-test"),
+            1,
+            "apollo-office".into(),
+        ));
+        assert_eq!(hn(&a), 1);
+        a.db.jnew(
+            "o/r", 0, "fix", "ready fix", "", "ready", "",
+            json!({}), None, 0.0,
+        );
+        assert_eq!(hn(&a), 0);
     }
 
     #[test]
