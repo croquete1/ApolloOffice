@@ -4177,7 +4177,7 @@ mod t {
         let reservation = IdleCacheGuard::claim(&a, "worker1").unwrap();
         assert!(IdleCacheGuard::claim(&a, "worker1").is_none());
         assert!(!admit(&a, "o/r", "worker1", id));
-        drop(reservation);
+        std::mem::drop(reservation);
         assert!(admit(&a, "o/r", "worker1", id));
         assert!(IdleCacheGuard::claim(&a, "worker1").is_none());
     }
