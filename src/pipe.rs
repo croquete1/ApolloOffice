@@ -3375,6 +3375,7 @@ pub(crate) fn admit(a: &Ax, repo: &str, host: &str, id: i64) -> bool {
     true
 }
 
+/// Selects eligible work, reserving the final admission under update_transition.
 async fn pick(a: &Ax, h: &str) -> Option<i64> {
     if a.drain.load(std::sync::atomic::Ordering::Relaxed) {
         return None;
