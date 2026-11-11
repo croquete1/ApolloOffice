@@ -491,7 +491,7 @@ fn preflight_host_error(result: &Out) -> bool {
 /// Setup stdout may mention a network error without the worker being offline.
 /// Only inspect the transport's stderr or a failed process launch.
 fn setup_transport_error(result: &Out) -> bool {
-    result.c < 0 || crate::app::hostish(&result.e)
+    result.c < 0 || crate::app::hostish(&result.e) || crate::app::netish(&result.e)
 }
 
 async fn prep(a: &Ax, j: &mut Job) -> R<()> {
@@ -3672,10 +3672,20 @@ fn mk_hunt(a: &Ax) -> bool {
         return false;
     }
     let on = a.db.all(
-        "select repo from jobs where kind='hunt' and st not in ('done','drop','park')",
+        "select repo, st from jobs where kind='hunt' and st not in ('done','drop','park')",
         pa![],
     );
-    if on.len() as i64 >= hn(a) {
+    // A queued hunt blocked by the circuit breaker cannot use a lane.
+    // Keep it in 'on' for duplicate suppression, but exclude it from
+    // active capacity until its repository is no longer blocked.
+    let occupying = on
+        .iter()
+        .filter(|j| {
+            j["st"] != "ready"
+                || !crate::hunt_health::blocked(a, j["repo"].as_str().unwrap_or(""))
+        })
+        .count() as i64;
+    if occupying >= hn(a) {
         return false;
     }
     let d0 = crate::db::day0();
@@ -4034,9 +4044,21 @@ mod t {
             o: String::new(),
             e: "cannot spawn worker process".into(),
         };
+        let ssh_reset = Out {
+            c: 255,
+            o: String::new(),
+            e: "ssh: Connection reset by peer".into(),
+        };
+        let stdout_only = Out {
+            c: 1,
+            o: "Connection reset by peer".into(),
+            e: String::new(),
+        };
         assert!(setup_transport_error(&lost_worker));
         assert!(!setup_transport_error(&failed_script));
         assert!(setup_transport_error(&cannot_spawn));
+        assert!(setup_transport_error(&ssh_reset));
+        assert!(!setup_transport_error(&stdout_only));
     }
 
     #[test]
@@ -4152,6 +4174,51 @@ mod t {
             ),
             1
         );
+    }
+
+
+    #[tokio::test]
+    async fn blocked_ready_hunt_does_not_starve_a_healthy_repository() {
+        let db = crate::db::Db::mem();
+        db.ks("set", &json!({"hunters": 1}));
+        db.run("insert into hs(id,ln,dk,on_) values('local',1,0,1)", pa![]);
+        db.run(
+            "insert into rp(full,ci,hunt,on_) values('o/blocked','true',1,1),('o/healthy','true',1,1)",
+            pa![],
+        );
+        db.jnew(
+            "o/blocked",
+            0,
+            "hunt",
+            "waiting",
+            "",
+            "ready",
+            "",
+            json!({}),
+            None,
+            99.0,
+        );
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::path::PathBuf::from("/tmp/apollo-blocked-hunt-capacity-test"),
+            1,
+            "apollo-office".into(),
+        ));
+        for _ in 0..3 {
+            crate::hunt_health::fail(&a, "o/blocked", "setup", 1);
+        }
+        assert!(crate::hunt_health::blocked(&a, "o/blocked"));
+        assert!(mk_hunt(&a), "a blocked ready hunt must not occupy the only lane");
+        assert_eq!(
+            a.db.n(
+                "select count(*) from jobs where kind='hunt' and repo='o/healthy'",
+                pa![]
+            ),
+            1
+        );
+        assert!(!mk_hunt(&a), "the healthy hunt must still use its lane");
+        crate::hunt_health::success(&a, "o/blocked");
+        assert!(!mk_hunt(&a), "unblocked hunts count toward capacity again");
     }
 
     #[tokio::test]
