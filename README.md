@@ -104,7 +104,6 @@ manualmente **dentro do contentor** não são preservadas.
 Confirme com `sudo docker exec apollo-office node -v` e `npm -v`, que devem indicar
 Node `v24.22.2` e npm incluído no Node 24. **Não reconstrua com jobs ativos.**
 
-
 It prints a one-time login link. Open it and follow the setup: add a machine,
 add a repository, check its test command.
 
