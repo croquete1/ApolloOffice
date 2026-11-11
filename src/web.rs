@@ -189,10 +189,7 @@ fn state(a: &Ax) -> Value {
     let admitted = a.lk.lock().unwrap();
     let waiting = queued
         .iter()
-        .filter(|job| {
-            job["st"] == "ready"
-                || !admitted.contains(&job["id"].as_i64().unwrap_or(0))
-        })
+        .filter(|job| job["st"] == "ready" || !admitted.contains(&job["id"].as_i64().unwrap_or(0)))
         .count() as i64;
     std::mem::drop(admitted);
     let paused = o["man"] == true || o["pause"].as_str().is_some_and(|reason| !reason.is_empty());
