@@ -211,3 +211,16 @@ test("stale agent detail does not advertise historical work as current", () => {
   assert.match(modern, /"Último registo: " \+ current/);
   assert.match(modern, /"Último registo: " \+ w\.say/);
 });
+
+
+test("a published Apollo job never counts as a merged FixFlow correction", () => {
+  assert.match(modern, /Correções integradas/);
+  assert.match(modern, /s\.delivery\?\.merged_fixes/);
+  assert.doesNotMatch(modern, /byId\("aoMetricDone"\)\.textContent = formatNum\(totals\.done\)/);
+  const backend = read("src/web.rs");
+  const pipeline = read("src/pipe.rs");
+  assert.match(backend, /"merged_fixes": a\.db\.n/);
+  assert.match(backend, /j\.st='done' and p\.st='merged'/);
+  assert.match(backend, /published_pr_is_not_counted_as_an_integrated_fix/);
+  assert.match(pipeline, /a\.steward_wake\.notify_one\(\);/);
+});

@@ -3203,6 +3203,16 @@ async fn go(a: &Ax, id: i64, h: &str) {
         );
         a.st("submit", "idle", None, "ok");
         clean(a, &j).await;
+        // A PR publicada ainda nao e uma correcao integrada. Notificar o
+        // Steward assim que a submissao foi persistida, sem dispensar gates.
+        if n > 0 {
+            a.steward_wake.notify_one();
+            a.say(
+                "submit",
+                &format!("{}: PR #{n} publicada; aguarda revisao e integracao", j.repo),
+                Some(id),
+            );
+        }
         Ok(())
     }
     .await;

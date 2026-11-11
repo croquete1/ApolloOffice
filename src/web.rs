@@ -183,6 +183,13 @@ fn state(a: &Ax) -> Value {
     json!({
         "t": now(), "v": crate::app::V,
         "o": o, "w": wv, "fl": fl, "ln": ln, "cil": cil, "hst": hst,
+        // DONE inclui pesquisas; so a PR confirmada pelo Watcher como merged
+        // representa uma correcao efetivamente integrada no repositório.
+        "delivery": {
+            "published_fixes": a.db.n("select count(*) from jobs where kind='fix' and st='done' and pr>0", pa![]),
+            "merged_fixes": a.db.n("select count(*) from jobs j join prs p on p.repo=j.repo and p.num=j.pr where j.kind='fix' and j.st='done' and p.st='merged'", pa![]),
+            "open_fixes": a.db.n("select count(*) from jobs j join prs p on p.repo=j.repo and p.num=j.pr where j.kind='fix' and j.st='done' and p.st='open'", pa![])
+        },
         "hs": a.db.all("select id, ln, dk, on_ from hs order by id='local' desc, id", pa![]),
         "q": a.db.all("select id,repo,num,kind,title,url,st,why,pr,t0,t1,json_extract(d,'$.h') h from jobs where st not in ('done','drop') order by st in ('hunt','repro','fix','ci','review','gate','submit') desc, st='approve' desc, st='vet', id limit 60", pa![]),
         "dn": a.db.all("select id,repo,num,kind,title,url,st,why,pr,t1 from jobs where st in ('done','drop') order by t1 desc limit 25", pa![]),
@@ -1902,6 +1909,36 @@ mod t {
             )
             .unwrap();
         assert_eq!(row["lang"], "en");
+    }
+
+    #[test]
+    fn published_pr_is_not_counted_as_an_integrated_fix() {
+        let db = crate::db::Db::mem();
+        let pending = db.jnew(
+            "o/r", 42, "fix", "correcao em revisao", "", "done", "",
+            json!({}), None, 0.0,
+        );
+        let integrated = db.jnew(
+            "o/r", 43, "fix", "correcao integrada", "", "done", "",
+            json!({}), None, 0.0,
+        );
+        db.jnew("o/r", 0, "hunt", "pesquisa feita", "", "done", "", json!({}), None, 0.0);
+        db.jset(pending, &[("pr", json!(201))]);
+        db.jset(integrated, &[("pr", json!(202))]);
+        db.run(
+            "insert into prs(repo,num,st,title,t0) values('o/r',201,'open','A',1),('o/r',202,'merged','B',1)",
+            pa![],
+        );
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db, std::env::temp_dir(), 47302, "apollo-office".into(),
+        ));
+        let observed = state(&a);
+        assert_eq!(observed["n"]["done"], 3);
+        assert_eq!(observed["delivery"]["published_fixes"], 2);
+        assert_eq!(observed["delivery"]["open_fixes"], 1);
+        assert_eq!(observed["delivery"]["merged_fixes"], 1);
+        a.db.run("update prs set st='merged' where repo='o/r' and num=201", pa![]);
+        assert_eq!(state(&a)["delivery"]["merged_fixes"], 2);
     }
 
     #[test]
