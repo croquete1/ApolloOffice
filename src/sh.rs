@@ -766,7 +766,6 @@ mod t {
         assert!(DF.contains("arm64) node_arch=arm64"));
     }
 
-
     #[cfg(unix)]
     #[tokio::test]
     async fn credentials_stay_available_to_cli_but_are_removed_from_workers() {
