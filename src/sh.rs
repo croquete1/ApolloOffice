@@ -501,11 +501,11 @@ pub async fn hxl(
     t: u64,
     ln: Option<&(dyn Fn(&str) + Send + Sync)>,
 ) -> Out {
-    hxo(a, id, s, t, ln, false).await
+    hxo(a, id, s, t, ln, false, true).await
 }
 
 pub async fn hxk(a: &App, id: &str, s: &str, t: u64) -> Out {
-    hxo(a, id, s, t, None, true).await
+    hxo(a, id, s, t, None, true, true).await
 }
 
 async fn hxo(
@@ -515,6 +515,7 @@ async fn hxo(
     t: u64,
     ln: Option<&(dyn Fn(&str) + Send + Sync)>,
     keep: bool,
+    isolate_npm: bool,
 ) -> Out {
     let Some(h) = ho(a, id) else {
         return Out {
@@ -533,7 +534,7 @@ async fn hxo(
     );
     // Separate npm exec/npx installations for each command. Only content-
     // addressed downloads are shared; the wrapper removes its private cache.
-    let npm_env = if h.dk {
+    let npm_env = if h.dk && isolate_npm {
         isolated_npm_cache_setup(NPM_DOWNLOAD_CACHE_DIR)
     } else {
         String::new()
@@ -581,6 +582,12 @@ async fn hxo(
 
 pub async fn hx(a: &App, id: &str, s: &str, t: u64) -> Out {
     hxl(a, id, s, t, None).await
+}
+
+/// Trusted disk-recovery command: avoids allocating another npm execution root
+/// when the disk is already full. Never use this for repository-controlled code.
+pub async fn hx_maintenance(a: &App, id: &str, s: &str, t: u64) -> Out {
+    hxo(a, id, s, t, None, false, false).await
 }
 
 pub const DF: &str = r#"FROM rust:1-trixie

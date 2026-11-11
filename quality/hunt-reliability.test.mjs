@@ -91,6 +91,11 @@ test("npm cache is persistent and npm ci is never silently bypassed", () => {
   assert.match(shell, /rm -rf --/);
   assert.match(shell, /_npx/);
   assert.match(pipe, /clean_idle_npm_cache\(&a, &h\)\.await/);
+  const diskGuard = pipe.slice(pipe.indexOf("pub async fn guard("), pipe.indexOf("#[cfg(test)]", pipe.indexOf("pub async fn guard(")));
+  assert.ok(diskGuard.indexOf("clean_idle_npm_cache(&a, &h).await") < diskGuard.indexOf("let r = disk(&a, &h).await"));
+  assert.match(shell, /pub async fn hx_maintenance\(/);
+  assert.match(shell, /if h\.dk && isolate_npm/);
+  assert.match(web, /let active_submits: Vec<i64>/);
   assert.match(pipe, /fn docker_cache_target\(/);
   assert.match(pipe, /cache_maintenance_serializes_aliases_of_the_same_docker_target/);
   assert.match(pipe, /q\(&su\)/);

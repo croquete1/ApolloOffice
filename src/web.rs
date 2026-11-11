@@ -163,6 +163,13 @@ fn state(a: &Ax) -> Value {
             wv[*x]["md"] = json!(a.md(x));
         }
     }
+    // A queued submission is not running merely because its state is 'submit'.
+    // Snapshot IDs before DB reads to avoid reversing the lock order.
+    let admitted_ids: Vec<i64> = a.lk.lock().unwrap().iter().copied().collect();
+    let active_submits: Vec<i64> = admitted_ids
+        .into_iter()
+        .filter(|id| a.db.jg(*id).is_some_and(|job| job.st == "submit"))
+        .collect();
     for x in a.db.all("select st, count(*) n, max(id) j from jobs where st in ('hunt','repro','fix','ci','review','gate','submit') group by st", pa![]) {
         let w = match x["st"].as_str().unwrap_or("") {
             "hunt" => "hunter",
@@ -171,11 +178,21 @@ fn state(a: &Ax) -> Value {
             "gate" => "submit",
             s => s,
         };
-        if wv[w].is_object() && x["n"].as_i64().unwrap_or(0) > 0 {
-            wv[w]["n"] = json!(wv[w]["n"].as_i64().unwrap_or(0) + x["n"].as_i64().unwrap_or(0));
+        let is_submit = x["st"] == "submit";
+        let count = if is_submit {
+            active_submits.len() as i64
+        } else {
+            x["n"].as_i64().unwrap_or(0)
+        };
+        if wv[w].is_object() && count > 0 {
+            wv[w]["n"] = json!(wv[w]["n"].as_i64().unwrap_or(0) + count);
             if wv[w]["st"] != "work" {
                 wv[w]["st"] = json!("work");
-                wv[w]["job"] = x["j"].clone();
+                wv[w]["job"] = if is_submit {
+                    json!(active_submits.iter().max())
+                } else {
+                    x["j"].clone()
+                };
             }
         }
     }

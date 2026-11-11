@@ -3937,7 +3937,7 @@ async fn clean_idle_npm_cache(a: &Ax, host: &crate::sh::Ho) {
     let Some(_reservation) = IdleCacheGuard::claim(a, &host.id) else {
         return;
     };
-    let result = hx(a, &host.id, &crate::sh::npm_cache_cleanup_cmd(), 600).await;
+    let result = crate::sh::hx_maintenance(a, &host.id, &crate::sh::npm_cache_cleanup_cmd(), 600).await;
     if result.c == 0 && result.o.contains("npm cache cleaned") {
         a.say(
             "ci",
@@ -3962,6 +3962,9 @@ pub async fn guard(a: Ax) {
             if !h.on || !a.net(&h.id) {
                 continue;
             }
+            // Reclaim npm caches first; disk() may remove inactive worktrees
+            // when an oversized cache is the actual cause of low free space.
+            clean_idle_npm_cache(&a, &h).await;
             let r = disk(&a, &h).await;
             if r.c != 0 {
                 continue;
@@ -3982,7 +3985,6 @@ pub async fn guard(a: Ax) {
                     4,
                 );
             }
-            clean_idle_npm_cache(&a, &h).await;
         }
         sl(300_000).await;
     }
