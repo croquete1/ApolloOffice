@@ -83,6 +83,10 @@ test("npm cache is persistent and npm ci is never silently bypassed", () => {
   assert.match(shell, /ln -s/);
   assert.match(shell, /export npm_config_cache/);
   assert.match(shell, /trap 'rm -rf/);
+  assert.match(shell, /\.owner\.lock/);
+  assert.match(shell, /flock -x 9/);
+  assert.match(shell, /flock -n/);
+  assert.match(shell, /-mmin \+5/);
   assert.match(shell, /npm cache clean --force/);
   assert.match(shell, /rm -rf --/);
   assert.match(shell, /_npx/);

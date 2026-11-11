@@ -585,7 +585,7 @@ pub async fn hx(a: &App, id: &str, s: &str, t: u64) -> Out {
 
 pub const DF: &str = r#"FROM rust:1-trixie
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config libssl-dev clang cmake git curl ca-certificates procps xz-utils unzip libxdo-dev mesa-vulkan-drivers \
+    pkg-config libssl-dev clang cmake git curl ca-certificates procps util-linux xz-utils unzip libxdo-dev mesa-vulkan-drivers \
     python3 python3-pip python3-venv python3-dev golang-go \
     libasound2-dev libfontconfig1-dev libfreetype-dev libgl1-mesa-dev libgtk-3-dev libwayland-dev \
     libx11-dev libxcursor-dev libxi-dev libxkbcommon-dev libxrandr-dev libudev-dev xvfb \
@@ -636,8 +636,11 @@ fn isolated_npm_cache_setup(download_cache: &str) -> String {
         "npm_job_cache=$(mktemp -d /tmp/apollo-npm-XXXXXXXX) || exit 1; \
          if ! mkdir -p '{quoted}/_cacache' || ! ln -s '{quoted}/_cacache' \"$npm_job_cache/_cacache\"; then \
          rm -rf -- \"$npm_job_cache\"; exit 1; fi; \
-         export npm_config_cache=\"$npm_job_cache\"; \
-         trap 'rm -rf -- \"$npm_job_cache\"' EXIT;\n"
+         trap 'rm -rf -- \"$npm_job_cache\"' EXIT; \
+         command -v flock >/dev/null 2>&1 || exit 1; \
+         exec 9>\"$npm_job_cache/.owner.lock\" || exit 1; \
+         flock -x 9 || exit 1; \
+         export npm_config_cache=\"$npm_job_cache\";\n"
     )
 }
 
@@ -663,22 +666,28 @@ fn npm_cache_cleanup_cmd_for(cache_dir: &str, limit_kib: u64) -> String {
     )
 }
 
-/// Remove npm execution roots left by SIGKILL/crashes, but only while the
-/// caller holds the idle Docker-target guard. The wrapper's own active cache
-/// root is explicitly excluded and no unrelated /tmp entries are touched.
+/// Remove stale npm execution roots only when their lock is no longer held.
+/// A live wrapper and its descendants keep the same file descriptor open.
+/// Unmarked legacy roots are left untouched for controlled manual cleanup.
 fn npm_orphan_cleanup_cmd_for(tmp_dir: &str) -> String {
     let quoted = tmp_dir.replace('\'', "'\\''");
     format!(
-        "find '{quoted}' -mindepth 1 -maxdepth 1 -type d \
-         -name 'apollo-npm-????????' ! -path \"$npm_config_cache\" \
-         -exec rm -rf -- {{}} + || exit 1"
+        "set -o pipefail; root='{quoted}'; \
+         command -v flock >/dev/null 2>&1 || exit 1; \
+         find \"$root\" -mindepth 1 -maxdepth 1 -type d \
+         -name 'apollo-npm-????????' -mmin +5 ! -path \"$npm_config_cache\" -print0 | \
+         while IFS= read -r -d '' candidate; do \
+         lock=\"$candidate/.owner.lock\"; \
+         [ -f \"$lock\" ] && [ ! -L \"$lock\" ] || continue; \
+         flock -n \"$lock\" rm -rf -- \"$candidate\" || :; \
+         done"
     )
 }
 
 /// Command run inside the already-created idle worker; never deletes the volume.
 pub fn npm_cache_cleanup_cmd() -> String {
     format!(
-        "{}; {}",
+        "{} || exit 1; {}",
         npm_orphan_cleanup_cmd_for("/tmp"),
         npm_cache_cleanup_cmd_for(NPM_DOWNLOAD_CACHE_DIR, NPM_CACHE_LIMIT_KIB)
     )
@@ -958,6 +967,8 @@ mod t {
     #[cfg(unix)]
     #[test]
     fn orphaned_npm_execution_caches_are_reclaimed_only_when_idle() {
+        use std::os::fd::AsRawFd;
+
         let root = std::env::temp_dir().join(format!(
             "apollo-npm-orphan-test-{}-{}",
             std::process::id(),
@@ -965,23 +976,41 @@ mod t {
         ));
         let stale = root.join("apollo-npm-abcdefgh");
         let active = root.join("apollo-npm-12345678");
+        let unmarked = root.join("apollo-npm-nomarker");
         let unrelated = root.join("another-app-cache");
-        std::fs::create_dir_all(&stale).unwrap();
-        std::fs::create_dir_all(&active).unwrap();
-        std::fs::create_dir_all(&unrelated).unwrap();
-        let output = std::process::Command::new("sh")
+        for path in [&stale, &active, &unmarked, &unrelated] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        std::fs::write(stale.join(".owner.lock"), "").unwrap();
+        let held_lock = std::fs::File::create(active.join(".owner.lock")).unwrap();
+        assert_eq!(
+            unsafe { libc::flock(held_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        for path in [&stale, &active, &unmarked] {
+            assert!(
+                std::process::Command::new("touch")
+                    .arg("-d")
+                    .arg("10 minutes ago")
+                    .arg(path)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let output = std::process::Command::new("bash")
             .arg("-c")
             .arg(npm_orphan_cleanup_cmd_for(root.to_str().unwrap()))
-            .env("npm_config_cache", &active)
+            .env("npm_config_cache", root.join("different-job"))
             .output()
             .unwrap();
         assert!(output.status.success(), "{output:?}");
-        assert!(!stale.exists());
-        assert!(active.exists(), "active wrapper must retain its own cache");
-        assert!(
-            unrelated.exists(),
-            "unrelated /tmp directories are untouched"
-        );
+        assert!(!stale.exists(), "unlocked stale cache may be removed");
+        assert!(active.exists(), "a live lock must prevent cleanup");
+        assert!(unmarked.exists(), "unmarked legacy roots must fail closed");
+        assert!(unrelated.exists(), "unrelated /tmp entries are untouched");
+        unsafe { libc::flock(held_lock.as_raw_fd(), libc::LOCK_UN) };
+        drop(held_lock);
         std::fs::remove_dir_all(root).unwrap();
     }
 
