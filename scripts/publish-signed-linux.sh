@@ -26,11 +26,12 @@ tag="fork-v$version"
 python3 quality/browser_smoke.py
 python3 -m unittest discover -s quality -p 'test_*.py'
 cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
+cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 node --test quality/*.test.mjs
 cargo build --release --locked
 [[ "$sha" = "$(git rev-parse HEAD)" ]] || exit 1
+[[ -z "$(git status --porcelain)" ]] || { echo "Validação alterou a árvore de trabalho"; exit 1; }
 [[ "$sha" = "$(git ls-remote origin refs/heads/main | awk '{print $1}')" ]] || exit 1
 out="$(mktemp -d)"
 trap 'rm -rf "$out"' EXIT
