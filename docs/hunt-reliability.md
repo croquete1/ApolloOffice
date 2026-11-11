@@ -15,7 +15,7 @@ Esta implementação limita-se a seis objetivos: interromper HUNT:DROP consecuti
 
 - `GET /api/failures` devolve os últimos 80 trabalhos `drop`, com identificador, repositório, fase, código de saída e razão; exige login.
 - `GET /api/job?id=N` inclui `failure` com fase, código de saída, máquina, data e cauda detalhada, limitada a 8 KiB.
-- O backend tenta ocultar padrões comuns de credenciais antes de persistir a cauda. Isto **não substitui** o cuidado na produção de logs, nem uma auditoria de segurança aos segredos.
+- O backend oculta padrões comuns de credenciais antes de persistir a cauda, incluindo atribuições `DOCKER_AUTH_CONFIG` com JSON de autenticação e os campos `auth`/`identitytoken`. Isto **não substitui** o cuidado na produção de logs nem uma auditoria específica dos segredos em formatos imprevistos.
 - O diálogo de cada trabalho mostra os detalhes. O painel de repositórios apresenta o histórico sem exigir comandos SQLite.
 - Não foram criados endpoints sem autenticação.
 
@@ -29,7 +29,7 @@ Esta implementação limita-se a seis objetivos: interromper HUNT:DROP consecuti
 
 ## Estados reais dos agentes (P1)
 
-- A API de estado publica `w[role].idle_reason` e `ops.waiting`, `ops.paused`, `ops.blocked_hunts`.
+- A API de estado publica `w[role].idle_reason` e `ops.waiting`, `ops.paused`, `ops.blocked_hunts`. O valor `ops.waiting` exclui os IDs admitidos, incluindo trabalhos ainda com estado `ready` ou `submit`.
 - O painel distingue pausas, tarefa não atribuída, existência de fila e pesquisas suspensas.
 - Os textos são informativos: não afirmam que exista execução quando só há trabalhos pendentes; não apresentam estimativas inventadas.
 
