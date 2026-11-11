@@ -3937,7 +3937,8 @@ async fn clean_idle_npm_cache(a: &Ax, host: &crate::sh::Ho) {
     let Some(_reservation) = IdleCacheGuard::claim(a, &host.id) else {
         return;
     };
-    let result = crate::sh::hx_maintenance(a, &host.id, &crate::sh::npm_cache_cleanup_cmd(), 600).await;
+    let result =
+        crate::sh::hx_maintenance(a, &host.id, &crate::sh::npm_cache_cleanup_cmd(), 600).await;
     if result.c == 0 && result.o.contains("npm cache cleaned") {
         a.say(
             "ci",
