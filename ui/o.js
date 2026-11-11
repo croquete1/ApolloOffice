@@ -491,10 +491,23 @@
 
   const rn = (j) => (j.repo.split("/")[1] || j.repo) + (j.num ? "#" + j.num : "");
   const sel = new Set();
-  const jrow = (j, x) => `<div class="row${j.st === "approve" ? " apr" : ""}">${j.st === "approve" && x ? `<input type="checkbox" class="bk" data-k="${j.id}" ${sel.has(j.id) ? "checked" : ""} aria-label="select">` : ""}<span class="pill ${STC[j.st] || ""}">${esc(j.kind !== "fix" ? j.kind + "·" + j.st : j.st)}</span><div class="ti"><a class="a" href="#" data-j="${j.id}">${esc(j.title)}</a><div class="w">${esc(j.st === "ci" && S.cil[j.id] ? S.cil[j.id] : j.why || "")}</div></div><span class="rp">${esc(rn(j))}${j.st === "approve" ? ` <button class="go" data-j="${j.id}">review</button>` : ""}${x && j.st !== "approve" ? ` <button class="x" data-d="${j.id}" title="drop">✕</button>` : ""}${!x && j.st === "drop" && j.kind === "fix" ? ` <button class="x" data-rq="${j.id}" title="try again">↻</button>` : ""}</span></div>`;
+  // A queue snapshot can replace a button while its request is still in flight.
+  const retryStates = new Map();
+  window.AO.retryStates = retryStates;
+  const jrow = (j, x) => {
+    const retry = retryStates.get(j.id);
+    const reason = retry?.error || (j.st === "ci" && S.cil[j.id] ? S.cil[j.id] : j.why || "");
+    return `<div class="row${j.st === "approve" ? " apr" : ""}">${j.st === "approve" && x ? `<input type="checkbox" class="bk" data-k="${j.id}" ${sel.has(j.id) ? "checked" : ""} aria-label="select">` : ""}<span class="pill ${STC[j.st] || ""}">${esc(j.kind !== "fix" ? j.kind + "·" + j.st : j.st)}</span><div class="ti"><a class="a" href="#" data-j="${j.id}">${esc(j.title)}</a><div class="w${retry?.error ? " bad2" : ""}">${esc(reason)}</div></div><span class="rp">${esc(rn(j))}${j.st === "approve" ? ` <button class="go" data-j="${j.id}">review</button>` : ""}${x && j.st !== "approve" ? ` <button class="x" data-d="${j.id}" title="drop">✕</button>` : ""}${!x && j.st === "drop" && j.kind === "fix" ? ` <button class="x" data-rq="${j.id}" title="try again" ${retry?.pending ? "disabled" : ""}>↻</button>` : ""}</span></div>`;
+  };
 
   const lists = () => {
     const q = S.q;
+    // Keep errors and pending retries through state refreshes, but discard
+    // resolved jobs so old diagnostics never leak into a different state.
+    const dropped = new Set([...q, ...S.dn].filter(j => j.st === "drop").map(j => j.id));
+    for (const [id, retry] of retryStates) {
+      if (!retry.pending && !dropped.has(id)) retryStates.delete(id);
+    }
     const suspended = S.ops?.blocked_hunts?.length || 0;
     $("qn").textContent = (q.length ? q.length + " trabalhos" : "") +
       (suspended ? " · " + suspended + " Hunter(s) suspenso(s)" : "");
@@ -590,22 +603,31 @@
     if (d) { post({ a: "drop", id: Number(d.dataset.d) }).then(apply); return; }
     const rq = e.target.closest("[data-rq]");
     if (rq) {
-      rq.disabled = true;
-      post({ a: "requeue", id: Number(rq.dataset.rq) }).then((result) => {
-        rq.disabled = false;
-        if (result.error) {
-          const reason = (rq.closest(".row")?.querySelector(".w") || rq.closest(".box")?.querySelector("[data-requeue-message]"));
-          if (reason) { reason.textContent = result.error; reason.classList.add("bad2"); }
+      const id = Number(rq.dataset.rq);
+      if (!Number.isSafeInteger(id) || id <= 0 || retryStates.get(id)?.pending) return;
+      const message = (error) => {
+        for (const target of document.querySelectorAll(`[data-requeue-message="${id}"]`)) {
+          target.textContent = error;
+          target.classList.toggle("bad2", !!error);
+        }
+      };
+      const refreshRetry = (error) => {
+        retryStates.set(id, { pending: false, error });
+        if (S && !window.AO.modernRoom) lists();
+        for (const button of document.querySelectorAll(`[data-rq="${id}"]`)) button.disabled = false;
+        message(error);
+      };
+      retryStates.set(id, { pending: true, error: "" });
+      for (const button of document.querySelectorAll(`[data-rq="${id}"]`)) button.disabled = true;
+      post({ a: "requeue", id }).then((result) => {
+        if (result?.error) {
+          refreshRetry(String(result.error));
         } else {
-          const reason = (rq.closest(".row")?.querySelector(".w") || rq.closest(".box")?.querySelector("[data-requeue-message]"));
-          if (reason) { reason.textContent = ""; reason.classList.remove("bad2"); }
+          retryStates.delete(id);
+          message("");
           apply(result);
         }
-      }).catch((error) => {
-        rq.disabled = false;
-        const reason = (rq.closest(".row")?.querySelector(".w") || rq.closest(".box")?.querySelector("[data-requeue-message]"));
-        if (reason) { reason.textContent = String(error); reason.classList.add("bad2"); }
-      });
+      }).catch((error) => refreshRetry(String(error)));
       return;
     }
     const jb = e.target.closest("[data-j]");
