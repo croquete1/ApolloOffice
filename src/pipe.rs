@@ -3864,12 +3864,7 @@ impl IdleCacheGuard {
         if active {
             return None;
         }
-        if !a
-            .cache_maintenance
-            .lock()
-            .unwrap()
-            .insert(host.to_string())
-        {
+        if !a.cache_maintenance.lock().unwrap().insert(host.to_string()) {
             return None;
         }
         Some(Self {
@@ -3903,7 +3898,10 @@ async fn clean_idle_npm_cache(a: &Ax, host: &crate::sh::Ho) {
     } else if result.c != 0 {
         a.say(
             "ci",
-            &format!("[{}] npm cache maintenance skipped (exit {})", host.id, result.c),
+            &format!(
+                "[{}] npm cache maintenance skipped (exit {})",
+                host.id, result.c
+            ),
             None,
         );
     }
