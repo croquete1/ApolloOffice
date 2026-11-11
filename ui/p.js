@@ -89,7 +89,7 @@
 
   const repos = async () => {
     cfg = await get("/api/cfg");
-    const diagnostics = await get("/api/failures").catch(() => ({ jobs: [], blocked: [] }));
+    const diagnostics = await get("/api/failures").catch(() => null);
     show("Repos", "repos");
     const rs = cfg.repos;
     let op = new Set();
@@ -139,18 +139,24 @@
         <label>Your rules</label><textarea name="rules" placeholder="optional, e.g. never touch the plugin API">${esc(r.rules)}</textarea>
       </div>
       <div class="acts"><button class="pri" data-op="set" disabled>Saved</button><button type="button" data-op="detect">Detect test command</button><span class="sp"></span><button type="button" class="dng" data-op="del">Remove</button></div><div class="msg"></div></details></form>`).join("") || `<div class="empty">No repository yet.</div>`}</div>`;
-    if (diagnostics.jobs?.length || diagnostics.blocked?.length) {
+    if (!diagnostics || diagnostics.jobs?.length || diagnostics.blocked?.length) {
       const section = document.createElement("section");
       section.className = "sec";
-      const blocked = (diagnostics.blocked || []).map(({ repo, health }) => {
+      const blocked = (diagnostics?.blocked || []).map(({ repo, health }) => {
         const when = new Date(health.until).toLocaleString("pt-PT");
         return `<div class="box"><b>${esc(repo)}</b><div class="warn">Hunter suspenso após ${Number(health.failures) || 0} falhas de ${esc(health.stage || "preparação")} · até ${esc(when)}</div><div class="acts"><button type="button" data-reset-hunt="${esc(repo)}">Repor após corrigir o ambiente</button></div></div>`;
       }).join("");
-      const drops = (diagnostics.jobs || []).map((j) =>
+      const drops = (diagnostics?.jobs || []).map((j) =>
         `<div class="ck"><span class="pill bad">DROP #${Number(j.id)}</span><div><a href="#" data-j="${Number(j.id)}">${esc(j.repo)} · ${esc(j.stage || "erro")}</a><div class="hint">${esc(j.why || "")}</div></div></div>`
       ).join("");
       section.innerHTML = `<h4>Diagnóstico de execução</h4><div class="hint">Falhas recentes e suspensões do Hunter. Os detalhes de cada trabalho incluem a fase, o código de saída e a mensagem sanitizada.</div>${blocked}<div class="box">${drops || '<div class="empty">Sem falhas recentes.</div>'}</div>`;
+      if (!diagnostics) {
+        section.innerHTML = '<h4>Diagnóstico de execução</h4><div class="box"><div class="warn">Não foi possível carregar os diagnósticos. O estado das suspensões é desconhecido.</div><div class="acts"><button type="button" data-retry-failures>Tentar novamente</button></div></div>';
+      }
       B.prepend(section);
+      section.querySelector("[data-retry-failures]")?.addEventListener("click", () => {
+        repos().catch(() => {});
+      });
       for (const button of section.querySelectorAll("[data-reset-hunt]")) {
         button.onclick = async () => {
           button.disabled = true;
