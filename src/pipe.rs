@@ -3209,7 +3209,10 @@ async fn go(a: &Ax, id: i64, h: &str) {
             a.steward_wake.notify_one();
             a.say(
                 "submit",
-                &format!("{}: PR #{n} publicada; aguarda revisao e integracao", j.repo),
+                &format!(
+                    "{}: PR #{n} publicada; aguarda revisao e integracao",
+                    j.repo
+                ),
                 Some(id),
             );
         }

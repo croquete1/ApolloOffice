@@ -1915,14 +1915,41 @@ mod t {
     fn published_pr_is_not_counted_as_an_integrated_fix() {
         let db = crate::db::Db::mem();
         let pending = db.jnew(
-            "o/r", 42, "fix", "correcao em revisao", "", "done", "",
-            json!({}), None, 0.0,
+            "o/r",
+            42,
+            "fix",
+            "correcao em revisao",
+            "",
+            "done",
+            "",
+            json!({}),
+            None,
+            0.0,
         );
         let integrated = db.jnew(
-            "o/r", 43, "fix", "correcao integrada", "", "done", "",
-            json!({}), None, 0.0,
+            "o/r",
+            43,
+            "fix",
+            "correcao integrada",
+            "",
+            "done",
+            "",
+            json!({}),
+            None,
+            0.0,
         );
-        db.jnew("o/r", 0, "hunt", "pesquisa feita", "", "done", "", json!({}), None, 0.0);
+        db.jnew(
+            "o/r",
+            0,
+            "hunt",
+            "pesquisa feita",
+            "",
+            "done",
+            "",
+            json!({}),
+            None,
+            0.0,
+        );
         db.jset(pending, &[("pr", json!(201))]);
         db.jset(integrated, &[("pr", json!(202))]);
         db.run(
@@ -1930,14 +1957,20 @@ mod t {
             pa![],
         );
         let a = std::sync::Arc::new(crate::app::App::new(
-            db, std::env::temp_dir(), 47302, "apollo-office".into(),
+            db,
+            std::env::temp_dir(),
+            47302,
+            "apollo-office".into(),
         ));
         let observed = state(&a);
         assert_eq!(observed["n"]["done"], 3);
         assert_eq!(observed["delivery"]["published_fixes"], 2);
         assert_eq!(observed["delivery"]["open_fixes"], 1);
         assert_eq!(observed["delivery"]["merged_fixes"], 1);
-        a.db.run("update prs set st='merged' where repo='o/r' and num=201", pa![]);
+        a.db.run(
+            "update prs set st='merged' where repo='o/r' and num=201",
+            pa![],
+        );
         assert_eq!(state(&a)["delivery"]["merged_fixes"], 2);
     }
 
