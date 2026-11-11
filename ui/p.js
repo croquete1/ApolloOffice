@@ -89,6 +89,7 @@
 
   const repos = async () => {
     cfg = await get("/api/cfg");
+    const diagnostics = await get("/api/failures").catch(() => null);
     show("Repos", "repos");
     const rs = cfg.repos;
     let op = new Set();
@@ -99,6 +100,7 @@
       if (!yes(r.on_)) c.push(chip("", "paused", "Not active"));
       if (!r.ci) c.push(chip("bad", "no tests", "No test command"));
       if (x.red) c.push(chip("bad", "main red", "CI is red on the default branch, jobs wait"));
+      if (x.hunt_health?.blocked) c.push(chip("bad", "HUNT suspenso", "Falhas repetidas de preparação; consulte o diagnóstico"));
       if (yes(r.iss)) c.push(chip(x.iv > 0 ? "" : "info", x.iv > 0 ? `issues · every ${x.iv >= 60 ? x.iv / 60 + " h" : x.iv + " min"}` : "issues", x.iv > 0 ? "Issues here rarely become PRs, so the Scout checks less often" : "Works on open issues"));
       if (yes(r.hunt)) c.push(chip("info", "hunt", "Hunts for bugs itself"));
       if (yes(r.feat)) c.push(chip("info", "features", "Builds requested features"));
@@ -137,6 +139,40 @@
         <label>Your rules</label><textarea name="rules" placeholder="optional, e.g. never touch the plugin API">${esc(r.rules)}</textarea>
       </div>
       <div class="acts"><button class="pri" data-op="set" disabled>Saved</button><button type="button" data-op="detect">Detect test command</button><span class="sp"></span><button type="button" class="dng" data-op="del">Remove</button></div><div class="msg"></div></details></form>`).join("") || `<div class="empty">No repository yet.</div>`}</div>`;
+    if (!diagnostics || diagnostics.jobs?.length || diagnostics.blocked?.length) {
+      const section = document.createElement("section");
+      section.className = "sec";
+      const blocked = (diagnostics?.blocked || []).map(({ repo, health }) => {
+        const when = new Date(health.until).toLocaleString("pt-PT");
+        return `<div class="box"><b>${esc(repo)}</b><div class="warn">Hunter suspenso após ${Number(health.failures) || 0} falhas de ${esc(health.stage || "preparação")} · até ${esc(when)}</div><div class="acts"><button type="button" data-reset-hunt="${esc(repo)}">Repor após corrigir o ambiente</button></div></div>`;
+      }).join("");
+      const drops = (diagnostics?.jobs || []).map((j) =>
+        `<div class="ck"><span class="pill bad">DROP #${Number(j.id)}</span><div><a href="#" data-j="${Number(j.id)}">${esc(j.repo)} · ${esc(j.stage || "erro")}</a><div class="hint">${esc(j.why || "")}</div></div></div>`
+      ).join("");
+      section.innerHTML = `<h4>Diagnóstico de execução</h4><div class="hint">Falhas recentes e suspensões do Hunter. Os detalhes de cada trabalho incluem a fase, o código de saída e a mensagem sanitizada.</div>${blocked}<div class="box">${drops || '<div class="empty">Sem falhas recentes.</div>'}</div>`;
+      if (!diagnostics) {
+        section.innerHTML = '<h4>Diagnóstico de execução</h4><div class="box"><div class="warn">Não foi possível carregar os diagnósticos. O estado das suspensões é desconhecido.</div><div class="acts"><button type="button" data-retry-failures>Tentar novamente</button></div></div>';
+      }
+      B.prepend(section);
+      section.querySelector("[data-retry-failures]")?.addEventListener("click", () => {
+        repos().catch(() => {});
+      });
+      for (const button of section.querySelectorAll("[data-reset-hunt]")) {
+        button.onclick = async () => {
+          button.disabled = true;
+          const previousLabel = button.textContent;
+          try {
+            const result = await post({ a: "reset-hunt", repo: button.dataset.resetHunt });
+            if (result.error) throw new Error(result.error);
+            await repos();
+          } catch (error) {
+            button.textContent = error?.message || "Erro de ligação; tentar novamente";
+            button.title = previousLabel;
+            button.disabled = false;
+          }
+        };
+      }
+    }
     if ($("rq")) $("rq").oninput = (e) => { const q = e.target.value.trim().toLowerCase(); for (const f of B.querySelectorAll("form.rr")) f.hidden = q && !f.dataset.r.toLowerCase().includes(q); };
     for (const d of B.querySelectorAll("form.rr details")) d.ontoggle = () => {
       const k = d.closest("form").dataset.r;
@@ -543,8 +579,12 @@
       };
       return;
     }
+    const failure = j.failure?.stage
+      ? `<div class="sec"><h4>Diagnóstico técnico</h4><div class="box"><div class="msg">Fase: ${esc(j.failure.stage)} · Saída: ${esc(j.failure.exit_code)} · Máquina: ${esc(j.failure.host || "—")}</div><pre class="df">${esc(j.failure.output || "Sem detalhes")}</pre></div></div>`
+      : "";
     B.innerHTML = `<div class="sec"><div class="box"><div class="hd2"><b>${esc(j.title)}</b><span class="pill">${esc(j.st)}</span></div><div class="msg">${esc(j.repo)} ${esc(tag)} · ${esc(j.kind)}${j.h ? " · " + esc(j.h) : ""}\n${esc(j.why || "")}</div>${cs}
       <div class="acts">${j.url ? `<button data-u="${esc(j.url)}">Open on GitHub</button>` : ""}${!["done", "drop"].includes(j.st) ? `<button class="dng" data-d="${id}">Drop</button>` : ""}${j.st === "drop" && j.kind === "fix" ? `<button data-rq="${id}">Try again</button>` : ""}</div></div></div>
+      ${failure}
       ${j.df ? `<div class="sec"><h4>Diff</h4>${dview(j.df)}</div>` : ""}
       <div class="sec"><h4>Log</h4><div class="log">${ev || `<div class="empty">nothing yet</div>`}</div></div>`;
   };

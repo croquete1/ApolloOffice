@@ -482,9 +482,10 @@
       t.querySelector(".md").title = w.md || "";
       t.querySelector(".sy").textContent = w.say || "…";
       t.className = "tile " + (wk ? "work" : "") + (w.hold ? " hold" : "");
-      t.querySelector(".stt").textContent = w.hold ? "paused" : wk ? "work" + (cn > 1 ? " ×" + cn : "") : w.st === "sleep" ? "sleep" : "idle";
-      t.querySelector(".ft").textContent = w.tk ? kt(w.tk) + " tok" : "";
-      t.title = w.hold ? "click to resume" : "click to pause";
+      t.querySelector(".stt").textContent = w.hold ? "pausado" : wk ? "em trabalho" + (cn > 1 ? " ×" + cn : "") : w.st === "sleep" ? "em espera" : "inativo";
+      t.querySelector(".ft").textContent = !wk && w.idle_reason ? w.idle_reason : (w.tk ? kt(w.tk) + " tok" : "");
+      t.querySelector(".ft").title = w.idle_reason || "";
+      t.title = (w.idle_reason && !wk ? w.idle_reason + " · " : "") + (w.hold ? "clique para retomar" : "clique para pausar");
     }
   };
 
@@ -494,7 +495,9 @@
 
   const lists = () => {
     const q = S.q;
-    $("qn").textContent = q.length ? q.length + " jobs" : "";
+    const suspended = S.ops?.blocked_hunts?.length || 0;
+    $("qn").textContent = (q.length ? q.length + " trabalhos" : "") +
+      (suspended ? " · " + suspended + " Hunter(s) suspenso(s)" : "");
     const aps = q.filter((j) => j.st === "approve").map((j) => j.id);
     for (const k of [...sel]) if (!aps.includes(k)) sel.delete(k);
     const bk = aps.length > 1 ? `<div class="bkb"><label class="ck"><input type="checkbox" id="bkA" ${sel.size === aps.length ? "checked" : ""}> all ${aps.length}</label><span class="sp"></span>${sel.size ? `<button class="go" id="bkS">submit ${sel.size}</button><button class="dng" id="bkD">drop ${sel.size}</button>` : `<span class="k">select pull requests to submit together</span>`}</div>` : "";
@@ -625,6 +628,7 @@
     const cs = (w.cmds || []).length ? w.cmds.slice(-4).reverse() : S.ev.filter((e) => e.w === h.n).slice(0, 3).map((e) => [e.t, e.m]);
     return `<div class="th"><b>${NM[h.n]}</b><span>${esc(mdn(w.md))}</span></div>`
       + tr("status", esc(st) + (w.tk ? ` · ${kt(w.tk)} tok today` : ""))
+      + (w.idle_reason && st !== "work" ? tr("motivo", esc(w.idle_reason)) : "")
       + (w.cs && (w.cs[0] || w.cs[1]) ? tr("cost", [w.cs[0] ? AO.usd(w.cs[0]) + " API" : "", w.cs[1] ? AO.usd(w.cs[1]) + " login value" : ""].filter(Boolean).join(" · ") + " today") : "")
       + (q ? tr("job", `${esc(rn(q))} · ${esc(q.title)} <span class="k">${esc(q.st)}</span>`) : "")
       + (w.say && !h.q ? tr("says", esc(w.say) + ` <span class="k">${ago(w.t)}</span>`) : "")
