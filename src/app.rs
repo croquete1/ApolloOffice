@@ -83,6 +83,8 @@ pub struct App {
     pub quit: tokio::sync::Notify,
     pub restart: Mutex<bool>,
     pub drain: std::sync::atomic::AtomicBool,
+    // Serializes new work/merge admission with the update shutdown decision.
+    pub update_transition: Mutex<()>,
     pub oa: Mutex<HashMap<String, (String, String, i64)>>,
 }
 
@@ -216,6 +218,7 @@ impl App {
             quit: tokio::sync::Notify::new(),
             restart: Mutex::new(false),
             drain: std::sync::atomic::AtomicBool::new(false),
+            update_transition: Mutex::new(()),
             oa: Mutex::new(HashMap::new()),
         }
     }
