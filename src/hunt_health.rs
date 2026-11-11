@@ -100,7 +100,7 @@ pub fn reset(a: &Ax, repo: &str) {
 /// Restrict logs shown to the signed-in operator to a bounded, redacted tail.
 fn safe_tail(output: &str) -> String {
     let credentials = Regex::new(
-        r"(?i)(github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{12,}|bearer\s+\S+|(?:api[_-]?key|token|password|secret|authorization)\s*[:=]\s*\S+)",
+        r"(?i)(authorization\s*[:=]\s*(?:bearer\s+)?\S+|github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{12,}|bearer\s+\S+|(?:api[_-]?key|token|password|secret)\s*[:=]\s*\S+)",
     )
     .expect("constant credential pattern");
     let clean = credentials.replace_all(output, "[credencial ocultada]");
@@ -116,10 +116,11 @@ pub fn diagnostic(
     output: &str,
 ) -> String {
     let detail = safe_tail(output);
+    let host = job.h();
     job.d["failure"] = json!({
         "stage": stage,
         "exit_code": code,
-        "host": job.h(),
+        "host": host,
         "at": now(),
         "output": detail,
     });
