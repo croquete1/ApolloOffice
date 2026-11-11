@@ -196,6 +196,8 @@ fn state(a: &Ax) -> Value {
             "Escritório em pausa"
         } else if !idle {
             ""
+        } else if wv[*role]["st"] == "sleep" {
+            "Em espera; consultar o último evento do agente"
         } else if *role == "hunter" && !blocked_hunts.is_empty() {
             "Existem pesquisas suspensas por falhas de preparação"
         } else if waiting > 0 {
