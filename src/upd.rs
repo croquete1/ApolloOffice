@@ -284,17 +284,15 @@ pub fn spawn(a: Ax) {
                     cancel_watcher_drain(&a);
                     continue;
                 }
-                {
-                    if request_drain(&a) {
-                        a.say(
-                            "submit",
-                            "update ready: finishing running jobs, then restarting",
-                            None,
-                        );
-                    }
-                    if apply(&a, false) {
-                        return;
-                    }
+                if request_drain(&a) {
+                    a.say(
+                        "submit",
+                        "update ready: finishing running jobs, then restarting",
+                        None,
+                    );
+                }
+                if apply(&a, false) {
+                    return;
                 }
             }
         }
@@ -380,7 +378,9 @@ pub fn install(a: &Ax) -> std::io::Result<()> {
             std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755))?;
             // Preserve the previous executable for recovery if the new one
             // fails to exec or crashes after replacing the running image.
-            std::fs::copy(me, me.with_extension("old"))?;
+            let backup_tmp = me.with_extension("old.part");
+            std::fs::copy(me, &backup_tmp)?;
+            std::fs::rename(&backup_tmp, me.with_extension("old"))?;
         }
         std::fs::rename(&f, me)?;
     }
