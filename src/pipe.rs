@@ -4259,6 +4259,7 @@ mod t {
         );
         assert_eq!(hn(&a), 0);
     }
+
     #[test]
     fn fixes_are_ranked_ahead_of_hunts() {
         let fix = json!({"st":"ready", "kind":"fix", "prio":0, "id":2});
