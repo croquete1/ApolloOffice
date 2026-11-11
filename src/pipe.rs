@@ -3257,22 +3257,39 @@ async fn go(a: &Ax, id: i64, h: &str) {
             let n = jj.d["ir"].as_i64().unwrap_or(0) + 1;
             idle_all(a, id);
             if n > 5 {
+                let detail = crate::hunt_health::safe_tail(&m);
+                jj.d["failure"] = json!({
+                    "stage": "host",
+                    "exit_code": Value::Null,
+                    "host": hh,
+                    "at": now(),
+                    "output": detail,
+                });
+                if jj.kind == "hunt" {
+                    crate::hunt_health::fail(a, &jj.repo, "host", 1);
+                }
                 a.db.jset(
                     id,
                     &[
                         ("st", json!("drop")),
+                        ("d", jj.d.clone()),
                         (
                             "why",
                             json!(format!(
                                 "machine kept failing: {}",
-                                crate::sh::head(&m, 260)
+                                crate::sh::head(&crate::hunt_health::safe_tail(&m), 260)
                             )),
                         ),
                     ],
                 );
                 a.say(
                     "submit",
-                    &format!("{} dropped after {} machine failures: {m}", jj.tag(), n - 1),
+                    &format!(
+                        "{} dropped after {} machine failures: {}",
+                        jj.tag(),
+                        n - 1,
+                        crate::sh::head(&crate::hunt_health::safe_tail(&m), 180)
+                    ),
                     Some(id),
                 );
             } else {
@@ -3309,8 +3326,25 @@ async fn go(a: &Ax, id: i64, h: &str) {
                 X::Drop(m) => m.clone(),
                 o => format!("error: {}", crate::sh::head(&o.to_string(), 300)),
             };
-            let jj = a.db.jg(id).unwrap_or(j.clone());
-            a.db.jset(id, &[("st", json!("drop")), ("why", json!(m.clone()))]);
+            let m = crate::hunt_health::safe_tail(&m);
+            let mut jj = a.db.jg(id).unwrap_or(j.clone());
+            if jj.d["failure"].is_null() {
+                jj.d["failure"] = json!({
+                    "stage": jj.st,
+                    "exit_code": Value::Null,
+                    "host": jj.h(),
+                    "at": now(),
+                    "output": m,
+                });
+            }
+            a.db.jset(
+                id,
+                &[
+                    ("st", json!("drop")),
+                    ("why", json!(crate::sh::last(&m, 300))),
+                    ("d", jj.d.clone()),
+                ],
+            );
             idle_all(a, id);
             a.say("submit", &format!("{} dropped: {m}", jj.tag()), Some(id));
             if Regex::new(r"faster|conflict|error|rounds|gave up|CI")
