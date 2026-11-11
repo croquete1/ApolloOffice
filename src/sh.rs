@@ -926,9 +926,7 @@ mod t {
                 .output()
                 .unwrap();
             assert!(result.status.success(), "{result:?}");
-            let path = std::path::PathBuf::from(
-                String::from_utf8(result.stdout).unwrap().trim(),
-            );
+            let path = std::path::PathBuf::from(String::from_utf8(result.stdout).unwrap().trim());
             assert!(!path.exists(), "the command's _npx tree must be removed");
             paths.push(path);
         }
