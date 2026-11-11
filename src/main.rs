@@ -4,6 +4,7 @@ mod codex_forecast;
 mod codex_usage;
 mod db;
 mod gh;
+mod hunt_health;
 mod goog;
 mod mcp;
 mod net;
