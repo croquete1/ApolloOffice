@@ -94,12 +94,23 @@ See [Fork security and configuration](docs/fork-security.md) for safe updates an
 Este fork fixa Node.js **24.22.2** na definição da imagem Docker do ApolloOffice e verifica
 o arquivo através dos SHA-256 oficiais. Não depende do Node 20 do Debian.
 
-Após compilar e instalar **a versão deste fork que contém a correção**, termine primeiro
-os jobs em curso. No painel **Machines → This computer**, grave novamente as definições
-do worker Docker. A alteração à definição da imagem muda o seu identificador e obriga
-à reconstrução e recriação do contentor `apollo-office`. Os volumes nomeados
-`apollo-office-work` e `apollo-office-cargo` são preservados; as alterações feitas
-manualmente **dentro do contentor** não são preservadas.
+**Antes de instalar a versão corrigida**, selecione **Pause office** na aplicação
+antiga e confirme que todos os jobs ativos terminaram (`apollo-office status`
+deve indicar `0 running`). Desative temporariamente novos hunts do FixFlow.
+Só depois inicie a atualização assinada para 0.10.3. O serviço chama
+`ensure` no arranque e pode reconstruir o worker **antes** de voltar a gravar
+as definições de **Machines → This computer**.
+
+A alteração à definição da imagem muda o seu identificador e desencadeia
+a reconstrução e recriação do contentor `apollo-office` no arranque.
+Depois de a aplicação regressar, confirme em **Machines → This computer** as
+definições do worker e grave-as novamente, se necessário. Os volumes nomeados
+`apollo-office-work` e `apollo-office-cargo` são preservados; as alterações
+feitas manualmente **dentro do contentor** não são preservadas.
+
+Se a construção da nova imagem falhar, a aplicação deverá preservar o
+contentor anterior. Não reative os hunts enquanto a versão Node dentro
+do worker não for confirmada.
 
 Confirme com `docker exec apollo-office node -v` e
 `docker exec apollo-office npm -v` (adicione `sudo` se necessário):
