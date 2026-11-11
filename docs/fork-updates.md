@@ -44,6 +44,11 @@ No computador Linux x64 que publica a release:
    Repetir o incremento de versão em cada release; apenas o SHA de Git não
    é suficiente para atualizar o executável integrado.
 
+   A primeira release assinada `fork-v0.10.1` foi publicada em 11/11/2026.
+   A versão `0.10.2` é uma release de validação do percurso completo de
+   atualização nativa (0.10.1 → 0.10.2); a mudança de versão, por si só,
+   não implica novas funcionalidades. Não publicar sem passar os gates. 
+
 3. Na raiz da `main` limpa, autenticado com `gh auth login`, executar:
 
    ```bash
