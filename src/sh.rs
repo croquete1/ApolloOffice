@@ -829,7 +829,9 @@ mod t {
             cpu: 0,
         };
         let mut paths = vec![dir.clone()];
-        paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
         let output = std::process::Command::new("bash")
             .arg("-c")
             .arg(dkup(&host, 1))
