@@ -1585,7 +1585,7 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                 if !crate::upd::idle(a) {
                     return er(StatusCode::CONFLICT, "Wait for all running jobs and merges to finish");
                 }
-                if !crate::upd::apply(a) {
+                if !crate::upd::apply(a, true) {
                     return er(StatusCode::CONFLICT, "Update interrupted by a running task");
                 }
                 js(json!({"ok": true}))
