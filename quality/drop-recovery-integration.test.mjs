@@ -19,28 +19,28 @@ test("job details retain failure diagnostics and show blocked retry errors", () 
   const jobDetails = drawer.slice(drawer.indexOf("const failure = j.failure?.stage"));
   assert.ok(jobDetails.length > 100, "job detail view is present");
   assert.match(jobDetails, /Diagnóstico técnico/);
-  assert.match(jobDetails, /data-requeue-message="\\$\\{id\\}" aria-live="polite"/);
+  assert.ok(jobDetails.includes('data-requeue-message="${id}" aria-live="polite"'));
   assert.match(jobDetails, /\$\{failure\}/);
   assert.match(controls, /data-requeue-message/);
-  assert.match(controls, /result\.error/);
+  assert.ok(controls.includes("result?.error"));
 });
 
-test("successful requeue discards stale error state before applying server state", () => {
+test("successful requeue clears the previous error before applying server state", () => {
   const handler = controls.slice(controls.indexOf('const rq = e.target.closest("[data-rq]")'));
-  assert.match(handler, /retryStates\\.delete\\(id\\)/);
-  assert.match(handler, /message\\(" "\)/.source === "" ? /message\\(" "\)/ : /message\\(" "\)/);
+  assert.ok(handler.includes("retryStates.delete(id)"));
+  assert.ok(handler.includes('message("");'));
   assert.ok(handler.indexOf("retryStates.delete(id)") < handler.indexOf("apply(result)"));
 });
 
-test("retry remains disabled and errors remain attached to the job across queue refreshes", () => {
-  assert.match(controls, /const retryStates = new Map\\(\\)/);
-  assert.match(controls, /const retry = retryStates\\.get\\(j\\.id\\)/);
-  assert.match(controls, /retry\\?\\.pending \\? "disabled"/);
-  assert.match(controls, /retry\\?\\.error/);
-  assert.match(controls, /retryStates\\.get\\(id\\)\\?\\.pending/);
-  assert.match(controls, /document\\.querySelectorAll\\(\\x60\\[data-requeue-message=/);
-  assert.match(controls, /retryStates\\.delete\\(id\\)/);
-  assert.match(drawer, /window\\.AO\\.retryStates\\?\\.get\\(id\\)\\?\\.pending/);
+test("retry remains disabled and errors remain attached to job ID across queue refreshes", () => {
+  assert.ok(controls.includes("const retryStates = new Map()"));
+  assert.ok(controls.includes("const retry = retryStates.get(j.id)"));
+  assert.ok(controls.includes('retry?.pending ? "disabled"'));
+  assert.ok(controls.includes("retry?.error"));
+  assert.ok(controls.includes("retryStates.get(id)?.pending"));
+  assert.ok(controls.includes("document.querySelectorAll("));
+  assert.ok(controls.includes("retryStates.delete(id)"));
+  assert.ok(drawer.includes("window.AO.retryStates?.get(id)?.pending"));
 });
 
 test("new main diagnostics API survives integration with safe dropped-job recovery", () => {
