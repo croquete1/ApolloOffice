@@ -3329,12 +3329,14 @@ async fn go(a: &Ax, id: i64, h: &str) {
             let m = crate::hunt_health::safe_tail(&m);
             let mut jj = a.db.jg(id).unwrap_or(j.clone());
             if jj.d["failure"].is_null() {
+                let stage = jj.st.clone();
+                let host = jj.h();
                 jj.d["failure"] = json!({
-                    "stage": jj.st,
+                    "stage": stage,
                     "exit_code": Value::Null,
-                    "host": jj.h(),
+                    "host": host,
                     "at": now(),
-                    "output": m,
+                    "output": m.clone(),
                 });
             }
             a.db.jset(
