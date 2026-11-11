@@ -587,6 +587,8 @@ RUN set -eu; \
     case "$(dpkg --print-architecture)" in \
       amd64) node_arch=x64 ;; \
       arm64) node_arch=arm64 ;; \
+      ppc64el) node_arch=ppc64le ;; \
+      s390x) node_arch=s390x ;; \
       *) echo "Unsupported Node.js architecture" >&2; exit 1 ;; \
     esac; \
     archive="node-v${NODE_VERSION}-linux-${node_arch}.tar.xz"; \
@@ -607,7 +609,7 @@ WORKDIR /work
 
 pub fn dkup(h: &Ho, cpu: i64) -> String {
     format!(
-        "command -v docker >/dev/null || {{ echo 'docker is not installed'; exit 2; }}\ndocker info >/dev/null 2>&1 || {{ echo 'docker is not running'; exit 2; }}\nif ! docker image inspect {im} >/dev/null 2>&1; then docker build -q -t {im} - <<'DOCKERFILE'\n{DF}DOCKERFILE\nfi\nold=$(docker inspect -f '{{{{.Config.Image}}}}' {CT} 2>/dev/null)\nif [ -n \"$old\" ] && [ \"$old\" != {im} ]; then docker rm -f {CT} >/dev/null 2>&1; fi\nr=$(docker inspect -f '{{{{.State.Running}}}}' {CT} 2>/dev/null)\nm=$(( $(docker info --format '{{{{.MemTotal}}}}' 2>/dev/null || echo 0) / 1048576 - 3072 ))\n[ \"$m\" -lt 2048 ] && m=2048\nif [ -z \"$r\" ]; then docker run -d --name {CT} --restart unless-stopped --cpus {cpu} --cpu-shares 128 --memory \"$m\"m --memory-swap \"$m\"m -v apollo-office-work:/work -v apollo-office-cargo:/usr/local/cargo/registry {im} sleep infinity >/dev/null 2>&1 || [ \"$(docker inspect -f '{{{{.State.Running}}}}' {CT} 2>/dev/null)\" = true ] || docker start {CT} >/dev/null || exit 3; elif [ \"$r\" != true ]; then docker start {CT} >/dev/null || exit 3; fi\ndocker update --cpus {cpu} --cpu-shares 128 --memory \"$m\"m --memory-swap \"$m\"m {CT} >/dev/null 2>&1\ndocker images apollo-office-build --format '{{{{.Repository}}}}:{{{{.Tag}}}}' | grep -vx {im} | xargs -r docker rmi >/dev/null 2>&1\necho ok {}\n",
+        "command -v docker >/dev/null || {{ echo 'docker is not installed'; exit 2; }}\ndocker info >/dev/null 2>&1 || {{ echo 'docker is not running'; exit 2; }}\nif ! docker image inspect {im} >/dev/null 2>&1; then docker build -q -t {im} - <<'DOCKERFILE' || {{ echo 'worker image build failed; existing container preserved' >&2; exit 4; }}\n{DF}DOCKERFILE\nfi\ndocker image inspect {im} >/dev/null 2>&1 || {{ echo 'replacement worker image unavailable; existing container preserved' >&2; exit 4; }}\nold=$(docker inspect -f '{{{{.Config.Image}}}}' {CT} 2>/dev/null)\nif [ -n \"$old\" ] && [ \"$old\" != {im} ]; then docker rm -f {CT} >/dev/null 2>&1 || {{ echo 'cannot remove previous worker container' >&2; exit 5; }}; fi\nr=$(docker inspect -f '{{{{.State.Running}}}}' {CT} 2>/dev/null)\nm=$(( $(docker info --format '{{{{.MemTotal}}}}' 2>/dev/null || echo 0) / 1048576 - 3072 ))\n[ \"$m\" -lt 2048 ] && m=2048\nif [ -z \"$r\" ]; then docker run -d --name {CT} --restart unless-stopped --cpus {cpu} --cpu-shares 128 --memory \"$m\"m --memory-swap \"$m\"m -v apollo-office-work:/work -v apollo-office-cargo:/usr/local/cargo/registry {im} sleep infinity >/dev/null 2>&1 || [ \"$(docker inspect -f '{{{{.State.Running}}}}' {CT} 2>/dev/null)\" = true ] || docker start {CT} >/dev/null || exit 3; elif [ \"$r\" != true ]; then docker start {CT} >/dev/null || exit 3; fi\ndocker update --cpus {cpu} --cpu-shares 128 --memory \"$m\"m --memory-swap \"$m\"m {CT} >/dev/null 2>&1\ndocker images apollo-office-build --format '{{{{.Repository}}}}:{{{{.Tag}}}}' | grep -vx {im} | xargs -r docker rmi >/dev/null 2>&1\necho ok {}\n",
         h.id,
         im = im()
     )
@@ -764,6 +766,31 @@ mod t {
         assert!(DF.contains("ENV PATH=\"/opt/node/bin:${PATH}\""));
         assert!(DF.contains("amd64) node_arch=x64"));
         assert!(DF.contains("arm64) node_arch=arm64"));
+        assert!(DF.contains("ppc64el) node_arch=ppc64le"));
+        assert!(DF.contains("s390x) node_arch=s390x"));
+    }
+
+    #[test]
+    fn worker_image_build_must_succeed_before_replacing_container() {
+        let host = Ho {
+            id: "test".into(),
+            ssh: String::new(),
+            dk: true,
+            ln: 1,
+            ci: 1,
+            gb: 5,
+            on: true,
+            no: vec![],
+            cpu: 0,
+        };
+        let script = dkup(&host, 1);
+        let build = script.find("docker build -q").unwrap();
+        let guarded = script.find("worker image build failed; existing container preserved").unwrap();
+        let remove = script.find("docker rm -f").unwrap();
+        assert!(build < guarded && guarded < remove);
+        assert!(script.contains("exit 4; }"));
+        assert!(script.contains("replacement worker image unavailable"));
+        assert!(script.contains("cannot remove previous worker container"));
     }
 
     #[cfg(unix)]
