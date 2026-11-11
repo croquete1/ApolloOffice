@@ -98,7 +98,7 @@ pub fn reset(a: &Ax, repo: &str) {
 }
 
 /// Restrict logs shown to the signed-in operator to a bounded, redacted tail.
-fn safe_tail(output: &str) -> String {
+pub(crate) fn safe_tail(output: &str) -> String {
     let credentials = Regex::new(
         r"(?i)(authorization\s*[:=]\s*(?:bearer\s+)?\S+|github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{12,}|bearer\s+\S+|(?:api[_-]?key|token|password|secret)\s*[:=]\s*\S+)",
     )
