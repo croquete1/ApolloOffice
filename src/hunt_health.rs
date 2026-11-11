@@ -151,8 +151,8 @@ mod tests {
         ))
     }
 
-    #[test]
-    fn breaker_is_isolated_by_repository_and_clears_after_success() {
+    #[tokio::test]
+    async fn breaker_is_isolated_by_repository_and_clears_after_success() {
         let a = app();
         for _ in 0..LIMIT {
             fail(&a, "example/one", "setup", 1);
