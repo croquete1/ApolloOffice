@@ -612,8 +612,10 @@ RUN set -eu; \
     rm -f "${archive}" SHASUMS256.txt; \
     test "$(/opt/node/bin/node --version)" = "v${NODE_VERSION}"
 ENV PATH="/opt/node/bin:${PATH}"
-# Persist npm's verified tarball cache on the apollo-office-npm named volume.
-# Altering DF also forces the worker image identifier to change.
+# The build-time npm cache stays inside the image. At runtime, each command
+# uses an isolated ephemeral cache root while sharing only verified _cacache
+# downloads through the apollo-office-npm-downloads named volume.
+# Altering DF also changes the worker image identifier.
 ENV npm_config_cache=/root/.npm
 RUN rustup component add rustfmt clippy && rustup target add wasm32-unknown-unknown && npm install -g pnpm yarn && pip3 install --break-system-packages pytest
 ENV CARGO_TERM_COLOR=never CARGO_INCREMENTAL=0 PIP_BREAK_SYSTEM_PACKAGES=1
