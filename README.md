@@ -101,8 +101,10 @@ do worker Docker. A alteração à definição da imagem muda o seu identificado
 `apollo-office-work` e `apollo-office-cargo` são preservados; as alterações feitas
 manualmente **dentro do contentor** não são preservadas.
 
-Confirme com `sudo docker exec apollo-office node -v` e `npm -v`, que devem indicar
-Node `v24.22.2` e npm incluído no Node 24. **Não reconstrua com jobs ativos.**
+Confirme com `docker exec apollo-office node -v` e
+`docker exec apollo-office npm -v` (adicione `sudo` se necessário):
+o contentor deve utilizar Node `v24.22.2` e o npm incluído no Node 24.
+**Não reconstrua com jobs ativos.**
 
 It prints a one-time login link. Open it and follow the setup: add a machine,
 add a repository, check its test command.
