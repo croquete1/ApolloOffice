@@ -126,7 +126,7 @@ pub(crate) fn safe_tail(output: &str) -> String {
     static PATTERNS: std::sync::LazyLock<Vec<Regex>> = std::sync::LazyLock::new(|| {
         [
             // Include the complete Basic/Bearer header value, never just its prefix.
-            r"(?im)\bauthorization[ \t]*[:=][ \t]*[^\r\n]*",
+            r#"(?im)(?:"|')?\bauthorization(?:"|')?[ \t]*[:=][ \t]*[^\r\n]*"#,
             // Strip URL userinfo, including a password containing an extra @.
             r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/]*@",
             // Consume all quoted values rather than only the first word.
@@ -212,6 +212,7 @@ mod tests {
     fn complete_authorization_urls_and_quoted_secrets_are_redacted() {
         let output = concat!(
             "Authorization: Basic dXNlcjpwYXNz\n",
+            "\"Authorization\": \"Basic Zm9vOmJhcg==\"\n",
             "authorization: Bearer abcdef012345 trailing-value\n",
             "remote https://alice:my-password@github.example/repo.git\n",
             "password='long password with spaces'\n",
@@ -221,6 +222,7 @@ mod tests {
         let tail = safe_tail(output);
         for secret in [
             "dXNlcjpwYXNz",
+            "Zm9vOmJhcg==",
             "abcdef012345",
             "trailing-value",
             "alice",
