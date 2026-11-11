@@ -143,11 +143,12 @@ pub fn info(a: &Ax) -> Value {
 
 /// Downloads a bounded asset, including when Content-Length is absent.
 async fn get(a: &Ax, u: &str, limit: usize) -> Result<Vec<u8>, String> {
-    let mut r = a.hc.get(u)
-        .timeout(Duration::from_secs(300))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let mut r =
+        a.hc.get(u)
+            .timeout(Duration::from_secs(300))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
     if r.status().as_u16() == 404 {
         return Err("no signed fork release published".into());
     }
@@ -176,9 +177,8 @@ pub async fn check(a: &Ax) -> Result<Value, String> {
     let cid = channel_id(&b, &key);
     let r: Result<Value, String> = async {
         let body = get(a, &format!("{b}/latest.json"), 128 * 1024).await?;
-        let sig = String::from_utf8_lossy(
-            &get(a, &format!("{b}/latest.json.sig"), 4 * 1024).await?
-        ).to_string();
+        let sig_bytes = get(a, &format!("{b}/latest.json.sig"), 4 * 1024).await?;
+        let sig = String::from_utf8_lossy(&sig_bytes).to_string();
         let m = check_sig(&key, &body, &sig)?;
         let v = m["v"].as_str().unwrap_or("").to_string();
         st(a, |x| {
@@ -435,7 +435,9 @@ mod t {
     fn running_work_or_merge_blocks_update() {
         let db = crate::db::Db::mem();
         let a = std::sync::Arc::new(crate::app::App::new(
-            db, PathBuf::from("/tmp/apollo-upd-test"), 47300,
+            db,
+            PathBuf::from("/tmp/apollo-upd-test"),
+            47300,
             PathBuf::from("/tmp/apollo-upd-test/apollo-office"),
         ));
         assert!(idle(&a));
@@ -460,7 +462,9 @@ mod t {
     fn manual_failure_never_clears_auto_drain() {
         let db = crate::db::Db::mem();
         let a = std::sync::Arc::new(crate::app::App::new(
-            db, PathBuf::from("/tmp/apollo-drain-test"), 47300,
+            db,
+            PathBuf::from("/tmp/apollo-drain-test"),
+            47300,
             PathBuf::from("/tmp/apollo-drain-test/apollo-office"),
         ));
         assert!(crate::pipe::admit(&a, "sample/repo", "local", 42));
@@ -495,7 +499,9 @@ mod t {
     fn manual_update_requires_pause_and_blocks_admission() {
         let db = crate::db::Db::mem();
         let a = std::sync::Arc::new(crate::app::App::new(
-            db, PathBuf::from("/tmp/apollo-manual-test"), 47300,
+            db,
+            PathBuf::from("/tmp/apollo-manual-test"),
+            47300,
             PathBuf::from("/tmp/apollo-manual-test/apollo-office"),
         ));
         assert!(!reserve_install(&a, true));
