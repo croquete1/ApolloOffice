@@ -29,27 +29,26 @@ pub fn blocked(a: &Ax, repo: &str) -> bool {
 }
 
 pub fn blocked_repos(a: &Ax) -> Vec<Value> {
-    a.db
-        .all("select full from rp where on_=1 and hunt=1 order by full", crate::pa![])
-        .into_iter()
-        .filter_map(|v| {
-            let repo = v["full"].as_str()?;
-            let h = status(a, repo);
-            if h["blocked"] == true {
-                Some(json!({"repo": repo, "health": h}))
-            } else {
-                None
-            }
-        })
-        .collect()
+    a.db.all(
+        "select full from rp where on_=1 and hunt=1 order by full",
+        crate::pa![],
+    )
+    .into_iter()
+    .filter_map(|v| {
+        let repo = v["full"].as_str()?;
+        let h = status(a, repo);
+        if h["blocked"] == true {
+            Some(json!({"repo": repo, "health": h}))
+        } else {
+            None
+        }
+    })
+    .collect()
 }
 
 pub fn fail(a: &Ax, repo: &str, stage: &str, code: i32) {
     let before = status(a, repo);
-    let failures = before["failures"]
-        .as_i64()
-        .unwrap_or(0)
-        .saturating_add(1);
+    let failures = before["failures"].as_i64().unwrap_or(0).saturating_add(1);
     let until = if failures >= LIMIT {
         now().saturating_add(COOLDOWN_MS)
     } else {
@@ -84,7 +83,11 @@ pub fn success(a: &Ax, repo: &str) {
     let before = status(a, repo);
     if before["failures"].as_i64().unwrap_or(0) > 0 {
         a.db.kd(&key(repo));
-        a.say("hunter", &format!("{repo}: preparação validada; contador de falhas limpo"), None);
+        a.say(
+            "hunter",
+            &format!("{repo}: preparação validada; contador de falhas limpo"),
+            None,
+        );
     }
 }
 
@@ -108,13 +111,7 @@ pub(crate) fn safe_tail(output: &str) -> String {
 }
 
 /// Persist stage, exit code, worker and a detailed tail before the job is dropped.
-pub fn diagnostic(
-    a: &Ax,
-    job: &mut Job,
-    stage: &str,
-    code: i32,
-    output: &str,
-) -> String {
+pub fn diagnostic(a: &Ax, job: &mut Job, stage: &str, code: i32, output: &str) -> String {
     let detail = safe_tail(output);
     let host = job.h();
     job.d["failure"] = json!({

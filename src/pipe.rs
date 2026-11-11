@@ -3641,9 +3641,9 @@ fn mk_hunt(a: &Ax) -> bool {
                 && !act.contains(r)
                 && !on.iter().any(|x| x["repo"].as_str() == Some(r.as_str()))
                 && {
-                let b = bl(a, r);
-                b > 0 && qn(a, r, "'vet','ready'") < 4 * b
-            }
+                    let b = bl(a, r);
+                    b > 0 && qn(a, r, "'vet','ready'") < 4 * b
+                }
         })
         .collect();
     let sc = |r: &str| (cnt(r) as f64 + 1.0) / hy(a, r);

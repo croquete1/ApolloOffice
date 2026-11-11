@@ -185,8 +185,7 @@ fn state(a: &Ax) -> Value {
         "select count(*) from jobs where st in ('ready','submit')",
         pa![],
     );
-    let paused = o["man"] == true
-        || o["pause"].as_str().is_some_and(|reason| !reason.is_empty());
+    let paused = o["man"] == true || o["pause"].as_str().is_some_and(|reason| !reason.is_empty());
     let blocked_hunts = crate::hunt_health::blocked_repos(a);
     for role in WS {
         let idle = wv[*role]["st"] != "work";
@@ -1188,7 +1187,8 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                     if a.db.n(
                         "select count(*) from rp where full=?",
                         pa![repo.to_string()],
-                    ) != 1 {
+                    ) != 1
+                    {
                         return er(StatusCode::BAD_REQUEST, "unknown repository");
                     }
                     crate::hunt_health::reset(a, repo);
