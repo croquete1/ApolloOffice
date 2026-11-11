@@ -1620,6 +1620,10 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
             _ => er(StatusCode::BAD_REQUEST, "unknown op"),
         },
         ("POST", "/api/update") => match b["op"].as_str().unwrap_or("") {
+            "check-main" => match crate::upd::check_main().await {
+                Ok(v) => js(json!({"ok": true, "r": v})),
+                Err(e) => js(json!({"ok": false, "m": e})),
+            },
             "check" => match crate::upd::check(a).await {
                 Ok(v) => js(json!({"ok": true, "r": v, "cfg": cfg(a)})),
                 Err(e) => js(json!({"ok": false, "m": e, "cfg": cfg(a)})),

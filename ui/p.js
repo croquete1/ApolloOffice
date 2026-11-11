@@ -330,6 +330,7 @@
   };
   A.role = role;
 
+  let mainCheck = null;
   const settings = async () => {
     cfg = await get("/api/cfg");
     show("Settings", "set");
@@ -338,7 +339,16 @@
     const ol = cfg.prov.find((p) => p.id === "ollama");
     const vg = (x, y) => { const a = String(x || "").replace(/^v/, "").split(".").map(Number), b = String(y || "").replace(/^v/, "").split(".").map(Number); for (let i = 0; i < 3; i++) if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) > (b[i] || 0); return false; };
     const nu = u.configured === true && u.ready && vg(u.ready, A.S?.v);
-    const ust = !u.configured ? "Automatic updates are disabled for this customized fork. Configure a trusted HTTPS release URL and a separate signing key to enable them." : nu ? `Update ${esc(u.ready)} is downloaded.` : u.err ? `Last check: ${esc(u.err)}` : u.latest ? `Latest release: ${esc(u.latest)}` : "Not checked yet.";
+    const ust = !u.configured ? "Canal de versões assinadas não configurado." : nu ? `Versão assinada ${esc(u.ready)} descarregada e pronta a instalar após pausa e validações.` : u.err ? `Erro na verificação do canal assinado: ${esc(u.err)}` : u.latest ? `Última versão assinada: ${esc(u.latest)}. Este indicador não reflete o último commit da main.` : "Canal assinado ainda não verificado.";
+    const ms = !mainCheck
+      ? "A branch main é verificada separadamente da versão assinada instalada."
+      : !mainCheck.ok
+      ? `Não foi possível comparar a main: ${esc(mainCheck.m || "erro desconhecido")}`
+      : mainCheck.r.ahead > 0
+      ? `Código mais recente no GitHub: main ${esc(mainCheck.r.sha.slice(0, 12))} — ${Number(mainCheck.r.ahead)} commit(s) depois da release ${esc(mainCheck.r.tag)}. Este código ainda não é uma atualização assinada instalável pelo botão.`
+      : mainCheck.r.status === "identical"
+      ? `A main coincide com a release GitHub ${esc(mainCheck.r.tag)} (SHA ${esc(mainCheck.r.sha.slice(0, 12))}). Isto não comprova qual o commit do executável local.`
+      : `A main e a release GitHub têm histórias diferentes (${esc(mainCheck.r.status)}). Compare antes de instalar.`;
     const TB = [["gen", "General"], ["md", "Models"], ["prov", "Providers"], ["ntf", "Notifications"], ["int", "Integrations"], ["sys", "System"]];
     let tb = "gen";
     try { tb = localStorage.getItem("ao.st") || "gen"; } catch {}
@@ -387,7 +397,7 @@
         <div class="hint" style="margin-top:6px">Sentry: add an internal integration with this webhook URL and alert rule actions. GlitchTip: add it as a webhook alert. The office has to be reachable from the internet for this, for example through a tunnel; use that address instead of 127.0.0.1. The same error goes into one report. Senders that can set headers can pass the key as <code>X-Hook-Key</code> instead of in the URL. The key can only create reports; replace the link if it leaks.</div>
         <div class="hint">GitHub Actions: a failed run can report itself with <code>Silvertree2010/ApolloOffice/report</code>, see the README.</div>
         <div class="acts"><button type="button" id="hn">${cfg.hook.on ? "Replace link" : "Create link"}</button>${cfg.hook.on ? `<button type="button" class="dng" id="ho">Revoke</button>` : ""}</div></div></div>
-      <div data-tab="sys" class="sec"><h4>Atualizações</h4><div class="box">${tg("updates", u.configured && s.updates, "install verified fork updates automatically when the office is idle")}<div class="msg" id="um">${ust}</div><div class="acts">${u.configured ? '<button type="button" id="uc">Verificar atualizações</button>' : ""}${nu ? `<button type="button" class="pri" id="ua">Atualizar agora</button>` : ""}</div></div></div>
+      <div data-tab="sys" class="sec"><h4>Atualizações</h4><div class="box">${tg("updates", u.configured && s.updates, "instalar apenas releases assinadas deste fork quando o escritório estiver inativo")}<div class="msg" id="um">${ust}</div><div class="acts">${u.configured ? '<button type="button" id="uc">Verificar versão assinada</button>' : ""}${nu ? `<button type="button" class="pri" id="ua">Instalar versão assinada</button>` : ""}</div><div class="hint">Verificar não instala. A instalação pelo botão exige uma versão superior publicada e assinada com a chave de confiança do fork.</div><div class="msg" id="umain" aria-live="polite">${ms}</div><div class="acts"><button type="button" id="umc">Comparar com a main do GitHub</button></div><div class="hint">A main pode conter correções ainda não publicadas como release assinada. Para instalar diretamente a main, utilize o atualizador local no CachyOS com o escritório em pausa: <code>python3 ~/Downloads/atualizar-apollo-fixflow.py</code>. A consulta da main não modifica o executável.</div></div></div>
       <div data-tab="sys" class="sec"><h4>Export and import</h4><div class="box"><div class="ck">Settings, repositories, machines and models as a JSON file. API keys, tokens, logins and notification addresses are not included.</div>
         <div class="acts"><button type="button" id="ex">Export</button><button type="button" id="im">Import…</button><input type="file" id="imf" accept="application/json,.json" hidden></div><div class="msg" id="xm"></div></div></div>
       <div data-tab="sys" class="sec"><h4>This installation</h4><div class="box"><div class="fm" style="margin:0">
@@ -499,12 +509,33 @@
     };
     if ($("ho")) $("ho").onclick = async (e) => { if (e.target.dataset.sure !== "1") { e.target.dataset.sure = "1"; e.target.textContent = "Click again to revoke"; return; } await post({ op: "off" }, "/api/hooktok"); settings(); };
     if ($("ao")) $("ao").onclick = async (e) => { if (e.target.dataset.sure !== "1") { e.target.dataset.sure = "1"; e.target.textContent = "Click again to revoke"; return; } await post({ op: "off" }, "/api/apitok"); settings(); };
-    if ($("uc")) $("uc").onclick = async (e) => { busy(e.target, true, "Checking…"); const r = await post({ op: "check" }, "/api/update"); await settings(); $("um").textContent = r.ok ? (r.r.new ? `Update ${r.r.latest} downloaded.` : `Up to date (latest ${r.r.latest}).`) : r.m; };
+    if ($("uc")) $("uc").onclick = async (e) => {
+      busy(e.target, true, "A verificar versão assinada…");
+      try {
+        const r = await post({ op: "check" }, "/api/update");
+        await settings();
+        if (!r.ok) { $("um").className = "msg bad2"; $("um").textContent = r.m || r.error || "Falha ao consultar o canal assinado."; }
+        else $("um").textContent = r.r.new
+          ? `Versão assinada ${r.r.latest} descarregada. Use «Instalar versão assinada» após pausar o escritório.`
+          : `Sem nova versão assinada (última: ${r.r.latest}). A main do GitHub pode conter commits posteriores.`;
+      } catch (error) {
+        await settings();
+        $("um").className = "msg bad2";
+        $("um").textContent = String(error);
+      }
+    };
+    if ($("umc")) $("umc").onclick = async (e) => {
+      busy(e.target, true, "A comparar main…");
+      try { mainCheck = await post({ op: "check-main" }, "/api/update"); }
+      catch (error) { mainCheck = { ok: false, m: String(error) }; }
+      await settings();
+      if (!mainCheck.ok) $("umain").className = "msg bad2";
+    };
     if ($("ua")) $("ua").onclick = async (e) => {
       busy(e.target, true, "A verificar segurança…");
       const r = await post({ op: "apply" }, "/api/update");
       if (!r.ok) {
-        busy(e.target, false, "Atualizar agora");
+        busy(e.target, false, "Instalar versão assinada");
         $("um").className = "msg bad2";
         $("um").textContent = r.error || r.m || "Não foi possível iniciar a atualização.";
         return;
