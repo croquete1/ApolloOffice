@@ -785,7 +785,9 @@ mod t {
         };
         let script = dkup(&host, 1);
         let build = script.find("docker build -q").unwrap();
-        let guarded = script.find("worker image build failed; existing container preserved").unwrap();
+        let guarded = script
+            .find("worker image build failed; existing container preserved")
+            .unwrap();
         let remove = script.find("docker rm -f").unwrap();
         assert!(build < guarded && guarded < remove);
         assert!(script.contains("exit 4; }"));
