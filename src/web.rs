@@ -1119,6 +1119,7 @@ fn rid(s: &str) -> Option<String> {
     }
 }
 
+/// Routes authenticated application commands, including safe manual updates.
 async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
     let qv = |k: &str| {
         q.split('&')
