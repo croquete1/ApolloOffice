@@ -176,6 +176,7 @@ pub fn dset() -> Value {
 }
 
 impl App {
+    /// Constructs application state with a process-wide update/work admission gate.
     pub fn new(db: Db, dd: PathBuf, port: u16, me: PathBuf) -> App {
         let mut lv = Lv::default();
         let ho = db.kg("hold");
