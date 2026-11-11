@@ -122,7 +122,7 @@ pub fn diagnostic(
         "exit_code": code,
         "host": host,
         "at": now(),
-        "output": detail,
+        "output": detail.clone(),
     });
     a.db.jd(job);
     if job.kind == "hunt" {
