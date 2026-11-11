@@ -1581,10 +1581,16 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                     return er(StatusCode::CONFLICT, "no trusted update downloaded");
                 }
                 if !crate::upd::manually_paused(a) {
-                    return er(StatusCode::CONFLICT, "Select Pause office before installing an update");
+                    return er(
+                        StatusCode::CONFLICT,
+                        "Select Pause office before installing an update",
+                    );
                 }
                 if !crate::upd::idle(a) {
-                    return er(StatusCode::CONFLICT, "Wait for all running jobs and merges to finish");
+                    return er(
+                        StatusCode::CONFLICT,
+                        "Wait for all running jobs and merges to finish",
+                    );
                 }
                 if !crate::upd::apply(a, true) {
                     return er(StatusCode::CONFLICT, "Update interrupted by a running task");
