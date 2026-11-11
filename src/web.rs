@@ -1119,6 +1119,7 @@ fn rid(s: &str) -> Option<String> {
     }
 }
 
+/// Routes authenticated application commands, including safe manual updates.
 async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
     let qv = |k: &str| {
         q.split('&')
@@ -1577,9 +1578,23 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
             },
             "apply" => {
                 if !crate::upd::ready(a) {
-                    return er(StatusCode::CONFLICT, "no update downloaded");
+                    return er(StatusCode::CONFLICT, "no trusted update downloaded");
                 }
-                crate::upd::apply(a);
+                if !crate::upd::manually_paused(a) {
+                    return er(
+                        StatusCode::CONFLICT,
+                        "Select Pause office before installing an update",
+                    );
+                }
+                if !crate::upd::idle(a) {
+                    return er(
+                        StatusCode::CONFLICT,
+                        "Wait for all running jobs and merges to finish",
+                    );
+                }
+                if !crate::upd::apply(a, true) {
+                    return er(StatusCode::CONFLICT, "Update interrupted by a running task");
+                }
                 js(json!({"ok": true}))
             }
             _ => er(StatusCode::BAD_REQUEST, "unknown op"),

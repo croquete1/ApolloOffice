@@ -3357,6 +3357,25 @@ async fn red(a: &Ax, r: &str, h: &str) -> bool {
     !(h["s"].is_string() && cr["sha"].is_string() && h["s"] != cr["sha"])
 }
 
+// Work admission must hold the same transition guard as the updater and merges.
+// A preliminary drain check is only an optimization, never the authority.
+pub(crate) fn admit(a: &Ax, repo: &str, host: &str, id: i64) -> bool {
+    let _transition = a.update_transition.lock().unwrap();
+    if a.drain.load(std::sync::atomic::Ordering::SeqCst) {
+        return false;
+    }
+    let mut active = a.act.lock().unwrap();
+    let mut locked = a.lk.lock().unwrap();
+    let claim = format!("{repo} {host}");
+    if active.contains(&claim) || locked.contains(&id) {
+        return false;
+    }
+    active.insert(claim);
+    locked.insert(id);
+    true
+}
+
+/// Selects eligible work, reserving the final admission under update_transition.
 async fn pick(a: &Ax, h: &str) -> Option<i64> {
     if a.drain.load(std::sync::atomic::Ordering::Relaxed) {
         return None;
@@ -3443,16 +3462,12 @@ async fn pick(a: &Ax, h: &str) -> Option<i64> {
                 continue;
             }
         }
-        {
-            let mut ac = a.act.lock().unwrap();
-            let mut lk = a.lk.lock().unwrap();
-            if ac.contains(&format!("{r} {h}")) || lk.contains(&id) {
-                continue;
-            }
-            ac.insert(format!("{r} {h}"));
-            lk.insert(id);
+        if admit(a, &r, h, id) {
+            return Some(id);
         }
-        return Some(id);
+        if a.drain.load(std::sync::atomic::Ordering::SeqCst) {
+            return None;
+        }
     }
     None
 }

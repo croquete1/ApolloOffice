@@ -373,7 +373,12 @@ struct MergePermit {
 }
 
 impl MergePermit {
+    /// Acquires a merge permit only if a binary update has not begun draining.
     fn acquire(app: &Ax, repo: &str) -> Option<Self> {
+        let _transition = app.update_transition.lock().ok()?;
+        if app.drain.load(std::sync::atomic::Ordering::SeqCst) {
+            return None;
+        }
         let mut active = app.merge_in_progress.lock().ok()?;
         if !active.insert(repo.to_string()) {
             return None;
