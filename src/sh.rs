@@ -795,6 +795,61 @@ mod t {
         assert!(script.contains("cannot remove previous worker container"));
     }
 
+    /// Simulates a Docker image build failure without accessing real Docker.
+    /// A failed build must never reach docker rm for the existing worker.
+    #[cfg(unix)]
+    #[test]
+    fn failed_image_build_does_not_remove_existing_container() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "apollo-docker-build-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let docker = dir.join("docker");
+        let trace = dir.join("calls.txt");
+        std::fs::write(
+            &docker,
+            "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$APOLLO_DOCKER_TRACE\"\ncase \"$1\" in\n  info) exit 0 ;;\n  image) exit 1 ;;\n  build) exit 17 ;;\n  rm) exit 90 ;;\n  *) exit 0 ;;\nesac\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let host = Ho {
+            id: "local".into(),
+            ssh: String::new(),
+            dk: true,
+            ln: 1,
+            ci: 1,
+            gb: 5,
+            on: true,
+            no: vec![],
+            cpu: 0,
+        };
+        let mut paths = vec![dir.clone()];
+        paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(dkup(&host, 1))
+            .env("PATH", std::env::join_paths(paths).unwrap())
+            .env("APOLLO_DOCKER_TRACE", &trace)
+            .output()
+            .unwrap();
+        let calls = std::fs::read_to_string(&trace).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(
+            output.status.code(),
+            Some(4),
+            "unexpected shell status: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(calls.lines().any(|line| line == "build"));
+        assert!(!calls.lines().any(|line| line == "rm"));
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn credentials_stay_available_to_cli_but_are_removed_from_workers() {
