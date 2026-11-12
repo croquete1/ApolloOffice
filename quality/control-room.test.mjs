@@ -38,6 +38,18 @@ test("Control Room is loaded after the original application", () => {
   assert.ok(iWalk > iModern, "handoff code must load after the modern dashboard");
 });
 
+test("integrated fixes count merged PRs on the tracked default branch", () => {
+  assert.match(modern, /Correções integradas/);
+  assert.match(modern, /s\.delivery\?\.merged_fixes/);
+  assert.doesNotMatch(modern, /byId\("aoMetricDone"\)\.textContent = formatNum\(totals\.done\)/);
+  const backend = read("src/web.rs");
+  const watcher = read("src/wk.rs");
+  assert.match(backend, /"merged_fixes": a\.db\.n/);
+  assert.match(backend, /json_extract\(p\.d,'\$\.base'\)=json_extract\(p\.d,'\$\.default_branch'\)/);
+  assert.match(watcher, /repo_default_branch/);
+  assert.match(watcher, /crate::gh::meta/);
+});
+
 test("all ten original agents have distinct live stations", () => {
   for (const role of ["scout","guard","vet","watcher","hunter","repro","fixer","ci","reviewer","submit"]) {
     assert.match(modern, new RegExp("\\b" + role + "\\b"));

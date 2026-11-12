@@ -215,9 +215,11 @@ fn state(a: &Ax) -> Value {
     // may have hunting or issue intake switched off. These were previously
     // invisible, leaving the office looking idle for no stated reason.
     let (ens_ids, ing_ids) = crate::pipe::ensure_state();
-    let hosts_diag: Vec<Value> = a
-        .db
-        .all("select id, dk, on_ from hs order by id='local' desc, id", pa![])
+    let hosts_diag: Vec<Value> =
+        a.db.all(
+            "select id, dk, on_ from hs order by id='local' desc, id",
+            pa![],
+        )
         .into_iter()
         .map(|h| {
             let id = h["id"].as_str().unwrap_or("").to_string();
@@ -231,11 +233,15 @@ fn state(a: &Ax) -> Value {
             })
         })
         .collect();
-    let hunt_off: Vec<Value> =
-        a.db.all("select full from rp where on_=1 and (hunt=0 or ci='')", pa![]);
+    let hunt_off: Vec<Value> = a.db.all(
+        "select full from rp where on_=1 and (hunt=0 or ci='')",
+        pa![],
+    );
     let iss_off: Vec<Value> = a.db.all("select full from rp where on_=1 and iss=0", pa![]);
-    let hunt_enabled =
-        a.db.n("select count(*) from rp where on_=1 and hunt=1 and ci<>''", pa![]);
+    let hunt_enabled = a.db.n(
+        "select count(*) from rp where on_=1 and hunt=1 and ci<>''",
+        pa![],
+    );
     let preparing_hosts: Vec<&str> = hosts_diag
         .iter()
         .filter(|h| h["preparing"] == true)
@@ -268,6 +274,11 @@ fn state(a: &Ax) -> Value {
     json!({
         "t": now(), "v": crate::app::V,
         "o": o, "w": wv, "fl": fl, "ln": ln, "cil": cil, "hst": hst,
+        "delivery": {
+            "published_fixes": a.db.n("select count(distinct p.repo || '#' || p.num) from jobs j join prs p on p.repo=j.repo and p.num=j.pr where j.kind='fix' and j.st='done' and j.pr>0", pa![]),
+            "open_fixes": a.db.n("select count(distinct p.repo || '#' || p.num) from jobs j join prs p on p.repo=j.repo and p.num=j.pr where j.kind='fix' and j.st='done' and p.st='open'", pa![]),
+            "merged_fixes": a.db.n("select count(distinct p.repo || '#' || p.num) from jobs j join prs p on p.repo=j.repo and p.num=j.pr where j.kind='fix' and j.st='done' and p.st='merged' and coalesce(json_extract(p.d,'$.default_branch'),'')<>'' and json_extract(p.d,'$.base')=json_extract(p.d,'$.default_branch')", pa![])
+        },
         "ops": {"waiting": waiting, "blocked_hunts": blocked_hunts, "paused": paused},
         "diag": {"hosts": hosts_diag, "hunt_off": hunt_off, "iss_off": iss_off, "hunt_enabled": hunt_enabled},
         "hs": a.db.all("select id, ln, dk, on_ from hs order by id='local' desc, id", pa![]),
@@ -1655,6 +1666,10 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
             _ => er(StatusCode::BAD_REQUEST, "unknown op"),
         },
         ("POST", "/api/update") => match b["op"].as_str().unwrap_or("") {
+            "check-main" => match crate::upd::check_main().await {
+                Ok(v) => js(json!({"ok": true, "r": v})),
+                Err(e) => js(json!({"ok": false, "m": e})),
+            },
             "check" => match crate::upd::check(a).await {
                 Ok(v) => js(json!({"ok": true, "r": v, "cfg": cfg(a)})),
                 Err(e) => js(json!({"ok": false, "m": e, "cfg": cfg(a)})),
@@ -1993,6 +2008,45 @@ mod t {
         for invalid in ["", "pt", "pt-BR", "en-US", "../pt-PT"] {
             assert_eq!(pr_lang(invalid), "en");
         }
+    }
+
+    #[test]
+    fn only_prs_merged_into_the_default_branch_count_as_integrated_fixes() {
+        let db = crate::db::Db::mem();
+        let make_fix = |num| {
+            db.jnew(
+                "o/r",
+                num,
+                "fix",
+                "correction",
+                "",
+                "done",
+                "",
+                json!({}),
+                None,
+                0.0,
+            )
+        };
+        let open = make_fix(42);
+        let release_branch = make_fix(43);
+        let main = make_fix(44);
+        db.jset(open, &[("pr", json!(200))]);
+        db.jset(release_branch, &[("pr", json!(201))]);
+        db.jset(main, &[("pr", json!(202))]);
+        db.run(
+            "insert into prs(repo,num,st,title,t0,d) values('o/r',200,'open','Open PR',1,'{\"base\":\"main\",\"default_branch\":\"main\"}'),('o/r',201,'merged','Release PR',1,'{\"base\":\"release/1.0\",\"default_branch\":\"main\"}'),('o/r',202,'merged','Main PR',1,'{\"base\":\"main\",\"default_branch\":\"main\"}')",
+            pa![],
+        );
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::env::temp_dir(),
+            47303,
+            "apollo-office".into(),
+        ));
+        let observed = state(&a);
+        assert_eq!(observed["delivery"]["published_fixes"], 3);
+        assert_eq!(observed["delivery"]["open_fixes"], 1);
+        assert_eq!(observed["delivery"]["merged_fixes"], 1);
     }
 
     #[test]

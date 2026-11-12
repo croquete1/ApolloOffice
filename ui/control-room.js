@@ -55,7 +55,7 @@
     '        <div class="ao-metric"><span>Agentes a trabalhar</span><strong id="aoMetricWorkers">—</strong><small>Estados reais</small></div>',
     '        <div class="ao-metric"><span>Tarefas em aberto</span><strong id="aoMetricQueue">—</strong><small>Total registado no sistema</small></div>',
     '        <div class="ao-metric"><span>PRs abertos (recentes)</span><strong id="aoMetricPR">—</strong><small>Até 40 PRs registados</small></div>',
-    '        <div class="ao-metric"><span>Tarefas concluídas</span><strong id="aoMetricDone">—</strong><small>Total registado no sistema</small></div>',
+    '        <div class="ao-metric"><span>Correções integradas</span><strong id="aoMetricDone">—</strong><small>PRs na branch predefinida</small></div>',
     '      </section>',
     '      <section class="ao-panel ao-pipeline-panel" aria-label="Fluxo de trabalho">',
     '        <div class="ao-panel-heading"><div><h2>Fluxo de trabalho</h2><p>Contagem total de tarefas por fase, diretamente da base de dados</p></div></div>',
@@ -394,7 +394,8 @@
     const totals = countTotals(s);
     byId("aoMetricQueue").textContent = formatNum(totals.active);
     byId("aoMetricPR").textContent = formatNum(safeArray(s.pr).filter((x) => x.st === "open").length);
-    byId("aoMetricDone").textContent = formatNum(totals.done);
+    byId("aoMetricDone").textContent = s.delivery?.merged_fixes == null
+      ? "—" : formatNum(s.delivery.merged_fixes);
     const signature = JSON.stringify([selectedRepo, q, prs, safeArray(s.ev).slice(0, 8)]);
     if (signature === lastListSignature) return;
     lastListSignature = signature;

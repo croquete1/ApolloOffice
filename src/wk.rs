@@ -82,7 +82,7 @@ async fn scout1(a: &Ax) -> R<()> {
     need(a, "scout", &["gh"]).await?;
     a.st("scout", "work", None, "");
     let me = crate::gh::login(a).await;
-    let no = Regex::new(r"(?i)\b(enhancement|feature|question|wontfix|won't fix|duplicate|invalid|discussion|idea|roadmap|docs?|documentation)\b").unwrap();
+    let no = Regex::new(r"(?i)\b(question|wontfix|won't fix|duplicate|invalid|discussion|idea|roadmap|docs?|documentation)\b").unwrap();
     let ft = Regex::new(r"(?i)^\s*(\[?feat(ure)?\]?|\[?request\]?|idea|proposal)[:\] ]").unwrap();
     let nf = Regex::new(
         r"(?i)\b(question|wontfix|won't fix|duplicate|invalid|discussion|docs?|documentation)\b",
@@ -352,6 +352,13 @@ async fn thread(r: &str, n: i64) -> R<Value> {
     )
     .await
     .map_err(X::E)
+}
+
+fn vet_classification(d: &mut Value, opt: bool) {
+    d["opt"] = json!(opt);
+    if opt {
+        d["feat"] = json!(false);
+    }
 }
 
 async fn vet1(a: &Ax, id: i64) -> R<()> {
@@ -719,17 +726,12 @@ async fn vet1(a: &Ax, id: i64) -> R<()> {
     }
     let mut d = j.d.clone();
     d["va"] = json!(now());
-    // Optimisation/refactor/audit issues preserve behaviour and have no failing
-    // test, so they cannot go through the bug "repro" (red→green) flow. Vet marks
-    // them opt; we route them through the plan flow (feat) that does not require a
-    // reproduction. The HARD fiscal exclusion in the Vet prompt keeps fiscal/money
-    // changes out of this path entirely.
-    if js["opt"].as_bool().unwrap_or(false) {
-        d["opt"] = json!(true);
-        d["feat"] = json!(true);
-    }
+    // Keep optimizations distinct from feature requests: they need a plan, but
+    // must preserve behavior and pass checks both before and after the change.
+    let opt = js["opt"].as_bool().unwrap_or(false);
+    vet_classification(&mut d, opt);
     d["cx"] = json!(
-        if js["cx"] == "complex" || j.s("cx") == "complex" || j.feat() {
+        if js["cx"] == "complex" || j.s("cx") == "complex" || j.feat() || opt {
             "complex"
         } else {
             "simple"
@@ -1020,26 +1022,51 @@ async fn late(a: &Ax, r: &str, n: i64, me: &str, v: &Value) -> R<()> {
     Ok(())
 }
 
+async fn repo_default_branch(
+    a: &Ax,
+    branches: &mut std::collections::HashMap<String, String>,
+    repo: &str,
+) -> String {
+    if let Some(branch) = branches.get(repo) {
+        return branch.clone();
+    }
+    let branch = crate::gh::meta(a, repo)
+        .await
+        .ok()
+        .and_then(|meta| meta["main"].as_str().map(String::from))
+        .unwrap_or_default();
+    branches.insert(repo.to_string(), branch.clone());
+    branch
+}
+
 async fn watch1(a: &Ax) -> R<()> {
     need(a, "watcher", &["gh"]).await?;
     a.st("watcher", "work", None, "");
     let me = crate::gh::login(a).await;
     let mut lu: std::collections::HashMap<String, std::collections::HashMap<i64, String>> =
         Default::default();
+    let mut default_branches: std::collections::HashMap<String, String> = Default::default();
     for p in a.db.all("select * from prs where st='open' or (st='merged' and merged>strftime('%Y-%m-%dT%H:%M:%SZ','now','-2 days'))", pa![]) {
         a.held("watcher").await;
         let r = p["repo"].as_str().unwrap_or("").to_string();
         let n = p["num"].as_i64().unwrap_or(0);
+        let default_branch = repo_default_branch(a, &mut default_branches, &r).await;
         if p["st"] == "merged" {
             let wk = format!("wm:{r}#{n}");
             if a.db.kg(&wk).as_i64().map(|t| now() - t < 1_800_000).unwrap_or(false) {
                 continue;
             }
             a.db.ks(&wk, &json!(now()));
-            let v = ghj(&["pr", "view", &n.to_string(), "-R", &r, "--json", "updatedAt,title,url"], 60).await.map_err(X::E)?;
+            let v = ghj(&["pr", "view", &n.to_string(), "-R", &r, "--json", "updatedAt,title,url,baseRefName"], 60).await.map_err(X::E)?;
             let up = v["updatedAt"].as_str().unwrap_or("").to_string();
+            let mut d = p["d"].clone();
+            if !d.is_object() {
+                d = json!({});
+            }
+            d["base"] = v["baseRefName"].clone();
+            d["default_branch"] = json!(default_branch);
+            a.db.run("update prs set upd=?,d=? where repo=? and num=?", pa![up.clone(), d.to_string(), r.clone(), n]);
             if p["upd"].as_str() != Some(up.as_str()) {
-                a.db.run("update prs set upd=? where repo=? and num=?", pa![up, r.clone(), n]);
                 late(a, &r, n, &me, &v).await?;
             }
             continue;
@@ -1067,7 +1094,13 @@ async fn watch1(a: &Ax) -> R<()> {
         };
         let up = v["updatedAt"].as_str().unwrap_or("").to_string();
         let st = if v["mergedAt"].is_string() { "merged".to_string() } else { v["state"].as_str().unwrap_or("OPEN").to_lowercase() };
-        a.db.run("update prs set st=?, title=?, upd=?, merged=? where repo=? and num=?", pa![st.clone(), v["title"].as_str().unwrap_or("").to_string(), up.clone(), v["mergedAt"].as_str().map(String::from), r.clone(), n]);
+        let mut d = p["d"].clone();
+        if !d.is_object() {
+            d = json!({});
+        }
+        d["base"] = v["baseRefName"].clone();
+        d["default_branch"] = json!(default_branch);
+        a.db.run("update prs set st=?, title=?, upd=?, merged=?, d=? where repo=? and num=?", pa![st.clone(), v["title"].as_str().unwrap_or("").to_string(), up.clone(), v["mergedAt"].as_str().map(String::from), d.to_string(), r.clone(), n]);
         let tag = format!("{r}#{n}");
         if st == "merged" {
             a.note("Merged", &format!("{tag} {}\n{}", v["title"].as_str().unwrap_or(""), v["url"].as_str().unwrap_or("")), 3);
@@ -1177,6 +1210,19 @@ pub async fn watch(a: Ax) {
 #[cfg(test)]
 mod t {
     use super::*;
+
+    #[test]
+    fn vet_keeps_optimizations_separate_from_features() {
+        let mut optimization = json!({"feat":true});
+        vet_classification(&mut optimization, true);
+        assert_eq!(optimization["opt"], true);
+        assert_eq!(optimization["feat"], false);
+
+        let mut feature = json!({"feat":true,"opt":true});
+        vet_classification(&mut feature, false);
+        assert_eq!(feature["opt"], false);
+        assert_eq!(feature["feat"], true);
+    }
 
     #[test]
     fn skip_labels_and_machine_errors() {

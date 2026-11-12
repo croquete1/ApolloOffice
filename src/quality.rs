@@ -19,7 +19,7 @@ pub fn context(j: &Job) -> String {
 }
 
 pub async fn inspect(a: &Ax, j: &mut Job) -> R<()> {
-    if !enabled(a) || j.kind != "fix" {
+    if !enabled(a) || j.kind != "fix" || j.opt() {
         return Ok(());
     }
     let issue = format!("{}\n{}\n{}", j.title, j.s("body"), j.d["repro"]);
@@ -156,7 +156,7 @@ fn planner_candidates(preferred: &str) -> Vec<String> {
 }
 
 pub async fn prepare(a: &Ax, j: &mut Job) -> R<()> {
-    if !enabled(a) || j.kind != "fix" {
+    if !enabled(a) || j.kind != "fix" || j.opt() {
         return Ok(());
     }
     if j.d["acceptance"]["base"] == j.d["base"] && j.d["acceptance"]["baseline_valid"] == true {
@@ -246,7 +246,7 @@ pub async fn prepare(a: &Ax, j: &mut Job) -> R<()> {
 }
 
 pub async fn check(a: &Ax, j: &mut Job) -> R<String> {
-    if !enabled(a) || j.kind != "fix" {
+    if !enabled(a) || j.kind != "fix" || j.opt() {
         return Ok(String::new());
     }
     prepare(a, j).await?;
