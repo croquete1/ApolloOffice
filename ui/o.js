@@ -440,11 +440,16 @@
       for (const [x, y, dx, dy] of [[x0, y0, 1, 1], [x1, y0, -1, 1], [x0, y1, 1, -1], [x1, y1, -1, -1]]) { px(dx > 0 ? x : x - 3, y, 4, 1, cl); px(x - (dx > 0 ? 0 : 1), dy > 0 ? y : y - 3, 1, 4, cl); }
     }
     if (S?.o?.off) { c.globalAlpha = 0.25; px(0, 35, VW, VH - 35, "#000"); c.globalAlpha = 1; }
-    const dp = window.devicePixelRatio || 1, sg = $("stage");
-    const sc = Math.max(1, Math.floor(Math.min((sg.clientWidth - 2) * dp / VW, (sg.clientHeight - 2) * dp / VH)));
-    if (cv.width !== VW * sc) { cv.width = VW * sc; cv.height = VH * sc; cv.style.width = VW * sc / dp + "px"; cv.style.height = VH * sc / dp + "px"; }
+    const dp = Math.min(window.devicePixelRatio || 1, 2), sg = $("stage"), inset = 12;
+    const fit = Math.max(0, Math.min((sg.clientWidth - inset * 2) / VW, (sg.clientHeight - inset * 2) / VH));
+    const renderScale = Math.min(fit * dp, 8);
+    const width = Math.max(1, Math.round(VW * renderScale)), height = Math.max(1, Math.round(VH * renderScale));
+    const cssWidth = (VW * fit).toFixed(2) + "px", cssHeight = (VH * fit).toFixed(2) + "px";
+    if (cv.width !== width || cv.height !== height || cv.style.width !== cssWidth || cv.style.height !== cssHeight) {
+      cv.width = width; cv.height = height; cv.style.width = cssWidth; cv.style.height = cssHeight;
+    }
     cx.imageSmoothingEnabled = false;
-    cx.drawImage(off, 0, 0, VW * sc, VH * sc);
+    cx.drawImage(off, 0, 0, width, height);
     const mg = $("mg");
     if (party()) {
       if (mg.hidden || mg.dataset.k !== S.lm.repo + S.lm.num) {
