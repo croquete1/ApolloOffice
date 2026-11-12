@@ -515,8 +515,10 @@
   window.AO.retryStates = retryStates;
   const jrow = (j, x) => {
     const retry = retryStates.get(j.id);
+    const kind = workLabel(j.work_class);
     const reason = retry?.error || (j.st === "ci" && S.cil[j.id] ? S.cil[j.id] : j.why || "");
-    return `<div class="row${j.st === "approve" ? " apr" : ""}">${j.st === "approve" && x ? `<input type="checkbox" class="bk" data-k="${j.id}" ${sel.has(j.id) ? "checked" : ""} aria-label="select">` : ""}<span class="pill ${STC[j.st] || ""}">${esc(workLabel(j.work_class))} · ${esc(j.st)}</span><div class="ti"><a class="a" href="#" data-j="${j.id}">${esc(j.title)}</a><div class="w${retry?.error ? " bad2" : ""}">${esc(reason)}</div></div><span class="rp">${esc(rn(j))}${j.st === "approve" ? ` <button class="go" data-j="${j.id}">review</button>` : ""}${x && j.st !== "approve" ? ` <button class="x" data-d="${j.id}" title="drop">✕</button>` : ""}${!x && j.st === "drop" && j.kind === "fix" ? ` <button class="x" data-rq="${j.id}" title="try again" ${retry?.pending ? "disabled" : ""}>↻</button>` : ""}</span></div>`;
+    const repo = rn(j);
+    return `<div class="row queue-row${j.st === "approve" ? " apr" : ""}">${j.st === "approve" && x ? `<input type="checkbox" class="bk" data-k="${j.id}" ${sel.has(j.id) ? "checked" : ""} aria-label="select">` : ""}<span class="pill ${STC[j.st] || ""}" title="${esc(kind + " · " + j.st)}">${esc(j.st)}</span><div class="ti"><a class="a" href="#" data-j="${j.id}" title="${esc(j.title)}">${esc(j.title)}</a><div class="queue-meta"><span class="queue-kind" title="${esc(kind)}">${esc(kind)}</span>${reason ? `<span class="queue-why${retry?.error ? " bad2" : ""}" title="${esc(reason)}">${esc(reason)}</span>` : ""}</div></div><span class="rp"><span class="queue-repo" title="${esc(repo)}">${esc(repo)}</span>${j.st === "approve" ? ` <button class="go" data-j="${j.id}">review</button>` : ""}${x && j.st !== "approve" ? ` <button class="x" data-d="${j.id}" title="drop">✕</button>` : ""}${!x && j.st === "drop" && j.kind === "fix" ? ` <button class="x" data-rq="${j.id}" title="try again" ${retry?.pending ? "disabled" : ""}>↻</button>` : ""}</span></div>`;
   };
 
   const lists = () => {
@@ -527,13 +529,18 @@
     for (const [id, retry] of retryStates) {
       if (!retry.pending && !dropped.has(id)) retryStates.delete(id);
     }
+    const query = $("queueFilter").value.trim().toLocaleLowerCase();
+    const matches = (j) => !query || [j.title, j.repo, j.num, j.kind, j.work_class, j.st, j.why, workLabel(j.work_class), retryStates.get(j.id)?.error].join(" ").toLocaleLowerCase().includes(query);
+    const queued = q.filter(matches), recent = S.dn.filter(matches);
     const suspended = S.ops?.blocked_hunts?.length || 0;
-    $("qn").textContent = (q.length ? q.length + " trabalhos" : "") +
+    $("qn").textContent = (query ? `${queued.length} de ${q.length}` : q.length ? q.length + " trabalhos" : "") +
       (suspended ? " · " + suspended + " Hunter(s) suspenso(s)" : "");
     const aps = q.filter((j) => j.st === "approve").map((j) => j.id);
     for (const k of [...sel]) if (!aps.includes(k)) sel.delete(k);
     const bk = aps.length > 1 ? `<div class="bkb"><label class="ck"><input type="checkbox" id="bkA" ${sel.size === aps.length ? "checked" : ""}> all ${aps.length}</label><span class="sp"></span>${sel.size ? `<button class="go" id="bkS">submit ${sel.size}</button><button class="dng" id="bkD">drop ${sel.size}</button>` : `<span class="k">select pull requests to submit together</span>`}</div>` : "";
-    $("queue").innerHTML = bk + (q.length ? q.slice(0, 16).map((j) => jrow(j, true)).join("") : `<div class="empty">nothing waiting</div>`) + (S.dn.length ? `<div class="sub">recent</div>` + S.dn.slice(0, 12).map((j) => jrow(j, false)).join("") : "");
+    const empty = query ? (!queued.length && !recent.length ? `<div class="empty">no matching work</div>` : "") : !q.length ? `<div class="empty">nothing waiting</div>` : "";
+    $("queue").innerHTML = bk + queued.slice(0, 16).map((j) => jrow(j, true)).join("") +
+      (recent.length ? `<div class="sub">recent${query ? " · " + recent.length : ""}</div>` + recent.slice(0, 12).map((j) => jrow(j, false)).join("") : "") + empty;
     const op = S.pr.filter((p) => p.st === "open").length, mg = S.pr.filter((p) => p.st === "merged").length;
     $("prn").textContent = `${op} open · ${mg} merged`;
     $("prs").innerHTML = S.pr.length ? S.pr.slice(0, 16).map((p) => `<div class="row"><span class="pill ${p.st === "merged" ? "ok" : p.st === "closed" ? "bad" : "info"}">${esc(p.st)}</span><div class="ti"><a class="a" href="#" data-u="${esc(p.url)}">${esc(p.title)}</a></div><span class="rp">${esc(rn({ repo: p.repo, num: p.num }))}</span></div>`).join("") : `<div class="empty">no pull requests yet</div>`;
@@ -543,6 +550,7 @@
     $("bars").innerHTML = days.map((d) => `<i class="${m[d] ? "" : "z"}" style="height:${m[d] ? Math.max(8, (m[d] / mx) * 100) : 2}%" title="${d}: ${m[d] || 0}"></i>`).join("");
     $("log").innerHTML = S.ev.slice(0, 30).map((e) => `<div><span class="tm">${hm(e.t)}</span><span style="color:${SK[e.w] ? hl(e.w) : "inherit"}">${esc(NM[e.w] || e.w)}</span><span>${esc(e.m)}</span></div>`).join("");
   };
+  $("queueFilter").addEventListener("input", () => { if (S) lists(); });
 
   const chips = () => {
     const o = S.o;
