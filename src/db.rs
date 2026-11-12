@@ -281,6 +281,9 @@ impl Job {
     pub fn feat(&self) -> bool {
         self.d["feat"].as_bool().unwrap_or(false)
     }
+    pub fn opt(&self) -> bool {
+        self.d["opt"].as_bool().unwrap_or(false)
+    }
     pub fn own(&self) -> bool {
         self.hunt() || self.ext()
     }
@@ -296,6 +299,11 @@ impl Job {
             "Bug found by our own testing (there is no GitHub issue; do not reference one)".into()
         } else if self.ext() {
             format!("Bug report sent to us directly from {} (there is no GitHub issue; do not reference one)", self.d["ext"]["src"].as_str().unwrap_or("an external tool"))
+        } else if self.opt() {
+            format!(
+                "Behaviour-preserving optimization request, issue #{}",
+                self.num
+            )
         } else if self.feat() {
             format!("Feature request, issue #{}", self.num)
         } else {
@@ -333,6 +341,27 @@ pub fn day0() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn optimization_jobs_remain_distinct_from_feature_requests() {
+        let optimization = Job::of(json!({
+            "id": 1, "repo": "o/r", "num": 14, "kind": "fix",
+            "d": {"opt": true, "feat": false}
+        }));
+        assert!(optimization.opt());
+        assert!(!optimization.feat());
+        assert!(optimization
+            .orig()
+            .contains("Behaviour-preserving optimization"));
+
+        let feature = Job::of(json!({
+            "id": 2, "repo": "o/r", "num": 15, "kind": "fix",
+            "d": {"opt": false, "feat": true}
+        }));
+        assert!(!feature.opt());
+        assert!(feature.feat());
+        assert!(feature.orig().contains("Feature request"));
+    }
 
     #[test]
     fn pull_request_language_persists_with_english_as_default() {

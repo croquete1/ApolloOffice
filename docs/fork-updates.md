@@ -83,8 +83,9 @@ respetivo administrador/systemd; não alterar a unidade errada.
 
 ### Definições → Sistema → Atualizações
 
-- **Verificar atualizações**: consulta apenas o canal assinado.
-- **Atualizar agora**: só é autorizado depois de selecionar **Pause office**
+- **Verificar versão assinada**: consulta o canal HTTPS/Ed25519 do fork e descarrega apenas uma release de versão superior, devidamente assinada. Não instala, nem compara o código da main.
+- **Comparar com a main do GitHub**: consulta a branch `croquete1/ApolloOffice:main` e compara a contagem de commits com a última release `fork-v*` do GitHub. É uma consulta informativa, **nunca** descarrega nem instala código-fonte.
+- **Instalar versão assinada**: só aparece quando foi descarregada uma atualização válida do canal assinado. É autorizado depois de selecionar **Pause office**
   e quando não existirem trabalhos, locks ou merges ativos. Uma condição
   de corrida interrompe a instalação.
 - O modo automático permanece **desativado por omissão**; só pode ser ativado

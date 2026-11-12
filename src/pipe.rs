@@ -10,6 +10,35 @@ use std::collections::BTreeSet;
 
 pub const RND: u64 = 2;
 const CIT: u64 = 150 * 60;
+const ENV_PREFLIGHT: &str = r#"command -v git >/dev/null 2>&1 || { echo "git missing in build environment"; exit 1; }
+if [ -f .nvmrc ]; then
+  want=$(sed 's/#.*//' .nvmrc | head -n1 | tr -d ' \t\r')
+  if [ -z "$want" ]; then echo "unsupported empty .nvmrc requirement"; exit 1; fi
+  command -v node >/dev/null 2>&1 || { echo "node missing but .nvmrc requires Node $want; rebuild the build image"; exit 1; }
+  have=$(node -v 2>&1) || { echo "node failed to run: $have"; exit 1; }
+  case "$have" in v[0-9]*) ;; *) echo "node returned an invalid version: $have"; exit 1 ;; esac
+  have=${have#v}
+  case "$have" in *[!0-9.]*|'') echo "node returned an invalid version: $have"; exit 1 ;; esac
+  case "$want" in v*) want=${want#v} ;; esac
+  case "$want" in
+    *[!0-9.]* )
+      nvm_file="${NVM_DIR:-$HOME/.nvm}/nvm.sh"
+      if [ -s "$nvm_file" ]; then . "$nvm_file"; fi
+      command -v nvm >/dev/null 2>&1 || { echo "unsupported .nvmrc requirement '$want': install nvm to resolve this alias"; exit 1; }
+      resolved=$(nvm version "$want" 2>&1) || { echo "unsupported .nvmrc requirement '$want': $resolved"; exit 1; }
+      case "$resolved" in v[0-9]*) ;; *) echo "unsupported .nvmrc requirement '$want': nvm could not resolve it"; exit 1 ;; esac
+      resolved=${resolved#v}
+      case "$resolved" in *[!0-9.]*|'') echo "unsupported .nvmrc requirement '$want': nvm returned an invalid version"; exit 1 ;; esac
+      wmaj=${resolved%%.*} ;;
+    *) wmaj=${want%%.*} ;;
+  esac
+  case "$wmaj" in ''|*[!0-9]*) echo "unsupported .nvmrc requirement '$want': no Node major version"; exit 1 ;; esac
+  hmaj=${have%%.*}
+  if [ "$wmaj" != "$hmaj" ]; then echo "node incompatible: repo requires Node $want but build environment has Node $have; rebuild the build image"; exit 1; fi
+  echo "preflight ok: node $have (wants $want)"
+else
+  echo "preflight ok: git present, no .nvmrc requirement"
+fi"#;
 
 pub fn gitb() -> String {
     std::env::var("APOLLO_OFFICE_REMOTE").unwrap_or_else(|_| "https://github.com/".into())
@@ -390,6 +419,10 @@ fn pr_title(preferred: Option<&str>, f: &Value, fallback: &str) -> R<String> {
 }
 
 fn commit_subject(title: &str, feature: bool) -> R<String> {
+    commit_subject_kind(title, if feature { "feat" } else { "fix" })
+}
+
+fn commit_subject_kind(title: &str, kind: &str) -> R<String> {
     let title = title
         .lines()
         .find(|line| !line.trim().is_empty())
@@ -404,7 +437,6 @@ fn commit_subject(title: &str, feature: bool) -> R<String> {
         r"^(?:feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(?:\([A-Za-z0-9_.-]+\))?!?:\s+\S",
     )
     .unwrap();
-    let kind = if feature { "feat" } else { "fix" };
     let subject = if conventional.is_match(title) {
         title.to_string()
     } else {
@@ -674,28 +706,22 @@ async fn prep(a: &Ax, j: &mut Job) -> R<()> {
         .await?;
         j.d["old"] = json!(ok(a, j, "git rev-parse HEAD", 60).await?);
     }
+    let pf = x(a, j, &format!("bash -c {} 2>&1", q(ENV_PREFLIGHT)), 120).await;
+    if pf.c != 0 {
+        a.say(
+            "repro",
+            &format!("[{}] preflight do ambiente falhou", j.h()),
+            Some(j.id),
+        );
+        return drop(crate::hunt_health::diagnostic(
+            a,
+            j,
+            "preflight",
+            pf.c,
+            &format!("{}\n{}", pf.o.trim(), pf.e.trim()),
+        ));
+    }
     if !su.is_empty() {
-        // Preflight: confirm the build environment provides the toolchain the
-        // repository requires (git, node and a matching major version) before
-        // running setup, so an incompatibility surfaces as a clear, actionable
-        // reason on the first attempt instead of an opaque setup failure
-        // repeated until the circuit breaker trips.
-        const PREFLIGHT: &str = r#"command -v git >/dev/null || { echo "git em falta no ambiente de build"; exit 1; }; command -v node >/dev/null || { echo "node em falta no ambiente de build"; exit 1; }; have=$(node -v | tr -d v); hmaj=${have%%.*}; want=; if [ -f .nvmrc ]; then want=$(tr -dc 0-9. < .nvmrc); fi; wmaj=${want%%.*}; if [ -n "$wmaj" ] && [ "$wmaj" != "$hmaj" ]; then echo "node incompativel: o repositorio exige Node $want mas o ambiente de build tem Node $have; reconstruir a imagem de build"; exit 1; fi; echo "preflight ok: node $have (quer ${want:-sem requisito})""#;
-        let pf = x(a, j, &format!("bash -c {}", q(PREFLIGHT)), 120).await;
-        if pf.c != 0 {
-            a.say(
-                "repro",
-                &format!("[{}] preflight do ambiente falhou", j.h()),
-                Some(j.id),
-            );
-            return drop(crate::hunt_health::diagnostic(
-                a,
-                j,
-                "preflight",
-                pf.c,
-                &format!("{}\n{}", pf.o.trim(), pf.e.trim()),
-            ));
-        }
         a.say(
             "repro",
             &format!("[{}] setup: {}", j.h(), crate::sh::head(&su, 80)),
@@ -790,9 +816,10 @@ async fn repro(a: &Ax, j: &mut Job) -> R<()> {
         )
     );
     let p = format!("{p}{}{}", rules(a, j), crate::quality::context(j));
+    let planning = j.feat() || j.opt();
     let ms = if crate::routing::enabled(a) {
         crate::routing::plan(a)
-    } else if cx(a, j) {
+    } else if planning || cx(a, j) {
         vec![a.md("big")]
     } else {
         vec![a.md("repro"), a.md("repro2")]
@@ -807,7 +834,7 @@ async fn repro(a: &Ax, j: &mut Job) -> R<()> {
             &format!(
                 "{} {} {}",
                 crate::prov::name(&md),
-                if j.feat() { "planning" } else { "reproducing" },
+                if planning { "planning" } else { "reproducing" },
                 j.tag()
             ),
             Some(j.id),
@@ -815,7 +842,7 @@ async fn repro(a: &Ax, j: &mut Job) -> R<()> {
         let mut o = Ask::new(
             "repro",
             md,
-            P(if j.feat() { "plan" } else { "repro" }),
+            P(if planning { "plan" } else { "repro" }),
             format!(
                 "{p}\n{}",
                 wrap("previous-reproduction-diagnostic", &reproduction_feedback)
@@ -846,7 +873,7 @@ async fn repro(a: &Ax, j: &mut Job) -> R<()> {
                 "repro",
                 &format!(
                     "{}: {}",
-                    if j.feat() { "planned" } else { "reproduced" },
+                    if planning { "planned" } else { "reproduced" },
                     js["how"].as_str().unwrap_or("")
                 ),
                 Some(j.id),
@@ -860,7 +887,7 @@ async fn repro(a: &Ax, j: &mut Job) -> R<()> {
             "repro",
             &format!(
                 "{}: {}",
-                if j.feat() {
+                if planning {
                     "not plannable"
                 } else {
                     "not reproduced"
@@ -871,7 +898,9 @@ async fn repro(a: &Ax, j: &mut Job) -> R<()> {
         );
     }
     a.st("repro", "idle", None, "sad");
-    drop(if j.feat() {
+    drop(if j.opt() {
+        "optimization is not a focused, behavior-preserving change"
+    } else if j.feat() {
         "feature already exists or cannot be done as one focused change"
     } else {
         "not reproducible"
@@ -1018,6 +1047,59 @@ pub fn judgef(ts: &[String], a_e: i32, a_o: &str, b_e: i32, b_o: &str) -> String
         .replace("without the fix", "without the feature")
 }
 
+pub fn judgeopt(ts: &[String], a_e: i32, a_o: &str, b_e: i32, b_o: &str) -> String {
+    if Regex::new(r"\[checkout failed\]")
+        .unwrap()
+        .is_match(&format!("{a_o}{b_o}"))
+    {
+        return format!(
+            "git checkout of the verification or optimization commit failed, so the checks did not run. Output:\n{}",
+            crate::sh::last(&format!("{a_o}\n{b_o}"), 3000)
+        );
+    }
+    if a_e != 0 {
+        return format!(
+            "Verification checks fail before the optimization (exit {a_e}); the baseline must be green. Output:\n{}",
+            crate::sh::last(a_o, 3000)
+        );
+    }
+    let before = fails(a_o);
+    if !before.is_empty() {
+        return format!(
+            "Checks report failures before the optimization: {}. Output:\n{}",
+            before.join(", "),
+            crate::sh::last(a_o, 3000)
+        );
+    }
+    if !ts.iter().any(|t| a_o.contains(&bare(t))) {
+        return format!(
+            "None of the named checks appears before the optimization. Output:\n{}",
+            crate::sh::last(a_o, 3000)
+        );
+    }
+    if b_e != 0 {
+        return format!(
+            "Verification checks fail after the optimization (exit {b_e}); the candidate must be green. Output:\n{}",
+            crate::sh::last(b_o, 3000)
+        );
+    }
+    let after = fails(b_o);
+    if !after.is_empty() {
+        return format!(
+            "Checks report failures after the optimization: {}. Output:\n{}",
+            after.join(", "),
+            crate::sh::last(b_o, 3000)
+        );
+    }
+    if !ts.iter().any(|t| b_o.contains(&bare(t))) {
+        return format!(
+            "None of the named checks appears after the optimization. Output:\n{}",
+            crate::sh::last(b_o, 3000)
+        );
+    }
+    String::new()
+}
+
 async fn verify(a: &Ax, j: &mut Job, f: &Value) -> R<String> {
     let ts: Vec<String> = f["tests"]
         .as_array()
@@ -1044,8 +1126,15 @@ async fn verify(a: &Ax, j: &mut Job, f: &Value) -> R<String> {
     .parse()
     .unwrap_or(0);
     if n != 2 {
+        let commit_roles = if j.opt() {
+            "verification, optimization"
+        } else if j.feat() {
+            "test, feature"
+        } else {
+            "test, fix"
+        };
         return Ok(format!(
-            "expected exactly 2 commits (test, fix) on top of the base, found {n}"
+            "expected exactly 2 commits ({commit_roles}) on top of the base, found {n}"
         ));
     }
     if let Some(m) = dirty(a, j).await? {
@@ -1060,7 +1149,9 @@ async fn verify(a: &Ax, j: &mut Job, f: &Value) -> R<String> {
     let (ae, ao) = run_t(a, j, &at, &tc).await;
     let (be, bo) = run_t(a, j, &b, &tc).await;
     ok(a, j, &format!("git checkout -q {}", q(&j.s("br"))), 120).await?;
-    let r = if j.feat() {
+    let r = if j.opt() {
+        judgeopt(&ts, ae, &ao, be, &bo)
+    } else if j.feat() {
         judgef(&ts, ae, &ao, be, &bo)
     } else {
         judge(&ts, ae, &ao, be, &bo)
@@ -1068,7 +1159,8 @@ async fn verify(a: &Ax, j: &mut Job, f: &Value) -> R<String> {
     if r.is_empty() {
         let fl = Regex::new(r"(?i)FAIL|panicked|assert|Error|expected|^not ok\b").unwrap();
         let pl = Regex::new(r"(?i)\bok\b|pass|✓").unwrap();
-        j.d["proof"] = json!({"a_exit":ae,"b_exit":be,"test_commit":at,"fix_commit":b,"command":tc,"a": ao.lines().filter(|x| fl.is_match(x)).take(4).collect::<Vec<_>>().join("\n"), "b": bo.lines().filter(|x| pl.is_match(x)).take(6).collect::<Vec<_>>().join("\n")});
+        let opt = j.opt();
+        j.d["proof"] = json!({"a_exit":ae,"b_exit":be,"test_commit":at,"fix_commit":b,"command":tc,"a": ao.lines().filter(|x| if opt { pl.is_match(x) } else { fl.is_match(x) }).take(6).collect::<Vec<_>>().join("\n"), "b": bo.lines().filter(|x| pl.is_match(x)).take(6).collect::<Vec<_>>().join("\n")});
         a.db.jd(j);
     }
     if !r.is_empty() {
@@ -1472,14 +1564,15 @@ fn body_lang(j: &Job, f: &Value, ci: &str, ft: &str, pt: bool) -> String {
         v.push(String::new());
     }
     let fe = j.feat();
+    let opt = j.opt();
     v.extend([
         (if pt {
-            if fe {
+            if fe || opt {
                 "## Motivo"
             } else {
                 "## Causa"
             }
-        } else if fe {
+        } else if fe || opt {
             "## Why"
         } else {
             "## Cause"
@@ -1488,12 +1581,12 @@ fn body_lang(j: &Job, f: &Value, ci: &str, ft: &str, pt: bool) -> String {
         g("cause"),
         String::new(),
         (if pt {
-            if fe {
+            if fe || opt {
                 "## Alterações"
             } else {
                 "## Correção"
             }
-        } else if fe {
+        } else if fe || opt {
             "## Change"
         } else {
             "## Fix"
@@ -1509,7 +1602,21 @@ fn body_lang(j: &Job, f: &Value, ci: &str, ft: &str, pt: bool) -> String {
             .map(|t| format!("`{t}`"))
             .collect::<Vec<_>>()
             .join(", ");
-        if pt {
+        if opt {
+            v.push(if pt {
+                format!(
+                    "- {} {names}: passam em `{mn}` antes e depois desta otimização (`{}`).",
+                    if pl { "Testes" } else { "Teste" },
+                    f["test_cmd"].as_str().unwrap_or("")
+                )
+            } else {
+                format!(
+                    "- {} {names}: pass on `{mn}` before and after this optimization (`{}`).",
+                    if pl { "Tests" } else { "Test" },
+                    f["test_cmd"].as_str().unwrap_or("")
+                )
+            });
+        } else if pt {
             v.push(format!(
                 "- {} {names}: {} em `{mn}` sem a alteração e {} com ela (`{}`).",
                 if fe {
@@ -1612,10 +1719,10 @@ async fn review_mode(a: &Ax, j: &mut Job, f: &mut Value, diagnostic: bool) -> R<
         j.repo,
         if j.kind == "mergecheck" { format!("PR #{} — validação para possível merge", j.pr.unwrap_or(0)) } else if j.own() { "no GitHub issue (the PR must not reference any issue number)".to_string() } else { format!("issue #{}", j.num) },
         wrap("issue", &format!("{}\n\n{}", j.title, crate::sh::head(&j.s("body"), 4000))),
-        if j.kind == "review" { format!("{}\n\n", wrap("request", &j.s("change"))) } else if j.feat() { "This PR implements a requested FEATURE, not a bug fix. Judge it as a feature: it does what the issue asks, completely but minimally; the tests check the new behaviour (on the test commit they may fail to compile because the new API is missing); no unrelated changes; no surprising changes to defaults, file formats or visible design beyond what the issue asks.\n\n".to_string() } else { String::new() },
+        if j.kind == "review" { format!("{}\n\n", wrap("request", &j.s("change"))) } else if j.opt() { "This PR is a behavior-preserving optimization, not a feature. It must keep externally observable behavior, outputs, file formats, APIs, and defaults unchanged. Confirm the named checks pass on both the verification commit before the optimization and the final commit, and assess whether the diff implements one concrete, measurable improvement without unrelated changes.\n\n".to_string() } else if j.feat() { "This PR implements a requested FEATURE, not a bug fix. Judge it as a feature: it does what the issue asks, completely but minimally; the tests check the new behaviour (on the test commit they may fail to compile because the new API is missing); no unrelated changes; no surprising changes to defaults, file formats or visible design beyond what the issue asks.\n\n".to_string() } else { String::new() },
         f["title"].as_str().unwrap_or(""),
         body_lang(j, f, &ci, "", pr_pt(a, j)),
-        if crate::quality::enabled(a) && j.kind == "fix" { format!("{}{}\nIndependent acceptance evidence: {}\nFrozen verifier (untrusted code): {}\nCheck that this verifier exercises actual production code and the reported behavior, rather than copying logic or merely matching source text. Reject inadequate coverage or unsupported claims.",rules(a, j),crate::quality::context(j),wrap("acceptance-evidence",&j.d["acceptance_proof"].to_string()),wrap("frozen-verifier",j.d["acceptance"]["script"].as_str().unwrap_or(""))) } else { rules(a, j) }
+        if crate::quality::enabled(a) && j.kind == "fix" && !j.opt() { format!("{}{}\nIndependent acceptance evidence: {}\nFrozen verifier (untrusted code): {}\nCheck that this verifier exercises actual production code and the reported behavior, rather than copying logic or merely matching source text. Reject inadequate coverage or unsupported claims.",rules(a, j),crate::quality::context(j),wrap("acceptance-evidence",&j.d["acceptance_proof"].to_string()),wrap("frozen-verifier",j.d["acceptance"]["script"].as_str().unwrap_or(""))) } else { rules(a, j) }
     );
     let author = j.d["author"].as_str().unwrap_or("").to_string();
     let candidates = if crate::routing::enabled(a) {
@@ -1740,6 +1847,7 @@ async fn review_mode(a: &Ax, j: &mut Job, f: &mut Value, diagnostic: bool) -> R<
 }
 
 const FEAT: &str = "This job is a FEATURE REQUEST, not a bug. The rules for a bug fix apply with these changes: implement the requested behaviour completely but minimally, in the project's existing style, without unrelated changes. Commit 1 \"test: …\" adds tests that check the new behaviour; on that commit they must fail because the feature is missing (an assertion failure is best; if the test has to call a new API, a compile error on that commit is accepted). Commit 2 \"feat: …\" implements the feature; there the tests pass. Update user-facing docs or the changelog only if the project does that for every feature. In the JSON, \"cause\" is why the feature is needed (what users could not do), \"fix\" is what was added.";
+const OPT: &str = "This job is a BEHAVIOR-PRESERVING OPTIMIZATION, not a bug fix or feature. Keep all externally observable behavior, outputs, APIs, formats, and defaults unchanged. Commit 1 \"test: …\" adds characterization checks that pass on the unchanged base. Commit 2 \"perf: …\" makes the focused optimization. Run the same test_cmd on both commits; every named check must pass before and after. Do not claim performance gains unless the checks objectively measure them. In the JSON, \"cause\" explains the concrete inefficiency, \"fix\" describes the optimization, and \"untouched\" notes behavior or areas preserved.";
 
 fn fixp(a: &Ax, j: &Job, fb: &str) -> String {
     let h = format!(
@@ -1766,13 +1874,26 @@ fn fixp(a: &Ax, j: &Job, fb: &str) -> String {
     } else {
         format!("{h} The repository's full test command is `{ci}`; your test_cmd runs in a fresh shell from the repo root, so use the same environment (for example the same virtualenv or package manager).")
     };
-    let h = if j.feat() { format!("{h}\n{FEAT}") } else { h };
+    let h = if j.opt() {
+        format!("{h}\n{OPT}")
+    } else if j.feat() {
+        format!("{h}\n{FEAT}")
+    } else {
+        h
+    };
+    let commit_roles = if j.opt() {
+        "verification, optimization"
+    } else if j.feat() {
+        "test, feature"
+    } else {
+        "test, fix"
+    };
     let instructions = format!("{}{}", rules(a, j), crate::quality::context(j));
     format!(
         "{h}\n{}:\n{}\n\n{} (from a previous agent): {}{}{}",
         j.orig(),
         wrap("issue", &format!("{}\n\n{}", j.title, j.s("body"))),
-        if j.feat() {
+        if j.feat() || j.opt() {
             "Implementation plan"
         } else {
             "Repro result"
@@ -1781,7 +1902,7 @@ fn fixp(a: &Ax, j: &Job, fb: &str) -> String {
         if fb.is_empty() {
             String::new()
         } else {
-            format!("\n\nYour previous attempt was rejected by the pipeline:\n{fb}\nThe branch still contains your previous commits; fix the problems and make sure there are exactly two commits (test, fix) on top of the base commit.")
+            format!("\n\nYour previous attempt was rejected by the pipeline:\n{fb}\nThe branch still contains your previous commits; fix the problems and make sure there are exactly two commits ({commit_roles}) on top of the base commit.")
         },
         instructions
     )
@@ -1868,7 +1989,12 @@ async fn fix(a: &Ax, j: &mut Job, fb0: String, k0: u64) -> R<Value> {
         crate::routing::event(a, Some(j.id), "fixer", k as usize, &md, &fb);
         use_(a, j, &md);
         j.d["author"] = json!(md);
-        let mut o = Ask::new("fixer", md, P("fixer"), fixp(a, j, &fb));
+        let mut o = Ask::new(
+            "fixer",
+            md,
+            P(if j.opt() { "optimizer" } else { "fixer" }),
+            fixp(a, j, &fb),
+        );
         o.job = Some(j.id);
         o.rn = rn(a, j);
         o.turns = if c { 200 } else { 120 };
@@ -2409,7 +2535,11 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
             // Keep the GitHub auto-close keyword intact in every language.
             format!("Fixes #{}", j.num)
         };
-        let subject = commit_subject(&ti, j.feat())?;
+        let subject = if j.opt() {
+            commit_subject_kind(&ti, "perf")?
+        } else {
+            commit_subject(&ti, j.feat())?
+        };
         ok(
             a,
             j,
@@ -2716,7 +2846,7 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
             (u, n)
         }
     };
-    a.db.run("insert into prs(repo,num,st,title,url,upd,d,t0) values(?,?,?,?,?,?,?,?) on conflict do update set st=excluded.st, d=excluded.d", pa![j.repo.clone(), n, "open".to_string(), ti.clone(), u.clone(), chrono::Utc::now().to_rfc3339(), json!({"job": j.id, "test_cmd": f["test_cmd"], "tests": f["tests"], "branch": br, "head": hr}).to_string(), now()]);
+    a.db.run("insert into prs(repo,num,st,title,url,upd,d,t0) values(?,?,?,?,?,?,?,?) on conflict do update set st=excluded.st, d=excluded.d", pa![j.repo.clone(), n, "open".to_string(), ti.clone(), u.clone(), chrono::Utc::now().to_rfc3339(), json!({"job": j.id, "test_cmd": f["test_cmd"], "tests": f["tests"], "branch": br, "head": hr, "base": j.s("base")}).to_string(), now()]);
     a.say("submit", &format!("PR opened: {u}"), Some(j.id));
     a.note("PR opened", &format!("{} → {ti}\n{u}", j.tag()), 3);
     Ok((u, n))
@@ -2931,7 +3061,7 @@ async fn desc(a: &Ax, j: &mut Job) -> R<Value> {
     } else {
         ""
     };
-    let mut o = Ask::new("fixer", a.md("reviewer"), P("desc"), format!("{locale}Repository {}. {}\n\nProof lines from the verification run:\n{}\n\nCommits:\n{lg}\n\nDiff:\n{df}\n\nAnswer with {{\"title\": \"PR title, imperative, max 72 chars\", \"cause\": \"root cause, 1-3 sentences\", \"fix\": \"what changed, 1-3 sentences\", \"untouched\": \"\", \"tests\": [\"exact names of the regression tests added in the diff\"], \"test_cmd\": \"exact shell command from the repo root that runs only those tests\"}}", j.repo, wrap("issue", &format!("{}\n\n{}", j.title, crate::sh::head(&j.s("body"), 3000))), j.d["proof"]));
+    let mut o = Ask::new("fixer", a.md("reviewer"), P("desc"), format!("{locale}Repository {}. {}\n\nProof lines from the verification run:\n{}\n\nCommits:\n{lg}\n\nDiff:\n{df}\n\nAnswer with {{\"title\": \"PR title, imperative, max 72 chars\", \"cause\": \"root cause or concrete inefficiency, 1-3 sentences\", \"fix\": \"what changed, 1-3 sentences\", \"untouched\": \"behavior or areas preserved, or empty\", \"tests\": [\"exact names of the checks used for this job type\"], \"test_cmd\": \"exact shell command from the repo root that runs only those checks\"}}", j.repo, wrap("issue", &format!("{}\n\n{}", j.title, crate::sh::head(&j.s("body"), 3000))), j.d["proof"]));
     o.job = Some(j.id);
     o.ef = Some("medium");
     let (_, js) = ask(a, o).await?;
@@ -3297,6 +3427,19 @@ async fn go(a: &Ax, id: i64, h: &str) {
                 ),
             ],
         );
+        if n > 0 {
+            // Wake after persisting the published PR, before repository cleanup.
+            // Cleanup can be slow; the Steward still applies its normal review gates.
+            a.steward_wake.notify_one();
+            a.say(
+                "submit",
+                &format!(
+                    "{}: PR #{n} publicada; aguarda revisão e integração",
+                    j.repo
+                ),
+                Some(id),
+            );
+        }
         a.st("submit", "idle", None, "ok");
         clean(a, &j).await;
         Ok(())
@@ -4031,6 +4174,93 @@ pub async fn guard(a: Ax) {
 mod t {
     use super::*;
 
+    #[cfg(unix)]
+    fn run_preflight(
+        nvmrc: Option<&str>,
+        node_body: &str,
+        nvm_resolved: &str,
+    ) -> std::process::Output {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "apollo-preflight-{}-{}",
+            std::process::id(),
+            hex::encode(rand::random::<[u8; 8]>())
+        ));
+        let bin = root.join("bin");
+        let nvm_dir = root.join("nvm");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&nvm_dir).unwrap();
+        if let Some(requirement) = nvmrc {
+            std::fs::write(root.join(".nvmrc"), requirement).unwrap();
+        }
+        for (name, body) in [
+            ("git", "exit 0"),
+            ("node", node_body),
+            ("nvm", "printf '%s\n' \"$NVM_RESOLVED\""),
+        ] {
+            let path = bin.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+            permissions.set_mode(0o700);
+            std::fs::set_permissions(path, permissions).unwrap();
+        }
+        let output = std::process::Command::new("/bin/bash")
+            .arg("-c")
+            .arg(ENV_PREFLIGHT)
+            .current_dir(&root)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("NVM_DIR", &nvm_dir)
+            .env("NVM_RESOLVED", nvm_resolved)
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(root);
+        output
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn environment_preflight_resolves_node_requirements_without_breaking_other_repositories() {
+        let no_nvmrc = run_preflight(None, "echo broken-node >&2; exit 9", "");
+        assert!(
+            no_nvmrc.status.success(),
+            "{}",
+            String::from_utf8_lossy(&no_nvmrc.stdout)
+        );
+
+        let pinned = run_preflight(
+            Some("v20.1.0 # keep the major stable\n"),
+            "printf 'v20.19.0\n'",
+            "",
+        );
+        assert!(
+            pinned.status.success(),
+            "{}",
+            String::from_utf8_lossy(&pinned.stdout)
+        );
+
+        let alias = run_preflight(Some("lts/argon\n"), "printf 'v20.19.0\n'", "v20.20.0");
+        assert!(
+            alias.status.success(),
+            "{}",
+            String::from_utf8_lossy(&alias.stdout)
+        );
+
+        let unresolved = run_preflight(Some("lts/unknown\n"), "printf 'v20.19.0\n'", "N/A");
+        assert!(!unresolved.status.success());
+        assert!(
+            String::from_utf8_lossy(&unresolved.stdout).contains("unsupported .nvmrc requirement")
+        );
+
+        let broken = run_preflight(Some("20\n"), "echo node failed >&2; exit 7", "");
+        assert!(!broken.status.success());
+        assert!(String::from_utf8_lossy(&broken.stdout).contains("node failed to run: node failed"));
+
+        let mismatch = run_preflight(Some("24\n"), "printf 'v20.19.0\n'", "");
+        assert!(!mismatch.status.success());
+        assert!(String::from_utf8_lossy(&mismatch.stdout).contains("node incompatible"));
+    }
+
     #[test]
     fn mergecheck_retry_preserves_head_sha_and_negative_ci_evidence() {
         let head = "0123456789abcdef0123456789abcdef01234567";
@@ -4590,6 +4820,22 @@ mod t {
         .contains("fails with the feature"));
         assert!(judgef(&ts, 0, "", 0, "").contains("already passes"));
         assert!(judgef(&ts, 101, "t_empty FAILED", 1, "boom").contains("with the feature"));
+    }
+
+    #[test]
+    fn optimization_requires_the_same_named_checks_to_pass_before_and_after() {
+        let ts = vec!["suite::case".to_string()];
+        let pass = "test suite::case ... ok";
+        assert!(judgeopt(&ts, 0, pass, 0, pass).is_empty());
+        assert!(judgeopt(&ts, 101, "test suite::case ... FAILED", 0, pass)
+            .contains("fail before the optimization"));
+        assert!(judgeopt(&ts, 0, pass, 101, "test suite::case ... FAILED")
+            .contains("fail after the optimization"));
+        assert!(judgeopt(&ts, 0, "running 0 tests", 0, pass)
+            .contains("None of the named checks appears before"));
+        assert!(judgeopt(&ts, 0, pass, 0, "running 0 tests")
+            .contains("None of the named checks appears after"));
+        assert!(judgeopt(&ts, 0, "[checkout failed]", 0, pass).contains("checkout"));
     }
 
     #[test]

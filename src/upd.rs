@@ -141,6 +141,101 @@ pub fn info(a: &Ax) -> Value {
     v
 }
 
+/// Compares the GitHub source branch with the latest published GitHub fork
+/// release. This is informational only: no code download or executable stage.
+fn main_comparison(main: &Value, release: &Value, compare: &Value) -> Result<Value, String> {
+    let head = main["sha"]
+        .as_str()
+        .filter(|sha| sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or("GitHub devolveu um SHA inválido para a main")?;
+    let tag = release["tag"]
+        .as_str()
+        .filter(|tag| {
+            tag.strip_prefix("fork-v").is_some_and(|version| {
+                version.split('.').count() == 3
+                    && version
+                        .split('.')
+                        .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+            })
+        })
+        .ok_or("A última release GitHub não pertence ao canal de versões deste fork")?;
+    let ahead = compare["ahead_by"]
+        .as_u64()
+        .filter(|v| *v <= 100_000)
+        .ok_or("Comparação GitHub sem contagem válida")?;
+    let behind = compare["behind_by"]
+        .as_u64()
+        .filter(|v| *v <= 100_000)
+        .ok_or("Comparação GitHub sem contagem válida")?;
+    let status = compare["status"]
+        .as_str()
+        .filter(|s| matches!(*s, "ahead" | "behind" | "identical" | "diverged"))
+        .ok_or("Comparação GitHub sem estado válido")?;
+    Ok(json!({
+        "sha": head,
+        "tag": tag,
+        "ahead": ahead,
+        "behind": behind,
+        "status": status,
+        "source": "croquete1/ApolloOffice:main",
+        "installable": false
+    }))
+}
+
+/// Checks the code on main separately from the signed binary release channel.
+/// Never presents a source commit as a verified, installable binary.
+pub async fn check_main() -> Result<Value, String> {
+    let main = crate::sh::ghj(
+        &[
+            "api",
+            "repos/croquete1/ApolloOffice/branches/main",
+            "--jq",
+            "{sha: .commit.sha}",
+        ],
+        45,
+    )
+    .await?;
+    let release = crate::sh::ghj(
+        &[
+            "api",
+            "repos/croquete1/ApolloOffice/releases/latest",
+            "--jq",
+            "{tag: .tag_name}",
+        ],
+        45,
+    )
+    .await?;
+    let tag = release["tag"]
+        .as_str()
+        .ok_or("A release GitHub não tem tag")?;
+    if !tag.starts_with("fork-v")
+        || tag["fork-v".len()..].split('.').count() != 3
+        || !tag["fork-v".len()..]
+            .split('.')
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return Err("Tag da release GitHub inesperada".into());
+    }
+    let head = main["sha"]
+        .as_str()
+        .filter(|sha| sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or("GitHub devolveu um SHA inválido para a main")?;
+    // Pin comparison to the validated commit. The compare response has no
+    // `head_commit` field, and a moving branch could otherwise race this check.
+    let endpoint = format!("repos/croquete1/ApolloOffice/compare/{tag}...{head}");
+    let compare = crate::sh::ghj(
+        &[
+            "api",
+            &endpoint,
+            "--jq",
+            "{status: .status, ahead_by: .ahead_by, behind_by: .behind_by}",
+        ],
+        60,
+    )
+    .await?;
+    main_comparison(&main, &release, &compare)
+}
+
 /// Downloads a bounded asset, including when Content-Length is absent.
 async fn get(a: &Ax, u: &str, limit: usize) -> Result<Vec<u8>, String> {
     let mut r =
@@ -437,6 +532,33 @@ pub fn cleanup(me: &Path) {
 mod t {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
+
+    #[test]
+    fn source_main_is_not_a_signed_installable_update() {
+        let main = json!({"sha": "0123456789abcdef0123456789abcdef01234567"});
+        let release = json!({"tag": "fork-v0.10.3"});
+        // Mirrors the GitHub compare response shape: it has no `head_commit`.
+        let comparison: Value = serde_json::from_str(
+            r#"{"base_commit":{"sha":"abcdef0123456789abcdef0123456789abcdef01"},"merge_base_commit":{"sha":"abcdef0123456789abcdef0123456789abcdef01"},"status":"ahead","ahead_by":2,"behind_by":0,"total_commits":2,"commits":[]}"#,
+        )
+        .unwrap();
+        assert!(comparison.get("head_commit").is_none());
+        let status = main_comparison(&main, &release, &comparison).unwrap();
+        assert_eq!(status["ahead"], 2);
+        assert_eq!(status["sha"], main["sha"]);
+        assert_eq!(status["tag"], "fork-v0.10.3");
+        assert_eq!(status["installable"], false);
+        assert!(main_comparison(&json!({"sha":"wrong"}), &release, &comparison).is_err());
+        assert!(main_comparison(&main, &json!({"tag":"v0.10.3"}), &comparison).is_err());
+        assert!(main_comparison(
+            &main,
+            &release,
+            &json!({
+                "status":"diverged", "ahead_by":2, "behind_by":1
+            })
+        )
+        .is_ok());
+    }
 
     #[test]
     fn versions() {
