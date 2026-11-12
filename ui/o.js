@@ -446,12 +446,17 @@
       const n = t.dataset.w, w = S.w[n] || { st: "idle", say: "", md: "", tk: 0 };
       const cn = STG[n] ? S.q.filter((q) => STG[n].includes(q.st)).length : n === "vet" ? S.o.vn || 0 : 0;
       const wk = cn > 0 || w.st === "work";
+      const state = w.hold ? "paused" : wk ? "work" + (cn > 1 ? " ×" + cn : "") : w.st === "sleep" ? "sleep" : "idle";
+      const detail = w.tk ? kt(w.tk) + " tok" : "";
       t.querySelector(".md").textContent = n === "ci" || n === "submit" ? "no model" : mdn(w.md);
       t.querySelector(".md").title = w.md || "";
       t.querySelector(".sy").textContent = w.say || "…";
+      t.querySelector(".sy").title = w.say || "";
       t.className = "tile " + (wk ? "work" : "") + (w.hold ? " hold" : "");
-      t.querySelector(".stt").textContent = w.hold ? "paused" : wk ? "work" + (cn > 1 ? " ×" + cn : "") : w.st === "sleep" ? "sleep" : "idle";
-      t.querySelector(".ft").textContent = w.tk ? kt(w.tk) + " tok" : "";
+      t.querySelector(".stt").textContent = state;
+      t.querySelector(".stt").title = state;
+      t.querySelector(".ft").textContent = detail;
+      t.querySelector(".ft").title = detail;
       t.title = w.hold ? "click to resume" : "click to pause";
     }
   };
