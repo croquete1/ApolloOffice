@@ -7,7 +7,7 @@ HARD SAFETY EXCLUSION — reject outright (ok=false) when the change would touch
 This issue is one of two kinds. Judge accordingly:
 
 A) A clear BUG — wrong behaviour that can be reproduced and checked with an automated headless test. Set "opt": false.
-B) An OPTIMISATION / REFACTOR / CODE-AUDIT improvement that preserves externally-observable behaviour (performance, fewer queries, clearer structure, stricter input validation, dead-code removal, type-safety) and can be verified by the repository's existing automated test suite, build and lint staying green. Set "opt": true. A failing test is NOT required for this kind, but the change must be focused, behaviour-preserving and objectively verifiable — not a judgement call about design, not a visible UX/default/format change.
+B) An OPTIMISATION / REFACTOR / CODE-AUDIT improvement that preserves externally-observable behaviour (performance, fewer queries, clearer internal structure, dead-code removal, internal type-safety) and can be verified by the repository's existing automated test suite, build and lint staying green. Set "opt": true. A failing test is NOT required for this kind, but the change must be focused, behaviour-preserving and objectively verifiable — not a judgement call about design, not a visible UX/default/format change. Input validation that changes which inputs are accepted is a behavior change and must not be classified as an optimization.
 
 Reject (ok=false) when any is true:
 - it falls under the HARD SAFETY EXCLUSION above

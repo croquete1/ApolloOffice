@@ -422,6 +422,32 @@ fn commit_subject(title: &str, feature: bool) -> R<String> {
     commit_subject_kind(title, if feature { "feat" } else { "fix" })
 }
 
+fn optimization_commit_subject(title: &str) -> R<String> {
+    let title = title
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    if title.is_empty() {
+        return e("cannot create a commit without a subject");
+    }
+    let conventional = Regex::new(
+        r"^(?:feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(?:\([A-Za-z0-9_.-]+\))?!?:\s*",
+    )
+    .unwrap();
+    let description = conventional.replace(title, "");
+    if description.trim().is_empty() {
+        return e("cannot create a commit without a subject");
+    }
+    let subject = format!("refactor: {description}");
+    Ok(subject
+        .chars()
+        .take(120)
+        .collect::<String>()
+        .trim_end()
+        .to_string())
+}
+
 fn commit_subject_kind(title: &str, kind: &str) -> R<String> {
     let title = title
         .lines()
@@ -939,9 +965,28 @@ async fn dirty(a: &Ax, j: &Job) -> R<Option<String>> {
     Ok(Some(format!("working tree not clean, uncommitted changes in: {}. Commit them into the test or fix commit, or restore them with git checkout / remove them.", ps.iter().take(10).cloned().collect::<Vec<_>>().join(", "))))
 }
 
-async fn run_t(a: &Ax, j: &Job, at: &str, c: &str) -> (i32, String) {
+const MAX_NAMED_CHECKS: usize = 64;
+const MAX_NAMED_CHECK_NAME_BYTES: usize = 512;
+
+async fn run_t(a: &Ax, j: &Job, at: &str, c: &str, named: &[String]) -> (i32, String) {
     let l = format!("/tmp/ao-t-{}.log", j.id);
-    let r = x(a, j, &format!("rm -f {l}; if git checkout -q {} 2>&1; then {{ to 3600 bash -c {}\n}} > {l} 2>&1; e=$?; tail -c 30000 {l}; git checkout -q -f -- . 2>/dev/null; git clean -fdq 2>/dev/null; else e=125; echo \"[checkout failed]\"; git status --short 2>&1 | head -20; fi; echo \"[exit $e]\"", q(at), q(c)), 3700).await;
+    let evidence = named
+        .iter()
+        .map(|name| {
+            format!(
+                "grep -F -- {} {} | tail -n 4 | cut -b 1-1000",
+                q(name),
+                q(&l)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let evidence = if evidence.is_empty() {
+        String::new()
+    } else {
+        format!("printf '\\n[Named check evidence]\\n'; {evidence}; printf '\\n[End named check evidence]\\n';")
+    };
+    let r = x(a, j, &format!("rm -f {l}; if git checkout -q {} 2>&1; then {{ to 3600 bash -c {}\n}} > {l} 2>&1; e=$?; {evidence} tail -c 30000 {l}; git checkout -q -f -- . 2>/dev/null; git clean -fdq 2>/dev/null; else e=125; echo \"[checkout failed]\"; git status --short 2>&1 | head -20; fi; echo \"[exit $e]\"", q(at), q(c)), 3700).await;
     let e = Regex::new(r"\[exit (\d+)\]\s*$")
         .unwrap()
         .captures(&r.o)
@@ -967,14 +1012,6 @@ pub fn fails(o: &str) -> Vec<String> {
     v.into_iter().collect()
 }
 
-pub fn bare(t: &str) -> String {
-    t.rsplit([':', '.', '/', '>', ' '])
-        .find(|x| !x.trim().is_empty())
-        .unwrap_or(t)
-        .trim()
-        .to_string()
-}
-
 pub const CE: &str = r"error\[E\d+\]|could not compile|error: no test target|no such command|SyntaxError|ModuleNotFoundError|ImportError while|cannot find module|Cannot find module|ERROR collecting|error TS\d{4}|no tests ran|No tests found|build failed|\[setup failed\]|undefined: |command not found|(?m:^[^\n]*\.java:\d+: error:)|ClassNotFoundException|NoClassDefFoundError";
 
 pub fn judge(ts: &[String], a_e: i32, a_o: &str, b_e: i32, b_o: &str) -> String {
@@ -993,7 +1030,7 @@ pub fn judge(ts: &[String], a_e: i32, a_o: &str, b_e: i32, b_o: &str) -> String 
     if Regex::new(CE).unwrap().is_match(a_o) {
         return format!("Test commit does not compile or load; a compile or import error does not count as a failing test. Output:\n{}", crate::sh::last(a_o, 3000));
     }
-    if !ts.iter().any(|t| a_o.contains(&bare(t))) {
+    if !ts.iter().any(|t| named_check_present(a_o, t)) {
         return format!("No failure of the named tests on the test commit (none of the test names appears in the output). Output:\n{}", crate::sh::last(a_o, 3000));
     }
     if b_e != 0 {
@@ -1026,7 +1063,7 @@ pub fn judgef(ts: &[String], a_e: i32, a_o: &str, b_e: i32, b_o: &str) -> String
                 crate::sh::last(b_o, 3000)
             );
         }
-        if !ts.iter().any(|t| b_o.contains(&bare(t))) {
+        if !ts.iter().any(|t| named_check_present(b_o, t)) {
             return format!(
                 "None of the named tests appears in the output of the feature commit. Output:\n{}",
                 crate::sh::last(b_o, 3000)
@@ -1071,9 +1108,11 @@ pub fn judgeopt(ts: &[String], a_e: i32, a_o: &str, b_e: i32, b_o: &str) -> Stri
             crate::sh::last(a_o, 3000)
         );
     }
-    if !ts.iter().any(|t| a_o.contains(&bare(t))) {
+    let missing_before = missing_named_checks(ts, a_o);
+    if !missing_before.is_empty() {
         return format!(
-            "None of the named checks appears before the optimization. Output:\n{}",
+            "Named checks are missing or did not pass before the optimization ({}). Output:\n{}",
+            missing_before.join(", "),
             crate::sh::last(a_o, 3000)
         );
     }
@@ -1091,13 +1130,86 @@ pub fn judgeopt(ts: &[String], a_e: i32, a_o: &str, b_e: i32, b_o: &str) -> Stri
             crate::sh::last(b_o, 3000)
         );
     }
-    if !ts.iter().any(|t| b_o.contains(&bare(t))) {
+    let missing_after = missing_named_checks(ts, b_o);
+    if !missing_after.is_empty() {
         return format!(
-            "None of the named checks appears after the optimization. Output:\n{}",
+            "Named checks are missing or did not pass after the optimization ({}). Output:\n{}",
+            missing_after.join(", "),
             crate::sh::last(b_o, 3000)
         );
     }
     String::new()
+}
+
+fn missing_named_checks(ts: &[String], output: &str) -> Vec<String> {
+    ts.iter()
+        .filter(|name| {
+            name.is_empty() || !output.lines().any(|line| passing_check_line(line, name))
+        })
+        .cloned()
+        .collect()
+}
+
+fn named_check_present(output: &str, name: &str) -> bool {
+    !name.is_empty()
+        && output
+            .lines()
+            .any(|line| named_occurrences(line, name).next().is_some())
+}
+
+fn named_occurrences<'a>(
+    line: &'a str,
+    name: &'a str,
+) -> impl Iterator<Item = (usize, usize)> + 'a {
+    line.match_indices(name).filter_map(move |(start, found)| {
+        let end = start + found.len();
+        let before = line[..start].chars().next_back();
+        let after = line[end..].chars().next();
+        let component_char =
+            |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '/' | '>' | '-');
+        let before_continues_name =
+            before.is_some_and(component_char) || line[..start].ends_with("::");
+        let after_continues_name =
+            after.is_some_and(component_char) || line[end..].starts_with("::");
+        (!before_continues_name && !after_continues_name).then_some((start, end))
+    })
+}
+
+fn passing_check_line(line: &str, name: &str) -> bool {
+    let mut status = String::with_capacity(line.len());
+    let mut copied = 0;
+    let mut found = false;
+    for (start, end) in named_occurrences(line, name) {
+        found = true;
+        status.push_str(&line[copied..start]);
+        status.push(' ');
+        copied = end;
+    }
+    if !found {
+        return false;
+    }
+    status.push_str(&line[copied..]);
+    let lower = status.to_ascii_lowercase();
+    let words: Vec<_> = lower
+        .split_whitespace()
+        .map(|token| token.trim_matches(|c: char| !c.is_ascii_alphanumeric()))
+        .collect();
+    let negative = words.iter().any(|word| {
+        matches!(
+            *word,
+            "fail" | "failed" | "failure" | "ignored" | "skipped" | "xfail" | "error"
+        )
+    }) || words.windows(2).any(|pair| pair == ["not", "ok"])
+        || lower.contains('✕')
+        || lower.contains('×');
+    if negative {
+        return false;
+    }
+    status.contains('✓')
+        || status.contains('✔')
+        || words
+            .iter()
+            .any(|word| matches!(*word, "ok" | "pass" | "passed" | "success"))
 }
 
 async fn verify(a: &Ax, j: &mut Job, f: &Value) -> R<String> {
@@ -1112,6 +1224,17 @@ async fn verify(a: &Ax, j: &mut Job, f: &Value) -> R<String> {
     let tc = f["test_cmd"].as_str().unwrap_or("").to_string();
     if tc.is_empty() || ts.is_empty() {
         return Ok("answer without test_cmd or tests".into());
+    }
+    if ts.len() > MAX_NAMED_CHECKS
+        || ts.iter().any(|name| {
+            name.trim().is_empty()
+                || name.len() > MAX_NAMED_CHECK_NAME_BYTES
+                || name.chars().any(char::is_control)
+        })
+    {
+        return Ok(format!(
+            "answer must name at most {MAX_NAMED_CHECKS} checks; each name must be non-empty, at most {MAX_NAMED_CHECK_NAME_BYTES} bytes, and contain no control characters"
+        ));
     }
     if Regex::new(crate::mcp::BAD).unwrap().is_match(&tc) {
         return Ok("test_cmd contains forbidden commands".into());
@@ -1146,8 +1269,8 @@ async fn verify(a: &Ax, j: &mut Job, f: &Value) -> R<String> {
         it.next().unwrap_or("").to_string(),
         it.next().unwrap_or("").to_string(),
     );
-    let (ae, ao) = run_t(a, j, &at, &tc).await;
-    let (be, bo) = run_t(a, j, &b, &tc).await;
+    let (ae, ao) = run_t(a, j, &at, &tc, &ts).await;
+    let (be, bo) = run_t(a, j, &b, &tc, &ts).await;
     ok(a, j, &format!("git checkout -q {}", q(&j.s("br"))), 120).await?;
     let r = if j.opt() {
         judgeopt(&ts, ae, &ao, be, &bo)
@@ -1719,7 +1842,7 @@ async fn review_mode(a: &Ax, j: &mut Job, f: &mut Value, diagnostic: bool) -> R<
         j.repo,
         if j.kind == "mergecheck" { format!("PR #{} — validação para possível merge", j.pr.unwrap_or(0)) } else if j.own() { "no GitHub issue (the PR must not reference any issue number)".to_string() } else { format!("issue #{}", j.num) },
         wrap("issue", &format!("{}\n\n{}", j.title, crate::sh::head(&j.s("body"), 4000))),
-        if j.kind == "review" { format!("{}\n\n", wrap("request", &j.s("change"))) } else if j.opt() { "This PR is a behavior-preserving optimization, not a feature. It must keep externally observable behavior, outputs, file formats, APIs, and defaults unchanged. Confirm the named checks pass on both the verification commit before the optimization and the final commit, and assess whether the diff implements one concrete, measurable improvement without unrelated changes.\n\n".to_string() } else if j.feat() { "This PR implements a requested FEATURE, not a bug fix. Judge it as a feature: it does what the issue asks, completely but minimally; the tests check the new behaviour (on the test commit they may fail to compile because the new API is missing); no unrelated changes; no surprising changes to defaults, file formats or visible design beyond what the issue asks.\n\n".to_string() } else { String::new() },
+        if j.kind == "review" { format!("{}\n\n", wrap("request", &j.s("change"))) } else if j.opt() { "This PR is a behavior-preserving optimization, not a feature. It must keep externally observable behavior, outputs, file formats, APIs, and defaults unchanged. Confirm every named check passes on both the verification commit before the optimization and the final commit. Assess whether the diff implements one concrete, objectively verifiable improvement without unrelated changes, and do not accept unsupported performance claims.\n\n".to_string() } else if j.feat() { "This PR implements a requested FEATURE, not a bug fix. Judge it as a feature: it does what the issue asks, completely but minimally; the tests check the new behaviour (on the test commit they may fail to compile because the new API is missing); no unrelated changes; no surprising changes to defaults, file formats or visible design beyond what the issue asks.\n\n".to_string() } else { String::new() },
         f["title"].as_str().unwrap_or(""),
         body_lang(j, f, &ci, "", pr_pt(a, j)),
         if crate::quality::enabled(a) && j.kind == "fix" && !j.opt() { format!("{}{}\nIndependent acceptance evidence: {}\nFrozen verifier (untrusted code): {}\nCheck that this verifier exercises actual production code and the reported behavior, rather than copying logic or merely matching source text. Reject inadequate coverage or unsupported claims.",rules(a, j),crate::quality::context(j),wrap("acceptance-evidence",&j.d["acceptance_proof"].to_string()),wrap("frozen-verifier",j.d["acceptance"]["script"].as_str().unwrap_or(""))) } else { rules(a, j) }
@@ -1847,7 +1970,7 @@ async fn review_mode(a: &Ax, j: &mut Job, f: &mut Value, diagnostic: bool) -> R<
 }
 
 const FEAT: &str = "This job is a FEATURE REQUEST, not a bug. The rules for a bug fix apply with these changes: implement the requested behaviour completely but minimally, in the project's existing style, without unrelated changes. Commit 1 \"test: …\" adds tests that check the new behaviour; on that commit they must fail because the feature is missing (an assertion failure is best; if the test has to call a new API, a compile error on that commit is accepted). Commit 2 \"feat: …\" implements the feature; there the tests pass. Update user-facing docs or the changelog only if the project does that for every feature. In the JSON, \"cause\" is why the feature is needed (what users could not do), \"fix\" is what was added.";
-const OPT: &str = "This job is a BEHAVIOR-PRESERVING OPTIMIZATION, not a bug fix or feature. Keep all externally observable behavior, outputs, APIs, formats, and defaults unchanged. Commit 1 \"test: …\" adds characterization checks that pass on the unchanged base. Commit 2 \"perf: …\" makes the focused optimization. Run the same test_cmd on both commits; every named check must pass before and after. Do not claim performance gains unless the checks objectively measure them. In the JSON, \"cause\" explains the concrete inefficiency, \"fix\" describes the optimization, and \"untouched\" notes behavior or areas preserved.";
+const OPT: &str = "This job is a BEHAVIOR-PRESERVING OPTIMIZATION, not a bug fix or feature. Keep all externally observable behavior, outputs, APIs, formats, and defaults unchanged. Commit 1 \"test: …\" adds characterization checks that pass on the unchanged base. Commit 2 \"refactor: …\" makes the focused improvement. Run the same test_cmd on both commits; every named check must pass before and after. Do not claim performance gains unless the checks objectively measure them. In the JSON, \"cause\" explains the concrete improvement, \"fix\" describes the change, and \"untouched\" notes behavior or areas preserved.";
 
 fn fixp(a: &Ax, j: &Job, fb: &str) -> String {
     let h = format!(
@@ -1943,7 +2066,7 @@ async fn vrev(a: &Ax, j: &Job, f: &Value) -> R<String> {
         if Regex::new(crate::mcp::BAD).unwrap().is_match(&c) {
             return Ok("test_cmd contains forbidden commands".into());
         }
-        let (e, o) = run_t(a, j, "HEAD", &c).await;
+        let (e, o) = run_t(a, j, "HEAD", &c, &[]).await;
         ok(a, j, &format!("git checkout -q {}", q(&j.s("br"))), 120).await?;
         if e != 0 {
             return Ok(format!("Tests fail:\n{}", crate::sh::last(&o, 3000)));
@@ -2165,7 +2288,7 @@ async fn reb(a: &Ax, j: &mut Job) -> R<()> {
     a.db.jd(j);
     let tc = j.s("test_cmd");
     if !tc.is_empty() && !Regex::new(crate::mcp::BAD).unwrap().is_match(&tc) {
-        let (e, _) = run_t(a, j, "HEAD", &tc).await;
+        let (e, _) = run_t(a, j, "HEAD", &tc, &[]).await;
         ok(a, j, &format!("git checkout -q {}", q(&j.s("br"))), 120).await?;
         if e != 0 {
             return drop("PR tests fail after rebase");
@@ -2536,7 +2659,7 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
             format!("Fixes #{}", j.num)
         };
         let subject = if j.opt() {
-            commit_subject_kind(&ti, "perf")?
+            optimization_commit_subject(&ti)?
         } else {
             commit_subject(&ti, j.feat())?
         };
@@ -3690,9 +3813,10 @@ fn job_rank(j: &Value) -> (i32, i32, f64, i64) {
             1
         },
         match j["kind"].as_str().unwrap_or("fix") {
+            "mergecheck" => 0.75,
             "fix" => 1.0 + j["prio"].as_f64().unwrap_or(0.0).clamp(-500.0, 500.0) / 1000.0,
             "hunt" => 2.0,
-            _ => 0.0,
+            _ => 1.5,
         },
         j["id"].as_i64().unwrap_or(0),
     )
@@ -3825,7 +3949,11 @@ fn hn(a: &Ax) -> i64 {
         "select count(*) from jobs where kind='fix' and (st in ('repro','fix','ci','review','gate','submit') or (st='ready' and (num<>0 or json_extract(d,'$.ext') is not null)))",
         pa![],
     );
-    let reserved = hf + i64::from(uncovered_fixes > 0);
+    let active_rechecks = a.db.n(
+        "select count(*) from jobs j join rp r on r.full=j.repo where j.kind='mergecheck' and j.st not in ('done','drop','park') and r.on_=1",
+        pa![],
+    );
+    let reserved = hf + i64::from(uncovered_fixes > 0) + i64::from(active_rechecks > 0);
     (l - reserved.max(0)).clamp(0, cap)
 }
 
@@ -3937,8 +4065,8 @@ async fn lane(a: Ax, h: String, k: i64) {
             continue;
         }
         // Capacity reservation: when a host has two or more lanes, the top lane
-        // never starts new hunts, so fixing queued work (issue and bug fixes)
-        // always keeps a lane and is never starved by continuous hunting.
+        // never starts new hunts, so fixes and PR rechecks keep a lane and are
+        // never starved by continuous hunting.
         let reserve_for_fixes = x.ln >= 2 && k == x.ln;
         while !reserve_for_fixes
             && !a.hold("hunter")
@@ -4732,10 +4860,150 @@ mod t {
     #[test]
     fn fixes_are_ranked_ahead_of_hunts() {
         let fix = json!({"st":"ready", "kind":"fix", "prio":0, "id":2});
+        let mergecheck = json!({"st":"ready", "kind":"mergecheck", "prio":0, "id":3});
         let hunt = json!({"st":"ready", "kind":"hunt", "prio":0, "id":1});
+        assert!(job_rank(&mergecheck) < job_rank(&fix));
         assert!(job_rank(&fix) < job_rank(&hunt));
         let high_priority_number = json!({"st":"ready", "kind":"fix", "prio":100_000, "id":3});
         assert!(job_rank(&high_priority_number) < job_rank(&hunt));
+    }
+
+    #[test]
+    fn pr_rechecks_reserve_a_worker_lane_from_hunts() {
+        let db = crate::db::Db::mem();
+        db.ks("set", &json!({"hunters": 2}));
+        db.run("insert into hs(id,ln,dk,on_) values('local',2,0,1)", pa![]);
+        db.run(
+            "insert into rp(full,on_) values('o/enabled',1),('o/disabled',0)",
+            pa![],
+        );
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::path::PathBuf::from("/tmp/apollo-recheck-capacity-test"),
+            1,
+            "apollo-office".into(),
+        ));
+        assert_eq!(hn(&a), 2);
+        a.db.jnew(
+            "o/enabled",
+            1,
+            "mergecheck",
+            "Revalidate PR",
+            "",
+            "ready",
+            "",
+            json!({"expected_head":"abc"}),
+            Some(42),
+            -5.0,
+        );
+        assert_eq!(hn(&a), 1);
+        a.db.jnew(
+            "o/disabled",
+            1,
+            "mergecheck",
+            "Revalidate PR",
+            "",
+            "ready",
+            "aguarda worker",
+            json!({"expected_head":"def"}),
+            Some(43),
+            -5.0,
+        );
+        assert_eq!(
+            hn(&a),
+            1,
+            "a disabled repository must not reserve another lane"
+        );
+        a.db.run("update jobs set st='review' where kind='mergecheck'", pa![]);
+        assert_eq!(
+            hn(&a),
+            1,
+            "an enabled running recheck keeps its lane reservation"
+        );
+        a.db.run(
+            "update jobs set st='done' where repo='o/enabled' and kind='mergecheck'",
+            pa![],
+        );
+        assert_eq!(hn(&a), 2, "a disabled recheck must not suppress hunting");
+    }
+
+    #[test]
+    fn optimization_verification_requires_every_named_check_before_and_after() {
+        let checks = vec![
+            "alpha::keeps_order".to_string(),
+            "beta::uses_cache".to_string(),
+        ];
+        let good = "test alpha::keeps_order ... ok\ntest beta::uses_cache ... ok";
+        assert!(judgeopt(&checks, 0, good, 0, good).is_empty());
+
+        let before_missing = judgeopt(&checks, 0, "test alpha::keeps_order ... ok", 0, good);
+        assert!(before_missing.contains("before the optimization"));
+        assert!(before_missing.contains("beta::uses_cache"));
+
+        let after_missing = judgeopt(&checks, 0, good, 0, "test beta::uses_cache ... ok");
+        assert!(after_missing.contains("after the optimization"));
+        assert!(after_missing.contains("alpha::keeps_order"));
+
+        let red_baseline = judgeopt(
+            &checks,
+            0,
+            "test alpha::keeps_order ... ok\ntest beta::uses_cache ... FAILED",
+            0,
+            good,
+        );
+        assert!(red_baseline.contains("before the optimization"));
+
+        assert_eq!(
+            missing_named_checks(&["test_foo".to_string()], "test test_foo_extra ... ok"),
+            vec!["test_foo"]
+        );
+        assert_eq!(
+            missing_named_checks(&["test_foo".to_string()], "test test_foo ... ignored"),
+            vec!["test_foo"]
+        );
+        assert_eq!(
+            missing_named_checks(
+                &["beta::keeps_order".to_string()],
+                "test alpha::keeps_order ... ok"
+            ),
+            vec!["beta::keeps_order"]
+        );
+        assert_eq!(
+            missing_named_checks(
+                &["alpha::keeps_order".to_string()],
+                "test beta::alpha::keeps_order ... ok"
+            ),
+            vec!["alpha::keeps_order"]
+        );
+        assert!(missing_named_checks(
+            &["alpha::keeps_order".to_string()],
+            "test alpha::keeps_order ... ok"
+        )
+        .is_empty());
+        assert!(
+            missing_named_checks(&["rejects an error".to_string()], "✓ rejects an error")
+                .is_empty()
+        );
+        assert!(missing_named_checks(
+            &["cache_equivalence".to_string()],
+            "cache_equivalence: PASS"
+        )
+        .is_empty());
+        assert_eq!(
+            missing_named_checks(
+                &["rejects an error".to_string()],
+                "test rejects an error ... FAILED"
+            ),
+            vec!["rejects an error"]
+        );
+        let long_log = format!(
+            "test alpha::keeps_order ... ok\n{}",
+            "diagnostic output ".repeat(4_000)
+        );
+        let tail = crate::sh::last(&long_log, 30_000);
+        assert!(!missing_named_checks(&checks[..1], &tail).is_empty());
+        let retained = format!("test alpha::keeps_order ... ok\n{tail}");
+        assert!(missing_named_checks(&checks[..1], &retained).is_empty());
     }
 
     #[test]
@@ -4751,9 +5019,6 @@ mod t {
                 "tests/t.py::test_x"
             ]
         );
-        assert_eq!(bare("a::b::c"), "c");
-        assert_eq!(bare("tests/t.py::test_x"), "test_x");
-        assert_eq!(bare("TestFoo"), "TestFoo");
     }
 
     #[test]
@@ -4792,7 +5057,10 @@ mod t {
         assert!(judge(&ts, 0, "", 0, "").contains("already passes"));
         assert!(judge(&ts, 101, "error[E0425]: cannot find", 0, "").contains("does not compile"));
         assert!(judge(&ts, 1, "something else failed", 0, "").contains("No failure"));
-        assert!(judge(&ts, 101, "t_empty FAILED", 1, "boom").contains("fails with the fix"));
+        assert!(
+            judge(&ts, 101, "test m::t_empty ... FAILED", 1, "boom").contains("fails with the fix")
+        );
+        assert!(judge(&ts, 101, "t_empty FAILED", 1, "boom").contains("No failure"));
         assert!(judge(&ts, 1, "t_empty", 0, "[checkout failed]").contains("checkout"));
         assert!(judgef(
             &ts,
@@ -4815,11 +5083,13 @@ mod t {
             101,
             "error[E0425]: cannot find function",
             1,
-            "t_empty FAILED"
+            "test m::t_empty ... FAILED"
         )
         .contains("fails with the feature"));
         assert!(judgef(&ts, 0, "", 0, "").contains("already passes"));
-        assert!(judgef(&ts, 101, "t_empty FAILED", 1, "boom").contains("with the feature"));
+        assert!(
+            judgef(&ts, 101, "test m::t_empty ... FAILED", 1, "boom").contains("with the feature")
+        );
     }
 
     #[test]
@@ -4832,9 +5102,9 @@ mod t {
         assert!(judgeopt(&ts, 0, pass, 101, "test suite::case ... FAILED")
             .contains("fail after the optimization"));
         assert!(judgeopt(&ts, 0, "running 0 tests", 0, pass)
-            .contains("None of the named checks appears before"));
+            .contains("Named checks are missing or did not pass before"));
         assert!(judgeopt(&ts, 0, pass, 0, "running 0 tests")
-            .contains("None of the named checks appears after"));
+            .contains("Named checks are missing or did not pass after"));
         assert!(judgeopt(&ts, 0, "[checkout failed]", 0, pass).contains("checkout"));
     }
 
@@ -4878,6 +5148,20 @@ mod t {
         assert!(commit_subject("   \n ", false).is_err());
         let long = "x".repeat(200);
         assert_eq!(commit_subject(&long, false).unwrap().chars().count(), 120);
+    }
+
+    #[test]
+    fn optimization_commits_do_not_claim_unmeasured_performance_gains() {
+        assert_eq!(
+            optimization_commit_subject("perf: Reduce repeated parsing").unwrap(),
+            "refactor: Reduce repeated parsing"
+        );
+        assert_eq!(
+            optimization_commit_subject("Simplify internal lookup").unwrap(),
+            "refactor: Simplify internal lookup"
+        );
+        assert!(optimization_commit_subject("perf: ").is_err());
+        assert!(optimization_commit_subject("refactor(core):").is_err());
     }
 
     #[test]

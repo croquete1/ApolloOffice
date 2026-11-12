@@ -2,6 +2,16 @@
   const K = window.K;
   const $ = (s) => document.getElementById(s);
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+  const workLabel = (kind) => ({
+    issue_bug: "bug de issue",
+    reported_bug: "bug reportado",
+    discovered_bug: "bug descoberto",
+    optimization: "otimização",
+    feature: "funcionalidade",
+    pr_recheck: "revalidação de PR",
+    pr_review: "revisão de PR",
+    branch_update: "atualização de branch",
+  }[kind] || "tarefa");
 
   const get = async (p) => {
     const r = await fetch(p, { cache: "no-store" });
@@ -12,7 +22,7 @@
     const r = await fetch(p, { method: "POST", headers: { "content-type": "application/json", "x-ao": "1" }, body: JSON.stringify(b) });
     return r.json();
   };
-  window.AO = { get, post, esc, $ };
+  window.AO = { get, post, esc, $, workLabel };
   // Dedicated, exception-isolated presentation subscriptions. Consumers do not
   // need to wrap the legacy onState callback or perform extra network requests.
   const stateListeners = new Set();
@@ -497,7 +507,7 @@
   const jrow = (j, x) => {
     const retry = retryStates.get(j.id);
     const reason = retry?.error || (j.st === "ci" && S.cil[j.id] ? S.cil[j.id] : j.why || "");
-    return `<div class="row${j.st === "approve" ? " apr" : ""}">${j.st === "approve" && x ? `<input type="checkbox" class="bk" data-k="${j.id}" ${sel.has(j.id) ? "checked" : ""} aria-label="select">` : ""}<span class="pill ${STC[j.st] || ""}">${esc(j.kind !== "fix" ? j.kind + "·" + j.st : j.st)}</span><div class="ti"><a class="a" href="#" data-j="${j.id}">${esc(j.title)}</a><div class="w${retry?.error ? " bad2" : ""}">${esc(reason)}</div></div><span class="rp">${esc(rn(j))}${j.st === "approve" ? ` <button class="go" data-j="${j.id}">review</button>` : ""}${x && j.st !== "approve" ? ` <button class="x" data-d="${j.id}" title="drop">✕</button>` : ""}${!x && j.st === "drop" && j.kind === "fix" ? ` <button class="x" data-rq="${j.id}" title="try again" ${retry?.pending ? "disabled" : ""}>↻</button>` : ""}</span></div>`;
+    return `<div class="row${j.st === "approve" ? " apr" : ""}">${j.st === "approve" && x ? `<input type="checkbox" class="bk" data-k="${j.id}" ${sel.has(j.id) ? "checked" : ""} aria-label="select">` : ""}<span class="pill ${STC[j.st] || ""}">${esc(workLabel(j.work_class))} · ${esc(j.st)}</span><div class="ti"><a class="a" href="#" data-j="${j.id}">${esc(j.title)}</a><div class="w${retry?.error ? " bad2" : ""}">${esc(reason)}</div></div><span class="rp">${esc(rn(j))}${j.st === "approve" ? ` <button class="go" data-j="${j.id}">review</button>` : ""}${x && j.st !== "approve" ? ` <button class="x" data-d="${j.id}" title="drop">✕</button>` : ""}${!x && j.st === "drop" && j.kind === "fix" ? ` <button class="x" data-rq="${j.id}" title="try again" ${retry?.pending ? "disabled" : ""}>↻</button>` : ""}</span></div>`;
   };
 
   const lists = () => {

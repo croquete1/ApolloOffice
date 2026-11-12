@@ -410,7 +410,7 @@
       value: active.getAttribute(focusedAttr)
     } : null;
     byId("aoTasksList").innerHTML = q.length ? q.slice(0, 7).map((j) =>
-      rowHTML(j.title, j.repo + (j.num ? " · #" + j.num : ""), stageLabels[j.st] || j.st, "data-job", j.id)).join("") :
+      rowHTML(j.title, j.repo + (j.num ? " · #" + j.num : "") + " · " + (A.workLabel ? A.workLabel(j.work_class) : j.kind), stageLabels[j.st] || j.st, "data-job", j.id)).join("") :
       '<p class="ao-empty">Sem tarefas em aberto.</p>';
     byId("aoPRList").innerHTML = prs.length ? prs.slice(0, 7).map((p) =>
       rowHTML(p.title, p.repo + " · #" + p.num, p.st === "open" ? "Aberto" : p.st === "merged" ? "Integrado" : "Fechado", "data-pr-url", p.url || "")).join("") :
@@ -650,7 +650,10 @@
       rows.push(["Motivo da espera", String(w.idle_reason)]);
     }
     if (Object.hasOwn(resultText, w.mood)) rows.push(["Resultado recente", resultText[w.mood].replace("Último resultado: ", "")]);
-    if (job) rows.push(["Tarefa",job.title]);
+    if (job) {
+      rows.push(["Tarefa",job.title]);
+      rows.push(["Tipo de trabalho",A.workLabel ? A.workLabel(job.work_class) : job.kind]);
+    }
     byId("aoDetailBody").replaceChildren();
     for (const [title,value] of rows) {
       const row = document.createElement("div"), t = document.createElement("span"), v = document.createElement("strong");
