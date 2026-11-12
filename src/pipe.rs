@@ -1165,9 +1165,13 @@ fn named_occurrences<'a>(
         let end = start + found.len();
         let before = line[..start].chars().next_back();
         let after = line[end..].chars().next();
-        let boundary =
-            |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '.' | '/' | '>' | '-');
-        (!before.is_some_and(boundary) && !after.is_some_and(boundary)).then_some((start, end))
+        let component_char =
+            |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '/' | '>' | '-');
+        let before_continues_name =
+            before.is_some_and(component_char) || line[..start].ends_with("::");
+        let after_continues_name =
+            after.is_some_and(component_char) || line[end..].starts_with("::");
+        (!before_continues_name && !after_continues_name).then_some((start, end))
     })
 }
 
@@ -4980,6 +4984,11 @@ mod t {
             missing_named_checks(&["rejects an error".to_string()], "✓ rejects an error")
                 .is_empty()
         );
+        assert!(missing_named_checks(
+            &["cache_equivalence".to_string()],
+            "cache_equivalence: PASS"
+        )
+        .is_empty());
         assert_eq!(
             missing_named_checks(
                 &["rejects an error".to_string()],
