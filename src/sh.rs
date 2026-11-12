@@ -661,7 +661,7 @@ fn npm_cache_cleanup_cmd_for(cache_dir: &str, limit_kib: u64) -> String {
         "cache='{quoted}'; \
          if [ -d \"$cache\" ]; then \
          kb=$(du -sk \"$cache\" 2>/dev/null | awk '{{print $1}}'); \
-         case \"$kb\" in ''|*[!0-9]*) exit 1;; esac; \
+         case \"$kb\" in ''|*[!0-9]*) exit 0;; esac; \
          if [ \"$kb\" -gt {limit_kib} ]; then \
          npm_config_cache=\"$cache\" npm cache clean --force >/dev/null 2>&1 || exit 1; \
          rm -rf -- \"$cache/_npx\" || exit 1; \

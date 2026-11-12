@@ -3793,7 +3793,12 @@ async fn lane(a: Ax, h: String, k: i64) {
             sl(60_000).await;
             continue;
         }
-        while !a.hold("hunter")
+        // Capacity reservation: when a host has two or more lanes, the top lane
+        // never starts new hunts, so fixing queued work (issue and bug fixes)
+        // always keeps a lane and is never starved by continuous hunting.
+        let reserve_for_fixes = x.ln >= 2 && k == x.ln;
+        while !reserve_for_fixes
+            && !a.hold("hunter")
             && !a.drain.load(std::sync::atomic::Ordering::Relaxed)
             && mk_hunt(&a)
         {}
