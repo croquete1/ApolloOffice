@@ -306,9 +306,11 @@ async fn cc(a: &Ax, o: Ask) -> R<(String, Value)> {
     .map(String::from)
     .collect();
     av.push(o.turns.to_string());
-    if let Some(e) = o.ef {
-        av.extend(["--effort".into(), e.into()]);
-    }
+    // Worker Claude (provider cc) corre sempre em esforço baixo — escolha do
+    // owner (claude-opus-4-8 low) para equilibrar custo/velocidade. O esforço da
+    // etapa é ignorado aqui; os provedores não-cc mantêm o seu esforço próprio.
+    let _ = o.ef;
+    av.extend(["--effort".into(), "low".into()]);
     let mut tk = String::new();
     let mut mf = None;
     if let Some(rn) = &o.rn {
