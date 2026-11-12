@@ -56,7 +56,8 @@ function scene() {
   const names = {};
   const stageLabels={fix:"Correção",ci:"Testes",approve:"Aprovação"};
   const byId=(id)=>elements[id];
-  const context = {document,formatNum,safeArray,escapeHTML,datum,names,stageLabels,byId};
+  const A = {workLabel:(kind)=>kind || "other"};
+  const context = {A,document,formatNum,safeArray,escapeHTML,datum,names,stageLabels,byId};
   const block = "(() => { let selectedRepo='', lastListSignature='';" +
     " const countTotals=(s)=>({active:s.n?.fix||0,done:s.n?.done||0}); " +
     implementation + " return {renderLists}; })()";

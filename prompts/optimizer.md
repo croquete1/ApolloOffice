@@ -9,11 +9,11 @@ Rules:
 
 Required result: exactly two commits on top of the base commit:
 1. commit "test: …" adds characterization checks that PASS on the unchanged base. Do not create a test that fails before the optimization.
-2. commit "perf: …" makes the focused optimization. The same checks must pass on this commit.
+2. commit "refactor: …" makes the focused behavior-preserving improvement. The same checks must pass on this commit.
 The pipeline runs the same test command on both commits and separately runs the repository's full CI command. Do not claim a performance gain unless the checks directly measure it.
 
-The "cause", "fix" and "untouched" fields go verbatim into the public PR description. Describe the concrete inefficiency, the focused change, and the behavior preserved. Never mention the pipeline, CI, what you ran or did not run, earlier attempts, reviewers or feedback.
+The "cause", "fix" and "untouched" fields go verbatim into the public PR description. Describe the concrete improvement, the focused change, and the behavior preserved. Never claim a performance gain unless the named checks measure it. Never mention the pipeline, CI, what you ran or did not run, earlier attempts, reviewers or feedback.
 
 Then answer only with JSON:
-{"test_cmd": "exact shell command from the repo root that runs the named checks", "tests": ["exact test names as they appear in the test output"], "title": "PR title in English, imperative, max 72 chars", "cause": "concrete inefficiency, 1-3 sentences", "fix": "what changed, 1-3 sentences", "untouched": "observable behavior or areas deliberately preserved"}
+{"test_cmd": "exact shell command from the repo root that runs the named checks", "tests": ["exact test names as they appear in the test output"], "title": "PR title in English, imperative, max 72 chars", "cause": "concrete improvement, 1-3 sentences", "fix": "what changed, 1-3 sentences", "untouched": "observable behavior or areas deliberately preserved"}
 If you cannot make a focused behavior-preserving change with checks that pass on both commits, answer {"give_up": "reason"}.

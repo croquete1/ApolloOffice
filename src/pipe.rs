@@ -422,6 +422,32 @@ fn commit_subject(title: &str, feature: bool) -> R<String> {
     commit_subject_kind(title, if feature { "feat" } else { "fix" })
 }
 
+fn optimization_commit_subject(title: &str) -> R<String> {
+    let title = title
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    if title.is_empty() {
+        return e("cannot create a commit without a subject");
+    }
+    let conventional = Regex::new(
+        r"^(?:feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(?:\([A-Za-z0-9_.-]+\))?!?:\s*",
+    )
+    .unwrap();
+    let description = conventional.replace(title, "");
+    if description.trim().is_empty() {
+        return e("cannot create a commit without a subject");
+    }
+    let subject = format!("refactor: {description}");
+    Ok(subject
+        .chars()
+        .take(120)
+        .collect::<String>()
+        .trim_end()
+        .to_string())
+}
+
 fn commit_subject_kind(title: &str, kind: &str) -> R<String> {
     let title = title
         .lines()
@@ -1071,9 +1097,11 @@ pub fn judgeopt(ts: &[String], a_e: i32, a_o: &str, b_e: i32, b_o: &str) -> Stri
             crate::sh::last(a_o, 3000)
         );
     }
-    if !ts.iter().any(|t| a_o.contains(&bare(t))) {
+    let missing_before = missing_named_checks(ts, a_o);
+    if !missing_before.is_empty() {
         return format!(
-            "None of the named checks appears before the optimization. Output:\n{}",
+            "Named checks are missing or did not pass before the optimization ({}). Output:\n{}",
+            missing_before.join(", "),
             crate::sh::last(a_o, 3000)
         );
     }
@@ -1091,13 +1119,57 @@ pub fn judgeopt(ts: &[String], a_e: i32, a_o: &str, b_e: i32, b_o: &str) -> Stri
             crate::sh::last(b_o, 3000)
         );
     }
-    if !ts.iter().any(|t| b_o.contains(&bare(t))) {
+    let missing_after = missing_named_checks(ts, b_o);
+    if !missing_after.is_empty() {
         return format!(
-            "None of the named checks appears after the optimization. Output:\n{}",
+            "Named checks are missing or did not pass after the optimization ({}). Output:\n{}",
+            missing_after.join(", "),
             crate::sh::last(b_o, 3000)
         );
     }
     String::new()
+}
+
+fn missing_named_checks(ts: &[String], output: &str) -> Vec<String> {
+    ts.iter()
+        .filter(|name| {
+            let short = bare(name);
+            short.is_empty()
+                || !output.lines().any(|line| {
+                    let exact_name = line.match_indices(&short).any(|(start, _)| {
+                        let before = line[..start].chars().next_back();
+                        let end = start + short.len();
+                        let after = line[end..].chars().next();
+                        !before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+                            && !after.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+                    });
+                    exact_name && passing_check_line(line)
+                })
+        })
+        .cloned()
+        .collect()
+}
+
+fn passing_check_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    let words: Vec<_> = lower
+        .split_whitespace()
+        .map(|token| token.trim_matches(|c: char| !c.is_ascii_alphanumeric()))
+        .collect();
+    let negative = words.iter().any(|word| {
+        matches!(
+            *word,
+            "failed" | "failure" | "ignored" | "skipped" | "xfail" | "error"
+        )
+    }) || words.windows(2).any(|pair| pair == ["not", "ok"]);
+    if negative {
+        return false;
+    }
+    line.contains('✓')
+        || line.contains('✔')
+        || words
+            .iter()
+            .any(|word| matches!(*word, "ok" | "pass" | "passed" | "success"))
 }
 
 async fn verify(a: &Ax, j: &mut Job, f: &Value) -> R<String> {
@@ -1719,7 +1791,7 @@ async fn review_mode(a: &Ax, j: &mut Job, f: &mut Value, diagnostic: bool) -> R<
         j.repo,
         if j.kind == "mergecheck" { format!("PR #{} — validação para possível merge", j.pr.unwrap_or(0)) } else if j.own() { "no GitHub issue (the PR must not reference any issue number)".to_string() } else { format!("issue #{}", j.num) },
         wrap("issue", &format!("{}\n\n{}", j.title, crate::sh::head(&j.s("body"), 4000))),
-        if j.kind == "review" { format!("{}\n\n", wrap("request", &j.s("change"))) } else if j.opt() { "This PR is a behavior-preserving optimization, not a feature. It must keep externally observable behavior, outputs, file formats, APIs, and defaults unchanged. Confirm the named checks pass on both the verification commit before the optimization and the final commit, and assess whether the diff implements one concrete, measurable improvement without unrelated changes.\n\n".to_string() } else if j.feat() { "This PR implements a requested FEATURE, not a bug fix. Judge it as a feature: it does what the issue asks, completely but minimally; the tests check the new behaviour (on the test commit they may fail to compile because the new API is missing); no unrelated changes; no surprising changes to defaults, file formats or visible design beyond what the issue asks.\n\n".to_string() } else { String::new() },
+        if j.kind == "review" { format!("{}\n\n", wrap("request", &j.s("change"))) } else if j.opt() { "This PR is a behavior-preserving optimization, not a feature. It must keep externally observable behavior, outputs, file formats, APIs, and defaults unchanged. Confirm every named check passes on both the verification commit before the optimization and the final commit. Assess whether the diff implements one concrete, objectively verifiable improvement without unrelated changes, and do not accept unsupported performance claims.\n\n".to_string() } else if j.feat() { "This PR implements a requested FEATURE, not a bug fix. Judge it as a feature: it does what the issue asks, completely but minimally; the tests check the new behaviour (on the test commit they may fail to compile because the new API is missing); no unrelated changes; no surprising changes to defaults, file formats or visible design beyond what the issue asks.\n\n".to_string() } else { String::new() },
         f["title"].as_str().unwrap_or(""),
         body_lang(j, f, &ci, "", pr_pt(a, j)),
         if crate::quality::enabled(a) && j.kind == "fix" && !j.opt() { format!("{}{}\nIndependent acceptance evidence: {}\nFrozen verifier (untrusted code): {}\nCheck that this verifier exercises actual production code and the reported behavior, rather than copying logic or merely matching source text. Reject inadequate coverage or unsupported claims.",rules(a, j),crate::quality::context(j),wrap("acceptance-evidence",&j.d["acceptance_proof"].to_string()),wrap("frozen-verifier",j.d["acceptance"]["script"].as_str().unwrap_or(""))) } else { rules(a, j) }
@@ -1847,7 +1919,7 @@ async fn review_mode(a: &Ax, j: &mut Job, f: &mut Value, diagnostic: bool) -> R<
 }
 
 const FEAT: &str = "This job is a FEATURE REQUEST, not a bug. The rules for a bug fix apply with these changes: implement the requested behaviour completely but minimally, in the project's existing style, without unrelated changes. Commit 1 \"test: …\" adds tests that check the new behaviour; on that commit they must fail because the feature is missing (an assertion failure is best; if the test has to call a new API, a compile error on that commit is accepted). Commit 2 \"feat: …\" implements the feature; there the tests pass. Update user-facing docs or the changelog only if the project does that for every feature. In the JSON, \"cause\" is why the feature is needed (what users could not do), \"fix\" is what was added.";
-const OPT: &str = "This job is a BEHAVIOR-PRESERVING OPTIMIZATION, not a bug fix or feature. Keep all externally observable behavior, outputs, APIs, formats, and defaults unchanged. Commit 1 \"test: …\" adds characterization checks that pass on the unchanged base. Commit 2 \"perf: …\" makes the focused optimization. Run the same test_cmd on both commits; every named check must pass before and after. Do not claim performance gains unless the checks objectively measure them. In the JSON, \"cause\" explains the concrete inefficiency, \"fix\" describes the optimization, and \"untouched\" notes behavior or areas preserved.";
+const OPT: &str = "This job is a BEHAVIOR-PRESERVING OPTIMIZATION, not a bug fix or feature. Keep all externally observable behavior, outputs, APIs, formats, and defaults unchanged. Commit 1 \"test: …\" adds characterization checks that pass on the unchanged base. Commit 2 \"refactor: …\" makes the focused improvement. Run the same test_cmd on both commits; every named check must pass before and after. Do not claim performance gains unless the checks objectively measure them. In the JSON, \"cause\" explains the concrete improvement, \"fix\" describes the change, and \"untouched\" notes behavior or areas preserved.";
 
 fn fixp(a: &Ax, j: &Job, fb: &str) -> String {
     let h = format!(
@@ -2536,7 +2608,7 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
             format!("Fixes #{}", j.num)
         };
         let subject = if j.opt() {
-            commit_subject_kind(&ti, "perf")?
+            optimization_commit_subject(&ti)?
         } else {
             commit_subject(&ti, j.feat())?
         };
@@ -3690,9 +3762,10 @@ fn job_rank(j: &Value) -> (i32, i32, f64, i64) {
             1
         },
         match j["kind"].as_str().unwrap_or("fix") {
+            "mergecheck" => 0.75,
             "fix" => 1.0 + j["prio"].as_f64().unwrap_or(0.0).clamp(-500.0, 500.0) / 1000.0,
             "hunt" => 2.0,
-            _ => 0.0,
+            _ => 1.5,
         },
         j["id"].as_i64().unwrap_or(0),
     )
@@ -3825,7 +3898,11 @@ fn hn(a: &Ax) -> i64 {
         "select count(*) from jobs where kind='fix' and (st in ('repro','fix','ci','review','gate','submit') or (st='ready' and (num<>0 or json_extract(d,'$.ext') is not null)))",
         pa![],
     );
-    let reserved = hf + i64::from(uncovered_fixes > 0);
+    let active_rechecks = a.db.n(
+        "select count(*) from jobs where kind='mergecheck' and st not in ('done','drop','park')",
+        pa![],
+    );
+    let reserved = hf + i64::from(uncovered_fixes > 0) + i64::from(active_rechecks > 0);
     (l - reserved.max(0)).clamp(0, cap)
 }
 
@@ -3937,8 +4014,8 @@ async fn lane(a: Ax, h: String, k: i64) {
             continue;
         }
         // Capacity reservation: when a host has two or more lanes, the top lane
-        // never starts new hunts, so fixing queued work (issue and bug fixes)
-        // always keeps a lane and is never starved by continuous hunting.
+        // never starts new hunts, so fixes and PR rechecks keep a lane and are
+        // never starved by continuous hunting.
         let reserve_for_fixes = x.ln >= 2 && k == x.ln;
         while !reserve_for_fixes
             && !a.hold("hunter")
@@ -4732,10 +4809,77 @@ mod t {
     #[test]
     fn fixes_are_ranked_ahead_of_hunts() {
         let fix = json!({"st":"ready", "kind":"fix", "prio":0, "id":2});
+        let mergecheck = json!({"st":"ready", "kind":"mergecheck", "prio":0, "id":3});
         let hunt = json!({"st":"ready", "kind":"hunt", "prio":0, "id":1});
+        assert!(job_rank(&mergecheck) < job_rank(&fix));
         assert!(job_rank(&fix) < job_rank(&hunt));
         let high_priority_number = json!({"st":"ready", "kind":"fix", "prio":100_000, "id":3});
         assert!(job_rank(&high_priority_number) < job_rank(&hunt));
+    }
+
+    #[test]
+    fn pr_rechecks_reserve_a_worker_lane_from_hunts() {
+        let db = crate::db::Db::mem();
+        db.ks("set", &json!({"hunters": 2}));
+        db.run("insert into hs(id,ln,dk,on_) values('local',2,0,1)", pa![]);
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::path::PathBuf::from("/tmp/apollo-recheck-capacity-test"),
+            1,
+            "apollo-office".into(),
+        ));
+        assert_eq!(hn(&a), 2);
+        a.db.jnew(
+            "o/r",
+            1,
+            "mergecheck",
+            "Revalidate PR",
+            "",
+            "ready",
+            "",
+            json!({"expected_head":"abc"}),
+            Some(42),
+            -5.0,
+        );
+        assert_eq!(hn(&a), 1);
+        a.db.run("update jobs set st='review' where kind='mergecheck'", pa![]);
+        assert_eq!(hn(&a), 1, "a running recheck keeps its lane reservation");
+    }
+
+    #[test]
+    fn optimization_verification_requires_every_named_check_before_and_after() {
+        let checks = vec![
+            "alpha::keeps_order".to_string(),
+            "beta::uses_cache".to_string(),
+        ];
+        let good = "test alpha::keeps_order ... ok\ntest beta::uses_cache ... ok";
+        assert!(judgeopt(&checks, 0, good, 0, good).is_empty());
+
+        let before_missing = judgeopt(&checks, 0, "test alpha::keeps_order ... ok", 0, good);
+        assert!(before_missing.contains("before the optimization"));
+        assert!(before_missing.contains("beta::uses_cache"));
+
+        let after_missing = judgeopt(&checks, 0, good, 0, "test beta::uses_cache ... ok");
+        assert!(after_missing.contains("after the optimization"));
+        assert!(after_missing.contains("alpha::keeps_order"));
+
+        let red_baseline = judgeopt(
+            &checks,
+            0,
+            "test alpha::keeps_order ... ok\ntest beta::uses_cache ... FAILED",
+            0,
+            good,
+        );
+        assert!(red_baseline.contains("before the optimization"));
+
+        assert_eq!(
+            missing_named_checks(&["test_foo".to_string()], "test test_foo_extra ... ok"),
+            vec!["test_foo"]
+        );
+        assert_eq!(
+            missing_named_checks(&["test_foo".to_string()], "test test_foo ... ignored"),
+            vec!["test_foo"]
+        );
     }
 
     #[test]
@@ -4832,9 +4976,9 @@ mod t {
         assert!(judgeopt(&ts, 0, pass, 101, "test suite::case ... FAILED")
             .contains("fail after the optimization"));
         assert!(judgeopt(&ts, 0, "running 0 tests", 0, pass)
-            .contains("None of the named checks appears before"));
+            .contains("Named checks are missing or did not pass before"));
         assert!(judgeopt(&ts, 0, pass, 0, "running 0 tests")
-            .contains("None of the named checks appears after"));
+            .contains("Named checks are missing or did not pass after"));
         assert!(judgeopt(&ts, 0, "[checkout failed]", 0, pass).contains("checkout"));
     }
 
@@ -4878,6 +5022,20 @@ mod t {
         assert!(commit_subject("   \n ", false).is_err());
         let long = "x".repeat(200);
         assert_eq!(commit_subject(&long, false).unwrap().chars().count(), 120);
+    }
+
+    #[test]
+    fn optimization_commits_do_not_claim_unmeasured_performance_gains() {
+        assert_eq!(
+            optimization_commit_subject("perf: Reduce repeated parsing").unwrap(),
+            "refactor: Reduce repeated parsing"
+        );
+        assert_eq!(
+            optimization_commit_subject("Simplify internal lookup").unwrap(),
+            "refactor: Simplify internal lookup"
+        );
+        assert!(optimization_commit_subject("perf: ").is_err());
+        assert!(optimization_commit_subject("refactor(core):").is_err());
     }
 
     #[test]

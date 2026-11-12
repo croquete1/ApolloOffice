@@ -98,6 +98,33 @@ fn local_candidate(listed: &Value, assessed: &Value) -> Result<(i64, String), &'
     Ok((n, sha.to_string()))
 }
 
+/// Permit a stale-base refresh even when the ordinary merge candidate is
+/// temporarily blocked by GitHub's BEHIND state or checks rerunning.
+fn stale_base_candidate(listed: &Value, assessed: &Value) -> Result<(i64, String), &'static str> {
+    if listed["mergeStateStatus"] != "BEHIND"
+        || listed["isDraft"] != false
+        || assessed["checks"] == "falhou"
+        || listed["reviewDecision"] == "CHANGES_REQUESTED"
+        || assessed["overlaps"]
+            .as_array()
+            .is_none_or(|x| !x.is_empty())
+        || assessed["possible_duplicates"]
+            .as_array()
+            .is_none_or(|x| !x.is_empty())
+    {
+        return Err("PR não pode ser atualizada automaticamente");
+    }
+    let number = listed["number"]
+        .as_i64()
+        .filter(|n| *n > 0)
+        .ok_or("número inválido")?;
+    let head = listed["headRefOid"].as_str().ok_or("SHA ausente")?;
+    if !valid_sha(head) {
+        return Err("SHA inválido");
+    }
+    Ok((number, head.to_string()))
+}
+
 /// Provas são recolhidas na CI e review do próprio ApolloOffice antes da publicação.
 /// A árvore Git é estável durante squash, ao contrário do SHA do commit.
 fn local_proof(job: &Value, head: &str, base: &str, tree: &str, ci: &str) -> bool {
@@ -261,6 +288,44 @@ enum MergeMode {
     Local,
 }
 
+fn valid_sha(value: &str) -> bool {
+    value.len() == 40 && value.bytes().all(|c| c.is_ascii_hexdigit())
+}
+
+/// An advanced base makes the previous CI proof stale. Updating is allowed
+/// only for the owner's same-repository PR branch; GitHub reruns its gates on
+/// the new head before the ordinary merge path can proceed.
+fn can_update_branch(
+    detail: &Value,
+    repo: &str,
+    base: &str,
+    current_base: &str,
+    login: &str,
+) -> bool {
+    let pr_base = detail["base"]["sha"].as_str().unwrap_or("");
+    let head = detail["head"]["sha"].as_str().unwrap_or("");
+    !login.is_empty()
+        && detail["state"] == "open"
+        && detail["draft"] == false
+        && detail["user"]["login"] == login
+        && detail["head"]["repo"]["full_name"] == repo
+        && detail["base"]["repo"]["full_name"] == repo
+        && detail["base"]["ref"] == base
+        && detail["head"]["ref"] != base
+        && valid_sha(pr_base)
+        && valid_sha(current_base)
+        && valid_sha(head)
+        && pr_base != current_base
+}
+
+fn update_retry_deferred(previous: &Value, head: &str, base: &str, now: i64) -> bool {
+    previous["head"] == head
+        && previous["base"] == base
+        && previous["at"]
+            .as_i64()
+            .is_some_and(|at| now.saturating_sub(at) < 5 * 60_000)
+}
+
 /// A API GitHub disponibiliza checks obrigatórios em `contexts` e/ou `checks`.
 /// Ambos têm de indicar uma exigência concreta; listas vazias não autorizam merge.
 fn has_required_status_checks(protection: &Value) -> bool {
@@ -281,13 +346,9 @@ fn has_required_status_checks(protection: &Value) -> bool {
 async fn merge_mode(
     repo: &str,
     base: &str,
-    sha: &str,
+    branch: &Value,
     local_enabled: bool,
 ) -> Result<MergeMode, String> {
-    let branch = ghj(&["api", &format!("repos/{repo}/branches/{base}")], 40).await?;
-    if branch["commit"]["sha"] != sha {
-        return Ok(MergeMode::Blocked);
-    }
     if branch["protected"] == true {
         let rules = ghj(
             &["api", &format!("repos/{repo}/branches/{base}/protection")],
@@ -476,14 +537,18 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
         pa![repo.to_string()],
     ) == 1;
     // A triagem local NÃO considera um check CodeRabbit prova de testes.
-    let (number, head) = match if local_enabled {
+    let selected = match if local_enabled {
         local_candidate(listed, assessed)
     } else {
         candidate(listed, assessed)
     } {
-        Ok(c) => c,
-        Err(_) => return Ok(false),
+        Ok(c) => (c, true),
+        Err(_) => match stale_base_candidate(listed, assessed) {
+            Ok(c) => (c, false),
+            Err(_) => return Ok(false),
+        },
     };
+    let ((number, head), candidate_ready) = selected;
     if a.hold("watcher") {
         return Ok(false);
     }
@@ -497,8 +562,6 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
     if detail["head"]["sha"] != head
         || detail["state"] != "open"
         || detail["draft"] != false
-        || detail["mergeable"] != true
-        || detail["mergeable_state"] != "clean"
         || detail["base"]["repo"]["full_name"] != repo
     {
         return Ok(false);
@@ -507,7 +570,112 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
     if metadata["default_branch"] != base || metadata["archived"] == true {
         return Ok(false);
     }
-    let mode = merge_mode(repo, base, base_sha, local_enabled).await?;
+    let branch = ghj(&["api", &format!("repos/{repo}/branches/{base}")], 40).await?;
+    let current_base = branch["commit"]["sha"].as_str().unwrap_or("");
+    if current_base.is_empty() {
+        return Ok(false);
+    }
+    if current_base != base_sha {
+        let update_key = format!("steward:update:{repo}#{number}");
+        let previous = a.db.kg(&update_key);
+        if update_retry_deferred(&previous, &head, current_base, crate::db::now()) {
+            return Ok(false);
+        }
+        let login = crate::gh::login(a).await;
+        if can_update_branch(&detail, repo, base, current_base, &login) {
+            if a.hold("watcher")
+                || a.db.n(
+                    "select auto_merge from rp where full=? and on_=1",
+                    pa![repo.to_string()],
+                ) != 1
+            {
+                return Ok(false);
+            }
+            let latest = ghj(&["api", &format!("repos/{repo}/pulls/{number}")], 40).await?;
+            if latest["head"]["sha"] != head
+                || latest["base"]["sha"] == current_base
+                || latest["base"]["sha"] != base_sha
+                || latest["base"]["ref"] != base
+                || !can_update_branch(&latest, repo, base, current_base, &login)
+            {
+                return Ok(false);
+            }
+            match ghj(
+                &[
+                    "api",
+                    "-X",
+                    "PUT",
+                    &format!("repos/{repo}/pulls/{number}/update-branch"),
+                    "-f",
+                    &format!("expected_head_sha={head}"),
+                ],
+                90,
+            )
+            .await
+            {
+                Ok(_) => {
+                    a.db.ks(
+                        &update_key,
+                        &json!({
+                            "status":"updated",
+                            "head":head,
+                            "base":current_base,
+                            "at":crate::db::now(),
+                            "message":"Branch atualizada no GitHub; CI e revisão têm de validar o novo HEAD"
+                        }),
+                    );
+                    a.say(
+                        "watcher",
+                        &format!("{repo}#{number}: base avançou; branch atualizada e provas anteriores invalidadas"),
+                        None,
+                    );
+                    a.steward_wake.notify_one();
+                }
+                Err(error) => {
+                    a.db.ks(
+                        &update_key,
+                        &json!({
+                            "status":"error",
+                            "head":head,
+                            "base":current_base,
+                            "at":crate::db::now(),
+                            "error":crate::sh::head(&error,500)
+                        }),
+                    );
+                    a.say(
+                        "watcher",
+                        &format!("{repo}#{number}: não foi possível atualizar a branch para a base atual"),
+                        None,
+                    );
+                }
+            }
+        } else {
+            let reason = "a PR não é uma branch própria do repositório ou faltam permissões";
+            a.db.ks(
+                &update_key,
+                &json!({
+                    "status":"blocked",
+                    "head":head,
+                    "base":current_base,
+                    "at":crate::db::now(),
+                    "error":reason
+                }),
+            );
+            a.say(
+                "watcher",
+                &format!("{repo}#{number}: base avançou; {reason}"),
+                None,
+            );
+        }
+        return Ok(false);
+    }
+    if !candidate_ready {
+        return Ok(false);
+    }
+    if detail["mergeable"] != true || detail["mergeable_state"] != "clean" {
+        return Ok(false);
+    }
+    let mode = merge_mode(repo, base, &branch, local_enabled).await?;
     if mode == MergeMode::Blocked
         || (mode == MergeMode::Protected && candidate(listed, assessed).is_err())
     {
@@ -909,6 +1077,95 @@ mod tests {
     }
 
     #[test]
+    fn branch_update_requires_an_owned_open_same_repository_pr() {
+        let old_base = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let current_base = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let head = "cccccccccccccccccccccccccccccccccccccccc";
+        let pr = json!({
+            "state":"open","draft":false,"user":{"login":"croquete1"},
+            "head":{"sha":head,"ref":"fix/task","repo":{"full_name":"croquete1/repo"}},
+            "base":{"sha":old_base,"ref":"main","repo":{"full_name":"croquete1/repo"}}
+        });
+        assert!(can_update_branch(
+            &pr,
+            "croquete1/repo",
+            "main",
+            current_base,
+            "croquete1"
+        ));
+
+        let mut fork = pr.clone();
+        fork["head"]["repo"]["full_name"] = json!("contributor/repo");
+        assert!(!can_update_branch(
+            &fork,
+            "croquete1/repo",
+            "main",
+            current_base,
+            "croquete1"
+        ));
+
+        let mut other_author = pr.clone();
+        other_author["user"]["login"] = json!("contributor");
+        assert!(!can_update_branch(
+            &other_author,
+            "croquete1/repo",
+            "main",
+            current_base,
+            "croquete1"
+        ));
+
+        assert!(!can_update_branch(
+            &pr,
+            "croquete1/repo",
+            "main",
+            current_base,
+            ""
+        ));
+        assert!(!can_update_branch(
+            &pr,
+            "croquete1/repo",
+            "develop",
+            current_base,
+            "croquete1"
+        ));
+        let mut same_branch = pr.clone();
+        same_branch["head"]["ref"] = json!("main");
+        assert!(!can_update_branch(
+            &same_branch,
+            "croquete1/repo",
+            "main",
+            current_base,
+            "croquete1"
+        ));
+        assert!(!can_update_branch(
+            &pr,
+            "croquete1/repo",
+            "main",
+            old_base,
+            "croquete1"
+        ));
+
+        let mut draft = pr.clone();
+        draft["draft"] = json!(true);
+        assert!(!can_update_branch(
+            &draft,
+            "croquete1/repo",
+            "main",
+            current_base,
+            "croquete1"
+        ));
+    }
+
+    #[test]
+    fn branch_update_backoff_is_scoped_to_head_and_base() {
+        let previous = json!({"head":"h1","base":"b1","at":10_000});
+        assert!(update_retry_deferred(&previous, "h1", "b1", 10_001));
+        assert!(!update_retry_deferred(&previous, "h2", "b1", 10_001));
+        assert!(!update_retry_deferred(&previous, "h1", "b2", 10_001));
+        assert!(!update_retry_deferred(&previous, "h1", "b1", 310_000));
+    }
+
+    #[test]
     fn protected_branch_does_not_accept_lint_only_as_test_evidence() {
         let mut e = sample_expected();
         e.mode = MergeMode::Protected;
@@ -1060,6 +1317,41 @@ mod tests {
         pr["reviewDecision"] = json!("APPROVED");
         pr["isDraft"] = json!(true);
         assert!(local_candidate(&pr, &assessment).is_err());
+    }
+
+    #[test]
+    fn behind_pr_can_refresh_only_when_content_has_no_known_blocker() {
+        let mut pr = json!({
+            "number":9,
+            "headRefOid":"0123456789012345678901234567890123456789",
+            "isDraft":false,
+            "mergeStateStatus":"BEHIND",
+            "reviewDecision":"APPROVED"
+        });
+        let mut assessment = json!({
+            "overlaps":[],
+            "possible_duplicates":[],
+            "checks":"aprovado"
+        });
+        assert_eq!(
+            stale_base_candidate(&pr, &assessment).unwrap(),
+            (9, "0123456789012345678901234567890123456789".to_string())
+        );
+
+        pr["mergeStateStatus"] = json!("DIRTY");
+        assert!(stale_base_candidate(&pr, &assessment).is_err());
+        pr["mergeStateStatus"] = json!("BEHIND");
+        assessment["overlaps"] = json!([10]);
+        assert!(stale_base_candidate(&pr, &assessment).is_err());
+        assessment["overlaps"] = json!([]);
+        assessment["checks"] = json!("falhou");
+        assert!(stale_base_candidate(&pr, &assessment).is_err());
+        assessment["checks"] = json!("aprovado");
+        pr["reviewDecision"] = json!("CHANGES_REQUESTED");
+        assert!(stale_base_candidate(&pr, &assessment).is_err());
+        pr["reviewDecision"] = json!("APPROVED");
+        assessment["possible_duplicates"] = json!([11]);
+        assert!(stale_base_candidate(&pr, &assessment).is_err());
     }
 
     #[test]

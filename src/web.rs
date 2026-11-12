@@ -13,6 +13,21 @@ use serde_json::{json, Value};
 #[folder = "ui/"]
 struct Ui;
 
+fn work_class(job: &Value) -> &'static str {
+    match job["kind"].as_str().unwrap_or("") {
+        "hunt" => "discovered_bug",
+        "mergecheck" => "pr_recheck",
+        "review" => "pr_review",
+        "rebase" => "branch_update",
+        "fix" if job["d"]["opt"] == true => "optimization",
+        "fix" if job["d"]["feat"] == true => "feature",
+        "fix" if job["d"]["ext"]["src"].is_string() => "reported_bug",
+        "fix" if job["num"].as_i64().unwrap_or(0) == 0 => "discovered_bug",
+        "fix" => "issue_bug",
+        _ => "other",
+    }
+}
+
 fn rs(c: StatusCode, ct: &str, b: impl Into<Body>) -> Response<Body> {
     Response::builder()
         .status(c)
@@ -271,6 +286,15 @@ fn state(a: &Ax) -> Value {
         wv[*role]["idle_reason"] = json!(reason);
     }
     let lm = a.db.kg("lm");
+    let class = "case when kind='hunt' then 'discovered_bug' when kind='mergecheck' then 'pr_recheck' when kind='review' then 'pr_review' when kind='rebase' then 'branch_update' when kind='fix' and coalesce(json_extract(d,'$.opt'),0)=1 then 'optimization' when kind='fix' and coalesce(json_extract(d,'$.feat'),0)=1 then 'feature' when kind='fix' and json_type(d,'$.ext.src') is not null then 'reported_bug' when kind='fix' and num=0 then 'discovered_bug' when kind='fix' then 'issue_bug' else 'other' end";
+    let queue = a.db.all(
+        &format!("select id,repo,num,kind,title,url,st,why,pr,t0,t1,{class} work_class,json_extract(d,'$.h') h from jobs where st not in ('done','drop') order by st in ('hunt','repro','fix','ci','review','gate','submit') desc, st='approve' desc, st='vet', id limit 60"),
+        pa![],
+    );
+    let finished = a.db.all(
+        &format!("select id,repo,num,kind,title,url,st,why,pr,t1,{class} work_class from jobs where st in ('done','drop') order by t1 desc limit 25"),
+        pa![],
+    );
     json!({
         "t": now(), "v": crate::app::V,
         "o": o, "w": wv, "fl": fl, "ln": ln, "cil": cil, "hst": hst,
@@ -282,8 +306,8 @@ fn state(a: &Ax) -> Value {
         "ops": {"waiting": waiting, "blocked_hunts": blocked_hunts, "paused": paused},
         "diag": {"hosts": hosts_diag, "hunt_off": hunt_off, "iss_off": iss_off, "hunt_enabled": hunt_enabled},
         "hs": a.db.all("select id, ln, dk, on_ from hs order by id='local' desc, id", pa![]),
-        "q": a.db.all("select id,repo,num,kind,title,url,st,why,pr,t0,t1,json_extract(d,'$.h') h from jobs where st not in ('done','drop') order by st in ('hunt','repro','fix','ci','review','gate','submit') desc, st='approve' desc, st='vet', id limit 60", pa![]),
-        "dn": a.db.all("select id,repo,num,kind,title,url,st,why,pr,t1 from jobs where st in ('done','drop') order by t1 desc limit 25", pa![]),
+        "q": queue,
+        "dn": finished,
         "pr": a.db.all("select repo,num,st,title,url,upd,merged from prs order by t0 desc limit 40", pa![]),
         "mg": a.db.all("select substr(merged,1,10) d, count(*) n from prs where merged is not null and merged >= date('now','-30 day') group by 1 order by 1", pa![]),
         "ev": a.db.all("select t,w,m,j from ev order by id desc limit 60", pa![]),
@@ -1217,6 +1241,58 @@ fn rid(s: &str) -> Option<String> {
     }
 }
 
+fn steward_report(a: &Ax, repo: &str) -> Value {
+    let mut report = a.db.kg(&format!("steward:{repo}"));
+    if !report.is_object() {
+        return report;
+    }
+    let jobs = a.db.all(
+        "select id,st,t0,t1,why,d,pr from jobs where repo=? and kind='mergecheck' and (st not in ('done','drop') or t0>=?) order by id desc",
+        pa![repo.to_string(), now() - 90 * 86_400_000],
+    );
+    let at = now();
+    let active: Vec<_> = jobs
+        .iter()
+        .filter(|j| !matches!(j["st"].as_str(), Some("done" | "drop")))
+        .collect();
+    if let Some(prs) = report["prs"].as_array_mut() {
+        for pr in prs {
+            let number = pr["number"].as_i64().unwrap_or(0);
+            let latest = jobs.iter().find(|j| j["pr"].as_i64() == Some(number));
+            pr["recheck"] = latest
+                .map(|job| {
+                    let expected_head = job["d"]["expected_head"].as_str().unwrap_or("");
+                    let expected_base = job["d"]["expected_base"].as_str().unwrap_or("");
+                    json!({
+                        "id":job["id"],
+                        "state":job["st"],
+                        "started_at":job["t0"],
+                        "updated_at":job["t1"],
+                        "age_ms":at.saturating_sub(job["t0"].as_i64().unwrap_or(at)),
+                        "why":job["why"],
+                        "expected_head":expected_head,
+                        "expected_base":expected_base,
+                        "matches_head":expected_head == pr["head_sha"].as_str().unwrap_or(""),
+                        "matches_base":expected_base == pr["base_sha"].as_str().unwrap_or("")
+                    })
+                })
+                .unwrap_or(Value::Null);
+            let update = a.db.kg(&format!("steward:update:{}#{number}", repo));
+            pr["branch_update"] =
+                if update["head"] == pr["head_sha"] || update["base"] == pr["base_sha"] {
+                    update
+                } else {
+                    Value::Null
+                };
+        }
+    }
+    report["queue"] = json!({
+        "pending_rechecks":active.len(),
+        "oldest_age_ms":active.iter().map(|j| at.saturating_sub(j["t0"].as_i64().unwrap_or(at))).max().unwrap_or(0)
+    });
+    report
+}
+
 /// Routes authenticated application commands, including safe manual updates.
 async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
     let qv = |k: &str| {
@@ -1244,7 +1320,7 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
             let id: i64 = qv("id").parse().unwrap_or(0);
             match a.db.one("select * from jobs where id=?", pa![id]) {
                 Some(j) => js(
-                    json!({"id": j["id"], "repo": j["repo"], "num": j["num"], "kind": j["kind"], "title": j["title"], "url": j["url"], "st": j["st"], "why": j["why"], "failure": j["d"]["failure"], "pt": j["d"]["pt"], "pb": j["d"]["pb"], "df": j["d"]["df"], "proof": j["d"]["proof"], "known": j["d"]["known"], "h": j["d"]["h"], "ext": j["d"]["ext"]["src"], "cost": a.db.one("select sum(case when sub=0 then usd end) usd, sum(case when sub=1 then usd end) val, sum(tin+tcw+tcr) ti, sum(tout) tou, count(*) n from cost where job=?", pa![id]), "ev": a.db.all("select t,w,m from ev where j=? order by id desc limit 80", pa![id])}),
+                    json!({"id": j["id"], "repo": j["repo"], "num": j["num"], "kind": j["kind"], "work_class": work_class(&j), "title": j["title"], "url": j["url"], "st": j["st"], "why": j["why"], "failure": j["d"]["failure"], "pt": j["d"]["pt"], "pb": j["d"]["pb"], "df": j["d"]["df"], "proof": j["d"]["proof"], "known": j["d"]["known"], "h": j["d"]["h"], "ext": j["d"]["ext"]["src"], "cost": a.db.one("select sum(case when sub=0 then usd end) usd, sum(case when sub=1 then usd end) val, sum(tin+tcw+tcr) ti, sum(tout) tou, count(*) n from cost where job=?", pa![id]), "ev": a.db.all("select t,w,m from ev where j=? order by id desc limit 80", pa![id])}),
                 ),
                 None => er(StatusCode::NOT_FOUND, "no such job"),
             }
@@ -1545,7 +1621,7 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                     let repo = row["full"].as_str().unwrap_or("");
                     json!({
                         "repo": repo,
-                        "report": a.db.kg(&format!("steward:{repo}")),
+                        "report": steward_report(a, repo),
                         "error": a.db.kg(&format!("steward:error:{repo}")),
                         "merge_error": a.db.kg(&format!("steward:merge_error:{repo}")),
                         "repair_error": a.db.kg(&format!("steward:repair_error:{repo}")),
@@ -1901,6 +1977,104 @@ mod t {
             assert!(public.get(field).is_none());
         }
         assert_eq!(repdetail(&a, id).unwrap()["diff"], "PRIVATE_PATCH");
+    }
+
+    #[test]
+    fn public_queue_labels_bug_optimization_and_feature_origins_without_job_data() {
+        let db = crate::db::Db::mem();
+        let cases = [
+            ("fix", 1, json!({}), "issue_bug"),
+            ("fix", 0, json!({}), "discovered_bug"),
+            ("fix", 2, json!({"opt":true}), "optimization"),
+            ("fix", 3, json!({"feat":true}), "feature"),
+            (
+                "fix",
+                0,
+                json!({"ext":{"src":"error-tracker"}}),
+                "reported_bug",
+            ),
+            ("hunt", 0, json!({}), "discovered_bug"),
+            ("mergecheck", 2, json!({}), "pr_recheck"),
+        ];
+        let mut ids = Vec::new();
+        for (kind, number, details, expected) in cases {
+            let id = db.jnew(
+                "owner/repo",
+                number,
+                kind,
+                "example work",
+                "",
+                "ready",
+                "",
+                details,
+                None,
+                0.0,
+            );
+            ids.push((id, expected));
+        }
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::env::temp_dir(),
+            1,
+            "x".into(),
+        ));
+        let public = state(&a);
+        for (id, expected) in ids {
+            let job = public["q"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|job| job["id"] == id)
+                .unwrap();
+            assert_eq!(job["work_class"], expected);
+            assert!(job.get("d").is_none());
+            assert!(job.get("ext").is_none());
+        }
+    }
+
+    #[test]
+    fn steward_report_exposes_head_base_and_recheck_diagnostics() {
+        let db = crate::db::Db::mem();
+        let repo = "owner/repo";
+        db.jnew(
+            repo,
+            7,
+            "mergecheck",
+            "Revalidar PR",
+            "",
+            "ready",
+            "aguarda worker",
+            json!({
+                "expected_head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "expected_base":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            }),
+            Some(42),
+            -5.0,
+        );
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::env::temp_dir(),
+            1,
+            "x".into(),
+        ));
+        a.db.ks(
+            &format!("steward:{repo}"),
+            &json!({"prs":[{
+                "number":42,
+                "head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "base_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            }]}),
+        );
+        a.db.ks(
+            &format!("steward:update:{repo}#42"),
+            &json!({"status":"updated","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","base":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","at":now()}),
+        );
+        let report = steward_report(&a, repo);
+        assert_eq!(report["queue"]["pending_rechecks"], 1);
+        assert_eq!(report["prs"][0]["recheck"]["state"], "ready");
+        assert_eq!(report["prs"][0]["recheck"]["matches_head"], true);
+        assert_eq!(report["prs"][0]["recheck"]["matches_base"], true);
+        assert_eq!(report["prs"][0]["branch_update"]["status"], "updated");
     }
 
     #[test]

@@ -601,10 +601,11 @@
     jid = id;
     show(j.st === "approve" ? "Review pull request" : "Job " + id, "job");
     const tag = (j.repo.split("/")[1] || j.repo) + (j.num ? "#" + j.num : "");
+    const work = A.workLabel ? A.workLabel(j.work_class) : j.kind;
     const cs = j.cost && j.cost.n ? `<div class="msg">Cost: ${j.cost.usd != null ? usd(j.cost.usd) + " API" : ""}${j.cost.usd != null && j.cost.val != null ? " · " : ""}${j.cost.val != null ? usd(j.cost.val) + " login value" : ""}${j.cost.usd == null && j.cost.val == null ? "unknown" : ""} · ${Math.round((j.cost.ti || 0) / 1000)}k in, ${Math.round((j.cost.tou || 0) / 1000)}k out</div>` : "";
     const ev = (j.ev || []).map((e) => `<div><span class="tm">${new Date(e.t).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}</span><span>${esc(e.w)}</span><span>${esc(e.m)}</span></div>`).join("");
     if (j.st === "approve") {
-      B.innerHTML = `<div class="sec"><div class="box"><div class="hd2"><b>${esc(j.repo)}${j.num ? " #" + j.num : j.ext ? " (reported by " + esc(j.ext) + ")" : " (found by Hunter)"}</b>${j.url ? `<a class="a" href="#" data-u="${esc(j.url)}">${j.num ? "open issue" : "open repository"}</a>` : ""}</div><div class="msg">Built and tested on ${esc(j.h || "")}. Nothing is on GitHub yet.</div>${cs}</div></div>
+      B.innerHTML = `<div class="sec"><div class="box"><div class="hd2"><b>${esc(j.repo)}${j.num ? " #" + j.num : j.ext ? " (reported by " + esc(j.ext) + ")" : " (found by Hunter)"}</b>${j.url ? `<a class="a" href="#" data-u="${esc(j.url)}">${j.num ? "open issue" : "open repository"}</a>` : ""}</div><div class="msg">Tipo: ${esc(work)} · Built and tested on ${esc(j.h || "")}. Nothing is on GitHub yet.</div>${cs}</div></div>
       <div class="sec"><h4>Pull request</h4><input type="text" id="pt" value="${esc(j.pt || j.title)}"><textarea id="pb" style="min-height:220px;margin-top:8px">${esc(j.pb || "")}</textarea></div>
       ${j.proof ? `<div class="sec"><h4>Proof</h4><pre class="df">${esc((j.proof.a || "") + "\n\n" + (j.proof.b || ""))}</pre></div>` : ""}
       <div class="sec"><h4>Diff</h4>${dview(j.df)}</div>
@@ -625,7 +626,7 @@
     const failure = j.failure?.stage
       ? `<div class="sec"><h4>Diagnóstico técnico</h4><div class="box"><div class="msg">Fase: ${esc(j.failure.stage)} · Saída: ${esc(j.failure.exit_code)} · Máquina: ${esc(j.failure.host || "—")}</div><pre class="df">${esc(j.failure.output || "Sem detalhes")}</pre></div></div>`
       : "";
-    B.innerHTML = `<div class="sec"><div class="box"><div class="hd2"><b>${esc(j.title)}</b><span class="pill">${esc(j.st)}</span></div><div class="msg">${esc(j.repo)} ${esc(tag)} · ${esc(j.kind)}${j.h ? " · " + esc(j.h) : ""}\n${esc(j.why || "")}</div>${cs}
+    B.innerHTML = `<div class="sec"><div class="box"><div class="hd2"><b>${esc(j.title)}</b><span class="pill">${esc(j.st)}</span></div><div class="msg">${esc(j.repo)} ${esc(tag)} · ${esc(work)}${j.h ? " · " + esc(j.h) : ""}\n${esc(j.why || "")}</div>${cs}
       <div class="acts">${j.url ? `<button data-u="${esc(j.url)}">Open on GitHub</button>` : ""}${!["done", "drop"].includes(j.st) ? `<button class="dng" data-d="${id}">Drop</button>` : ""}${j.st === "drop" && j.kind === "fix" ? `<button data-rq="${id}" ${window.AO.retryStates?.get(id)?.pending ? "disabled" : ""}>Try again</button>` : ""}</div>${j.st === "drop" && j.kind === "fix" ? `<div class="msg${window.AO.retryStates?.get(id)?.error ? " bad2" : ""}" data-requeue-message="${id}" aria-live="polite">${esc(window.AO.retryStates?.get(id)?.error || "")}</div>` : ""}</div></div>
       ${failure}
       ${j.df ? `<div class="sec"><h4>Diff</h4>${dview(j.df)}</div>` : ""}
@@ -653,6 +654,11 @@
     B.innerHTML = '<div class="msg">A consultar a fila de revisão…</div>';
     const data = await get("/api/steward");
     const reports = data.repos || [];
+    const shortSha = (sha) => typeof sha === "string" && sha ? sha.slice(0, 10) : "n/d";
+    const elapsed = (ms) => {
+      const m = Math.max(0, Math.floor(Number(ms || 0) / 60000));
+      return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`;
+    };
     B.innerHTML = `<div class="sec"><div class="box">
       <b>PR Steward — análise automática</b>
       <div class="hint">Consulta o GitHub periodicamente. Identifica duplicações, conflitos, checks e revisões pendentes. O estado «CI: aprovado» não dispensa provas de testes completos nem as regras de proteção da branch. CodeRabbit isolado não é CI. A integração é opcional e fica desligada por omissão.</div>
@@ -668,7 +674,7 @@
           : "Integração com proteção GitHub obrigatória";
       const repairs = report?.repair_enabled ? "Encaminhamento de revisões ativo (só PRs próprias)" : "Encaminhamento de revisões desativado";
       return `<div class="sec"><h4>${esc(repo)}</h4><div class="box">
-        <div class="msg">${rows.length} PRs abertas · ${esc(at)} · ${esc(mode)} · ${esc(repairs)}${error?.error ? " · Último erro: " + esc(error.error) : ""}</div>
+        <div class="msg">${rows.length} PRs abertas · ${esc(at)} · ${esc(mode)} · ${esc(repairs)} · Revalidações pendentes: ${esc(String(report?.queue?.pending_rechecks ?? 0))} · mais antiga: ${esc(elapsed(report?.queue?.oldest_age_ms))}${error?.error ? " · Último erro: " + esc(error.error) : ""}</div>
         ${repair_error?.error ? `<div class="warn">Revisão não encaminhada: ${esc(repair_error.error)}</div>` : ""}
         ${merge_error?.reason ? `<div class="warn">Integração bloqueada: ${esc(merge_error.reason)}</div>` : ""}
         <div class="hint">Drops: ${esc(String(drops?.total ?? 0))} · Recuperação automática: ${drops?.enabled ? "ativa" : "desativada"} · Potencialmente recuperáveis: ${esc(String((drops?.jobs || []).filter(j => j.safe_auto).length))} (nos últimos 25).</div>
@@ -679,7 +685,10 @@
           <div style="flex:1;min-width:0">
             <a href="${esc(p.url || "#")}" target="_blank" rel="noopener noreferrer"><b>${esc(p.title || "PR")}</b></a>
             <div class="hint">Prioridade P${esc(String(p.priority ?? 9))} · Estado: ${esc(p.state)} · CI: ${esc(p.checks)} · Revisão: ${esc(p.review || "não verificada")}</div>
+            <div class="hint">HEAD ${esc(shortSha(p.head_sha))} · base ${esc(p.base || "?")} @ ${esc(shortSha(p.base_sha))} · atualizada: ${esc(p.updated_at ? new Date(p.updated_at).toLocaleString("pt-PT") : "n/d")}</div>
             <div class="hint">Próximo passo: ${esc(p.next_action || "Rever PR")}</div>
+            ${p.recheck ? `<div class="hint">Revalidação #${esc(String(p.recheck.id))}: ${esc(p.recheck.state)} · ${esc(elapsed(p.recheck.age_ms))} · HEAD/base desta PR: ${p.recheck.matches_head && p.recheck.matches_base ? "atuais" : "desatualizados"}${p.recheck.why ? " · " + esc(p.recheck.why) : ""}</div>` : ""}
+            ${p.branch_update ? `<div class="${p.branch_update.status === "error" || p.branch_update.status === "blocked" ? "warn" : "hint"}">Atualização da branch: ${esc(p.branch_update.message || p.branch_update.error || p.branch_update.status)} · ${esc(p.branch_update.status)}${p.branch_update.at ? " · " + esc(new Date(p.branch_update.at).toLocaleString("pt-PT")) : ""}</div>` : ""}
             ${p.overlaps?.length ? `<div class="hint bad2">Ficheiros em comum com: #${p.overlaps.map(Number).join(", #")}</div>` : ""}
             ${p.possible_duplicates?.length ? `<div class="hint bad2">Possível duplicação da mesma issue: #${p.possible_duplicates.map(Number).join(", #")}</div>` : ""}
           </div>
