@@ -719,6 +719,15 @@ async fn vet1(a: &Ax, id: i64) -> R<()> {
     }
     let mut d = j.d.clone();
     d["va"] = json!(now());
+    // Optimisation/refactor/audit issues preserve behaviour and have no failing
+    // test, so they cannot go through the bug "repro" (red→green) flow. Vet marks
+    // them opt; we route them through the plan flow (feat) that does not require a
+    // reproduction. The HARD fiscal exclusion in the Vet prompt keeps fiscal/money
+    // changes out of this path entirely.
+    if js["opt"].as_bool().unwrap_or(false) {
+        d["opt"] = json!(true);
+        d["feat"] = json!(true);
+    }
     d["cx"] = json!(
         if js["cx"] == "complex" || j.s("cx") == "complex" || j.feat() {
             "complex"
