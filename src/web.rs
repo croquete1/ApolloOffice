@@ -1241,6 +1241,15 @@ fn rid(s: &str) -> Option<String> {
     }
 }
 
+fn branch_update_matches_pr(update: &Value, head: &Value, base: &Value) -> bool {
+    let status = update["status"].as_str().unwrap_or("");
+    if matches!(status, "error" | "blocked") {
+        update["head"] == *head
+    } else {
+        update["head"] == *head || update["base"] == *base
+    }
+}
+
 fn steward_report(a: &Ax, repo: &str) -> Value {
     let mut report = a.db.kg(&format!("steward:{repo}"));
     if !report.is_object() {
@@ -1263,12 +1272,19 @@ fn steward_report(a: &Ax, repo: &str) -> Value {
                 .map(|job| {
                     let expected_head = job["d"]["expected_head"].as_str().unwrap_or("");
                     let expected_base = job["d"]["expected_base"].as_str().unwrap_or("");
+                    let started_at = job["t0"].as_i64().unwrap_or(at);
+                    let terminal = matches!(job["st"].as_str(), Some("done" | "drop"));
+                    let age_end = if terminal {
+                        job["t1"].as_i64().unwrap_or(started_at)
+                    } else {
+                        at
+                    };
                     json!({
                         "id":job["id"],
                         "state":job["st"],
                         "started_at":job["t0"],
                         "updated_at":job["t1"],
-                        "age_ms":at.saturating_sub(job["t0"].as_i64().unwrap_or(at)),
+                        "age_ms":age_end.saturating_sub(started_at),
                         "why":job["why"],
                         "expected_head":expected_head,
                         "expected_base":expected_base,
@@ -1279,7 +1295,7 @@ fn steward_report(a: &Ax, repo: &str) -> Value {
                 .unwrap_or(Value::Null);
             let update = a.db.kg(&format!("steward:update:{}#{number}", repo));
             pr["branch_update"] =
-                if update["head"] == pr["head_sha"] || update["base"] == pr["base_sha"] {
+                if branch_update_matches_pr(&update, &pr["head_sha"], &pr["base_sha"]) {
                     update
                 } else {
                     Value::Null
@@ -2069,12 +2085,67 @@ mod t {
             &format!("steward:update:{repo}#42"),
             &json!({"status":"updated","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","base":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","at":now()}),
         );
+        let finished_at = now() - 30_000;
+        let done_id = a.db.jnew(
+            repo,
+            2,
+            "mergecheck",
+            "Completed recheck",
+            "",
+            "done",
+            "",
+            json!({"expected_head":"cccccccccccccccccccccccccccccccccccccccc","expected_base":"dddddddddddddddddddddddddddddddddddddddd"}),
+            Some(43),
+            -5.0,
+        );
+        a.db.run(
+            "update jobs set t0=?,t1=? where id=?",
+            pa![finished_at - 25_000, finished_at, done_id],
+        );
+        let drop_id = a.db.jnew(
+            repo,
+            3,
+            "mergecheck",
+            "Dropped recheck",
+            "",
+            "drop",
+            "",
+            json!({"expected_head":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","expected_base":"ffffffffffffffffffffffffffffffffffffffff"}),
+            Some(44),
+            -5.0,
+        );
+        a.db.run(
+            "update jobs set t0=?,t1=? where id=?",
+            pa![finished_at - 40_000, finished_at, drop_id],
+        );
+        a.db.ks(
+            &format!("steward:{repo}"),
+            &json!({"prs":[
+                {"number":42,"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","base_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+                {"number":43,"head_sha":"cccccccccccccccccccccccccccccccccccccccc","base_sha":"dddddddddddddddddddddddddddddddddddddddd"},
+                {"number":44,"head_sha":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","base_sha":"ffffffffffffffffffffffffffffffffffffffff"}
+            ]}),
+        );
         let report = steward_report(&a, repo);
         assert_eq!(report["queue"]["pending_rechecks"], 1);
         assert_eq!(report["prs"][0]["recheck"]["state"], "ready");
         assert_eq!(report["prs"][0]["recheck"]["matches_head"], true);
         assert_eq!(report["prs"][0]["recheck"]["matches_base"], true);
         assert_eq!(report["prs"][0]["branch_update"]["status"], "updated");
+        assert_eq!(report["prs"][1]["recheck"]["age_ms"], 25_000);
+        assert_eq!(report["prs"][2]["recheck"]["age_ms"], 40_000);
+    }
+
+    #[test]
+    fn stale_branch_update_errors_do_not_follow_a_new_pr_head() {
+        let head = json!("new-head");
+        let base = json!("same-base");
+        let error = json!({"status":"error","head":"old-head","base":"same-base"});
+        let blocked = json!({"status":"blocked","head":"old-head","base":"same-base"});
+        let updated = json!({"status":"updated","head":"old-head","base":"same-base"});
+        assert!(!branch_update_matches_pr(&error, &head, &base));
+        assert!(!branch_update_matches_pr(&blocked, &head, &base));
+        assert!(branch_update_matches_pr(&updated, &head, &base));
     }
 
     #[test]

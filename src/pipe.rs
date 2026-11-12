@@ -965,9 +965,28 @@ async fn dirty(a: &Ax, j: &Job) -> R<Option<String>> {
     Ok(Some(format!("working tree not clean, uncommitted changes in: {}. Commit them into the test or fix commit, or restore them with git checkout / remove them.", ps.iter().take(10).cloned().collect::<Vec<_>>().join(", "))))
 }
 
-async fn run_t(a: &Ax, j: &Job, at: &str, c: &str) -> (i32, String) {
+const MAX_NAMED_CHECKS: usize = 64;
+const MAX_NAMED_CHECK_NAME_BYTES: usize = 512;
+
+async fn run_t(a: &Ax, j: &Job, at: &str, c: &str, named: &[String]) -> (i32, String) {
     let l = format!("/tmp/ao-t-{}.log", j.id);
-    let r = x(a, j, &format!("rm -f {l}; if git checkout -q {} 2>&1; then {{ to 3600 bash -c {}\n}} > {l} 2>&1; e=$?; tail -c 30000 {l}; git checkout -q -f -- . 2>/dev/null; git clean -fdq 2>/dev/null; else e=125; echo \"[checkout failed]\"; git status --short 2>&1 | head -20; fi; echo \"[exit $e]\"", q(at), q(c)), 3700).await;
+    let evidence = named
+        .iter()
+        .map(|name| {
+            format!(
+                "grep -F -- {} {} | tail -n 4 | cut -b 1-1000",
+                q(name),
+                q(&l)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let evidence = if evidence.is_empty() {
+        String::new()
+    } else {
+        format!("printf '\\n[Named check evidence]\\n'; {evidence}; printf '\\n[End named check evidence]\\n';")
+    };
+    let r = x(a, j, &format!("rm -f {l}; if git checkout -q {} 2>&1; then {{ to 3600 bash -c {}\n}} > {l} 2>&1; e=$?; {evidence} tail -c 30000 {l}; git checkout -q -f -- . 2>/dev/null; git clean -fdq 2>/dev/null; else e=125; echo \"[checkout failed]\"; git status --short 2>&1 | head -20; fi; echo \"[exit $e]\"", q(at), q(c)), 3700).await;
     let e = Regex::new(r"\[exit (\d+)\]\s*$")
         .unwrap()
         .captures(&r.o)
@@ -993,14 +1012,6 @@ pub fn fails(o: &str) -> Vec<String> {
     v.into_iter().collect()
 }
 
-pub fn bare(t: &str) -> String {
-    t.rsplit([':', '.', '/', '>', ' '])
-        .find(|x| !x.trim().is_empty())
-        .unwrap_or(t)
-        .trim()
-        .to_string()
-}
-
 pub const CE: &str = r"error\[E\d+\]|could not compile|error: no test target|no such command|SyntaxError|ModuleNotFoundError|ImportError while|cannot find module|Cannot find module|ERROR collecting|error TS\d{4}|no tests ran|No tests found|build failed|\[setup failed\]|undefined: |command not found|(?m:^[^\n]*\.java:\d+: error:)|ClassNotFoundException|NoClassDefFoundError";
 
 pub fn judge(ts: &[String], a_e: i32, a_o: &str, b_e: i32, b_o: &str) -> String {
@@ -1019,7 +1030,7 @@ pub fn judge(ts: &[String], a_e: i32, a_o: &str, b_e: i32, b_o: &str) -> String 
     if Regex::new(CE).unwrap().is_match(a_o) {
         return format!("Test commit does not compile or load; a compile or import error does not count as a failing test. Output:\n{}", crate::sh::last(a_o, 3000));
     }
-    if !ts.iter().any(|t| a_o.contains(&bare(t))) {
+    if !ts.iter().any(|t| named_check_present(a_o, t)) {
         return format!("No failure of the named tests on the test commit (none of the test names appears in the output). Output:\n{}", crate::sh::last(a_o, 3000));
     }
     if b_e != 0 {
@@ -1052,7 +1063,7 @@ pub fn judgef(ts: &[String], a_e: i32, a_o: &str, b_e: i32, b_o: &str) -> String
                 crate::sh::last(b_o, 3000)
             );
         }
-        if !ts.iter().any(|t| b_o.contains(&bare(t))) {
+        if !ts.iter().any(|t| named_check_present(b_o, t)) {
             return format!(
                 "None of the named tests appears in the output of the feature commit. Output:\n{}",
                 crate::sh::last(b_o, 3000)
@@ -1133,25 +1144,48 @@ pub fn judgeopt(ts: &[String], a_e: i32, a_o: &str, b_e: i32, b_o: &str) -> Stri
 fn missing_named_checks(ts: &[String], output: &str) -> Vec<String> {
     ts.iter()
         .filter(|name| {
-            let short = bare(name);
-            short.is_empty()
-                || !output.lines().any(|line| {
-                    let exact_name = line.match_indices(&short).any(|(start, _)| {
-                        let before = line[..start].chars().next_back();
-                        let end = start + short.len();
-                        let after = line[end..].chars().next();
-                        !before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
-                            && !after.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
-                    });
-                    exact_name && passing_check_line(line)
-                })
+            name.is_empty() || !output.lines().any(|line| passing_check_line(line, name))
         })
         .cloned()
         .collect()
 }
 
-fn passing_check_line(line: &str) -> bool {
-    let lower = line.to_ascii_lowercase();
+fn named_check_present(output: &str, name: &str) -> bool {
+    !name.is_empty()
+        && output
+            .lines()
+            .any(|line| named_occurrences(line, name).next().is_some())
+}
+
+fn named_occurrences<'a>(
+    line: &'a str,
+    name: &'a str,
+) -> impl Iterator<Item = (usize, usize)> + 'a {
+    line.match_indices(name).filter_map(move |(start, found)| {
+        let end = start + found.len();
+        let before = line[..start].chars().next_back();
+        let after = line[end..].chars().next();
+        let boundary =
+            |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '.' | '/' | '>' | '-');
+        (!before.is_some_and(boundary) && !after.is_some_and(boundary)).then_some((start, end))
+    })
+}
+
+fn passing_check_line(line: &str, name: &str) -> bool {
+    let mut status = String::with_capacity(line.len());
+    let mut copied = 0;
+    let mut found = false;
+    for (start, end) in named_occurrences(line, name) {
+        found = true;
+        status.push_str(&line[copied..start]);
+        status.push(' ');
+        copied = end;
+    }
+    if !found {
+        return false;
+    }
+    status.push_str(&line[copied..]);
+    let lower = status.to_ascii_lowercase();
     let words: Vec<_> = lower
         .split_whitespace()
         .map(|token| token.trim_matches(|c: char| !c.is_ascii_alphanumeric()))
@@ -1159,14 +1193,16 @@ fn passing_check_line(line: &str) -> bool {
     let negative = words.iter().any(|word| {
         matches!(
             *word,
-            "failed" | "failure" | "ignored" | "skipped" | "xfail" | "error"
+            "fail" | "failed" | "failure" | "ignored" | "skipped" | "xfail" | "error"
         )
-    }) || words.windows(2).any(|pair| pair == ["not", "ok"]);
+    }) || words.windows(2).any(|pair| pair == ["not", "ok"])
+        || lower.contains('✕')
+        || lower.contains('×');
     if negative {
         return false;
     }
-    line.contains('✓')
-        || line.contains('✔')
+    status.contains('✓')
+        || status.contains('✔')
         || words
             .iter()
             .any(|word| matches!(*word, "ok" | "pass" | "passed" | "success"))
@@ -1184,6 +1220,17 @@ async fn verify(a: &Ax, j: &mut Job, f: &Value) -> R<String> {
     let tc = f["test_cmd"].as_str().unwrap_or("").to_string();
     if tc.is_empty() || ts.is_empty() {
         return Ok("answer without test_cmd or tests".into());
+    }
+    if ts.len() > MAX_NAMED_CHECKS
+        || ts.iter().any(|name| {
+            name.trim().is_empty()
+                || name.len() > MAX_NAMED_CHECK_NAME_BYTES
+                || name.chars().any(char::is_control)
+        })
+    {
+        return Ok(format!(
+            "answer must name at most {MAX_NAMED_CHECKS} checks; each name must be non-empty, at most {MAX_NAMED_CHECK_NAME_BYTES} bytes, and contain no control characters"
+        ));
     }
     if Regex::new(crate::mcp::BAD).unwrap().is_match(&tc) {
         return Ok("test_cmd contains forbidden commands".into());
@@ -1218,8 +1265,8 @@ async fn verify(a: &Ax, j: &mut Job, f: &Value) -> R<String> {
         it.next().unwrap_or("").to_string(),
         it.next().unwrap_or("").to_string(),
     );
-    let (ae, ao) = run_t(a, j, &at, &tc).await;
-    let (be, bo) = run_t(a, j, &b, &tc).await;
+    let (ae, ao) = run_t(a, j, &at, &tc, &ts).await;
+    let (be, bo) = run_t(a, j, &b, &tc, &ts).await;
     ok(a, j, &format!("git checkout -q {}", q(&j.s("br"))), 120).await?;
     let r = if j.opt() {
         judgeopt(&ts, ae, &ao, be, &bo)
@@ -2015,7 +2062,7 @@ async fn vrev(a: &Ax, j: &Job, f: &Value) -> R<String> {
         if Regex::new(crate::mcp::BAD).unwrap().is_match(&c) {
             return Ok("test_cmd contains forbidden commands".into());
         }
-        let (e, o) = run_t(a, j, "HEAD", &c).await;
+        let (e, o) = run_t(a, j, "HEAD", &c, &[]).await;
         ok(a, j, &format!("git checkout -q {}", q(&j.s("br"))), 120).await?;
         if e != 0 {
             return Ok(format!("Tests fail:\n{}", crate::sh::last(&o, 3000)));
@@ -2237,7 +2284,7 @@ async fn reb(a: &Ax, j: &mut Job) -> R<()> {
     a.db.jd(j);
     let tc = j.s("test_cmd");
     if !tc.is_empty() && !Regex::new(crate::mcp::BAD).unwrap().is_match(&tc) {
-        let (e, _) = run_t(a, j, "HEAD", &tc).await;
+        let (e, _) = run_t(a, j, "HEAD", &tc, &[]).await;
         ok(a, j, &format!("git checkout -q {}", q(&j.s("br"))), 120).await?;
         if e != 0 {
             return drop("PR tests fail after rebase");
@@ -3899,7 +3946,7 @@ fn hn(a: &Ax) -> i64 {
         pa![],
     );
     let active_rechecks = a.db.n(
-        "select count(*) from jobs where kind='mergecheck' and st not in ('done','drop','park')",
+        "select count(*) from jobs j join rp r on r.full=j.repo where j.kind='mergecheck' and j.st not in ('done','drop','park') and r.on_=1",
         pa![],
     );
     let reserved = hf + i64::from(uncovered_fixes > 0) + i64::from(active_rechecks > 0);
@@ -4822,6 +4869,10 @@ mod t {
         let db = crate::db::Db::mem();
         db.ks("set", &json!({"hunters": 2}));
         db.run("insert into hs(id,ln,dk,on_) values('local',2,0,1)", pa![]);
+        db.run(
+            "insert into rp(full,on_) values('o/enabled',1),('o/disabled',0)",
+            pa![],
+        );
         let a = std::sync::Arc::new(crate::app::App::new(
             db,
             std::path::PathBuf::from("/tmp/apollo-recheck-capacity-test"),
@@ -4830,7 +4881,7 @@ mod t {
         ));
         assert_eq!(hn(&a), 2);
         a.db.jnew(
-            "o/r",
+            "o/enabled",
             1,
             "mergecheck",
             "Revalidate PR",
@@ -4842,8 +4893,34 @@ mod t {
             -5.0,
         );
         assert_eq!(hn(&a), 1);
+        a.db.jnew(
+            "o/disabled",
+            1,
+            "mergecheck",
+            "Revalidate PR",
+            "",
+            "ready",
+            "aguarda worker",
+            json!({"expected_head":"def"}),
+            Some(43),
+            -5.0,
+        );
+        assert_eq!(
+            hn(&a),
+            1,
+            "a disabled repository must not reserve another lane"
+        );
         a.db.run("update jobs set st='review' where kind='mergecheck'", pa![]);
-        assert_eq!(hn(&a), 1, "a running recheck keeps its lane reservation");
+        assert_eq!(
+            hn(&a),
+            1,
+            "an enabled running recheck keeps its lane reservation"
+        );
+        a.db.run(
+            "update jobs set st='done' where repo='o/enabled' and kind='mergecheck'",
+            pa![],
+        );
+        assert_eq!(hn(&a), 2, "a disabled recheck must not suppress hunting");
     }
 
     #[test]
@@ -4880,6 +4957,44 @@ mod t {
             missing_named_checks(&["test_foo".to_string()], "test test_foo ... ignored"),
             vec!["test_foo"]
         );
+        assert_eq!(
+            missing_named_checks(
+                &["beta::keeps_order".to_string()],
+                "test alpha::keeps_order ... ok"
+            ),
+            vec!["beta::keeps_order"]
+        );
+        assert_eq!(
+            missing_named_checks(
+                &["alpha::keeps_order".to_string()],
+                "test beta::alpha::keeps_order ... ok"
+            ),
+            vec!["alpha::keeps_order"]
+        );
+        assert!(missing_named_checks(
+            &["alpha::keeps_order".to_string()],
+            "test alpha::keeps_order ... ok"
+        )
+        .is_empty());
+        assert!(
+            missing_named_checks(&["rejects an error".to_string()], "✓ rejects an error")
+                .is_empty()
+        );
+        assert_eq!(
+            missing_named_checks(
+                &["rejects an error".to_string()],
+                "test rejects an error ... FAILED"
+            ),
+            vec!["rejects an error"]
+        );
+        let long_log = format!(
+            "test alpha::keeps_order ... ok\n{}",
+            "diagnostic output ".repeat(4_000)
+        );
+        let tail = crate::sh::last(&long_log, 30_000);
+        assert!(!missing_named_checks(&checks[..1], &tail).is_empty());
+        let retained = format!("test alpha::keeps_order ... ok\n{tail}");
+        assert!(missing_named_checks(&checks[..1], &retained).is_empty());
     }
 
     #[test]
@@ -4895,9 +5010,6 @@ mod t {
                 "tests/t.py::test_x"
             ]
         );
-        assert_eq!(bare("a::b::c"), "c");
-        assert_eq!(bare("tests/t.py::test_x"), "test_x");
-        assert_eq!(bare("TestFoo"), "TestFoo");
     }
 
     #[test]
@@ -4936,7 +5048,10 @@ mod t {
         assert!(judge(&ts, 0, "", 0, "").contains("already passes"));
         assert!(judge(&ts, 101, "error[E0425]: cannot find", 0, "").contains("does not compile"));
         assert!(judge(&ts, 1, "something else failed", 0, "").contains("No failure"));
-        assert!(judge(&ts, 101, "t_empty FAILED", 1, "boom").contains("fails with the fix"));
+        assert!(
+            judge(&ts, 101, "test m::t_empty ... FAILED", 1, "boom").contains("fails with the fix")
+        );
+        assert!(judge(&ts, 101, "t_empty FAILED", 1, "boom").contains("No failure"));
         assert!(judge(&ts, 1, "t_empty", 0, "[checkout failed]").contains("checkout"));
         assert!(judgef(
             &ts,
@@ -4959,11 +5074,13 @@ mod t {
             101,
             "error[E0425]: cannot find function",
             1,
-            "t_empty FAILED"
+            "test m::t_empty ... FAILED"
         )
         .contains("fails with the feature"));
         assert!(judgef(&ts, 0, "", 0, "").contains("already passes"));
-        assert!(judgef(&ts, 101, "t_empty FAILED", 1, "boom").contains("with the feature"));
+        assert!(
+            judgef(&ts, 101, "test m::t_empty ... FAILED", 1, "boom").contains("with the feature")
+        );
     }
 
     #[test]

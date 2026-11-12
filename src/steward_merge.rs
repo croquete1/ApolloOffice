@@ -301,6 +301,7 @@ fn can_update_branch(
     base: &str,
     current_base: &str,
     login: &str,
+    head_is_behind: bool,
 ) -> bool {
     let pr_base = detail["base"]["sha"].as_str().unwrap_or("");
     let head = detail["head"]["sha"].as_str().unwrap_or("");
@@ -315,15 +316,51 @@ fn can_update_branch(
         && valid_sha(pr_base)
         && valid_sha(current_base)
         && valid_sha(head)
-        && pr_base != current_base
+        && (pr_base != current_base || head_is_behind)
 }
 
 fn update_retry_deferred(previous: &Value, head: &str, base: &str, now: i64) -> bool {
-    previous["head"] == head
-        && previous["base"] == base
-        && previous["at"]
-            .as_i64()
-            .is_some_and(|at| now.saturating_sub(at) < 5 * 60_000)
+    let recent = previous["at"]
+        .as_i64()
+        .is_some_and(|at| now.saturating_sub(at) < 5 * 60_000);
+    if !recent {
+        return false;
+    }
+    previous["status"] == "pending"
+        || (previous["head"] == head
+            && previous["base"] == base
+            && matches!(
+                previous["status"].as_str(),
+                Some("error" | "blocked" | "updated")
+            ))
+}
+
+fn branch_update_needed(detail: &Value, listed: &Value, current_base: &str) -> bool {
+    detail["base"]["sha"].as_str().unwrap_or("") != current_base
+        || detail["mergeable_state"] == "behind"
+        || listed["mergeStateStatus"] == "BEHIND"
+}
+
+fn confirmed_branch_update(
+    previous: &Value,
+    detail: &Value,
+    base_comparison: &Value,
+    head_comparison: &Value,
+) -> bool {
+    let old_head = previous["head"].as_str().unwrap_or("");
+    let target_base = previous["base"].as_str().unwrap_or("");
+    let new_head = detail["head"]["sha"].as_str().unwrap_or("");
+    previous["status"] == "pending"
+        && valid_sha(old_head)
+        && valid_sha(target_base)
+        && valid_sha(new_head)
+        && old_head != new_head
+        && base_comparison["base_commit"]["sha"] == target_base
+        && base_comparison["head_commit"]["sha"] == new_head
+        && base_comparison["status"] == "ahead"
+        && head_comparison["base_commit"]["sha"] == old_head
+        && head_comparison["head_commit"]["sha"] == new_head
+        && head_comparison["status"] == "ahead"
 }
 
 /// A API GitHub disponibiliza checks obrigatórios em `contexts` e/ou `checks`.
@@ -575,14 +612,58 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
     if current_base.is_empty() {
         return Ok(false);
     }
-    if current_base != base_sha {
-        let update_key = format!("steward:update:{repo}#{number}");
-        let previous = a.db.kg(&update_key);
+    let update_key = format!("steward:update:{repo}#{number}");
+    let previous = a.db.kg(&update_key);
+    if previous["status"] == "pending" {
+        let previous_head = previous["head"].as_str().unwrap_or("");
+        let previous_base = previous["base"].as_str().unwrap_or("");
+        let current_head = detail["head"]["sha"].as_str().unwrap_or("");
+        if valid_sha(previous_head)
+            && valid_sha(previous_base)
+            && valid_sha(current_head)
+            && current_head != previous_head
+        {
+            let base_compare = format!("repos/{repo}/compare/{previous_base}...{current_head}");
+            let head_compare = format!("repos/{repo}/compare/{previous_head}...{current_head}");
+            let base_args = ["api", base_compare.as_str()];
+            let head_args = ["api", head_compare.as_str()];
+            let (base_comparison, head_comparison) =
+                tokio::join!(ghj(&base_args, 45), ghj(&head_args, 45));
+            if let (Ok(base_comparison), Ok(head_comparison)) = (base_comparison, head_comparison) {
+                if confirmed_branch_update(&previous, &detail, &base_comparison, &head_comparison) {
+                    let at = crate::db::now();
+                    a.db.ks(
+                        &update_key,
+                        &json!({
+                            "status":"updated",
+                            "head":current_head,
+                            "expected_head":previous_head,
+                            "base":previous_base,
+                            "at":at,
+                            "message":"GitHub confirmou que o novo HEAD contém a base atualizada e o HEAD anterior"
+                        }),
+                    );
+                    a.say(
+                        "watcher",
+                        &format!("{repo}#{number}: atualização da branch confirmada no GitHub; CI e revisão têm de validar o novo HEAD"),
+                        None,
+                    );
+                    a.steward_wake.notify_one();
+                    return Ok(false);
+                }
+            }
+        }
+        if update_retry_deferred(&previous, &head, current_base, crate::db::now()) {
+            return Ok(false);
+        }
+    }
+    let needs_update = branch_update_needed(&detail, listed, current_base);
+    if needs_update {
         if update_retry_deferred(&previous, &head, current_base, crate::db::now()) {
             return Ok(false);
         }
         let login = crate::gh::login(a).await;
-        if can_update_branch(&detail, repo, base, current_base, &login) {
+        if can_update_branch(&detail, repo, base, current_base, &login, needs_update) {
             if a.hold("watcher")
                 || a.db.n(
                     "select auto_merge from rp where full=? and on_=1",
@@ -593,11 +674,22 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
             }
             let latest = ghj(&["api", &format!("repos/{repo}/pulls/{number}")], 40).await?;
             if latest["head"]["sha"] != head
-                || latest["base"]["sha"] == current_base
                 || latest["base"]["sha"] != base_sha
                 || latest["base"]["ref"] != base
-                || !can_update_branch(&latest, repo, base, current_base, &login)
+                || !can_update_branch(
+                    &latest,
+                    repo,
+                    base,
+                    current_base,
+                    &login,
+                    latest["mergeable_state"] == "behind"
+                        || latest["base"]["sha"].as_str().unwrap_or("") != current_base,
+                )
             {
+                return Ok(false);
+            }
+            let latest_branch = ghj(&["api", &format!("repos/{repo}/branches/{base}")], 40).await?;
+            if latest_branch["commit"]["sha"] != current_base {
                 return Ok(false);
             }
             match ghj(
@@ -614,19 +706,20 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
             .await
             {
                 Ok(_) => {
+                    let at = crate::db::now();
                     a.db.ks(
                         &update_key,
                         &json!({
-                            "status":"updated",
+                            "status":"pending",
                             "head":head,
                             "base":current_base,
-                            "at":crate::db::now(),
-                            "message":"Branch atualizada no GitHub; CI e revisão têm de validar o novo HEAD"
+                            "at":at,
+                            "message":"Pedido de atualização aceite pelo GitHub; a confirmação do novo HEAD ainda está pendente"
                         }),
                     );
                     a.say(
                         "watcher",
-                        &format!("{repo}#{number}: base avançou; branch atualizada e provas anteriores invalidadas"),
+                        &format!("{repo}#{number}: pedido de atualização da branch aceite; a aguardar confirmação do novo HEAD"),
                         None,
                     );
                     a.steward_wake.notify_one();
@@ -1091,7 +1184,8 @@ mod tests {
             "croquete1/repo",
             "main",
             current_base,
-            "croquete1"
+            "croquete1",
+            false
         ));
 
         let mut fork = pr.clone();
@@ -1101,7 +1195,8 @@ mod tests {
             "croquete1/repo",
             "main",
             current_base,
-            "croquete1"
+            "croquete1",
+            false
         ));
 
         let mut other_author = pr.clone();
@@ -1111,7 +1206,8 @@ mod tests {
             "croquete1/repo",
             "main",
             current_base,
-            "croquete1"
+            "croquete1",
+            false
         ));
 
         assert!(!can_update_branch(
@@ -1119,14 +1215,16 @@ mod tests {
             "croquete1/repo",
             "main",
             current_base,
-            ""
+            "",
+            false
         ));
         assert!(!can_update_branch(
             &pr,
             "croquete1/repo",
             "develop",
             current_base,
-            "croquete1"
+            "croquete1",
+            false
         ));
         let mut same_branch = pr.clone();
         same_branch["head"]["ref"] = json!("main");
@@ -1135,14 +1233,24 @@ mod tests {
             "croquete1/repo",
             "main",
             current_base,
-            "croquete1"
+            "croquete1",
+            false
         ));
         assert!(!can_update_branch(
             &pr,
             "croquete1/repo",
             "main",
             old_base,
-            "croquete1"
+            "croquete1",
+            false
+        ));
+        assert!(can_update_branch(
+            &pr,
+            "croquete1/repo",
+            "main",
+            old_base,
+            "croquete1",
+            true
         ));
 
         let mut draft = pr.clone();
@@ -1152,17 +1260,87 @@ mod tests {
             "croquete1/repo",
             "main",
             current_base,
-            "croquete1"
+            "croquete1",
+            false
         ));
     }
 
     #[test]
     fn branch_update_backoff_is_scoped_to_head_and_base() {
-        let previous = json!({"head":"h1","base":"b1","at":10_000});
+        let previous = json!({"status":"error","head":"h1","base":"b1","at":10_000});
         assert!(update_retry_deferred(&previous, "h1", "b1", 10_001));
         assert!(!update_retry_deferred(&previous, "h2", "b1", 10_001));
         assert!(!update_retry_deferred(&previous, "h1", "b2", 10_001));
         assert!(!update_retry_deferred(&previous, "h1", "b1", 310_000));
+
+        let pending = json!({"status":"pending","head":"h1","base":"b1","at":10_000});
+        assert!(update_retry_deferred(&pending, "h2", "b2", 10_001));
+        assert!(!update_retry_deferred(&pending, "h2", "b2", 310_000));
+    }
+
+    #[test]
+    fn behind_state_can_trigger_update_when_base_sha_matches() {
+        let current_base = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut pr = json!({
+            "base":{"sha":current_base},
+            "mergeable_state":"behind"
+        });
+        assert!(branch_update_needed(
+            &pr,
+            &json!({"mergeStateStatus":"CLEAN"}),
+            current_base
+        ));
+        pr["mergeable_state"] = json!("clean");
+        assert!(branch_update_needed(
+            &pr,
+            &json!({"mergeStateStatus":"BEHIND"}),
+            current_base
+        ));
+        assert!(!branch_update_needed(
+            &pr,
+            &json!({"mergeStateStatus":"CLEAN"}),
+            current_base
+        ));
+    }
+
+    #[test]
+    fn branch_update_is_reported_only_after_both_commits_are_confirmed() {
+        let old_head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let target_base = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let new_head = "cccccccccccccccccccccccccccccccccccccccc";
+        let previous = json!({"status":"pending","head":old_head,"base":target_base});
+        let detail = json!({"head":{"sha":new_head}});
+        let base_comparison = json!({
+            "status":"ahead",
+            "base_commit":{"sha":target_base},
+            "head_commit":{"sha":new_head}
+        });
+        let head_comparison = json!({
+            "status":"ahead",
+            "base_commit":{"sha":old_head},
+            "head_commit":{"sha":new_head}
+        });
+        assert!(confirmed_branch_update(
+            &previous,
+            &detail,
+            &base_comparison,
+            &head_comparison
+        ));
+
+        let mut incomplete = head_comparison.clone();
+        incomplete["status"] = json!("diverged");
+        assert!(!confirmed_branch_update(
+            &previous,
+            &detail,
+            &base_comparison,
+            &incomplete
+        ));
+        assert!(!confirmed_branch_update(
+            &json!({"status":"pending","head":old_head,"base":target_base}),
+            &json!({"head":{"sha":old_head}}),
+            &base_comparison,
+            &head_comparison
+        ));
     }
 
     #[test]
