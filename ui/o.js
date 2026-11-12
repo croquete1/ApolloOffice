@@ -488,13 +488,17 @@
       const n = t.dataset.w, w = S.w[n] || { st: "idle", say: "", md: "", tk: 0 };
       const cn = STG[n] ? S.q.filter((q) => STG[n].includes(q.st)).length : n === "vet" ? S.o.vn || 0 : 0;
       const wk = cn > 0 || w.st === "work";
+      const state = w.hold ? "pausado" : wk ? "em trabalho" + (cn > 1 ? " ×" + cn : "") : w.st === "sleep" ? "em espera" : "inativo";
+      const detail = !wk && w.idle_reason ? w.idle_reason : (w.tk ? kt(w.tk) + " tok" : "");
       t.querySelector(".md").textContent = n === "ci" || n === "submit" ? "no model" : mdn(w.md);
       t.querySelector(".md").title = w.md || "";
       t.querySelector(".sy").textContent = w.say || "…";
+      t.querySelector(".sy").title = w.say || "";
       t.className = "tile " + (wk ? "work" : "") + (w.hold ? " hold" : "");
-      t.querySelector(".stt").textContent = w.hold ? "pausado" : wk ? "em trabalho" + (cn > 1 ? " ×" + cn : "") : w.st === "sleep" ? "em espera" : "inativo";
-      t.querySelector(".ft").textContent = !wk && w.idle_reason ? w.idle_reason : (w.tk ? kt(w.tk) + " tok" : "");
-      t.querySelector(".ft").title = w.idle_reason || "";
+      t.querySelector(".stt").textContent = state;
+      t.querySelector(".stt").title = state;
+      t.querySelector(".ft").textContent = detail;
+      t.querySelector(".ft").title = detail;
       t.title = (w.idle_reason && !wk ? w.idle_reason + " · " : "") + (w.hold ? "clique para retomar" : "clique para pausar");
     }
   };
