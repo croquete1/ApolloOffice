@@ -75,8 +75,8 @@ button.ic { padding: 4px 7px; display: inline-flex; align-items: center; }
 button.ic svg { width: 14px; height: 14px; }
 .tile .md { margin-left: auto; color: var(--t3); font-weight: 400; letter-spacing: 0; text-transform: none; overflow: hidden; text-overflow: ellipsis; }
 .tile .sy { margin-top: 6px; color: var(--t2); font: 11px/1.3 var(--m); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word; }
-.tile .ft { position: absolute; bottom: 6px; right: 9px; font: 10px var(--m); color: var(--t3); }
-.tile .stt { position: absolute; bottom: 6px; left: 9px; font: 10px var(--m); color: var(--t3); text-transform: uppercase; }
+.tile .ft { position: absolute; bottom: 6px; right: 9px; max-width: 52%; font: 10px var(--m); color: var(--t3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: right; }
+.tile .stt { position: absolute; bottom: 6px; left: 9px; max-width: 44%; font: 10px var(--m); color: var(--t3); text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tile.work .stt { color: var(--t1); }
 .tile.hold { opacity: .55; }
 body.sb { grid-template-rows: auto auto auto minmax(0, 1fr); }

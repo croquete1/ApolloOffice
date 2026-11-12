@@ -211,6 +211,36 @@ fn state(a: &Ax) -> Value {
     std::mem::drop(admitted);
     let paused = o["man"] == true || o["pause"].as_str().is_some_and(|reason| !reason.is_empty());
     let blocked_hunts = crate::hunt_health::blocked_repos(a);
+    // Diagnostics: a host may be ready or still running `ensure`; a repository
+    // may have hunting or issue intake switched off. These were previously
+    // invisible, leaving the office looking idle for no stated reason.
+    let (ens_ids, ing_ids) = crate::pipe::ensure_state();
+    let hosts_diag: Vec<Value> = a
+        .db
+        .all("select id, dk, on_ from hs order by id='local' desc, id", pa![])
+        .into_iter()
+        .map(|h| {
+            let id = h["id"].as_str().unwrap_or("").to_string();
+            let up = a.db.kg(&format!("up:{id}")) == json!(true) || ens_ids.contains(&id);
+            json!({
+                "id": id,
+                "dk": h["dk"].as_i64().unwrap_or(0) == 1,
+                "on": h["on_"].as_i64().unwrap_or(0) == 1,
+                "up": up,
+                "preparing": ing_ids.contains(&id),
+            })
+        })
+        .collect();
+    let hunt_off: Vec<Value> =
+        a.db.all("select full from rp where on_=1 and (hunt=0 or ci='')", pa![]);
+    let iss_off: Vec<Value> = a.db.all("select full from rp where on_=1 and iss=0", pa![]);
+    let hunt_enabled =
+        a.db.n("select count(*) from rp where on_=1 and hunt=1 and ci<>''", pa![]);
+    let preparing_hosts: Vec<&str> = hosts_diag
+        .iter()
+        .filter(|h| h["preparing"] == true)
+        .filter_map(|h| h["id"].as_str())
+        .collect();
     for role in WS {
         let idle = wv[*role]["st"] != "work";
         let reason = if !idle {
@@ -219,6 +249,10 @@ fn state(a: &Ax) -> Value {
             "Agente pausado"
         } else if paused {
             "Escritório em pausa"
+        } else if !preparing_hosts.is_empty() {
+            "A preparar o ambiente de build; a aguardar que a máquina fique pronta"
+        } else if *role == "hunter" && hunt_enabled == 0 {
+            "Caça desligada: nenhum repositório com caça ativa"
         } else if wv[*role]["st"] == "sleep" {
             "Em espera; consultar o último evento do agente"
         } else if *role == "hunter" && !blocked_hunts.is_empty() {
@@ -235,6 +269,7 @@ fn state(a: &Ax) -> Value {
         "t": now(), "v": crate::app::V,
         "o": o, "w": wv, "fl": fl, "ln": ln, "cil": cil, "hst": hst,
         "ops": {"waiting": waiting, "blocked_hunts": blocked_hunts, "paused": paused},
+        "diag": {"hosts": hosts_diag, "hunt_off": hunt_off, "iss_off": iss_off, "hunt_enabled": hunt_enabled},
         "hs": a.db.all("select id, ln, dk, on_ from hs order by id='local' desc, id", pa![]),
         "q": a.db.all("select id,repo,num,kind,title,url,st,why,pr,t0,t1,json_extract(d,'$.h') h from jobs where st not in ('done','drop') order by st in ('hunt','repro','fix','ci','review','gate','submit') desc, st='approve' desc, st='vet', id limit 60", pa![]),
         "dn": a.db.all("select id,repo,num,kind,title,url,st,why,pr,t1 from jobs where st in ('done','drop') order by t1 desc limit 25", pa![]),

@@ -50,6 +50,7 @@
     '      <div class="ao-top-actions"><span id="aoOfficeStatus" class="ao-status-chip" role="status" aria-live="polite">A ligar…</span><button id="aoPause" type="button" class="ao-outline-button" disabled>Pausar escritório</button></div>',
     '    </header>',
     '    <main class="ao-content" id="aoOverview">',
+    '      <section id="aoDiag" class="ao-diag" aria-label="Diagnóstico do ambiente" aria-live="polite" hidden></section>',
     '      <section class="ao-metrics" aria-label="Indicadores operacionais">',
     '        <div class="ao-metric"><span>Agentes a trabalhar</span><strong id="aoMetricWorkers">—</strong><small>Estados reais</small></div>',
     '        <div class="ao-metric"><span>Tarefas em aberto</span><strong id="aoMetricQueue">—</strong><small>Total registado no sistema</small></div>',
@@ -336,6 +337,45 @@
     byId("aoAgentSummary").textContent = working + " em execução · " + (roles.length - working) + " restantes" +
       (suspended ? " · " + suspended + " pesquisa(s) suspensa(s)" : "");
   };
+  /**
+   * Surface the environment blockers that otherwise leave the office looking
+   * idle for no stated reason: a host still preparing its build container,
+   * hunting or issue intake switched off, or a repository suspended by the
+   * setup-failure circuit breaker.
+   * @param {object} s Latest server state.
+   */
+  const renderDiag = (s) => {
+    const el = byId("aoDiag");
+    if (!el) return;
+    const d = s.diag || {};
+    const names = (arr) => safeArray(arr).map((x) => x.full || x.repo || x).join(", ");
+    const items = [];
+    for (const h of safeArray(d.hosts)) {
+      if (h.preparing) {
+        items.push({ tone: "work", text: "A preparar o ambiente de build em «" + (h.id || "?") + "» — a aguardar que a máquina fique pronta" });
+      } else if (h.dk && h.on && !h.up) {
+        items.push({ tone: "warn", text: "Máquina «" + (h.id || "?") + "» ainda não está pronta" });
+      }
+    }
+    if (Number(d.hunt_enabled) === 0) {
+      items.push({ tone: "warn", text: "Caça desligada: nenhum repositório com caça ativa (hunt=0)" });
+    } else if (safeArray(d.hunt_off).length) {
+      items.push({ tone: "warn", text: "Caça desligada em: " + names(d.hunt_off) });
+    }
+    if (safeArray(d.iss_off).length) {
+      items.push({ tone: "info", text: "Intake de issues desligado em: " + names(d.iss_off) });
+    }
+    for (const b of safeArray(s.ops && s.ops.blocked_hunts)) {
+      const u = b.health && b.health.until;
+      const when = u ? " (até " + new Date(u).toLocaleTimeString("pt-PT", { hour: "2-digit", minute: "2-digit" }) + ")" : "";
+      items.push({ tone: "warn", text: "Pesquisa suspensa por falhas de preparação: " + (b.repo || "?") + when });
+    }
+    if (!items.length) { el.hidden = true; el.textContent = ""; return; }
+    el.hidden = false;
+    el.innerHTML = items.map((i) =>
+      '<div class="ao-diag-item ao-diag-' + i.tone + '"><span class="ao-diag-dot" aria-hidden="true"></span><span>' + escapeHTML(i.text) + "</span></div>"
+    ).join("");
+  };
   const rowHTML = (label, caption, badge, attr, val, extraClass = "") => {
     const unavailable = attr === "data-pr-url" && !val;
     return '<button class="ao-data-row ' + extraClass + '" type="button" ' +
@@ -578,7 +618,7 @@
     if (byId("aoConnection").textContent !== connection) byId("aoConnection").textContent = connection;
     byId("aoPause").textContent = s.o?.man ? "Retomar escritório" : "Pausar escritório";
     byId("aoPause").disabled = !s.o;
-    updateAgents(s); renderPipeline(s); renderRepos(s); renderLists(s); renderMerges(s); renderMachines(s);
+    renderDiag(s); updateAgents(s); renderPipeline(s); renderRepos(s); renderLists(s); renderMerges(s); renderMachines(s);
     if (selected) showAgent(selected, false);
   };
   const overlay = byId("aoAgentOverlay");

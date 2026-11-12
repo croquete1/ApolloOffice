@@ -675,6 +675,27 @@ async fn prep(a: &Ax, j: &mut Job) -> R<()> {
         j.d["old"] = json!(ok(a, j, "git rev-parse HEAD", 60).await?);
     }
     if !su.is_empty() {
+        // Preflight: confirm the build environment provides the toolchain the
+        // repository requires (git, node and a matching major version) before
+        // running setup, so an incompatibility surfaces as a clear, actionable
+        // reason on the first attempt instead of an opaque setup failure
+        // repeated until the circuit breaker trips.
+        const PREFLIGHT: &str = r#"command -v git >/dev/null || { echo "git em falta no ambiente de build"; exit 1; }; command -v node >/dev/null || { echo "node em falta no ambiente de build"; exit 1; }; have=$(node -v | tr -d v); hmaj=${have%%.*}; want=; if [ -f .nvmrc ]; then want=$(tr -dc 0-9. < .nvmrc); fi; wmaj=${want%%.*}; if [ -n "$wmaj" ] && [ "$wmaj" != "$hmaj" ]; then echo "node incompativel: o repositorio exige Node $want mas o ambiente de build tem Node $have; reconstruir a imagem de build"; exit 1; fi; echo "preflight ok: node $have (quer ${want:-sem requisito})""#;
+        let pf = x(a, j, &format!("bash -c {}", q(PREFLIGHT)), 120).await;
+        if pf.c != 0 {
+            a.say(
+                "repro",
+                &format!("[{}] preflight do ambiente falhou", j.h()),
+                Some(j.id),
+            );
+            return drop(crate::hunt_health::diagnostic(
+                a,
+                j,
+                "preflight",
+                pf.c,
+                &format!("{}\n{}", pf.o.trim(), pf.e.trim()),
+            ));
+        }
         a.say(
             "repro",
             &format!("[{}] setup: {}", j.h(), crate::sh::head(&su, 80)),
@@ -3794,6 +3815,16 @@ static ENS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<Strin
     std::sync::LazyLock::new(Default::default);
 static ING: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
     std::sync::LazyLock::new(Default::default);
+
+/// Diagnostic snapshot of the build-container readiness per host:
+/// returns (ensured, preparing) host ids so the UI can distinguish a host
+/// that is ready from one still running `ensure` (the "preparing the build
+/// container" step) instead of leaving it looking silently idle.
+pub fn ensure_state() -> (Vec<String>, Vec<String>) {
+    let ens = ENS.lock().unwrap().iter().cloned().collect();
+    let ing = ING.lock().unwrap().iter().cloned().collect();
+    (ens, ing)
+}
 
 pub async fn lanes(a: Ax) {
     loop {
