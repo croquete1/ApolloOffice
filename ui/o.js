@@ -530,7 +530,7 @@
       if (!retry.pending && !dropped.has(id)) retryStates.delete(id);
     }
     const query = $("queueFilter").value.trim().toLocaleLowerCase();
-    const matches = (j) => !query || [j.title, j.repo, j.num, j.kind, j.work_class, j.st, j.why, workLabel(j.work_class), retryStates.get(j.id)?.error].join(" ").toLocaleLowerCase().includes(query);
+    const matches = (j) => !query || [j.title, j.repo, j.num, j.kind, j.work_class, j.st, j.why, S.cil[j.id], workLabel(j.work_class), retryStates.get(j.id)?.error].join(" ").toLocaleLowerCase().includes(query);
     const queued = q.filter(matches), recent = S.dn.filter(matches);
     const suspended = S.ops?.blocked_hunts?.length || 0;
     $("qn").textContent = (query ? `${queued.length} de ${q.length}` : q.length ? q.length + " trabalhos" : "") +
