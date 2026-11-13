@@ -398,11 +398,22 @@ fn costs(a: &Ax) -> Value {
         x["nm"] = json!(crate::prov::name(r["md"].as_str().unwrap_or("")));
         st.push(x);
     }
+    let attempts = a.db.all(
+        "select a.model, count(*) attempts, sum(case when a.outcome='accepted' then 1 else 0 end) accepted, sum(case when a.attempt=1 and a.outcome='accepted' then 1 else 0 end) first_pass, sum(case when a.attempt=1 and exists(select 1 from fix_attempts b where b.job=a.job and b.attempt>1 and b.model<>a.model) then 1 else 0 end) escalated, sum(case when a.gate='verification' and a.outcome in ('rejected','failed') then 1 else 0 end) verification_failures, sum(case when a.gate='ci' and a.outcome in ('rejected','failed') then 1 else 0 end) ci_failures, sum(case when a.gate='review' and a.outcome='rejected' then 1 else 0 end) review_rejections, avg(a.elapsed_ms) avg_ms from fix_attempts a where a.started>=? group by a.model order by attempts desc, a.model",
+        pa![now() - 90 * 86_400_000],
+    );
+    let mut fm = vec![];
+    for r in &attempts {
+        let mut x = r.clone();
+        x["nm"] = json!(crate::prov::name(r["model"].as_str().unwrap_or("")));
+        fm.push(x);
+    }
     json!({
         "today": a.db.one("select sum(case when sub=0 then usd end) usd, sum(case when sub=1 then usd end) val, sum(case when usd is null then 1 else 0 end) unk from cost where day=?", pa![crate::db::day()]),
         "days": a.db.all("select day, sum(case when sub=0 then usd end) usd, sum(case when sub=1 then usd end) val from cost where day>=date('now','localtime','-13 day') group by day order by day desc", pa![]),
         "repos": a.db.all("select repo, sum(case when sub=0 then usd end) usd, sum(case when sub=1 then usd end) val, count(distinct job) jobs from cost where t>=? and repo<>'' group by repo order by 2 desc", pa![t30]),
         "stats": st,
+        "fixer_metrics": fm,
         "hints": hints(&rows),
         "budday": a.set()["budday"],
         "px": a.set()["px"],
@@ -1678,6 +1689,10 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                 "history" => {
                     a.db.run("delete from jobs where st in ('done','drop')", pa![]);
                     a.db.run(
+                        "delete from fix_attempts where job not in (select id from jobs)",
+                        pa![],
+                    );
+                    a.db.run(
                         "delete from ev where j is null or j not in (select id from jobs)",
                         pa![],
                     );
@@ -1703,7 +1718,17 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                     }
                     a.lv.lock().unwrap().o.man = true;
                     for t in [
-                        "jobs", "ev", "prs", "cost", "tok", "seen", "cm", "rp", "hs", "lnk",
+                        "jobs",
+                        "ev",
+                        "prs",
+                        "cost",
+                        "fix_attempts",
+                        "tok",
+                        "seen",
+                        "cm",
+                        "rp",
+                        "hs",
+                        "lnk",
                     ] {
                         a.db.run(&format!("delete from {t}"), pa![]);
                     }

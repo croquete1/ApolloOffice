@@ -2075,15 +2075,68 @@ async fn vrev(a: &Ax, j: &Job, f: &Value) -> R<String> {
     Ok(String::new())
 }
 
+fn fix_attempt_start(a: &Ax, j: &Job, ordinal: u64, md: &str) -> (i64, i64) {
+    let started = crate::db::now();
+    a.db.ch(
+        "update fix_attempts set finished=?,elapsed_ms=?-started,outcome='interrupted',gate='model' where job=? and finished is null",
+        pa![started, started, j.id],
+    );
+    let next = a.db.n(
+        "select coalesce(max(attempt),0)+1 n from fix_attempts where job=?",
+        pa![j.id],
+    );
+    let attempt = next.max(ordinal.min(i64::MAX as u64) as i64);
+    let id = a.db.run(
+        "insert into fix_attempts(job,attempt,model,started) values(?,?,?,?)",
+        pa![j.id, attempt, md.to_string(), started],
+    );
+    (id, started)
+}
+
+fn fix_attempt_finish(a: &Ax, id: i64, started: i64, outcome: &str, gate: &str) {
+    if id < 0 {
+        return;
+    }
+    let finished = crate::db::now();
+    a.db.ch(
+        "update fix_attempts set finished=?,elapsed_ms=?,outcome=?,gate=? where id=?",
+        pa![
+            finished,
+            (finished - started).max(0),
+            outcome.to_string(),
+            gate.to_string(),
+            id
+        ],
+    );
+}
+
+fn fix_attempt_finish_active(a: &Ax, j: &Job, outcome: &str, gate: &str) {
+    if let Some(attempt) = a.db.one(
+        "select id,started from fix_attempts where job=? and finished is null order by attempt desc limit 1",
+        pa![j.id],
+    ) {
+        if let (Some(id), Some(started)) = (attempt["id"].as_i64(), attempt["started"].as_i64()) {
+            fix_attempt_finish(a, id, started, outcome, gate);
+        }
+    }
+}
+
 async fn fix(a: &Ax, j: &mut Job, fb0: String, k0: u64) -> R<Value> {
     crate::quality::prepare(a, j).await?;
     let mut fb = fb0;
+    let route_on = crate::routing::enabled(a);
     let plan = crate::routing::plan(a);
-    let rounds = if crate::routing::enabled(a) {
-        plan.len() as u64
-    } else {
-        RND + 1
-    };
+    let rounds = if route_on { plan.len() as u64 } else { RND + 1 };
+    let primary = a.md("fixer");
+    let complex_model = a.md("big");
+    // Keep the low-cost path for ordinary work, but hand a failed local-model
+    // candidate to the configured Codex model for independent repair. Free-first
+    // routing retains its own bounded plan, and complex jobs start on `big`.
+    let fallback = !route_on
+        && a.set()["big"].as_bool().unwrap_or(true)
+        && primary.starts_with("ollama:")
+        && complex_model.starts_with("codex:")
+        && primary != complex_model;
     for k in k0..rounds {
         kill(a, j)?;
         a.db.jset(j.id, &[("st", json!("fix"))]);
@@ -2102,13 +2155,16 @@ async fn fix(a: &Ax, j: &mut Job, fb0: String, k0: u64) -> R<Value> {
             Some(j.id),
         );
         let c = cx(a, j);
-        let md = if crate::routing::enabled(a) {
+        let md = if route_on {
             plan[k as usize].clone()
         } else if c {
-            a.md("big")
+            complex_model.clone()
+        } else if fallback && k > 0 {
+            complex_model.clone()
         } else {
-            a.md("fixer")
+            primary.clone()
         };
+        let (attempt_id, attempt_started) = fix_attempt_start(a, j, k + 1, &md);
         crate::routing::event(a, Some(j.id), "fixer", k as usize, &md, &fb);
         use_(a, j, &md);
         j.d["author"] = json!(md);
@@ -2124,22 +2180,39 @@ async fn fix(a: &Ax, j: &mut Job, fb0: String, k0: u64) -> R<Value> {
         o.t = if c { 180 * 60 } else { 120 * 60 };
         let (_, js) = match ask(a, o).await {
             Ok(v) => v,
-            Err(X::Back(e)) => return Err(X::Back(e)),
-            Err(X::Drop(e)) => return Err(X::Drop(e)),
-            Err(e) if crate::routing::enabled(a) => {
+            Err(X::Back(e)) => {
+                fix_attempt_finish(a, attempt_id, attempt_started, "interrupted", "model");
+                return Err(X::Back(e));
+            }
+            Err(X::Drop(e)) if fallback => {
+                fix_attempt_finish(a, attempt_id, attempt_started, "failed", "model");
                 fb = format!("Model attempt failed: {e}. Inspect the existing tree and preserve useful work.");
                 continue;
             }
-            Err(e) => return Err(e),
+            Err(X::Drop(e)) => {
+                fix_attempt_finish(a, attempt_id, attempt_started, "failed", "model");
+                return Err(X::Drop(e));
+            }
+            Err(e) if route_on || fallback => {
+                fix_attempt_finish(a, attempt_id, attempt_started, "failed", "model");
+                fb = format!("Model attempt failed: {e}. Inspect the existing tree and preserve useful work.");
+                continue;
+            }
+            Err(e) => {
+                fix_attempt_finish(a, attempt_id, attempt_started, "failed", "model");
+                return Err(e);
+            }
         };
         a.st("fixer", "idle", None, "");
         if js.is_null() {
+            fix_attempt_finish(a, attempt_id, attempt_started, "rejected", "output");
             fb = "Your answer contained no JSON.".into();
             continue;
         }
         if let Some(g) = js["give_up"].as_str() {
+            fix_attempt_finish(a, attempt_id, attempt_started, "rejected", "output");
             a.st("fixer", "idle", None, "sad");
-            if crate::routing::enabled(a) {
+            if route_on || fallback {
                 fb = format!(
                     "Previous model gave up: {g}. Inspect the tree and repair the actual issue."
                 );
@@ -2156,31 +2229,47 @@ async fn fix(a: &Ax, j: &mut Job, fb0: String, k0: u64) -> R<Value> {
         j.d["k"] = json!(k);
         a.db.jd(j);
         a.flow("fixer", "ci", "proof");
-        fb = if j.kind == "review" {
-            vrev(a, j, &js).await?
+        let verification = if j.kind == "review" {
+            vrev(a, j, &js).await
         } else {
-            verify(a, j, &js).await?
+            verify(a, j, &js).await
+        };
+        fb = match verification {
+            Ok(value) => value,
+            Err(e) => {
+                fix_attempt_finish(a, attempt_id, attempt_started, "failed", "verification");
+                return Err(e);
+            }
         };
         if !fb.is_empty() {
+            fix_attempt_finish(a, attempt_id, attempt_started, "rejected", "verification");
             a.say(
                 "fixer",
                 &format!("proof missing: {}", fb.lines().next().unwrap_or("")),
                 Some(j.id),
             );
-            if crate::routing::enabled(a) {
+            if route_on {
                 j.d["verification_feedback"] = json!(fb.clone());
                 let diagnosis = diagnosis(a, j, &mut js.clone()).await?;
                 fb.push_str(&format!("\n{diagnosis}"));
             }
             continue;
         }
-        fb = ci(a, j).await?;
+        fb = match ci(a, j).await {
+            Ok(value) => value,
+            Err(e) => {
+                fix_attempt_finish(a, attempt_id, attempt_started, "failed", "ci");
+                return Err(e);
+            }
+        };
         if fb.starts_with("CI aborted after") {
+            fix_attempt_finish(a, attempt_id, attempt_started, "blocked", "ci");
             a.st("fixer", "idle", None, "sad");
             return drop(format!("{fb} on {}", j.h()));
         }
         if !fb.is_empty() {
-            if crate::routing::enabled(a) {
+            fix_attempt_finish(a, attempt_id, attempt_started, "rejected", "ci");
+            if route_on {
                 j.d["verification_feedback"] = json!(fb.clone());
                 let diagnosis = diagnosis(a, j, &mut js.clone()).await?;
                 fb.push_str(&format!("\n{diagnosis}"));
@@ -2189,11 +2278,19 @@ async fn fix(a: &Ax, j: &mut Job, fb0: String, k0: u64) -> R<Value> {
         }
         j.d["verification_feedback"] = json!("Executed regression proof and repository CI passed.");
         let mut f = js.clone();
-        fb = review(a, j, &mut f).await?;
+        fb = match review(a, j, &mut f).await {
+            Ok(value) => value,
+            Err(e) => {
+                fix_attempt_finish(a, attempt_id, attempt_started, "failed", "review");
+                return Err(e);
+            }
+        };
         if !fb.is_empty() {
+            fix_attempt_finish(a, attempt_id, attempt_started, "rejected", "review");
             a.flow("reviewer", "fixer", "back");
             continue;
         }
+        fix_attempt_finish(a, attempt_id, attempt_started, "accepted", "");
         j.d["f"] = f.clone();
         a.db.jd(j);
         return Ok(f);
@@ -3211,19 +3308,48 @@ async fn resume(a: &Ax, j: &mut Job) -> R<Value> {
         a.db.jd(j);
     }
     let k = j.d["k"].as_u64().unwrap_or(0);
-    let mut fb = crate::quality::check(a, j).await?;
+    let mut fb = match crate::quality::check(a, j).await {
+        Ok(value) => value,
+        Err(e) => {
+            fix_attempt_finish_active(a, j, "failed", "verification");
+            return Err(e);
+        }
+    };
+    if !fb.is_empty() {
+        fix_attempt_finish_active(a, j, "rejected", "verification");
+    }
     if fb.is_empty() {
-        fb = ci(a, j).await?;
+        fb = match ci(a, j).await {
+            Ok(value) => value,
+            Err(e) => {
+                fix_attempt_finish_active(a, j, "failed", "ci");
+                return Err(e);
+            }
+        };
     }
     if fb.starts_with("CI aborted after") {
+        fix_attempt_finish_active(a, j, "blocked", "ci");
         return drop(format!("{fb} on {}", j.h()));
     }
+    if !fb.is_empty() {
+        fix_attempt_finish_active(a, j, "rejected", "ci");
+    }
     if fb.is_empty() {
-        fb = review(a, j, &mut f).await?;
+        fb = match review(a, j, &mut f).await {
+            Ok(value) => value,
+            Err(e) => {
+                fix_attempt_finish_active(a, j, "failed", "review");
+                return Err(e);
+            }
+        };
+        if !fb.is_empty() {
+            fix_attempt_finish_active(a, j, "rejected", "review");
+        }
     }
     if !fb.is_empty() {
         return fix(a, j, fb, k + 1).await;
     }
+    fix_attempt_finish_active(a, j, "accepted", "");
     j.d["f"] = f.clone();
     a.db.jd(j);
     Ok(f)
