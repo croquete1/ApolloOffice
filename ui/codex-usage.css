@@ -1,24 +1,24 @@
 /* Quotas Codex: estética discreta compatível com pixel art e vista moderna. */
 .codex-quota-card { min-width: 0; }
 .codex-quota-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:10px; }
-.codex-quota-head h2 { margin:0; font:600 11px/1.3 var(--m,ui-monospace,monospace); text-transform:uppercase; letter-spacing:.05em; }
-.codex-quota-source { font:10px/1.25 var(--m,ui-monospace,monospace); color:var(--t3,#8b97a7); text-align:right; }
+.codex-quota-head h2 { margin:0; font:600 12px/1.3 var(--m,ui-monospace,monospace); text-transform:uppercase; letter-spacing:.05em; }
+.codex-quota-source { font:11px/1.3 var(--m,ui-monospace,monospace); color:var(--t2,#b9bec7); text-align:right; }
 .codex-quota-status-ok { color:var(--ok,#5cbf6a); }
 .codex-quota-window { margin:0 0 11px; }
-.codex-quota-line { display:flex; align-items:baseline; justify-content:space-between; gap:8px; font:11px/1.45 var(--m,ui-monospace,monospace); }
+.codex-quota-line { display:flex; align-items:baseline; justify-content:space-between; gap:8px; font:12px/1.45 var(--m,ui-monospace,monospace); }
 .codex-quota-line strong { font-weight:600; color:var(--t1,#eee); }
 .codex-quota-line span { color:var(--t2,#b9bec7); white-space:nowrap; }
 .codex-quota-bar { height:6px; margin:5px 0; border:1px solid var(--l,#384151); border-radius:2px; background:var(--f,#26313b); overflow:hidden; }
 .codex-quota-bar i { display:block; height:100%; background:var(--ok,#5cbf6a); width:0; transition:width .35s ease; }
 .codex-quota-low .codex-quota-bar i { background:var(--bad,#e0675a); }
 .codex-quota-missing .codex-quota-bar { opacity:.35; }
-.codex-quota-reset,.codex-quota-footer { color:var(--t3,#8b97a7); font:10px/1.45 var(--m,ui-monospace,monospace); }
-.codex-quota-prediction { margin-top:7px; padding:4px 0 0 8px; border-left:2px solid var(--l,#384151); color:var(--t2,#b9bec7); font:10px/1.5 var(--m,ui-monospace,monospace); }
+.codex-quota-reset,.codex-quota-footer { color:var(--t2,#b9bec7); font:11px/1.45 var(--m,ui-monospace,monospace); }
+.codex-quota-prediction { margin-top:7px; padding:4px 0 0 8px; border-left:2px solid var(--l,#384151); color:var(--t2,#b9bec7); font:11px/1.45 var(--m,ui-monospace,monospace); }
 .codex-quota-prediction[data-risk="risk"], .codex-quota-prediction[data-risk="exhausted"] { border-color:var(--bad,#e0675a); color:var(--t1,#eee); }
 .codex-quota-prediction[data-risk="near"] { border-color:var(--warn,#e6b65b); color:var(--t1,#eee); }
 .codex-quota-prediction[data-risk="ok"], .codex-quota-prediction[data-risk="low"] { border-color:var(--ok,#5cbf6a); }
 .codex-quota-footer { border-top:1px solid var(--l,#384151); padding-top:6px; margin-top:3px; }
-.side:has(.codex-quota-card) { grid-template-rows:minmax(0,1.1fr) minmax(0,.9fr) minmax(135px,.85fr) minmax(0,.7fr); }
+.side:has(.codex-quota-card) { grid-template-rows:minmax(0,1.1fr) minmax(0,1fr) minmax(150px,1fr) minmax(0,.7fr); }
 @media (max-width:860px) and (min-width:701px) {
   .side:has(.codex-quota-card) { grid-template-rows:minmax(0,1fr) minmax(135px,1fr); }
 }
