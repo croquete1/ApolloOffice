@@ -17,6 +17,7 @@ mod routing;
 mod sh;
 mod star;
 mod steward;
+mod steward_close;
 mod steward_merge;
 mod steward_repair;
 mod sys;

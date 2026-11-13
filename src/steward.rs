@@ -218,7 +218,7 @@ pub async fn scan(a: &Ax, repo: &str) -> Result<(), String> {
             "--limit",
             PAGE_LIMIT,
             "--json",
-            "number,title,body,url,isDraft,headRefOid,baseRefName,baseRefOid,createdAt,updatedAt,mergeStateStatus,reviewDecision,statusCheckRollup,files",
+            "number,title,body,url,author,isDraft,headRefOid,baseRefName,baseRefOid,createdAt,updatedAt,mergeStateStatus,reviewDecision,statusCheckRollup,files",
         ],
         90,
     )
@@ -240,6 +240,10 @@ pub async fn scan(a: &Ax, repo: &str) -> Result<(), String> {
     ) == 1;
     let repair_enabled = a.db.n(
         "select steward_repair from rp where full=? and on_=1",
+        pa![repo.to_string()],
+    ) == 1;
+    let close_enabled = a.db.n(
+        "select steward_close from rp where full=? and on_=1",
         pa![repo.to_string()],
     ) == 1;
     let local_merge_enabled = a.db.n(
@@ -266,9 +270,18 @@ pub async fn scan(a: &Ax, repo: &str) -> Result<(), String> {
             "read_only": !merge_enabled,
             "merge_enabled": merge_enabled,
             "local_merge_enabled": local_merge_enabled,
-            "repair_enabled": repair_enabled
+            "repair_enabled": repair_enabled,
+            "close_enabled": close_enabled
         }),
     );
+    if close_enabled {
+        if let Err(error) = crate::steward_close::run(a, repo, list).await {
+            a.db.ks(
+                &format!("steward:close_error:{repo}"),
+                &json!({"at":now(),"error":crate::sh::head(&error,500)}),
+            );
+        }
+    }
     if repair_enabled {
         crate::steward_repair::run(a, repo, list, &report).await;
     }

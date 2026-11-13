@@ -128,6 +128,8 @@
         <label>Pull requests</label><select name="mode"><option value="ask" ${r.mode !== "auto" ? "selected" : ""}>wait for my approval</option><option value="auto" ${r.mode === "auto" ? "selected" : ""}>submit automatically</option></select>
         <label>Encaminhar revisões para correção</label>${tg("steward_repair", r.steward_repair, "Criar trabalhos de revisão apenas para PRs próprias com pedidos humanos validados")}
         <div class="hint">Desligado por defeito. Requer pedido CHANGES_REQUESTED no HEAD atual, autor com permissões, Guard aprovado, ausência de duplicações e de trabalho de revisão pendente. Encaminha para o Fixer e os gates habituais; não faz merge.</div>
+        <label>Fechar PRs substituídas</label>${tg("steward_close", r.steward_close, "Fechar automaticamente PRs próprias já substituídas")}
+        <div class="hint">Desligado por defeito. Só fecha uma PR sua quando outra PR sua, para a branch principal, já foi integrada e fechou a mesma issue. Confirma o estado atual no GitHub e deixa um comentário com a PR que a substituiu.</div>
         <label>Integração automática (restrita)</label>${tg("auto_merge", r.auto_merge, "Integrar PRs elegíveis após verificar os requisitos")}
         <div class="hint">Quando a branch é protegida, exige checks GitHub obrigatórios e aprovação humana independente.</div>
         <label>Modo local sem plano GitHub pago</label>${tg("local_merge", r.local_merge, "Permitir integrações com provas de CI e revisão independente guardadas no ApolloOffice")}
@@ -664,7 +666,7 @@
       <div class="hint">Consulta o GitHub periodicamente. Identifica duplicações, conflitos, checks e revisões pendentes. O estado «CI: aprovado» não dispensa provas de testes completos nem as regras de proteção da branch. CodeRabbit isolado não é CI. A integração é opcional e fica desligada por omissão.</div>
       <div class="acts"><button id="steRefresh" type="button">Atualizar painel</button></div>
     </div></div>
-    ${reports.map(({ repo, report, error, merge_error, repair_error, drops }) => {
+    ${reports.map(({ repo, report, error, merge_error, repair_error, close_error, drops }) => {
       const rows = [...(report?.prs || [])].sort((a,b) => (Number(a.priority ?? 9) - Number(b.priority ?? 9)) || (Number(b.number) - Number(a.number)));
       const at = report?.at ? new Date(report.at).toLocaleString("pt-PT") : "sem leitura";
       const mode = !report?.merge_enabled
@@ -673,10 +675,12 @@
           ? "Integração local com provas obrigatórias (sem proteção GitHub)"
           : "Integração com proteção GitHub obrigatória";
       const repairs = report?.repair_enabled ? "Encaminhamento de revisões ativo (só PRs próprias)" : "Encaminhamento de revisões desativado";
+      const closing = report?.close_enabled ? "Fecho automático de PRs substituídas ativo" : "Fecho automático de PRs substituídas desativado";
       return `<div class="sec"><h4>${esc(repo)}</h4><div class="box">
-        <div class="msg">${rows.length} PRs abertas · ${esc(at)} · ${esc(mode)} · ${esc(repairs)} · Revalidações pendentes: ${esc(String(report?.queue?.pending_rechecks ?? 0))} · mais antiga: ${esc(elapsed(report?.queue?.oldest_age_ms))}${error?.error ? " · Último erro: " + esc(error.error) : ""}</div>
+        <div class="msg">${rows.length} PRs abertas · ${esc(at)} · ${esc(mode)} · ${esc(repairs)} · ${esc(closing)} · Revalidações pendentes: ${esc(String(report?.queue?.pending_rechecks ?? 0))} · mais antiga: ${esc(elapsed(report?.queue?.oldest_age_ms))}${error?.error ? " · Último erro: " + esc(error.error) : ""}</div>
         ${repair_error?.error ? `<div class="warn">Revisão não encaminhada: ${esc(repair_error.error)}</div>` : ""}
         ${merge_error?.reason ? `<div class="warn">Integração bloqueada: ${esc(merge_error.reason)}</div>` : ""}
+        ${close_error?.error ? `<div class="warn">Fecho automático não executado: ${esc(close_error.error)}</div>` : ""}
         <div class="hint">Drops: ${esc(String(drops?.total ?? 0))} · Recuperação automática: ${drops?.enabled ? "ativa" : "desativada"} · Potencialmente recuperáveis: ${esc(String((drops?.jobs || []).filter(j => j.safe_auto).length))} (nos últimos 25).</div>
         ${(drops?.jobs || []).slice(0, 5).map(j => `<div class="hint">Trabalho #${esc(String(j.id))} · ${esc(j.category)} · ${esc(j.reason)} · tentativas: ${esc(String(j.attempts))}</div>`).join("")}
         ${!report || report.error ? '<div class="warn">Sem diagnóstico completo. Não é possível concluir que alguma PR esteja pronta.</div>' : ""}
