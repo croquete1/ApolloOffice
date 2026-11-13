@@ -24,6 +24,9 @@ create table if not exists cm(id text primary key, t int);
 create table if not exists cost(id integer primary key, t int, day text, job int, repo text default '', w text, md text, sub int default 0, tin int default 0, tcw int default 0, tcr int default 0, tout int default 0, usd real);
 create index if not exists cost_day on cost(day);
 create index if not exists cost_job on cost(job);
+create table if not exists fix_attempts(id integer primary key, job int not null, attempt int not null, model text not null, started int not null, finished int, elapsed_ms int, outcome text not null default 'running', gate text not null default '');
+create index if not exists fix_attempts_started on fix_attempts(started);
+create index if not exists fix_attempts_job on fix_attempts(job, attempt);
 ";
 
 fn mig(c: &Connection) {

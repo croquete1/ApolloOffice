@@ -66,6 +66,13 @@ For optional free-model authors with Codex/Claude subscription review, see
 - **Costs** per job, worker and repository, a daily budget in USD for API keys
   (overall or per repository), and a table of which model gets merged how often
   at what cost, with a hint when a cheaper one does as well.
+- **Qwen-first Fixer with fallback**: set Fixer to `ollama:qwen3:8b` and
+  Complex bugs + fallback to `codex:gpt-6.1-luna`. With the toggle enabled,
+  ordinary work starts on Qwen and moves to Codex after a model error, invalid
+  answer, or failed verification, CI or review. Complex jobs start on the
+  configured Codex model; the independent Reviewer remains a separate worker.
+  Costs shows first-pass acceptances, escalations, gate failures and average
+  attempt time over 90 days. It stores model and timing metadata, not issue text.
 - **Sign in** with a one-time link or your Google account, notifications by
   ntfy or Discord, and automatic updates.
 
