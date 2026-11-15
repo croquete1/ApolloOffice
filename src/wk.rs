@@ -98,21 +98,14 @@ async fn scout1(a: &Ax) -> R<()> {
         let sk = skl(r["skl"].as_str().unwrap_or(""));
         let r = r["full"].as_str().unwrap_or("").to_string();
         let b = bl(a, &r);
-        if b == 0 || qn(a, &r, "'vet','ready'") >= 4 * b {
-            continue;
-        }
-        let sw = format!("sc:{r}");
         let iv = ivl(a, &r);
-        if iv > 0
+        let cooling_down = iv > 0
             && a.db
-                .kg(&sw)
+                .kg(&format!("sc:{r}"))
                 .as_i64()
                 .map(|t| now() - t < iv)
-                .unwrap_or(false)
-        {
-            continue;
-        }
-        a.db.ks(&sw, &json!(now()));
+                .unwrap_or(false);
+        let capacity = b > 0 && qn(a, &r, "'vet','ready'") < 4 * b;
         a.held("scout").await;
         a.st("scout", "work", None, "");
         let is = ghj(
@@ -130,10 +123,104 @@ async fn scout1(a: &Ax) -> R<()> {
             ],
             120,
         )
-        .await
-        .map_err(X::E)?;
+        .await;
+        let is = match is {
+            Ok(value) => match value.as_array() {
+                Some(items) => items.clone(),
+                None => {
+                    let previous = a.db.kg(&format!("iscan:{r}"));
+                    a.db.ks(
+                        &format!("iscan:{r}"),
+                        &json!({
+                            "at": previous["at"],
+                            "count": previous["count"],
+                            "limit": 200,
+                            "truncated": previous["truncated"].as_bool().unwrap_or(false),
+                            "error": "GitHub devolveu uma lista de issues inválida",
+                            "error_at": now(),
+                        }),
+                    );
+                    continue;
+                }
+            },
+            Err(error) => {
+                let previous = a.db.kg(&format!("iscan:{r}"));
+                a.db.ks(
+                    &format!("iscan:{r}"),
+                    &json!({
+                        "at": previous["at"],
+                        "count": previous["count"],
+                        "limit": 200,
+                        "truncated": previous["truncated"].as_bool().unwrap_or(false),
+                        "error": crate::sh::head(&error, 300),
+                        "error_at": now(),
+                    }),
+                );
+                a.say(
+                    "scout",
+                    &format!("{r}: não foi possível atualizar os issues do GitHub"),
+                    None,
+                );
+                continue;
+            }
+        };
+        let scan_at = now();
+        let truncated = is.len() >= 200;
+        for issue in &is {
+            let number = issue["number"].as_i64().unwrap_or(0);
+            if number <= 0 {
+                continue;
+            }
+            let labels: Vec<String> = issue["labels"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|label| label["name"].as_str().map(String::from))
+                .collect();
+            let assignees: Vec<String> = issue["assignees"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|assignee| assignee["login"].as_str().map(String::from))
+                .collect();
+            a.db.run(
+                "insert into github_issues(repo,num,title,url,author,updated,labels,assignees,seen_at,is_open,skip_reason) values(?,?,?,?,?,?,?,?,?,1,'') on conflict(repo,num) do update set title=excluded.title,url=excluded.url,author=excluded.author,labels=excluded.labels,assignees=excluded.assignees,seen_at=excluded.seen_at,is_open=1,skip_reason=case when github_issues.updated<>excluded.updated then '' else github_issues.skip_reason end,updated=excluded.updated",
+                pa![
+                    r.clone(),
+                    number,
+                    issue["title"].as_str().unwrap_or("").to_string(),
+                    issue["url"].as_str().unwrap_or("").to_string(),
+                    issue["author"]["login"].as_str().unwrap_or("").to_string(),
+                    issue["updatedAt"].as_str().unwrap_or("").to_string(),
+                    json!(labels).to_string(),
+                    json!(assignees).to_string(),
+                    scan_at,
+                ],
+            );
+        }
+        if !truncated {
+            a.db.run(
+                "update github_issues set is_open=0 where repo=? and seen_at<? and is_open=1",
+                pa![r.clone(), scan_at],
+            );
+        }
+        a.db.ks(
+            &format!("iscan:{r}"),
+            &json!({
+                "at": scan_at,
+                "count": is.len(),
+                "limit": 200,
+                "truncated": truncated,
+                "error": null,
+                "error_at": null,
+            }),
+        );
+        if !capacity || cooling_down {
+            continue;
+        }
+        a.db.ks(&format!("sc:{r}"), &json!(now()));
         let mut nw = vec![];
-        for i in is.as_array().cloned().unwrap_or_default() {
+        for i in is {
             let n = i["number"].as_i64().unwrap_or(0);
             let up = i["updatedAt"].as_str().unwrap_or("").to_string();
             if i["assignees"]
@@ -141,6 +228,19 @@ async fn scout1(a: &Ax) -> R<()> {
                 .map(|x| x.iter().any(|y| y["login"].as_str() != Some(&me)))
                 .unwrap_or(false)
             {
+                let assignees = i["assignees"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|x| x["login"].as_str())
+                    .filter(|login| *login != me.as_str())
+                    .map(|login| format!("@{login}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                a.db.run(
+                    "update github_issues set skip_reason=? where repo=? and num=?",
+                    pa![format!("Atribuída a {assignees}"), r.clone(), n],
+                );
                 continue;
             }
             if a.db.n(
@@ -161,20 +261,30 @@ async fn scout1(a: &Ax) -> R<()> {
                 continue;
             }
             let nx = if fe { &nf } else { &no };
-            if i["labels"]
-                .as_array()
-                .map(|l| {
-                    l.iter().any(|x| {
-                        let ln = x["name"].as_str().unwrap_or("");
-                        nx.is_match(ln)
-                            || hold.is_match(ln)
-                            || sk.iter().any(|k| k == &ln.to_lowercase())
-                    })
+            let matching_label = i["labels"].as_array().and_then(|l| {
+                l.iter().find_map(|x| {
+                    let label = x["name"].as_str().unwrap_or("");
+                    (nx.is_match(label)
+                        || hold.is_match(label)
+                        || sk.iter().any(|k| k == &label.to_lowercase()))
+                    .then(|| label.to_string())
                 })
-                .unwrap_or(false)
-                || (!fe && ft.is_match(i["title"].as_str().unwrap_or("")))
-            {
-                a.db.run("insert into seen(repo,num,upd) values(?,?,?) on conflict do update set upd=excluded.upd", pa![r.clone(), n, up]);
+            });
+            let filtered_title = !fe && ft.is_match(i["title"].as_str().unwrap_or(""));
+            if matching_label.is_some() || filtered_title {
+                let reason = matching_label
+                    .map(|label| format!("Ignorado pela etiqueta ‘{label}’"))
+                    .unwrap_or_else(|| {
+                        "Ignorado pelo formato do título de pedido de funcionalidade".into()
+                    });
+                a.db.run(
+                    "update github_issues set skip_reason=? where repo=? and num=?",
+                    pa![reason.clone(), r.clone(), n],
+                );
+                a.db.run(
+                    "insert into seen(repo,num,upd,why) values(?,?,?,?) on conflict do update set upd=excluded.upd,why=excluded.why",
+                    pa![r.clone(), n, up, reason],
+                );
                 continue;
             }
             nw.push(i);
@@ -187,7 +297,15 @@ async fn scout1(a: &Ax) -> R<()> {
                 .map(|x| !crate::gh::live(x).is_empty())
                 .unwrap_or(false)
             {
-                a.db.run("insert into seen(repo,num,upd) values(?,?,?) on conflict do update set upd=excluded.upd", pa![r.clone(), n, i["updatedAt"].as_str().unwrap_or("").to_string()]);
+                let reason = "Já existe um pull request relacionado com este issue";
+                a.db.run(
+                    "insert into seen(repo,num,upd,why) values(?,?,?,?) on conflict do update set upd=excluded.upd,why=excluded.why",
+                    pa![r.clone(), n, i["updatedAt"].as_str().unwrap_or("").to_string(), reason],
+                );
+                a.db.run(
+                    "update github_issues set skip_reason=? where repo=? and num=?",
+                    pa![reason, r.clone(), n],
+                );
             } else {
                 nk.push(i);
             }
@@ -232,7 +350,18 @@ async fn scout1(a: &Ax) -> R<()> {
                 if js[&id]["pick"].as_bool().unwrap_or(false) {
                     pk.push(i.clone());
                 } else {
-                    a.db.run("insert into seen(repo,num,upd) values(?,?,?) on conflict do update set upd=excluded.upd", pa![r.clone(), i["number"].as_i64().unwrap_or(0), i["updatedAt"].as_str().unwrap_or("").to_string()]);
+                    let reason = js[&id]["why"]
+                        .as_str()
+                        .filter(|why| !why.trim().is_empty())
+                        .unwrap_or("Scout decidiu não encaminhar este issue para correção.");
+                    a.db.run(
+                        "insert into seen(repo,num,upd,why) values(?,?,?,?) on conflict do update set upd=excluded.upd,why=excluded.why",
+                        pa![r.clone(), i["number"].as_i64().unwrap_or(0), i["updatedAt"].as_str().unwrap_or("").to_string(), reason],
+                    );
+                    a.db.run(
+                        "update github_issues set skip_reason=? where repo=? and num=?",
+                        pa![reason, r.clone(), i["number"].as_i64().unwrap_or(0)],
+                    );
                 }
             }
             if pk.is_empty() {

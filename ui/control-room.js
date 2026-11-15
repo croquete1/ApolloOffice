@@ -35,7 +35,9 @@
     '      <button class="ao-nav-item is-active" type="button" data-target="aoOverview">Painel</button>',
     '      <button class="ao-nav-item" type="button" data-target="aoAgents">Agentes</button>',
     '      <button class="ao-nav-item" type="button" data-target="aoTasks">Tarefas</button>',
+    '      <button class="ao-nav-item" type="button" data-target="aoIssues">Issues GitHub</button>',
     '      <button class="ao-nav-item" type="button" data-target="aoPulls">Pull Requests</button>',
+    '      <button class="ao-nav-item" type="button" data-open="steward">Fila de revisão de PRs</button>',
     '      <button class="ao-nav-item" type="button" data-open="repos">Repositórios</button>',
     '      <button class="ao-nav-item" type="button" data-open="hosts">Máquinas</button>',
     '      <button class="ao-nav-item" type="button" data-open="costs">Custos</button>',
@@ -54,7 +56,7 @@
     '      <section class="ao-metrics" aria-label="Indicadores operacionais">',
     '        <div class="ao-metric"><span>Agentes a trabalhar</span><strong id="aoMetricWorkers">—</strong><small>Estados reais</small></div>',
     '        <div class="ao-metric"><span>Tarefas em aberto</span><strong id="aoMetricQueue">—</strong><small>Total registado no sistema</small></div>',
-    '        <div class="ao-metric"><span>PRs abertos (recentes)</span><strong id="aoMetricPR">—</strong><small>Até 40 PRs registados</small></div>',
+    '        <div class="ao-metric"><span>PRs abertos</span><strong id="aoMetricPR">—</strong><small>Relatório do steward</small></div>',
     '        <div class="ao-metric"><span>Correções integradas</span><strong id="aoMetricDone">—</strong><small>PRs na branch predefinida</small></div>',
     '      </section>',
     '      <section class="ao-panel ao-pipeline-panel" aria-label="Fluxo de trabalho">',
@@ -62,8 +64,8 @@
     '        <div id="aoPipeline" class="ao-pipeline"></div>',
     '      </section>',
     '      <section class="ao-operations-grid" aria-label="Operações">',
-    '        <article class="ao-panel" id="aoTasks" tabindex="-1"><div class="ao-panel-heading"><div><h2>Tarefas em aberto</h2><p>Fluxo de trabalho</p></div></div><div id="aoTasksList" class="ao-list"></div></article>',
-    '        <article class="ao-panel" id="aoPulls" tabindex="-1"><div class="ao-panel-heading"><div><h2>Pull Requests</h2><p>Revisão e integração</p></div></div><div id="aoPRList" class="ao-list"></div></article>',
+    '        <article class="ao-panel" id="aoTasks" tabindex="-1"><div class="ao-panel-heading"><div><h2>Tarefas admitidas</h2><p>Trabalho já em curso no Apollo</p></div></div><div id="aoTasksList" class="ao-list"></div><section class="ao-issues" id="aoIssues" tabindex="-1"><div class="ao-issue-heading"><div><h3>Backlog de issues GitHub</h3><p id="aoIssueSummary">À espera do Scout</p></div></div><div id="aoIssueList" class="ao-issue-list"></div></section></article>',
+    '        <article class="ao-panel" id="aoPulls" tabindex="-1"><div class="ao-panel-heading"><div><h2>Pull Requests</h2><p>Estado, bloqueios e próxima ação</p></div></div><div id="aoPRList" class="ao-list"></div><button type="button" class="ao-pr-queue" data-open="steward">Abrir fila completa do steward</button></article>',
     '        <article class="ao-panel" id="aoActivity"><div class="ao-panel-heading"><div><h2>Atividade recente</h2><p>Eventos do sistema</p></div></div><div id="aoEventList" class="ao-list"></div></article>',
     '      </section>',
     '      <section class="ao-primary-grid" aria-label="Escritório e agentes">',
@@ -390,13 +392,19 @@
    * @param {object} s Latest server state.
    */
   const renderLists = (s) => {
-    const q = filtered(s.q), prs = filtered(s.pr);
+    const q = filtered(s.q);
+    const steward = s.pr_steward || {};
+    const stewardHasReport = safeArray(steward.repos).some((repo) => Number(repo.at || 0) > 0);
+    const prs = filtered(stewardHasReport ? steward.prs : s.pr);
+    const issues = filtered(s.issue_backlog);
+    const issueSummary = filtered(s.issue_summary);
     const totals = countTotals(s);
     byId("aoMetricQueue").textContent = formatNum(totals.active);
-    byId("aoMetricPR").textContent = formatNum(safeArray(s.pr).filter((x) => x.st === "open").length);
+    const selectedSteward = filtered(steward.repos).find((repo) => Number(repo.at || 0) > 0);
+    byId("aoMetricPR").textContent = formatNum(stewardHasReport ? (selectedRepo ? selectedSteward?.total || 0 : steward.total) : (s.pr_counts?.open ?? safeArray(s.pr).filter((x) => x.st === "open").length));
     byId("aoMetricDone").textContent = s.delivery?.merged_fixes == null
       ? "—" : formatNum(s.delivery.merged_fixes);
-    const signature = JSON.stringify([selectedRepo, q, prs, safeArray(s.ev).slice(0, 8)]);
+    const signature = JSON.stringify([selectedRepo, q, prs, issues, issueSummary, s.pr_steward, s.pr_counts, safeArray(s.ev).slice(0, 8)]);
     if (signature === lastListSignature) return;
     lastListSignature = signature;
     // A backend update should not unexpectedly reset keyboard navigation.
@@ -412,8 +420,19 @@
     byId("aoTasksList").innerHTML = q.length ? q.slice(0, 7).map((j) =>
       rowHTML(j.title, j.repo + (j.num ? " · #" + j.num : "") + " · " + (A.workLabel ? A.workLabel(j.work_class) : j.kind), stageLabels[j.st] || j.st, "data-job", j.id)).join("") :
       '<p class="ao-empty">Sem tarefas em aberto.</p>';
+    const issueTotals = Object.fromEntries(["open", "waiting", "queued", "pr_open", "blocked"].map((key) => [key, issueSummary.reduce((sum, item) => sum + Number(item[key] || 0), 0)]));
+    const scanTimes = issueSummary.map((item) => Number(item.scan?.at || 0)).filter(Boolean);
+    const scanErrors = issueSummary.filter((item) => item.scan?.error);
+    const intakeNotReady = issueSummary.filter((item) => !item.intake_ready);
+    const scanNote = scanTimes.length ? "Última leitura " + datum(Math.max(...scanTimes)) : "À espera do primeiro scan do Scout";
+    const backlogNote = `${issueTotals.open}${issueSummary.some((item) => item.scan?.truncated) ? "+" : ""} abertos · ${issueTotals.waiting} por triagem · ${issueTotals.queued} no Apollo · ${issueTotals.pr_open} com PR · ${scanNote}${scanErrors.length ? " · erro: " + scanErrors.map((item) => item.repo).join(", ") : ""}${intakeNotReady.length ? " · CI por configurar: " + intakeNotReady.map((item) => item.repo).join(", ") : ""}`;
+    byId("aoIssueSummary").textContent = backlogNote;
+    const issueState = {waiting:"Por triar", reviewed:"Avaliado", filtered:"Ignorado", queued:"No Apollo", blocked:"Bloqueado", pr_open:"PR aberto", integrated:"Integrado", done:"Concluído"};
+    byId("aoIssueList").innerHTML = issues.length ? issues.slice(0, 40).map((issue) =>
+      rowHTML(issue.title, issue.repo + " · #" + issue.num + (issue.reason ? " · " + issue.reason : ""), issueState[issue.status] || issue.status, "data-pr-url", issue.url, "ao-issue-row")).join("") :
+      '<p class="ao-empty">' + (intakeNotReady.length ? "Configura um comando CI em Repositórios para o Scout iniciar o intake." : selectedRepo ? "Sem issues em cache neste repositório." : "Sem issues em cache; confirma se o intake está ativo em Repositórios.") + '</p>';
     byId("aoPRList").innerHTML = prs.length ? prs.slice(0, 7).map((p) =>
-      rowHTML(p.title, p.repo + " · #" + p.num, p.st === "open" ? "Aberto" : p.st === "merged" ? "Integrado" : "Fechado", "data-pr-url", p.url || "")).join("") :
+      rowHTML(p.title, p.repo + " · #" + p.num + (p.next_action ? " · " + p.next_action : ""), p.state || p.st || "Aberto", "data-pr-url", p.url || "")).join("") :
       '<p class="ao-empty">Sem pull requests registados.</p>';
     byId("aoEventList").innerHTML = safeArray(s.ev).slice(0, 8).map((e) =>
       '<div class="ao-event"><time>' + datum(e.t) + '</time><span class="ao-event-agent">' + escapeHTML(names[e.w] || e.w) +
@@ -428,7 +447,7 @@
     }
   };
   const renderRepos = (s) => {
-    const repos = [...new Set(safeArray(s.q).concat(safeArray(s.dn), safeArray(s.pr)).map((v) => v.repo).filter(Boolean))].sort();
+    const repos = [...new Set(safeArray(s.q).concat(safeArray(s.dn), safeArray(s.pr), safeArray(s.issue_summary)).map((v) => v.repo).filter(Boolean))].sort();
     if (selectedRepo && !repos.includes(selectedRepo)) selectedRepo = "";
     const signature = JSON.stringify([repos, selectedRepo]);
     if (signature === lastRepoSignature) return;
@@ -704,7 +723,7 @@
     }
   };
   document.addEventListener("keydown", onModalKeydown);
-  const handlers = {repos:"bRepos",hosts:"bHosts",costs:"bCost",settings:"bSet"};
+  const handlers = {repos:"bRepos",hosts:"bHosts",costs:"bCost",settings:"bSet",steward:"bSteward"};
   app.addEventListener("click", (event) => {
     const node = event.target.closest("[data-role],[data-agent],[data-job],[data-pr-url],[data-target],[data-open]");
     if (!node) return;
