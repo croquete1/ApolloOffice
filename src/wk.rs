@@ -353,10 +353,13 @@ async fn scout1(a: &Ax) -> R<()> {
                     let reason = js[&id]["why"]
                         .as_str()
                         .filter(|why| !why.trim().is_empty())
-                        .unwrap_or("Scout decidiu não encaminhar este issue para correção.");
+                        .map(String::from)
+                        .unwrap_or_else(|| {
+                            "Scout decidiu não encaminhar este issue para correção.".into()
+                        });
                     a.db.run(
                         "insert into seen(repo,num,upd,why) values(?,?,?,?) on conflict do update set upd=excluded.upd,why=excluded.why",
-                        pa![r.clone(), i["number"].as_i64().unwrap_or(0), i["updatedAt"].as_str().unwrap_or("").to_string(), reason],
+                        pa![r.clone(), i["number"].as_i64().unwrap_or(0), i["updatedAt"].as_str().unwrap_or("").to_string(), reason.clone()],
                     );
                     a.db.run(
                         "update github_issues set skip_reason=? where repo=? and num=?",

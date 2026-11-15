@@ -46,6 +46,8 @@ function scene() {
   createList("aoTasksList");
   createList("aoPRList");
   createList("aoEventList");
+  elements.aoIssueSummary={textContent:""};
+  elements.aoIssueList={innerHTML:""};
   for (const id of ["aoMetricQueue","aoMetricPR","aoMetricDone","aoTasks","aoPulls"]) {
     elements[id]={textContent:"",focus(){document.activeElement=this}};
   }
