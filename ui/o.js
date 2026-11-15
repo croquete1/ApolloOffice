@@ -521,6 +521,43 @@
     return `<div class="row queue-row${j.st === "approve" ? " apr" : ""}">${j.st === "approve" && x ? `<input type="checkbox" class="bk" data-k="${j.id}" ${sel.has(j.id) ? "checked" : ""} aria-label="select">` : ""}<span class="pill ${STC[j.st] || ""}" title="${esc(kind + " · " + j.st)}">${esc(j.st)}</span><div class="ti"><a class="a" href="#" data-j="${j.id}" title="${esc(j.title)}">${esc(j.title)}</a><div class="queue-meta"><span class="queue-kind" title="${esc(kind)}">${esc(kind)}</span>${reason ? `<span class="queue-why${retry?.error ? " bad2" : ""}" title="${esc(reason)}">${esc(reason)}</span>` : ""}</div></div><span class="rp"><span class="queue-repo" title="${esc(repo)}">${esc(repo)}</span>${j.st === "approve" ? ` <button class="go" data-j="${j.id}">review</button>` : ""}${x && j.st !== "approve" ? ` <button class="x" data-d="${j.id}" title="drop">✕</button>` : ""}${!x && j.st === "drop" && j.kind === "fix" ? ` <button class="x" data-rq="${j.id}" title="try again" ${retry?.pending ? "disabled" : ""}>↻</button>` : ""}</span></div>`;
   };
 
+  const renderIssueBacklog = () => {
+    if (!S) return;
+    const rows = S.issue_backlog || [];
+    const summaries = S.issue_summary || [];
+    const totals = Object.fromEntries(["open", "waiting", "reviewed", "filtered", "queued", "blocked", "pr_open", "integrated", "done"].map((key) => [key, summaries.reduce((sum, item) => sum + Number(item[key] || 0), 0)]));
+    const truncated = summaries.some((item) => item.scan?.truncated);
+    const errors = summaries.filter((item) => item.scan?.error);
+    const ready = summaries.some((item) => item.scan?.at);
+    const intakeNotReady = summaries.filter((item) => !item.intake_ready);
+    const issueCount = `${totals.open}${truncated ? "+" : ""} open`;
+    const stages = [totals.waiting && `${totals.waiting} to triage`, totals.queued && `${totals.queued} in Apollo`, totals.pr_open && `${totals.pr_open} with PR`].filter(Boolean);
+    $("issueSummary").textContent = [issueCount, ...stages].join(" · ") || (ready ? "no open issues" : "waiting for Scout");
+    const scans = summaries.map((item) => item.scan?.at || 0).filter(Boolean);
+    const lastScan = scans.length ? new Date(Math.max(...scans)).toLocaleString() : "not scanned yet";
+    const notes = [`Last GitHub scan: ${lastScan}`, "showing up to 80 cached issues, most actionable first"];
+    if (truncated) notes.push("at least one repository reached the 200 issue scan limit");
+    if (errors.length) notes.push(`scan errors for ${errors.map((item) => item.repo).join(", ")}; showing last successful data`);
+    if (!summaries.length) notes.push("enable issue intake for a repository in Repos to start scanning");
+    else if (intakeNotReady.length) notes.push(`Scout needs a CI command configured for ${intakeNotReady.map((item) => item.repo).join(", ")}`);
+    $("issueScan").classList.toggle("bad2", errors.length > 0);
+    $("issueScan").textContent = notes.join(" · ");
+    const query = $("issueFilter").value.trim().toLocaleLowerCase();
+    const matches = rows.filter((issue) => !query || [issue.repo, issue.num, issue.title, issue.status, issue.reason, issue.author].join(" ").toLocaleLowerCase().includes(query));
+    const status = {
+      waiting: ["to triage", "wait"], reviewed: ["reviewed", ""], filtered: ["filtered", "filtered"],
+      queued: ["in Apollo", "queued"], blocked: ["blocked", "blocked"], pr_open: ["PR open", "info"],
+      integrated: ["merged", "ok"], done: ["done", "ok"],
+    };
+    $("githubIssues").innerHTML = matches.length ? matches.map((issue) => {
+      const [label, cls] = status[issue.status] || [issue.status || "unknown", ""];
+      const repo = issue.repo.split("/")[1] || issue.repo;
+      const detail = issue.reason || (issue.job_stage ? `Apollo · ${issue.job_stage}` : "");
+      const pr = issue.pr_url ? ` · <a href="${esc(issue.pr_url)}" target="_blank" rel="noopener">view PR</a>` : "";
+      return `<div class="issue-row"><span class="pill ${cls}" title="${esc(issue.status)}">${esc(label)}</span><div class="ti"><a class="a" href="${esc(issue.url)}" target="_blank" rel="noopener" title="${esc(issue.title)}">${esc(issue.title)}</a></div><div class="issue-meta" title="${esc([issue.repo, detail].filter(Boolean).join(" · "))}">${esc(`${repo}#${issue.num}`)}${detail ? ` · ${esc(detail)}` : ""}${pr}</div></div>`;
+    }).join("") : `<div class="empty">${query ? "no matching GitHub issues" : ready ? "no cached open issues" : intakeNotReady.length ? "Configure a CI command in Repos to enable Scout intake" : "Scout has not scanned issues yet"}</div>`;
+  };
+
   const lists = () => {
     const q = S.q;
     // Keep errors and pending retries through state refreshes, but discard
@@ -541,8 +578,19 @@
     const empty = query ? (!queued.length && !recent.length ? `<div class="empty">no matching work</div>` : "") : !q.length ? `<div class="empty">nothing waiting</div>` : "";
     $("queue").innerHTML = bk + queued.slice(0, 16).map((j) => jrow(j, true)).join("") +
       (recent.length ? `<div class="sub">recent${query ? " · " + recent.length : ""}</div>` + recent.slice(0, 12).map((j) => jrow(j, false)).join("") : "") + empty;
-    const op = S.pr.filter((p) => p.st === "open").length, mg = S.pr.filter((p) => p.st === "merged").length;
-    $("prn").textContent = `${op} open · ${mg} merged`;
+    renderIssueBacklog();
+    const steward = S.pr_steward || {};
+    const counts = S.pr_counts || {};
+    const hasStewardReport = (steward.repos || []).some((repo) => Number(repo.at || 0) > 0);
+    const op = hasStewardReport ? Number(steward.total || 0) : Number(counts.open ?? S.pr.filter((p) => p.st === "open").length);
+    const mg = Number(counts.merged ?? S.pr.filter((p) => p.st === "merged").length);
+    const prStats = [`${op} open`, `${mg} merged`];
+    if (hasStewardReport) {
+      prStats.push(`${Number(steward.final_check || 0)} need final checks`);
+      if (Number(steward.review_requested || 0)) prStats.push(`${Number(steward.review_requested)} changes requested`);
+    }
+    $("prn").textContent = prStats.join(" · ");
+    $("prn").title = hasStewardReport ? `Steward scan: ${(steward.repos || []).filter((repo) => repo.at).map((repo) => `${repo.repo} ${new Date(repo.at).toLocaleString()}`).join(" · ")}` : "Counts from locally recorded pull requests; steward has not completed a scan yet";
     $("prs").innerHTML = S.pr.length ? S.pr.slice(0, 16).map((p) => `<div class="row"><span class="pill ${p.st === "merged" ? "ok" : p.st === "closed" ? "bad" : "info"}">${esc(p.st)}</span><div class="ti"><a class="a" href="#" data-u="${esc(p.url)}">${esc(p.title)}</a></div><span class="rp">${esc(rn({ repo: p.repo, num: p.num }))}</span></div>`).join("") : `<div class="empty">no pull requests yet</div>`;
     const m = Object.fromEntries(S.mg.map((x) => [x.d, x.n]));
     const days = [...Array(30)].map((_, i) => new Date(Date.now() - (29 - i) * 86400000).toISOString().slice(0, 10));
@@ -551,6 +599,7 @@
     $("log").innerHTML = S.ev.slice(0, 30).map((e) => `<div><span class="tm">${hm(e.t)}</span><span style="color:${SK[e.w] ? hl(e.w) : "inherit"}">${esc(NM[e.w] || e.w)}</span><span>${esc(e.m)}</span></div>`).join("");
   };
   $("queueFilter").addEventListener("input", () => { if (S) lists(); });
+  $("issueFilter").addEventListener("input", () => { if (S) renderIssueBacklog(); });
 
   const chips = () => {
     const o = S.o;

@@ -132,6 +132,146 @@ fn page(b: &str) -> Response<Body> {
     )
 }
 
+const ISSUE_STATE_CTE: &str = r#"
+with issue_state as (
+    select i.repo,i.num,i.title,i.url,i.author,i.updated,i.labels,
+        case
+            when j.st='drop' then 'blocked'
+            when j.st='done' and p.st='open' then 'pr_open'
+            when j.st='done' and p.st='merged' then 'integrated'
+            when j.st='done' then 'done'
+            when j.id is not null then 'queued'
+            when coalesce(i.skip_reason,'')<>'' then 'filtered'
+            when s.upd=i.updated then 'reviewed'
+            else 'waiting'
+        end status,
+        case
+            when j.id is not null then coalesce(j.why,'')
+            when coalesce(i.skip_reason,'')<>'' then i.skip_reason
+            when s.upd=i.updated then coalesce(nullif(s.why,''),'Scout já avaliou esta versão; uma nova atualização volta a ser triada.')
+            else ''
+        end reason,
+        coalesce(j.st,'') job_stage,
+        coalesce(j.id,0) job_id,
+        coalesce(p.url,'') pr_url,
+        i.seen_at
+    from github_issues i
+    left join jobs j on j.id=(select id from jobs where repo=i.repo and num=i.num and kind='fix' order by id desc limit 1)
+    left join prs p on p.repo=j.repo and p.num=j.pr
+    left join seen s on s.repo=i.repo and s.num=i.num
+    where i.is_open=1 and exists(select 1 from rp where full=i.repo and on_=1 and iss=1)
+)
+"#;
+
+fn issue_backlog(a: &Ax) -> (Vec<Value>, Vec<Value>) {
+    let counts = a.db.all(
+        &format!("{ISSUE_STATE_CTE} select repo,status,count(*) n from issue_state group by repo,status order by repo,status"),
+        pa![],
+    );
+    let repos = a.db.all(
+        "select full,ci from rp where on_=1 and iss=1 order by full",
+        pa![],
+    );
+    let mut summary = Vec::with_capacity(repos.len());
+    for row in repos {
+        let repo = row["full"].as_str().unwrap_or("");
+        let mut item = json!({
+            "repo": repo,
+            "intake_ready": !row["ci"].as_str().unwrap_or("").trim().is_empty(),
+            "open": 0,
+            "waiting": 0,
+            "reviewed": 0,
+            "filtered": 0,
+            "queued": 0,
+            "blocked": 0,
+            "pr_open": 0,
+            "integrated": 0,
+            "done": 0,
+            "scan": a.db.kg(&format!("iscan:{repo}")),
+        });
+        for count in counts.iter().filter(|x| x["repo"].as_str() == Some(repo)) {
+            let status = count["status"].as_str().unwrap_or("");
+            let n = count["n"].as_i64().unwrap_or(0);
+            item["open"] = json!(item["open"].as_i64().unwrap_or(0) + n);
+            if item.get(status).is_some() {
+                item[status] = json!(n);
+            }
+        }
+        summary.push(item);
+    }
+    let rows = a.db.all(
+        &format!("{ISSUE_STATE_CTE} select repo,num,title,url,author,updated,labels,status,reason,job_stage,job_id,pr_url,seen_at from issue_state order by case status when 'waiting' then 0 when 'blocked' then 1 when 'queued' then 2 when 'pr_open' then 3 when 'reviewed' then 4 when 'filtered' then 5 else 6 end, updated asc limit 80"),
+        pa![],
+    );
+    (rows, summary)
+}
+
+fn pr_steward_state(a: &Ax) -> Value {
+    let repos =
+        a.db.all("select full from rp where on_=1 order by full", pa![]);
+    let mut summaries = Vec::with_capacity(repos.len());
+    let mut prs = Vec::new();
+    let mut total = 0_i64;
+    let mut review_requested = 0_i64;
+    let mut ci_failed = 0_i64;
+    let mut draft = 0_i64;
+    let mut overlap = 0_i64;
+    let mut blocked = 0_i64;
+    let mut final_check = 0_i64;
+    for row in repos {
+        let repo = row["full"].as_str().unwrap_or("");
+        let report = a.db.kg(&format!("steward:{repo}"));
+        let summary = &report["summary"];
+        let report_total = summary["total"].as_i64().unwrap_or(0);
+        let report_blocked = summary["blocked"].as_i64().unwrap_or(report_total);
+        total += report_total;
+        review_requested += summary["review_requested"].as_i64().unwrap_or(0);
+        ci_failed += summary["ci_failed"].as_i64().unwrap_or(0);
+        draft += summary["draft"].as_i64().unwrap_or(0);
+        overlap += summary["overlap"].as_i64().unwrap_or(0);
+        blocked += report_blocked;
+        final_check += (report_total - report_blocked).max(0);
+        summaries.push(json!({
+            "repo": repo,
+            "at": report["at"],
+            "total": report_total,
+            "review_requested": summary["review_requested"],
+            "ci_failed": summary["ci_failed"],
+            "draft": summary["draft"],
+            "overlap": summary["overlap"],
+            "blocked": report_blocked,
+            "final_check": (report_total - report_blocked).max(0),
+            "error": a.db.kg(&format!("steward:error:{repo}")),
+        }));
+        if let Some(rows) = report["prs"].as_array() {
+            for pr in rows {
+                prs.push(json!({
+                    "repo": repo,
+                    "num": pr["number"],
+                    "title": pr["title"],
+                    "url": pr["url"],
+                    "state": pr["state"],
+                    "priority": pr["priority"],
+                    "next_action": pr["next_action"],
+                }));
+            }
+        }
+    }
+    prs.sort_by_key(|pr| pr["priority"].as_i64().unwrap_or(9));
+    prs.truncate(40);
+    json!({
+        "total": total,
+        "review_requested": review_requested,
+        "ci_failed": ci_failed,
+        "draft": draft,
+        "overlap": overlap,
+        "blocked": blocked,
+        "final_check": final_check,
+        "repos": summaries,
+        "prs": prs,
+    })
+}
+
 fn state(a: &Ax) -> Value {
     let d = crate::db::day();
     let mut tk = json!({});
@@ -295,6 +435,15 @@ fn state(a: &Ax) -> Value {
         &format!("select id,repo,num,kind,title,url,st,why,pr,t1,{class} work_class from jobs where st in ('done','drop') order by t1 desc limit 25"),
         pa![],
     );
+    let (issue_backlog, issue_summary) = issue_backlog(a);
+    let pr_steward = pr_steward_state(a);
+    let mut pr_counts = json!({"open": 0, "merged": 0, "closed": 0});
+    for row in a.db.all("select st,count(*) n from prs group by st", pa![]) {
+        let status = row["st"].as_str().unwrap_or("");
+        if pr_counts.get(status).is_some() {
+            pr_counts[status] = row["n"].clone();
+        }
+    }
     json!({
         "t": now(), "v": crate::app::V,
         "o": o, "w": wv, "fl": fl, "ln": ln, "cil": cil, "hst": hst,
@@ -308,7 +457,11 @@ fn state(a: &Ax) -> Value {
         "hs": a.db.all("select id, ln, dk, on_ from hs order by id='local' desc, id", pa![]),
         "q": queue,
         "dn": finished,
+        "issue_backlog": issue_backlog,
+        "issue_summary": issue_summary,
         "pr": a.db.all("select repo,num,st,title,url,upd,merged from prs order by t0 desc limit 40", pa![]),
+        "pr_counts": pr_counts,
+        "pr_steward": pr_steward,
         "mg": a.db.all("select substr(merged,1,10) d, count(*) n from prs where merged is not null and merged >= date('now','-30 day') group by 1 order by 1", pa![]),
         "ev": a.db.all("select t,w,m,j from ev order by id desc limit 60", pa![]),
         "n": Value::Object(a.db.all("select st, count(*) n from jobs group by st", pa![]).into_iter().map(|x| (x["st"].as_str().unwrap_or("").to_string(), x["n"].clone())).collect()),

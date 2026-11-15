@@ -18,6 +18,8 @@ create table if not exists jobs(id integer primary key, repo text, num int, kind
 create index if not exists jobs_st on jobs(st);
 create table if not exists ev(id integer primary key, t int, w text, m text, j int);
 create table if not exists prs(repo text, num int, st text, title text, url text, upd text, merged text, d text default '{}', t0 int, primary key(repo, num));
+create table if not exists github_issues(repo text not null, num int not null, title text not null, url text not null, author text default '', updated text default '', labels text default '[]', assignees text default '[]', seen_at int not null default 0, is_open int not null default 1, skip_reason text default '', primary key(repo, num));
+create index if not exists github_issues_open on github_issues(repo,is_open,updated);
 create table if not exists tok(day text, w text, tin int default 0, tout int default 0, primary key(day, w));
 create table if not exists seen(repo text, num int, upd text, primary key(repo, num));
 create table if not exists cm(id text primary key, t int);
@@ -50,6 +52,7 @@ fn mig(c: &Connection) {
         "alter table rp add column auto_recover_drops int default 0",
         [],
     );
+    let _ = c.execute("alter table seen add column why text default ''", []);
 }
 
 pub type P = Vec<Box<dyn ToSql + Send>>;
