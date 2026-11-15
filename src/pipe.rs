@@ -2157,9 +2157,7 @@ async fn fix(a: &Ax, j: &mut Job, fb0: String, k0: u64) -> R<Value> {
         let c = cx(a, j);
         let md = if route_on {
             plan[k as usize].clone()
-        } else if c {
-            complex_model.clone()
-        } else if fallback && k > 0 {
+        } else if c || (fallback && k > 0) {
             complex_model.clone()
         } else {
             primary.clone()

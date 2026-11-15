@@ -68,7 +68,7 @@ test("fix jobs outrank hunts and capacity is reserved for pending fixes", () => 
   assert.match(panels, /data-retry-failures/);
   assert.match(panels, /Não foi possível carregar os diagnósticos/);
   assert.match(web, /let reason = if !idle \{/);
-  assert.match(original, /textContent = !wk && w\.idle_reason/);
+  assert.match(original, /const detail = !wk && w\.idle_reason/);
   assert.match(original, /w\.idle_reason/);
   assert.match(modern, /w\.idle_reason/);
   assert.match(modern, /s\.ops\?\.blocked_hunts/);

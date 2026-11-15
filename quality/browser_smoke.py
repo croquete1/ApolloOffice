@@ -247,12 +247,17 @@ class Handler(SimpleHTTPRequestHandler):
     if (!scenario || !canvas) return;
     var text = hoverHost(canvas);
     if (!text.includes("este computador"))
-      errors.push("Tooltip do host não abriu através do canvas");
+      errors.push("Tooltip do host não abriu através do canvas: " +
+        JSON.stringify(text) + " · canvas " +
+        JSON.stringify(canvas.getBoundingClientRect().toJSON()) + " · stage " +
+        JSON.stringify(document.getElementById("stage")?.getBoundingClientRect().toJSON()) +
+        " · viewport " + window.innerWidth + "x" + window.innerHeight);
     if (scenario === "fresh" || scenario === "skew") {
       if (!text.includes("online") || !text.includes("carga média") ||
           !text.includes("RAM") || !text.includes("disco") ||
           !text.includes("sensor não identificado"))
-        errors.push("Telemetria atual não foi apresentada corretamente");
+        errors.push("Telemetria atual não foi apresentada corretamente: " +
+          JSON.stringify(text));
       if (scenario === "skew" && !text.includes("0s atrás"))
         errors.push("Idade da telemetria afetada pelo relógio do navegador");
     } else if (scenario === "stale" || scenario === "future") {

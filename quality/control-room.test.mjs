@@ -50,6 +50,18 @@ test("integrated fixes count merged PRs on the tracked default branch", () => {
   assert.match(watcher, /crate::gh::meta/);
 });
 
+test("GitHub issues are shown separately from admitted Apollo jobs", () => {
+  assert.match(html, /id="queue-card"/);
+  assert.match(html, /id="issueBacklog"/);
+  assert.match(html, /id="issueFilter"/);
+  assert.match(original, /const renderIssueBacklog = \(\) =>/);
+  assert.match(original, /showing up to 80 cached issues/);
+  assert.match(original, /scan errors for/);
+  assert.match(modern, /id="aoIssues"/);
+  assert.match(modern, /Fila de revisão de PRs/);
+  assert.match(modern, /Abrir fila completa do steward/);
+});
+
 test("all ten original agents have distinct live stations", () => {
   for (const role of ["scout","guard","vet","watcher","hunter","repro","fixer","ci","reviewer","submit"]) {
     assert.match(modern, new RegExp("\\b" + role + "\\b"));
@@ -122,7 +134,8 @@ test("actual command and mood telemetry drive visual reactions", () => {
 
 test("metrics and host connectivity never imply unavailable totals", () => {
   assert.match(modern, /Total registado no sistema/);
-  assert.match(modern, /Até 40 PRs registados/);
+  assert.match(modern, /PRs abertos/);
+  assert.match(modern, /Relatório do steward/);
   assert.match(modern, /countTotals\(s\)/);
   assert.match(modern, /key !== "done" && key !== "drop"/);
   assert.match(modern, /age < 120_000/);
