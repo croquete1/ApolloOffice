@@ -78,6 +78,13 @@ pub fn errm(e: &X) -> String {
     }
 }
 
+// Keep issue intake bounded while allowing repositories to exceed the former 200-item cap.
+const ISSUE_SCAN_LIMIT: usize = 500;
+
+fn issue_scan_truncated(count: usize) -> bool {
+    count >= ISSUE_SCAN_LIMIT
+}
+
 async fn scout1(a: &Ax) -> R<()> {
     need(a, "scout", &["gh"]).await?;
     a.st("scout", "work", None, "");
@@ -108,6 +115,7 @@ async fn scout1(a: &Ax) -> R<()> {
         let capacity = b > 0 && qn(a, &r, "'vet','ready'") < 4 * b;
         a.held("scout").await;
         a.st("scout", "work", None, "");
+        let issue_limit = ISSUE_SCAN_LIMIT.to_string();
         let is = ghj(
             &[
                 "issue",
@@ -117,7 +125,7 @@ async fn scout1(a: &Ax) -> R<()> {
                 "--state",
                 "open",
                 "--limit",
-                "200",
+                &issue_limit,
                 "--json",
                 "number,title,body,author,updatedAt,labels,assignees,url",
             ],
@@ -134,7 +142,7 @@ async fn scout1(a: &Ax) -> R<()> {
                         &json!({
                             "at": previous["at"],
                             "count": previous["count"],
-                            "limit": 200,
+                            "limit": ISSUE_SCAN_LIMIT,
                             "truncated": previous["truncated"].as_bool().unwrap_or(false),
                             "error": "GitHub devolveu uma lista de issues inválida",
                             "error_at": now(),
@@ -150,7 +158,7 @@ async fn scout1(a: &Ax) -> R<()> {
                     &json!({
                         "at": previous["at"],
                         "count": previous["count"],
-                        "limit": 200,
+                        "limit": ISSUE_SCAN_LIMIT,
                         "truncated": previous["truncated"].as_bool().unwrap_or(false),
                         "error": crate::sh::head(&error, 300),
                         "error_at": now(),
@@ -165,7 +173,7 @@ async fn scout1(a: &Ax) -> R<()> {
             }
         };
         let scan_at = now();
-        let truncated = is.len() >= 200;
+        let truncated = issue_scan_truncated(is.len());
         for issue in &is {
             let number = issue["number"].as_i64().unwrap_or(0);
             if number <= 0 {
@@ -209,7 +217,7 @@ async fn scout1(a: &Ax) -> R<()> {
             &json!({
                 "at": scan_at,
                 "count": is.len(),
-                "limit": 200,
+                "limit": ISSUE_SCAN_LIMIT,
                 "truncated": truncated,
                 "error": null,
                 "error_at": null,
@@ -1354,6 +1362,14 @@ mod t {
         vet_classification(&mut feature, false);
         assert_eq!(feature["opt"], false);
         assert_eq!(feature["feat"], true);
+    }
+
+    #[test]
+    fn issue_scan_covers_backlog_and_reports_the_limit_boundary() {
+        assert_eq!(ISSUE_SCAN_LIMIT, 500);
+        assert!(!issue_scan_truncated(280));
+        assert!(!issue_scan_truncated(ISSUE_SCAN_LIMIT - 1));
+        assert!(issue_scan_truncated(ISSUE_SCAN_LIMIT));
     }
 
     #[test]
