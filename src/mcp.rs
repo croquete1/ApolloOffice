@@ -6,6 +6,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 pub const BAD: &str = r"(?i)\bgit\s+(push|remote|config|credential)|\.git/(hooks|config|info)|hooksPath|fsmonitor|\bgh\b|\bcurl\b.*\|\s*(ba)?sh|\bwget\b.*\|\s*(ba)?sh|\bssh\b|\bscp\b|rm\s+-rf\s+[~/$]|\bsudo\b|security\s+find|\.ssh\b|keychain|GIT_CONFIG|extraheader";
 
+// In staged mode the office owns git history; model shell commands cannot forge
+// the required RED/GREEN commits or move the branch away from verified checkpoints.
+pub const STAGED_GIT: &str = r"(?i)\bgit\b[^|&;]*\b(commit|reset|rebase|cherry-pick|revert|merge|am|apply|stash|branch|checkout|switch|restore|tag|update-ref|update-index|commit-tree|hash-object|write-tree|fast-import|filter-branch|filter-repo|replace|notes|reflog|symbolic-ref|gc|prune|clean|mv|rm)\b";
+
 fn pa(p: &str) -> Result<String, String> {
     let s = p.trim().trim_start_matches('/');
     let mut o: Vec<&str> = vec![];
@@ -151,6 +155,9 @@ pub async fn call(a: &Ax, r: &Rn, n: &str, g: &Value) -> Result<String, String> 
             if regex::Regex::new(BAD).unwrap().is_match(&c) {
                 return Err("command not allowed here".into());
             }
+            if r.staged && regex::Regex::new(STAGED_GIT).unwrap().is_match(&c) {
+                return Err("git history is controlled by the office in staged mode: edit files only; the office creates the test and fix commits".into());
+            }
             let m = g["min"].as_u64().unwrap_or(20).clamp(1, 60);
             let m = if crate::routing::enabled(a) && crate::routing::is_free(&r.md) {
                 m.min(3)
@@ -293,6 +300,7 @@ mod t {
             dir: root.display().to_string(),
             w: String::new(),
             md: String::new(),
+            staged: false,
         };
         let out = call(
             &a,
@@ -314,6 +322,7 @@ mod t {
             dir: root.join("missing").display().to_string(),
             w: String::new(),
             md: String::new(),
+            staged: false,
         };
         let out = call(&a, &missing, "sh", &json!({"cmd":"echo OUTSIDE_WORKSPACE"}))
             .await
@@ -364,5 +373,36 @@ mod t {
         ] {
             assert!(!r.is_match(c), "{c}");
         }
+    }
+    #[test]
+    fn staged_git_blocks_history_mutations_but_not_inspection_or_tests() {
+        let r = regex::Regex::new(STAGED_GIT).unwrap();
+        for c in ["git commit -m x", "git reset --hard HEAD~1", "git rebase -i main", "git cherry-pick abc", "git checkout -B x base", "git revert HEAD", "git commit-tree t", "git update-ref refs/heads/x y", "git clean -fdq", "FOO=1 git  commit --amend"] {
+            assert!(r.is_match(c), "should block: {c}");
+        }
+        for c in ["git status --porcelain", "git diff HEAD", "git log --oneline", "git show HEAD", "git rev-parse HEAD", "git grep -n foo", "git ls-files", "bash t/run.sh", "pytest -k foo", "cargo test"] {
+            assert!(!r.is_match(c), "should allow: {c}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn staged_run_refuses_model_commit_but_allows_test_run() {
+        let root = std::env::temp_dir().join(format!("apollo-staged-sh-{}", hex::encode(rand::random::<[u8; 8]>())));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = crate::db::Db::mem();
+        db.run("insert into hs(id,on_) values('local',1)", crate::pa![]);
+        let a = std::sync::Arc::new(crate::app::App::new(db, root.clone(), 1, "x".into()));
+        let r = Rn { h: "local".into(), dir: root.display().to_string(), staged: true, ..Default::default() };
+        let err = call(&a, &r, "sh", &json!({"cmd": "git commit -m sneaky"})).await.unwrap_err();
+        assert!(err.contains("controlled by the office"), "{err}");
+        // non-git work still runs in staged mode
+        let ok = call(&a, &r, "sh", &json!({"cmd": "echo hello"})).await.unwrap();
+        assert!(ok.contains("hello") && ok.contains("[exit 0]"), "{ok}");
+        // without staged the same command is permitted (legacy behaviour unchanged)
+        let legacy = Rn { h: "local".into(), dir: root.display().to_string(), ..Default::default() };
+        let out = call(&a, &legacy, "sh", &json!({"cmd": "git init -q && git status --porcelain; echo done"})).await.unwrap();
+        assert!(out.contains("done"), "{out}");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

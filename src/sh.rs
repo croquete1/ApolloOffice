@@ -381,7 +381,27 @@ pub fn ho(a: &App, id: &str) -> Option<Ho> {
         .map(|v| Ho::of(&v))
 }
 
-pub const CT: &str = "apollo-office";
+/// Execution container name. Override it when multiple Apollo Office instances
+/// share a Docker daemon so each instance gets its own worker and volumes.
+pub fn ct() -> String {
+    let configured = std::env::var("APOLLO_OFFICE_CONTAINER").ok();
+    match configured {
+        None => "apollo-office".into(),
+        Some(name)
+            if !name.is_empty()
+                && name.len() <= 128
+                && name.as_bytes()[0].is_ascii_alphanumeric()
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-')) =>
+        {
+            name
+        }
+        // An invalid override must not silently fall back to the official
+        // container, which could defeat per-instance isolation.
+        Some(_) => "apollo-office-invalid-container".into(),
+    }
+}
 pub fn im() -> String {
     use sha2::{Digest, Sha256};
     format!(
@@ -541,7 +561,7 @@ async fn hxo(
     };
     let i = format!("{PRE}{}{npm_env}{body}", jobs(a, &h));
     let mut command: Vec<String> = if h.dk {
-        vec!["docker".into(), "exec".into(), "-i".into(), CT.into()]
+        vec!["docker".into(), "exec".into(), "-i".into(), ct()]
     } else {
         vec![]
     };
@@ -592,38 +612,26 @@ pub async fn hx_maintenance(a: &App, id: &str, s: &str, t: u64) -> Out {
 
 pub const DF: &str = r#"FROM rust:1-trixie
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config libssl-dev clang cmake git curl ca-certificates procps util-linux xz-utils unzip libxdo-dev mesa-vulkan-drivers \
+    pkg-config libssl-dev clang cmake git curl ca-certificates procps xz-utils unzip libxdo-dev mesa-vulkan-drivers \
     python3 python3-pip python3-venv python3-dev golang-go \
     libasound2-dev libfontconfig1-dev libfreetype-dev libgl1-mesa-dev libgtk-3-dev libwayland-dev \
     libx11-dev libxcursor-dev libxi-dev libxkbcommon-dev libxrandr-dev libudev-dev xvfb \
     && rm -rf /var/lib/apt/lists/*
-# Debian/Trixie provides Node 20; FixFlow requires >=24.22.1 <25.
-# Changing this Dockerfile also changes im(), forcing a new worker image.
-ARG NODE_VERSION=24.22.2
-RUN set -eu; \
+RUN set -eux; \
     case "$(dpkg --print-architecture)" in \
-      amd64) node_arch=x64 ;; \
-      arm64) node_arch=arm64 ;; \
-      ppc64el) node_arch=ppc64le ;; \
-      s390x) node_arch=s390x ;; \
-      *) echo "Unsupported Node.js architecture" >&2; exit 1 ;; \
+        amd64) node_arch=x64; node_sha256=4f2b175a6d53a5c617a80dba2676238a0688cef28c6da4eba35c7d844e66fcfb ;; \
+        arm64) node_arch=arm64; node_sha256=6e51a2ada00f0011cc266f65d98922b403d7ad88f809ca2aa615a5fe1ce6e86c ;; \
+        ppc64el) node_arch=ppc64le; node_sha256=c4b446699171f64763304a0bc6fb972b0fb4acb1de5358e52b4c52a95883593a ;; \
+        s390x) node_arch=s390x; node_sha256=b5dbeb563ffb81946478fd765ae92efc21117e410e4e9b7d966bf59b00cee55d ;; \
+        *) echo "Unsupported Node.js worker architecture: $(dpkg --print-architecture)" >&2; exit 1 ;; \
     esac; \
-    archive="node-v${NODE_VERSION}-linux-${node_arch}.tar.xz"; \
-    url="https://nodejs.org/dist/v${NODE_VERSION}"; \
-    curl -fsSL --retry 3 -o "/tmp/${archive}" "${url}/${archive}"; \
-    curl -fsSL --retry 3 -o /tmp/SHASUMS256.txt "${url}/SHASUMS256.txt"; \
-    cd /tmp; \
-    grep -F "  ${archive}" SHASUMS256.txt | sha256sum -c -; \
-    mkdir -p /opt/node; \
-    tar -xJf "${archive}" -C /opt/node --strip-components=1; \
-    rm -f "${archive}" SHASUMS256.txt; \
-    test "$(/opt/node/bin/node --version)" = "v${NODE_VERSION}"
-ENV PATH="/opt/node/bin:${PATH}"
-# The build-time npm cache stays inside the image. At runtime, each command
-# uses an isolated ephemeral cache root while sharing only verified _cacache
-# downloads through the apollo-office-npm-downloads named volume.
-# Altering DF also changes the worker image identifier.
-ENV npm_config_cache=/root/.npm
+    curl -fsSL "https://nodejs.org/dist/v24.22.3/node-v24.22.3-linux-${node_arch}.tar.xz" -o /tmp/node.tar.xz; \
+    printf '%s  %s\n' "$node_sha256" /tmp/node.tar.xz | sha256sum -c -; \
+    tar -xJf /tmp/node.tar.xz --strip-components=1 -C /usr/local; \
+    rm -f /tmp/node.tar.xz; \
+    test "$(node --version)" = v24.22.3; \
+    npm install --global npm@12.2.0; \
+    test "$(npm --version)" = 12.2.0
 RUN rustup component add rustfmt clippy && rustup target add wasm32-unknown-unknown && npm install -g pnpm yarn && pip3 install --break-system-packages pytest
 ENV CARGO_TERM_COLOR=never CARGO_INCREMENTAL=0 PIP_BREAK_SYSTEM_PACKAGES=1
 WORKDIR /work
@@ -701,13 +709,34 @@ pub fn npm_cache_cleanup_cmd() -> String {
 }
 
 pub fn dkup(h: &Ho, cpu: i64) -> String {
+    let ct = ct();
+    let work = format!("{ct}-work");
+    let cargo = format!("{ct}-cargo");
+    let npm = format!("{ct}-npm-downloads");
     format!(
-        "command -v docker >/dev/null || {{ echo 'docker is not installed'; exit 2; }}\ndocker info >/dev/null 2>&1 || {{ echo 'docker is not running'; exit 2; }}\nif ! docker image inspect {im} >/dev/null 2>&1; then docker build -q -t {im} - <<'DOCKERFILE' || {{ echo 'worker image build failed; existing container preserved' >&2; exit 4; }}\n{DF}DOCKERFILE\nfi\ndocker image inspect {im} >/dev/null 2>&1 || {{ echo 'replacement worker image unavailable; existing container preserved' >&2; exit 4; }}\nold=$(docker inspect -f '{{{{.Config.Image}}}}' {CT} 2>/dev/null)\nif [ -n \"$old\" ] && [ \"$old\" != {im} ]; then docker rm -f {CT} >/dev/null 2>&1 || {{ echo 'cannot remove previous worker container' >&2; exit 5; }}; fi\nr=$(docker inspect -f '{{{{.State.Running}}}}' {CT} 2>/dev/null)\nm=$(( $(docker info --format '{{{{.MemTotal}}}}' 2>/dev/null || echo 0) / 1048576 - 3072 ))\n[ \"$m\" -lt 2048 ] && m=2048\nif [ -z \"$r\" ]; then docker run -d --name {CT} --restart unless-stopped --cpus {cpu} --cpu-shares 128 --memory \"$m\"m --memory-swap \"$m\"m -v apollo-office-work:/work -v apollo-office-cargo:/usr/local/cargo/registry -v apollo-office-npm-downloads:/var/cache/apollo-npm {im} sleep infinity >/dev/null 2>&1 || [ \"$(docker inspect -f '{{{{.State.Running}}}}' {CT} 2>/dev/null)\" = true ] || docker start {CT} >/dev/null || exit 3; elif [ \"$r\" != true ]; then docker start {CT} >/dev/null || exit 3; fi\ndocker update --cpus {cpu} --cpu-shares 128 --memory \"$m\"m --memory-swap \"$m\"m {CT} >/dev/null 2>&1\ndocker images apollo-office-build --format '{{{{.Repository}}}}:{{{{.Tag}}}}' | grep -vx {im} | xargs -r docker rmi >/dev/null 2>&1\necho ok {}\n",
+        r#"command -v docker >/dev/null || {{ echo 'docker is not installed'; exit 2; }}
+docker info >/dev/null 2>&1 || {{ echo 'docker is not running'; exit 2; }}
+if ! docker image inspect {im} >/dev/null 2>&1; then docker build -q -t {im} - <<'DOCKERFILE' || {{ echo 'worker image build failed; existing container preserved' >&2; exit 4; }}
+{DF}DOCKERFILE
+fi
+docker image inspect {im} >/dev/null 2>&1 || {{ echo 'replacement worker image unavailable; existing container preserved' >&2; exit 4; }}
+old=$(docker inspect -f '{{{{.Config.Image}}}}' {ct} 2>/dev/null)
+if [ -n "$old" ] && [ "$old" != {im} ]; then docker rm -f {ct} >/dev/null 2>&1 || {{ echo 'cannot remove previous worker container' >&2; exit 5; }}; fi
+r=$(docker inspect -f '{{{{.State.Running}}}}' {ct} 2>/dev/null)
+m=$(( $(docker info --format '{{{{.MemTotal}}}}' 2>/dev/null || echo 0) / 1048576 - 3072 ))
+[ "$m" -lt 2048 ] && m=2048
+if [ -z "$r" ]; then docker run -d --name {ct} --restart unless-stopped --cpus {cpu} --cpu-shares 128 --memory "$m"m --memory-swap "$m"m -v {work}:/work -v {cargo}:/usr/local/cargo/registry -v {npm}:/var/cache/apollo-npm {im} sleep infinity >/dev/null 2>&1 || [ "$(docker inspect -f '{{{{.State.Running}}}}' {ct} 2>/dev/null)" = true ] || docker start {ct} >/dev/null || exit 3; elif [ "$r" != true ]; then docker start {ct} >/dev/null || exit 3; fi
+docker update --cpus {cpu} --cpu-shares 128 --memory "$m"m --memory-swap "$m"m {ct} >/dev/null 2>&1
+docker images apollo-office-build --format '{{{{.Repository}}}}:{{{{.Tag}}}}' | grep -vx {im} | xargs -r docker rmi >/dev/null 2>&1
+echo ok {}"#,
         h.id,
+        ct = ct,
+        work = work,
+        cargo = cargo,
+        npm = npm,
         im = im()
     )
 }
-
 pub async fn orph(a: &Ax, id: &str) {
     let Some(h) = ho(a, id) else { return };
     if !h.dk {
@@ -1197,6 +1226,19 @@ mod t {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn worker_image_pins_supported_node_and_npm_runtime() {
+        for marker in [
+            "node-v24.22.3-linux-${node_arch}.tar.xz",
+            "npm install --global npm@12.2.0",
+            "test \"$(node --version)\" = v24.22.3",
+            "test \"$(npm --version)\" = 12.2.0",
+        ] {
+            assert!(super::DF.contains(marker), "missing worker image setting: {marker}");
+        }
+        assert!(!super::DF.contains("python3-dev nodejs npm"));
+    }
+
     #[test]
     fn clip_keeps_exit_marker_at_the_end() {
         let s = format!(

@@ -12,7 +12,7 @@ pragma busy_timeout=5000;
 create table if not exists kv(k text primary key, v text);
 create table if not exists ses(id text primary key, exp int);
 create table if not exists lnk(c text primary key, exp int);
-create table if not exists rp(id integer primary key, full text unique, iss int default 1, hunt int default 0, ci text default '', setup text default '', rules text default '', mode text default 'ask', maxo int default 3, maxd int default 5, ai int default 1, on_ int default 1, t0 int);
+create table if not exists rp(id integer primary key, full text unique, iss int default 1, hunt int default 0, ci text default '', setup text default '', rules text default '', mode text default 'ask', merge int default 1, maxo int default 3, maxd int default 5, ai int default 1, on_ int default 1, t0 int);
 create table if not exists hs(id text primary key, ssh text default '', dk int default 0, ln int default 1, ci int default 1, gb int default 50, raw int default 0, on_ int default 1, t0 int);
 create table if not exists jobs(id integer primary key, repo text, num int, kind text default 'fix', title text, url text, st text, why text default '', d text default '{}', pr int, prio real default 0, t0 int, t1 int);
 create index if not exists jobs_st on jobs(st);
@@ -38,6 +38,9 @@ fn mig(c: &Connection) {
     let _ = c.execute("alter table rp add column bud real default 0", []);
     let _ = c.execute("alter table rp add column feat int default 0", []);
     let _ = c.execute("alter table rp add column skl text default ''", []);
+    let _ = c.execute("alter table rp add column tests text default ''", []);
+    let _ = c.execute("alter table rp add column tcmd text default ''", []);
+    let _ = c.execute("alter table rp add column green text default ''", []);
     let _ = c.execute("alter table rp add column lang text default 'en'", []);
     // Nunca ativar merge automático em instalações existentes por migração.
     let _ = c.execute("alter table rp add column auto_merge int default 0", []);
@@ -314,6 +317,8 @@ impl Job {
             )
         } else if self.feat() {
             format!("Feature request, issue #{}", self.num)
+        } else if self.opt() {
+            format!("Behaviour-preserving optimization request, issue #{}", self.num)
         } else {
             format!("Issue #{}", self.num)
         }

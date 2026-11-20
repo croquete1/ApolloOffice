@@ -13,9 +13,11 @@
   const escapeHTML = (value) => A.esc(value ?? "");
   const names = A.NM || {};
   const roles = ["scout", "guard", "vet", "watcher", "hunter", "repro", "fixer", "ci", "reviewer", "submit"];
+  // The panorama has ten positions, matching the ten real worker roles.
+  const officeRoles = roles;
   const colors = ["#3ac9b6", "#5e91ef", "#a283e8", "#4dbee4", "#d1aa6c", "#ef7b6b", "#f39963", "#8792a8", "#d77cb3", "#69c97c"];
-  const skins = ["#eab58c", "#bd896c", "#dcac8b", "#d49c77", "#e7b58f", "#b98263", "#f1c5a3", "#d7a082", "#e4b391", "#d4a17f"];
-  const hairColors = ["#58372c", "#242e40", "#342c2a", "#a45635", "#58372b", "#303039", "#4f302b", "#2c3546", "#403045", "#59402d"];
+  // Role-specific verb shown while a worker is really in the "work" state.
+  const workVerb = {scout:"A analisar", guard:"A validar", vet:"Em triagem", watcher:"A monitorizar", hunter:"A pesquisar", repro:"A reproduzir", fixer:"A programar", ci:"A testar", reviewer:"A rever", submit:"A preparar"};
   const stageLabels = {
     ready: "Pendente", vet: "Triagem", hunt: "Pesquisa", repro: "Reprodução",
     fix: "Correção", ci: "Testes", review: "Revisão", gate: "Validação",
@@ -27,77 +29,93 @@
     const d = v ? new Date(v) : null;
     return d && !Number.isNaN(d.getTime()) ? d.toLocaleTimeString("pt-PT", {hour:"2-digit",minute:"2-digit"}) : "—";
   };
+  const isoDate = (v) => {
+    const d = v ? new Date(v) : null;
+    return d && !Number.isNaN(d.getTime()) ? d.toISOString() : "";
+  };
+  // Honest pipeline progress: a job's position through the real stage sequence.
+  const stageProgress = {ready:8, vet:16, hunt:30, repro:42, fix:58, ci:72, review:84, gate:92, approve:95, submit:98, done:100, drop:0};
+  const greetWord = () => { const h = new Date().getHours(); return h < 13 ? "Bom dia" : h < 20 ? "Boa tarde" : "Boa noite"; };
+  const pct = (n) => Math.max(0, Math.min(100, Math.round(Number(n) || 0)));
   const html = [
     '<div class="ao-app" id="aoControlRoom" lang="pt-PT">',
     '  <aside class="ao-sidebar">',
-    '    <div class="ao-brand"><span class="ao-logo" aria-hidden="true">A</span><span><strong>Apollo Office</strong><small>Control Center</small></span></div>',
+    '    <div class="ao-brand"><span class="ao-logo" aria-hidden="true"><img src="/assets/brand/apollo-mark.svg" alt=""></span><span><strong>Apollo Office</strong><small>Control Center</small></span></div>',
     '    <nav class="ao-navigation" aria-label="Navegação principal">',
-    '      <button class="ao-nav-item is-active" type="button" data-target="aoOverview">Painel</button>',
-    '      <button class="ao-nav-item" type="button" data-target="aoAgents">Agentes</button>',
-    '      <button class="ao-nav-item" type="button" data-target="aoTasks">Tarefas</button>',
-    '      <button class="ao-nav-item" type="button" data-target="aoIssues">Issues GitHub</button>',
-    '      <button class="ao-nav-item" type="button" data-target="aoPulls">Pull Requests</button>',
-    '      <button class="ao-nav-item" type="button" data-open="steward">Fila de revisão de PRs</button>',
-    '      <button class="ao-nav-item" type="button" data-open="repos">Repositórios</button>',
-    '      <button class="ao-nav-item" type="button" data-open="hosts">Máquinas</button>',
-    '      <button class="ao-nav-item" type="button" data-open="costs">Custos</button>',
-    '      <button class="ao-nav-item" type="button" data-target="aoActivity">Atividade</button>',
-    '      <button class="ao-nav-item" type="button" data-open="settings">Definições</button>',
+    '      <button class="ao-nav-item is-active" type="button" data-target="aoOverview"><img src="/assets/icons/dashboard.svg" alt="" aria-hidden="true"><span>Painel</span></button>',
+    '      <button class="ao-nav-item" type="button" data-target="aoRoomPanel"><img src="/assets/icons/agents.svg" alt="" aria-hidden="true"><span>Agentes</span><span class="ao-nav-count" id="aoNavAgents">' + roles.length + '</span></button>',
+    '      <button class="ao-nav-item" type="button" data-target="aoTasks"><img src="/assets/icons/tasks.svg" alt="" aria-hidden="true"><span>Tarefas</span><span class="ao-nav-count" id="aoNavTasks" hidden></span></button>',
+    '      <button class="ao-nav-item" type="button" data-target="aoPulls"><img src="/assets/icons/pulls.svg" alt="" aria-hidden="true"><span>Pull Requests</span><span class="ao-nav-count" id="aoNavPulls" hidden></span></button>',
+    '      <button class="ao-nav-item" type="button" data-open="repos"><img src="/assets/icons/folder.svg" alt="" aria-hidden="true"><span>Repositórios</span></button>',
+    '      <button class="ao-nav-item" type="button" data-target="aoRepos"><img src="/assets/icons/projects.svg" alt="" aria-hidden="true"><span>Projetos</span></button>',
+    '      <button class="ao-nav-item" type="button" data-open="hosts"><img src="/assets/icons/machines.svg" alt="" aria-hidden="true"><span>Máquinas</span></button>',
+    '      <button class="ao-nav-item" type="button" data-open="costs"><img src="/assets/icons/costs.svg" alt="" aria-hidden="true"><span>Custos</span></button>',
+    '      <button class="ao-nav-item" type="button" data-target="aoActivity"><img src="/assets/icons/activity.svg" alt="" aria-hidden="true"><span>Logs</span></button>',
+    '      <button class="ao-nav-item" type="button" data-open="settings"><img src="/assets/icons/settings.svg" alt="" aria-hidden="true"><span>Definições</span></button>',
     '    </nav>',
-    '    <div class="ao-sidebar-section"><span>Repositórios em atividade</span><div id="aoRepos" class="ao-repo-list"><div class="ao-muted">A carregar…</div></div></div>',
-    '    <div class="ao-sidebar-footer"><span class="ao-presence-dot"></span><span id="aoConnection">A estabelecer ligação…</span></div>',
+    '    <div class="ao-sidebar-section"><div class="ao-sidebar-section-title"><span>Projetos ativos</span><button class="ao-project-add" type="button" data-open="repos" aria-label="Gerir projetos" title="Gerir projetos">+</button><span id="aoProjectCount" class="sr-only">—</span></div><div id="aoRepos" class="ao-repo-list"><div class="ao-muted">A carregar…</div></div></div>',
+    '    <div class="ao-sidebar-footer"><span class="ao-presence-dot"></span><span><strong id="aoConnection">A estabelecer ligação…</strong><small id="aoUpdatedAt" aria-label="Último estado recebido">A aguardar dados</small></span></div>',
+    '    <div class="ao-user-card"><span class="ao-user-avatar" id="aoUserInitials" aria-hidden="true">·</span><span class="ao-user-meta"><strong id="aoUserName">Utilizador</strong><small><i class="ao-user-dot" aria-hidden="true"></i>Online</small></span></div>',
     '  </aside>',
     '  <div class="ao-workspace">',
-    '    <header class="ao-topbar"><div class="ao-top-heading"><strong>Visão geral</strong><span>Operações e agentes em tempo real · <time id="aoUpdatedAt" aria-label="Último estado recebido">A aguardar dados</time></span></div>',
-    '      <div class="ao-top-actions"><span id="aoOfficeStatus" class="ao-status-chip" role="status" aria-live="polite">A ligar…</span><button id="aoPause" type="button" class="ao-outline-button" disabled>Pausar escritório</button></div>',
+    '    <div class="ao-pixel-toolbar">',
+    '      <nav class="ao-pixel-nav" aria-label="Navegação principal">',
+    '        <button class="ao-nav-item is-active" type="button" data-target="aoOverview">Painel</button><button class="ao-nav-item" type="button" data-target="aoRoomPanel">Agentes</button><button class="ao-nav-item" type="button" data-target="aoTasks">Tarefas</button><button class="ao-nav-item" type="button" data-target="aoPulls">Pull Requests</button><button class="ao-nav-item" type="button" data-target="aoActivity">Atividade</button>',
+    '      </nav>',
+    '      <div class="ao-pixel-tools"><label for="aoRepoFilter">Projeto</label><select id="aoRepoFilter" aria-label="Filtrar por projeto"><option value="">Todos os projetos</option></select><button type="button" data-open="costs">Custos</button><button type="button" data-open="repos">Repositórios</button><button type="button" data-open="hosts">Máquinas</button><button type="button" data-open="settings">Definições</button></div>',
+    '    </div>',
+    '    <header class="ao-topbar"><div class="ao-top-heading"><strong id="aoGreeting">Olá</strong><span>Central de agentes de IA · Desenvolvimento · Revisão · Automação</span></div>',
+    '      <div class="ao-top-actions"><span id="aoOfficeStatus" class="ao-status-chip" role="status" aria-live="polite">A ligar…</span><button id="aoPause" type="button" class="ao-outline-button ao-pause-button" disabled aria-label="Pausar escritório" title="Pausar escritório"><span class="ao-pause-glyph" aria-hidden="true"></span><span id="aoPauseLabel">Pausar escritório</span></button><button id="aoBell" type="button" class="ao-icon-button ao-bell" aria-label="Notificações"><span class="ao-bell-dot" hidden></span>!</button><div class="ao-clock" aria-hidden="true"><strong id="aoClock">--:--</strong><small id="aoDate"></small></div></div>',
     '    </header>',
     '    <main class="ao-content" id="aoOverview">',
     '      <section id="aoDiag" class="ao-diag" aria-label="Diagnóstico do ambiente" aria-live="polite" hidden></section>',
     '      <section class="ao-metrics" aria-label="Indicadores operacionais">',
-    '        <div class="ao-metric"><span>Agentes a trabalhar</span><strong id="aoMetricWorkers">—</strong><small>Estados reais</small></div>',
-    '        <div class="ao-metric"><span>Tarefas em aberto</span><strong id="aoMetricQueue">—</strong><small>Total registado no sistema</small></div>',
-    '        <div class="ao-metric"><span>PRs abertos</span><strong id="aoMetricPR">—</strong><small>Relatório do steward</small></div>',
-    '        <div class="ao-metric"><span>Correções integradas</span><strong id="aoMetricDone">—</strong><small>PRs na branch predefinida</small></div>',
+    '        <div class="ao-metric" data-tone="cyan"><img src="/assets/icons/agents.svg" alt="" aria-hidden="true"><span><small>Agentes ativos</small><strong id="aoMetricWorkers">—</strong></span><span id="aoMetricWorkersSub" class="ao-metric-sub" hidden></span></div>',
+    '        <div class="ao-metric" data-tone="blue"><img src="/assets/icons/tasks.svg" alt="" aria-hidden="true"><span><small>Tarefas em aberto · Total registado no sistema</small><strong id="aoMetricQueue">—</strong></span><span id="aoMetricQueueBar" class="ao-metric-track" hidden><i></i></span></div>',
+    '        <div class="ao-metric" data-tone="violet"><img src="/assets/icons/pulls.svg" alt="" aria-hidden="true"><span><small>PRs abertos (recentes) · Até 40 PRs registados</small><strong id="aoMetricPR">—</strong></span><span id="aoMetricPRSub" class="ao-metric-sub" hidden></span></div>',
+    '        <div class="ao-metric" data-tone="green"><img src="/assets/icons/complete.svg" alt="" aria-hidden="true"><span><small>Concluídas (24h)</small><strong id="aoMetricDone">—</strong></span><span id="aoMetricDoneSpark" class="ao-metric-spark" aria-hidden="true"></span></div>',
     '      </section>',
-    '      <section class="ao-panel ao-pipeline-panel" aria-label="Fluxo de trabalho">',
-    '        <div class="ao-panel-heading"><div><h2>Fluxo de trabalho</h2><p>Contagem total de tarefas por fase, diretamente da base de dados</p></div></div>',
-    '        <div id="aoPipeline" class="ao-pipeline"></div>',
+    '      <section class="ao-primary-grid" aria-label="Escritório e estado dos agentes">',
+    '      <section class="ao-panel ao-room-panel" id="aoRoomPanel" aria-labelledby="aoRoomTitle">',
+    '        <div class="ao-panel-heading"><img class="ao-panel-icon" src="/assets/icons/machines.svg" alt="" aria-hidden="true"><div><h2 id="aoRoomTitle">Escritório Virtual</h2><p>Dez papéis · estados observados em tempo real</p></div>',
+    '          <div class="ao-room-controls"><span id="aoOfficeMode" class="ao-room-live" aria-live="polite">A aguardar estado</span><span class="ao-room-view" aria-hidden="true">Vista: Escritório</span><label class="ao-motion-label" for="aoMotion">Animações</label><input id="aoMotion" type="checkbox" checked aria-label="Ativar animações" title="A preferência do sistema para movimento reduzido é respeitada"><button id="aoExpand" type="button" class="ao-icon-button" aria-label="Ampliar o escritório" aria-controls="aoRoomPanel" aria-expanded="false" title="Ampliar o escritório">⤢</button></div>',
+    '        </div>',
+    '        <div class="ao-office" role="group" aria-label="Escritório virtual com dez agentes">',
+    '          <div class="ao-office-brand" aria-hidden="true"><img src="/assets/brand/apollo-office-lockup.webp" alt=""><span>AI Agents Lab</span></div>',
+    '          <div class="ao-office-check" id="aoOfficeCheck" role="group" aria-label="Tarefas em aberto por fase"><span data-phase="develop"><i aria-hidden="true"></i><span>Desenvolver</span><b class="ao-check-count">—</b></span><span data-phase="test"><i aria-hidden="true"></i><span>Testar</span><b class="ao-check-count">—</b></span><span data-phase="review"><i aria-hidden="true"></i><span>Rever</span><b class="ao-check-count">—</b></span><span data-phase="integrate"><i aria-hidden="true"></i><span>Integrar</span><b class="ao-check-count">—</b></span></div>',
+    '          <div class="ao-stations" id="aoStations"></div><div id="aoTransfer" class="ao-transfer-label" role="status" aria-live="polite" hidden></div>',
+    '        </div>',
     '      </section>',
-    '      <section class="ao-operations-grid" aria-label="Operações">',
-    '        <article class="ao-panel" id="aoTasks" tabindex="-1"><div class="ao-panel-heading"><div><h2>Tarefas admitidas</h2><p>Trabalho já em curso no Apollo</p></div></div><div id="aoTasksList" class="ao-list"></div><section class="ao-issues" id="aoIssues" tabindex="-1"><div class="ao-issue-heading"><div><h3>Backlog de issues GitHub</h3><p id="aoIssueSummary">À espera do Scout</p></div></div><div id="aoIssueList" class="ao-issue-list"></div></section></article>',
-    '        <article class="ao-panel" id="aoPulls" tabindex="-1"><div class="ao-panel-heading"><div><h2>Pull Requests</h2><p>Estado, bloqueios e próxima ação</p></div></div><div id="aoPRList" class="ao-list"></div><button type="button" class="ao-pr-queue" data-open="steward">Abrir fila completa do steward</button></article>',
-    '        <article class="ao-panel" id="aoActivity"><div class="ao-panel-heading"><div><h2>Atividade recente</h2><p>Eventos do sistema</p></div></div><div id="aoEventList" class="ao-list"></div></article>',
+    '      <article class="ao-panel ao-agent-panel"><div class="ao-panel-heading"><div><h2>Estado dos agentes</h2><p id="aoAgentSummary">10 papéis</p></div></div><div id="aoAgentList" class="ao-agent-list"></div></article>',
     '      </section>',
-    '      <section class="ao-primary-grid" aria-label="Escritório e agentes">',
-    '        <article class="ao-panel ao-room-panel" id="aoRoomPanel">',
-    '          <div class="ao-panel-heading"><div><h2>Escritório virtual</h2><p>Personagens animadas · atividade real</p></div>',
-    '            <div class="ao-room-controls"><label class="ao-motion-label" for="aoMotion">Animações</label><input id="aoMotion" type="checkbox" checked aria-label="Ativar animações"><button id="aoExpand" type="button" class="ao-icon-button" aria-label="Ampliar o escritório" aria-controls="aoRoomPanel" aria-expanded="false" title="Ampliar o escritório">⤢</button></div>',
-    '          </div>',
-    '          <div class="ao-office" role="group" aria-label="Dez agentes no escritório virtual">',
-    '            <div class="ao-room-glow" aria-hidden="true"></div>',
-    '            <div class="ao-windows" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>',
-    '            <div class="ao-office-sign" aria-hidden="true"><b>APOLLO</b><span>DEVELOPMENT OFFICE</span></div>',
-    '            <div class="ao-office-lamp ao-lamp-one" aria-hidden="true"></div><div class="ao-office-lamp ao-lamp-two" aria-hidden="true"></div>',
-    '            <div class="ao-office-floor" aria-hidden="true"></div>',
-    '            <div class="ao-stations" id="aoStations"></div>',
-    '          </div>',
+    '      <section class="ao-panel ao-pipeline-panel" aria-label="Estado do fluxo de trabalho">',
+    '        <div class="ao-panel-heading"><div><h2>Fluxo de trabalho</h2><p>Contagem total de tarefas por fase</p></div></div><div id="aoPipeline" class="ao-pipeline"></div>',
+    '      </section>',
+    '      <section class="ao-panel ao-staged-panel" id="aoStagedPanel" aria-labelledby="aoStagedTitle" hidden><div class="ao-staged-head"><div><h3 id="aoStagedTitle">Pipeline test-first</h3><p id="aoStagedModels">A ler configuração do controlador…</p></div><span id="aoStagedStatus" class="ao-staged-status" role="status" aria-live="polite">A aguardar dados</span></div><ol id="aoStagedPhases" class="ao-staged-phases" aria-label="Fases do pipeline staged"></ol><p id="aoStagedFeedback" class="ao-staged-feedback" hidden></p></section>',
+    '      <section class="ao-operations-grid" aria-label="Operações prioritárias">',
+    '        <article class="ao-panel ao-task-panel" id="aoTasks" tabindex="-1"><div class="ao-panel-heading queue-heading"><div class="ao-panel-title"><h2>Tarefas em execução</h2><span id="aoTaskSummary" class="ao-section-count">—</span></div><input class="ao-task-filter" id="aoTaskFilter" type="search" placeholder="Filtrar tarefas" aria-label="Filtrar tarefas por texto"><button class="ao-panel-action" type="button" data-open-list="tasks">Ver todas <span aria-hidden="true">→</span></button></div><div id="aoTasksList" class="ao-list"></div>',
     '        </article>',
-    '        <article class="ao-panel ao-agent-panel" id="aoAgents">',
-    '          <div class="ao-panel-heading"><div><h2>Estado dos agentes</h2><p id="aoAgentSummary">Sem informação</p></div></div>',
-    '          <div id="aoAgentList" class="ao-agent-list"></div>',
-    '        </article>',
+    '        <article class="ao-panel" id="aoPulls" tabindex="-1"><div class="ao-panel-heading"><div class="ao-panel-title"><h2>Pull Requests</h2><span id="aoPRSummary" class="ao-section-count">—</span></div><button class="ao-panel-action" type="button" data-open-list="prs">Ver todas <span aria-hidden="true">→</span></button></div><div id="aoMergeChart" class="ao-pr-trend" role="img" aria-label="Integrações dos últimos 30 dias"></div><div id="aoPRList" class="ao-list"></div></article>',
+    '        <article class="ao-panel" id="aoActivity" tabindex="-1"><div class="ao-panel-heading"><img class="ao-panel-icon" src="/assets/icons/activity-wave.svg" alt="" aria-hidden="true"><div class="ao-panel-title"><h2>Atividade recente</h2><span id="aoActivitySummary" class="ao-section-count">—</span></div><button class="ao-panel-action" type="button" data-open-list="activity">Ver todo o histórico <span aria-hidden="true">→</span></button></div><div id="aoEventList" class="ao-list"></div></article>',
     '      </section>',
     '      <section class="ao-bottom-grid" aria-label="Métricas adicionais">',
-    '        <article class="ao-panel"><div class="ao-panel-heading"><div><h2>Integrações (30 dias)</h2><p>PRs integrados por dia</p></div></div><div class="ao-trend" id="aoMergeChart"></div></article>',
-    '        <article class="ao-panel"><div class="ao-panel-heading"><div><h2>Máquinas e recursos</h2><p>Dados disponíveis no Apollo Office</p></div></div><div id="aoMachines" class="ao-machines"></div></article>',
+    '        <article class="ao-panel"><div class="ao-panel-heading"><div><h2>Produtividade (24h)</h2><p>Tarefas concluídas por hora</p></div><span class="ao-data-source">Tempo real</span></div><div class="ao-trend" id="aoProductivityChart"></div></article>',
+    '        <article class="ao-panel"><div class="ao-panel-heading"><div><h2>Recursos do Sistema</h2><p>Telemetria das máquinas</p></div><span id="aoResourcesHost" class="ao-data-source" hidden></span></div><div id="aoMachines" class="ao-machines"></div></article>',
     '      </section>',
     '    </main>',
     '  </div>',
     '  <div class="ao-agent-overlay" id="aoAgentOverlay" hidden>',
     '    <section class="ao-agent-dialog" role="dialog" aria-modal="true" aria-labelledby="aoDetailTitle" tabindex="-1">',
     '      <button class="ao-dialog-close" id="aoDetailClose" type="button" aria-label="Fechar detalhes">×</button>',
-    '      <h2 id="aoDetailTitle"></h2><div id="aoDetailBody"></div>',
+    '      <div class="ao-agent-head"><img id="aoDetailAvatar" class="ao-agent-avatar" alt="" aria-hidden="true"><h2 id="aoDetailTitle"></h2></div><div id="aoDetailBody"></div>',
     '      <div class="ao-detail-actions"><button id="aoDetailJob" type="button" hidden>Ver tarefa</button><button id="aoDetailModel" type="button" hidden>Configurar modelo</button></div>',
+    '    </section>',
+    '  </div>',
+    '  <div class="ao-agent-overlay ao-list-overlay" id="aoListOverlay" hidden>',
+    '    <section class="ao-agent-dialog ao-list-dialog" role="dialog" aria-modal="true" aria-labelledby="aoListDialogTitle" tabindex="-1">',
+    '      <button class="ao-dialog-close" id="aoListClose" type="button" aria-label="Fechar lista">×</button>',
+    '      <div class="ao-list-dialog-head"><img id="aoListDialogIcon" src="/assets/icons/tasks.svg" alt="" aria-hidden="true"><div><h2 id="aoListDialogTitle">Lista completa</h2><span id="aoListDialogCount" class="ao-section-count">—</span></div></div>',
+    '      <div id="aoListDialogContent" class="ao-list-dialog-content"></div>',
     '    </section>',
     '  </div>',
     '</div>'
@@ -118,100 +136,86 @@
   document.body.appendChild(app);
   if (drawer) document.body.appendChild(drawer);
   document.body.classList.add("ao-enabled");
-  A.modernRoom = true;
+  const pixelStage = byId("stage");
+  const pixelCanvas = byId("cv");
+  const pixelMerge = byId("mg");
+  const pixelTip = byId("tip");
+  const pixelTipParent = pixelTip?.parentElement || null;
+  const pixelTipNext = pixelTip?.nextSibling || null;
+  const pixelOffice = app.querySelector(".ao-office");
+  if (pixelCanvas && pixelOffice && pixelStage?.contains(pixelCanvas)) pixelOffice.append(pixelCanvas);
+  if (pixelOffice && pixelMerge && pixelStage?.contains(pixelMerge)) pixelOffice.append(pixelMerge);
+  if (pixelTip) document.body.append(pixelTip);
+  A.pixelDashboard = true;
+  A.modernRoom = false;
+  A.pixelMotion = true;
+  A.disablePixelArt = false;
 
-  const hairs = [
-    "M27 45Q24 22 50 18Q68 13 78 32Q86 42 77 49L69 31L61 40L53 28L43 40L35 35Z",
-    "M26 48Q22 17 50 16Q80 15 83 40L78 50L71 29Q50 17 36 39Z",
-    "M24 43Q23 21 45 22Q69 12 83 34L82 50L29 49Z",
-    "M24 49Q19 26 40 18Q66 9 79 25Q87 39 81 57L72 39L37 39Z",
-    "M24 45Q19 16 48 18Q67 11 83 34L79 43L69 28L50 31L31 47Z",
-    "M23 48Q20 24 42 19Q65 11 81 29L81 48Q66 23 33 45Z",
-    "M24 44Q27 19 51 19Q80 19 82 45L71 28L59 35L44 30L31 47Z",
-    "M24 46Q27 21 46 19Q70 14 80 38L81 51L67 31L47 30L29 47Z",
-    "M23 46Q23 25 41 18Q68 9 81 32L84 54L75 48L72 34L30 48Z",
-    "M24 47Q20 23 47 18Q73 17 83 41L80 49L68 31L38 36Z"
-  ];
-  const character = (i) => {
-    const skin = skins[i], color = colors[i], hair = hairColors[i], id = "ao-face-" + i;
-    return '<svg class="ao-person" viewBox="0 0 108 125" aria-hidden="true" focusable="false">' +
-      '<defs><linearGradient id="' + id + '" x1="0" y1="0" x2="1" y2="1"><stop stop-color="' + skin + '"/><stop offset="1" stop-color="#966751"/></linearGradient></defs>' +
-      '<ellipse cx="54" cy="120" rx="30" ry="4" fill="#02060f" opacity=".3"/>' +
-      '<path d="M35 87L28 113H44L52 99L64 113H80L71 87Z" fill="#192434"/>' +
-      '<path d="M25 77Q33 65 48 66H64Q79 67 86 80L82 105H27Z" fill="' + color + '"/>' +
-      '<path d="M46 67L55 86L64 67" fill="#ecf0f5" opacity=".65"/>' +
-      '<path d="M32 80L29 107M77 80L81 107" stroke="#152435" stroke-width="3" opacity=".5"/>' +
-      '<g class="ao-arm ao-arm-left"><path d="M31 81Q18 86 22 103L38 105" fill="none" stroke="' + color + '" stroke-width="14" stroke-linecap="round"/><ellipse cx="39" cy="105" rx="7" ry="5" fill="' + skin + '"/></g>' +
-      '<g class="ao-arm ao-arm-right"><path d="M77 81Q91 87 86 103L70 105" fill="none" stroke="' + color + '" stroke-width="14" stroke-linecap="round"/><ellipse cx="69" cy="105" rx="7" ry="5" fill="' + skin + '"/></g>' +
-      '<path d="M45 61V70Q54 79 64 69V61Z" fill="' + skin + '"/>' +
-      '<g class="ao-head"><ellipse cx="54" cy="42" rx="28" ry="30" fill="url(#' + id + ')"/>' +
-      '<path d="' + hairs[i] + '" fill="' + hair + '"/>' +
-      '<path d="M28 48Q22 47 26 55L30 59M79 48Q85 47 82 55L78 59" stroke="' + skin + '" stroke-width="6" stroke-linecap="round"/>' +
-      '<g class="ao-eyes"><ellipse cx="44" cy="46" rx="2.3" ry="3.3" fill="#172330"/><ellipse cx="65" cy="46" rx="2.3" ry="3.3" fill="#172330"/></g>' +
-      '<path d="M51 55Q55 58 59 55" stroke="#945d52" fill="none" stroke-width="1.8" stroke-linecap="round"/>' +
-      (i % 3 === 1 ? '<path d="M24 41Q20 28 30 25M83 41Q87 27 77 25" stroke="#233449" stroke-width="5" fill="none" stroke-linecap="round"/><rect x="21" y="40" width="7" height="18" rx="4" fill="#37495d"/><rect x="79" y="40" width="7" height="18" rx="4" fill="#37495d"/>' : '') +
-      (i === 2 || i === 9 ? '<path d="M27 31Q54 8 82 32" stroke="' + hair + '" stroke-width="7" fill="none"/>' : '') +
-      '</g></svg>';
-  };
   const stations = byId("aoStations");
-  stations.innerHTML = roles.map((role, i) => {
-    return '<button class="ao-station" type="button" data-role="' + role + '" data-mode="unknown" style="--agent-accent:' + colors[i] + '" aria-label="Ver agente ' + names[role] + ' · sem dados">' +
-      '<span class="ao-monitor"><span class="ao-screen"><i></i><i></i><i></i><i></i></span><span class="ao-result-mark" aria-hidden="true"></span></span>' +
-      '<span class="ao-chair"></span><span class="ao-avatar-holder">' + (window.AOOfficeV2?.character(i) || character(i)) + '</span>' +
-      '<span class="ao-desk"><span class="ao-keyboard"></span></span>' +
-      '<span class="ao-station-name">' + names[role] + '</span><span class="ao-station-state">A ligar…</span>' +
+  stations.innerHTML = officeRoles.map((role) => {
+    const i = roles.indexOf(role);
+    return '<button class="ao-station" type="button" data-role="' + role + '" data-mode="unknown" style="--agent-accent:' + colors[i] + '" aria-label="Ver agente ' + escapeHTML(names[role]) + ' · sem dados">' +
+      '<span class="ao-plaque"><span class="ao-station-name">' + escapeHTML(names[role]) + '</span>' +
+      '<span class="ao-station-caption"><i class="ao-station-indicator" aria-hidden="true"></i><span class="ao-station-state">A ligar…</span><span class="ao-result-mark" aria-hidden="true"></span></span></span>' +
       '</button>';
   }).join("");
+  const agentList = byId("aoAgentList");
+  agentList.innerHTML = roles.map((role, i) =>
+    '<button class="ao-agent-row" type="button" data-role="' + role + '" aria-label="Ver agente ' + escapeHTML(names[role]) + '">' +
+      '<i class="ao-agent-color" style="background:' + colors[i] + '" aria-hidden="true"></i>' +
+      '<span class="ao-agent-meta"><strong class="ao-agent-title">' + escapeHTML(names[role]) + '</strong><small class="ao-agent-activity">Sem atividade registada</small><small class="ao-agent-model" hidden></small></span>' +
+      '<span class="ao-agent-status">Sem dados</span></button>'
+  ).join("");
+  const taskFilterInput = byId("aoTaskFilter");
   window.AOOfficeV2?.decorate(document.querySelector('.ao-office'), stations);
-  const stationNodes = Object.fromEntries(roles.map((role) => [role, stations.querySelector('[data-role="' + role + '"]')]));
-  // Arrow navigation follows the same 5/2-column layout used in CSS.
-  // Buttons remain individually tabbable; arrows are an optional shortcut.
+  const stationNodes = Object.fromEntries(officeRoles.map((role) => [role, stations.querySelector('[data-role="' + role + '"]')]));
+  // Arrow navigation follows the ten-station horizontal row; buttons remain individually tabbable.
   stations.addEventListener("keydown", (event) => {
     if (event.altKey || event.ctrlKey || event.metaKey) return;
     const station = event.target.closest?.("[data-role]");
     if (!station || !stations.contains(station)) return;
-    const index = roles.indexOf(station.dataset.role);
+    const index = officeRoles.indexOf(station.dataset.role);
     if (index < 0) return;
-    const columns = window.matchMedia?.("(max-width: 530px)")?.matches ? 2 : 5;
-    const offsets = {
-      ArrowLeft: -1, ArrowRight: 1,
-      ArrowUp: -columns, ArrowDown: columns
-    };
-    const offset = offsets[event.key];
+    const offset = {ArrowLeft: -1, ArrowRight: 1}[event.key];
     if (!offset) return;
     const next = index + offset;
-    if (next < 0 || next >= roles.length) return;
+    if (next < 0 || next >= officeRoles.length) return;
     event.preventDefault();
-    stationNodes[roles[next]].focus({preventScroll:true});
+    stationNodes[officeRoles[next]].focus({preventScroll:true});
   });
-  // One-shot visual reactions must not override normal breathing/typing forever.
+  // Transient state highlights are cleared on stale data, hidden tabs, or reduced motion.
   /**
    * Limpa animações transitórias quando o movimento é suspenso,
    * o documento fica oculto ou os dados deixam de ser recentes.
    */
   const clearReactions = () => {
-    // Stale data must immediately restore hidden desk sprites. Merely
-    // clearing CSS classes leaves an active Web Animations walker visible.
+    // State-driven event highlights must not outlive their real data.
     A.cancelOfficeMotion?.();
     window.AOOfficeV2?.clearTransitions(stations);
     for (const node of Object.values(stationNodes)) {
-      node.classList.remove("ao-celebrate", "ao-action-pulse");
+      node.classList.remove("ao-agent-state-change", "ao-stage-arrived", "ao-celebrate", "ao-action-pulse");
     }
   };
   for (const node of Object.values(stationNodes)) {
     node.addEventListener("animationend", (event) => {
-      if (event.animationName === "ao-celebrate") node.classList.remove("ao-celebrate");
-      if (event.animationName === "ao-command-sweep") node.classList.remove("ao-action-pulse");
+      if (event.animationName === "ao-event-pop" || event.animationName === "ao-celebrate" || event.animationName === "ao-command-sweep") {
+        node.classList.remove("ao-agent-state-change", "ao-stage-arrived");
+      }
     });
   }
   let snapshot = null, selected = null, selectedRepo = "", lastFocus = null;
-  let lastRepoSignature = "", lastListSignature = "", lastMergeSignature = "", lastPipelineSignature = "";
+  let taskFilterText = "";
+  let lastRepoSignature = "", lastListSignature = "", lastMergeSignature = "", lastProdSignature = "", lastPipelineSignature = "";
+  let listDialogData = {tasks: "", prs: "", activity: ""};
   let lastMachineSignature = "", lastDetailSignature = "", lastStateAt = 0;
   let animationsOn = true;
   try { animationsOn = localStorage.getItem("ao.motion") !== "off"; } catch {}
   const motion = byId("aoMotion");
   motion.checked = animationsOn;
-  const syncMotion = () => app.classList.toggle("ao-motion-disabled", !animationsOn);
+  const syncMotion = () => {
+    app.classList.toggle("ao-motion-disabled", !animationsOn);
+    A.pixelMotion = animationsOn;
+  };
   syncMotion();
   motion.addEventListener("change", () => {
     animationsOn = motion.checked;
@@ -226,8 +230,8 @@
   byId("aoExpand").addEventListener("click", (e) => {
     const expanded = byId("aoRoomPanel").classList.toggle("ao-expanded");
     e.currentTarget.setAttribute("aria-label", expanded ? "Reduzir o escritório" : "Ampliar o escritório");
+    e.currentTarget.title = expanded ? "Reduzir o escritório" : "Ampliar o escritório";
     e.currentTarget.setAttribute("aria-expanded", String(expanded));
-    e.currentTarget.textContent = expanded ? "↙" : "⤢";
   });
   const offline = (s) => Boolean(s?.o?.off);
   // External provider/network failures are not the same as manual pausing;
@@ -260,131 +264,126 @@
     Array.isArray(entry) && entry.length >= 2 && typeof entry[1] === "string").slice(-4).reverse();
   const updateAgents = (s) => {
     let working = 0;
-    const list = byId("aoAgentList");
-    if (!list.children.length) {
-      list.innerHTML = roles.map((role, i) =>
-        '<button type="button" class="ao-agent-row" data-agent="' + role + '">' +
-        '<span class="ao-agent-color" style="background:' + colors[i] + '"></span>' +
-        '<span class="ao-agent-meta"><span class="ao-agent-title">' + escapeHTML(names[role]) +
-        '</span><span class="ao-agent-activity">A aguardar dados</span></span>' +
-        '<span class="ao-agent-end"><span class="ao-agent-status">Sem dados</span>' +
-        '<span class="ao-agent-model"></span></span></button>'
-      ).join("");
-    }
-    for (let i=0;i<roles.length;i++) {
-      const role = roles[i], w = s.w?.[role] || {}, el = stationNodes[role], state = mode(s, role);
+    for (const role of roles) {
+      const w = s.w?.[role] || {}, el = stationNodes[role], state = mode(s, role);
       if (state === "work") working++;
-      // Only celebrate the completion of a job this worker was previously
-      // observed handling. A stale entry in the recent history is not enough.
       const activeJob = w.job;
       const priorJob = el.dataset.lastJob;
-      const completed = Number.isFinite(Number(s.t)) && safeArray(s.dn).some((j) => {
-        const finishedAt = Number(j.t1);
-        const age = Number(s.t) - finishedAt;
-        return priorJob && String(j.id) === priorJob && j.st === "done" &&
-          j.t1 != null && Number.isFinite(finishedAt) && age >= 0 && age <= 60_000;
+      const completed = Number.isFinite(Number(s.t)) && safeArray(s.dn).some((job) => {
+        const finishedAt = Number(job.t1), age = Number(s.t) - finishedAt;
+        return priorJob && String(job.id) === priorJob && job.st === "done" && job.t1 != null &&
+          Number.isFinite(finishedAt) && age >= 0 && age <= 60_000;
       });
-      if (el.dataset.mode === "work" && state !== "work" && completed &&
-          !paused(s) && animationsOn && !document.hidden &&
-          !window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) {
+      if (el.dataset.mode === "work" && state !== "work" && completed && !paused(s) && animationsOn &&
+          !document.hidden && !window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) {
         el.classList.remove("ao-celebrate");
         void el.offsetWidth;
         el.classList.add("ao-celebrate");
       }
       if (state === "work" && activeJob != null) el.dataset.lastJob = String(activeJob);
       else if (state !== "work") delete el.dataset.lastJob;
-      window.AOOfficeV2?.onAgentState(el, el.dataset.mode, state);
-      el.dataset.mode = state;
-      // A subtle screen reaction only when a genuinely new command is reported.
       const latestCommand = lastCommands(w)[0];
       if (latestCommand) {
         const commandKey = String(latestCommand[0]) + ":" + latestCommand[1];
-        if (el.dataset.lastCommand && el.dataset.lastCommand !== commandKey &&
-            state === "work" && animationsOn && !document.hidden &&
-            !window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) {
+        if (el.dataset.lastCommand && el.dataset.lastCommand !== commandKey && state === "work" && animationsOn &&
+            !document.hidden && !window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) {
           el.classList.remove("ao-action-pulse");
           void el.offsetWidth;
           el.classList.add("ao-action-pulse");
         }
         el.dataset.lastCommand = commandKey;
       }
+      const row = agentList.querySelector('[data-role="' + role + '"]');
+      if (row) {
+        const job = w.job != null ? safeArray(s.q).find((item) => String(item.id) === String(w.job)) : null;
+        const activity = row.querySelector(".ao-agent-activity");
+        const model = row.querySelector(".ao-agent-model");
+        const stateNode = row.querySelector(".ao-agent-status");
+        const current = typeof w.say === "string" ? w.say.trim() : "";
+        const detail = current ? (state === "work" ? current : "Último registo: " + current)
+          : state === "work" ? job?.title || "Sem descrição da tarefa" : "Sem atividade registada";
+        row.dataset.state = state;
+        row.classList.toggle("ao-state-work", state === "work");
+        row.classList.toggle("ao-state-paused", state === "paused");
+        activity.textContent = detail;
+        activity.title = detail;
+        stateNode.textContent = state === "work" ? (workVerb[role] || statusText[state]) : statusText[state];
+        const modelText = w.md && !["ci", "submit"].includes(role) && typeof A.mdn === "function" ? String(A.mdn(w.md)) : "";
+        model.hidden = !modelText;
+        model.textContent = modelText;
+        row.setAttribute("aria-label", ["Ver agente " + names[role], statusText[state], detail, w.md && A.mdn(w.md)].filter(Boolean).join(". "));
+      }
+      if (!el) continue;
+      window.AOOfficeV2?.onAgentState(el, el.dataset.mode, state);
+      el.dataset.mode = state;
       const result = Object.hasOwn(resultText, w.mood) ? w.mood : "";
       el.dataset.mood = result;
       el.querySelector(".ao-result-mark").textContent = result === "ok" ? "✓" : result === "err" ? "!" : result === "sad" ? "!" : "";
-      el.querySelector(".ao-station-state").textContent = statusText[state];
-      const idleReason = state !== "work" && typeof w.idle_reason === "string"
-        ? w.idle_reason.trim() : "";
-      el.title = [names[role], statusText[state], idleReason, resultText[result], w.say].filter(Boolean).join(" · ");
+      const stage = w.job != null ? safeArray(s.q).find((job) => String(job.id) === String(w.job))?.st : null;
+      const stateLabel = statusText[state];
+      // Live state → the role's work verb when really working, else the generic state.
+      el.querySelector(".ao-station-state").textContent = state === "work" ? (workVerb[role] || stateLabel) : stateLabel;
+      el.title = [names[role], stateLabel, stage && (stageLabels[stage] || stage), resultText[result], w.say].filter(Boolean).join(" · ");
       const accessible = ["Ver agente " + names[role], statusText[state], resultText[result]].filter(Boolean).join(". ");
       if (el.getAttribute("aria-label") !== accessible) el.setAttribute("aria-label", accessible);
-      const row = list.querySelector('[data-agent="' + role + '"]');
-      const status = row.querySelector(".ao-agent-status");
-      const activity = row.querySelector(".ao-agent-activity");
-      const model = row.querySelector(".ao-agent-model");
-      const current = typeof w.say === "string" ? w.say.trim() : "";
-      const activityText = state === "work"
-        ? (current || "Sem descrição da tarefa")
-        : (idleReason || (current ? "Último registo: " + current : "Sem atividade registada"));
-      const modelText = w.md && role !== "ci" && role !== "submit" && typeof A.mdn === "function"
-        ? String(A.mdn(w.md)) : "";
-      if (status.className !== "ao-agent-status ao-state-" + state) status.className = "ao-agent-status ao-state-" + state;
-      if (status.textContent !== statusText[state]) status.textContent = statusText[state];
-      if (activity.textContent !== activityText) activity.textContent = activityText;
-      if (activity.title !== activityText) activity.title = activityText;
-      if (model.textContent !== modelText) model.textContent = modelText;
-      model.hidden = !modelText;
     }
-    byId("aoMetricWorkers").textContent = working + " / " + roles.length;
-    const suspended = safeArray(s.ops?.blocked_hunts).length;
-    byId("aoAgentSummary").textContent = working + " em execução · " + (roles.length - working) + " restantes" +
-      (suspended ? " · " + suspended + " pesquisa(s) suspensa(s)" : "");
+    byId("aoMetricWorkers").textContent = formatNum(working) + " / " + roles.length;
+    byId("aoAgentSummary").textContent = formatNum(working) + " em execução · " + formatNum(roles.length - working) + " restantes";
   };
-  /**
-   * Surface the environment blockers that otherwise leave the office looking
-   * idle for no stated reason: a host still preparing its build container,
-   * hunting or issue intake switched off, or a repository suspended by the
-   * setup-failure circuit breaker.
-   * @param {object} s Latest server state.
-   */
-  const renderDiag = (s) => {
-    const el = byId("aoDiag");
-    if (!el) return;
-    const d = s.diag || {};
-    const names = (arr) => safeArray(arr).map((x) => x.full || x.repo || x).join(", ");
-    const items = [];
-    for (const h of safeArray(d.hosts)) {
-      if (h.preparing) {
-        items.push({ tone: "work", text: "A preparar o ambiente de build em «" + (h.id || "?") + "» — a aguardar que a máquina fique pronta" });
-      } else if (h.dk && h.on && !h.up) {
-        items.push({ tone: "warn", text: "Máquina «" + (h.id || "?") + "» ainda não está pronta" });
-      }
-    }
-    if (Number(d.hunt_enabled) === 0) {
-      items.push({ tone: "warn", text: "Caça desligada: nenhum repositório com caça ativa (hunt=0)" });
-    } else if (safeArray(d.hunt_off).length) {
-      items.push({ tone: "warn", text: "Caça desligada em: " + names(d.hunt_off) });
-    }
-    if (safeArray(d.iss_off).length) {
-      items.push({ tone: "info", text: "Intake de issues desligado em: " + names(d.iss_off) });
-    }
-    for (const b of safeArray(s.ops && s.ops.blocked_hunts)) {
-      const u = b.health && b.health.until;
-      const when = u ? " (até " + new Date(u).toLocaleTimeString("pt-PT", { hour: "2-digit", minute: "2-digit" }) + ")" : "";
-      items.push({ tone: "warn", text: "Pesquisa suspensa por falhas de preparação: " + (b.repo || "?") + when });
-    }
-    if (!items.length) { el.hidden = true; el.textContent = ""; return; }
-    el.hidden = false;
-    el.innerHTML = items.map((i) =>
-      '<div class="ao-diag-item ao-diag-' + i.tone + '"><span class="ao-diag-dot" aria-hidden="true"></span><span>' + escapeHTML(i.text) + "</span></div>"
-    ).join("");
-  };
-  const rowHTML = (label, caption, badge, attr, val, extraClass = "") => {
+  const rowHTML = (label, caption, badge, attr, val, opts = {}) => {
+    const {extraClass = "", progress = null, badgeTone = ""} = opts;
     const unavailable = attr === "data-pr-url" && !val;
-    return '<button class="ao-data-row ' + extraClass + '" type="button" ' +
+    const bar = progress == null ? "" :
+      '<span class="ao-row-progress" aria-hidden="true"><i style="width:' + pct(progress) + '%"></i></span>' +
+      '<span class="ao-row-pct">' + pct(progress) + '%</span>';
+    return '<button class="ao-data-row ' + extraClass + (progress == null ? "" : " has-progress") + '" type="button" ' +
       (unavailable ? 'disabled title="Ligação indisponível"' : attr + '="' + escapeHTML(val) + '"') + '>' +
       '<span class="ao-row-main"><strong>' + escapeHTML(label) + '</strong><small>' + escapeHTML(caption) + '</small></span>' +
-      '<span class="ao-row-badge">' + escapeHTML(badge) + '</span></button>';
+      bar +
+      '<span class="ao-row-badge ' + badgeTone + '">' + escapeHTML(badge) + '</span></button>';
   };
+  const taskIcon = (stage) => ({
+    hunt: "checklist.svg", vet: "checklist.svg", repro: "code.svg", fix: "code.svg",
+    ci: "flask.svg", review: "pulls.svg", gate: "pulls.svg", approve: "pulls.svg", submit: "pulls.svg"
+  }[stage] || "tasks.svg");
+  const projectName = (repo) => String(repo || "Projeto").split("/").filter(Boolean).pop() || "Projeto";
+  const taskRowHTML = (job) => {
+    const progress = stageProgress[job.st] ?? null;
+    const bar = progress == null ? "" :
+      '<span class="ao-row-progress" aria-label="' + pct(progress) + '% concluído"><i style="width:' + pct(progress) + '%"></i></span>' +
+      '<span class="ao-row-pct">' + pct(progress) + '%</span>';
+    return '<button class="ao-data-row ao-task-row" type="button" data-job="' + escapeHTML(job.id) + '">' +
+      '<img class="ao-task-kind" src="/assets/icons/' + taskIcon(job.st) + '" alt="" aria-hidden="true">' +
+      '<span class="ao-task-title" title="' + escapeHTML(job.title) + '">' + escapeHTML(job.title) + '</span>' +
+      '<span class="ao-project-chip" title="' + escapeHTML(job.repo) + '"><i aria-hidden="true"></i>' + escapeHTML(projectName(job.repo)) + '</span>' +
+      bar + '</button>';
+  };
+  // Map a PR to a real status badge, cross-referencing the live job stage.
+  const prBadge = (s, p) => {
+    if (p.st === "merged") return {t: "Integrado", tone: "ao-badge-ok"};
+    if (p.st === "closed") return {t: "Fechado", tone: ""};
+    const job = safeArray(s.q).find((j) => j.repo === p.repo && String(j.num) === String(p.num));
+    if (job) {
+      if (job.st === "review") return {t: "Em revisão", tone: "ao-badge-review"};
+      if (job.st === "ci") return {t: "Testes", tone: "ao-badge-wait"};
+      if (["approve", "gate", "submit"].includes(job.st)) return {t: "Pronto", tone: "ao-badge-ok"};
+    }
+    return {t: "Aberto", tone: "ao-badge-open"};
+  };
+  const pullRowHTML = (s, p) => {
+    const badge = prBadge(s, p);
+    const commentValue = p.comments_count ?? p.comment_count ?? p.comments;
+    const commentCount = Array.isArray(commentValue) ? commentValue.length : Number(commentValue);
+    const comments = commentValue != null && Number.isFinite(commentCount)
+      ? '<span class="ao-pr-comments" aria-label="' + formatNum(commentCount) + ' comentários"><img src="/assets/icons/comment.svg" alt="" aria-hidden="true">' + formatNum(commentCount) + '</span>' : "";
+    return '<button class="ao-data-row ao-pr-row" type="button" ' + (p.url ? 'data-pr-url="' + escapeHTML(p.url) + '"' : 'disabled title="Ligação indisponível"') + '>' +
+      '<img class="ao-pr-mark" src="/assets/icons/github.svg" alt="" aria-hidden="true">' +
+      '<span class="ao-pr-main"><strong><span class="ao-pr-number">#' + escapeHTML(p.num) + '</span> ' + escapeHTML(p.title) + '</strong><small><i aria-hidden="true"></i>' + escapeHTML(projectName(p.repo)) + '</small></span>' +
+      '<span class="ao-row-badge ' + badge.tone + '">' + escapeHTML(badge.t) + '</span>' + comments + '</button>';
+  };
+  const eventRowHTML = (e) =>
+    '<div class="ao-event"><img class="ao-event-mark" src="/assets/icons/complete.svg" alt="" aria-hidden="true"><time datetime="' + escapeHTML(isoDate(e.t)) + '">' + datum(e.t) + '</time><span class="ao-event-agent">' + escapeHTML(names[e.w] || e.w || "Sistema") +
+    '</span><span class="ao-event-message" title="' + escapeHTML(e.m) + '">' + escapeHTML(e.m) + '</span></div>';
   const filtered = (items) => safeArray(items).filter((x) => !selectedRepo || x.repo === selectedRepo);
   /**
    * Render the limited task, pull-request and activity previews.
@@ -392,19 +391,34 @@
    * @param {object} s Latest server state.
    */
   const renderLists = (s) => {
-    const q = filtered(s.q);
-    const steward = s.pr_steward || {};
-    const stewardHasReport = safeArray(steward.repos).some((repo) => Number(repo.at || 0) > 0);
-    const prs = filtered(stewardHasReport ? steward.prs : s.pr);
-    const issues = filtered(s.issue_backlog);
-    const issueSummary = filtered(s.issue_summary);
+    const matchesTask = (job) => !taskFilterText || [job.title, job.repo, job.num, job.kind, job.why, stageLabels[job.st] || job.st]
+      .filter(Boolean).join(" ").toLocaleLowerCase("pt-PT").includes(taskFilterText);
+    const q = filtered(s.q).filter(matchesTask), prs = filtered(s.pr);
     const totals = countTotals(s);
+    const openPRs = prs.filter((x) => x.st === "open");
+    const reviewPRs = openPRs.filter((p) => safeArray(s.q).some((j) => j.repo === p.repo && String(j.num) === String(p.num) && j.st === "review"));
     byId("aoMetricQueue").textContent = formatNum(totals.active);
-    const selectedSteward = filtered(steward.repos).find((repo) => Number(repo.at || 0) > 0);
-    byId("aoMetricPR").textContent = formatNum(stewardHasReport ? (selectedRepo ? selectedSteward?.total || 0 : steward.total) : (s.pr_counts?.open ?? safeArray(s.pr).filter((x) => x.st === "open").length));
-    byId("aoMetricDone").textContent = s.delivery?.merged_fixes == null
-      ? "—" : formatNum(s.delivery.merged_fixes);
-    const signature = JSON.stringify([selectedRepo, q, prs, issues, issueSummary, s.pr_steward, s.pr_counts, safeArray(s.ev).slice(0, 8)]);
+    const qbar = byId("aoMetricQueueBar");
+    qbar.hidden = totals.active <= 0;
+    if (!qbar.hidden) qbar.firstElementChild.style.width = pct(totals.active / Math.max(6, totals.active) * 100) + "%";
+    byId("aoMetricPR").textContent = formatNum(openPRs.length);
+    const navTasks = byId("aoNavTasks");
+    if (navTasks) { navTasks.hidden = totals.active <= 0; navTasks.textContent = formatNum(totals.active); }
+    const navPulls = byId("aoNavPulls");
+    if (navPulls) { navPulls.hidden = openPRs.length <= 0; navPulls.textContent = formatNum(openPRs.length); }
+    const prSub = byId("aoMetricPRSub");
+    prSub.hidden = reviewPRs.length === 0;
+    if (!prSub.hidden) prSub.textContent = formatNum(reviewPRs.length) + " em revisão";
+    const done24 = selectedRepo
+      ? Math.max(0, Number(safeArray(s.done24ByRepo).find((row) => row.repo === selectedRepo)?.n) || 0)
+      : Math.max(0, Number(s.done24) || 0);
+    byId("aoMetricDone").textContent = formatNum(done24);
+    renderDoneSpark(s);
+    const activeStages = ["hunt", "repro", "fix", "ci", "review", "gate", "submit"];
+    const activeTasks = q.filter((job) => activeStages.includes(job.st));
+    const approvals = q.filter((job) => job.st === "approve");
+    const otherOpenTasks = q.filter((job) => !activeStages.includes(job.st) && !["approve", "done", "drop"].includes(job.st));
+    const signature = JSON.stringify([selectedRepo, taskFilterText, q, prs, safeArray(s.ev).slice(0, 8), s.done24, s.done24ByRepo, s.byRepo]);
     if (signature === lastListSignature) return;
     lastListSignature = signature;
     // A backend update should not unexpectedly reset keyboard navigation.
@@ -417,26 +431,27 @@
       parent: focusedParent.id, attribute: focusedAttr,
       value: active.getAttribute(focusedAttr)
     } : null;
-    byId("aoTasksList").innerHTML = q.length ? q.slice(0, 7).map((j) =>
-      rowHTML(j.title, j.repo + (j.num ? " · #" + j.num : "") + " · " + (A.workLabel ? A.workLabel(j.work_class) : j.kind), stageLabels[j.st] || j.st, "data-job", j.id)).join("") :
+    const events = safeArray(s.ev);
+    byId("aoTaskSummary").textContent = formatNum(activeTasks.length);
+    byId("aoPRSummary").textContent = formatNum(openPRs.length);
+    byId("aoActivitySummary").textContent = formatNum(events.slice(0, 8).length);
+    const allTaskRows = activeTasks.map(taskRowHTML).concat(
+      otherOpenTasks.map((j) => rowHTML(j.title, j.repo + (j.num ? " · #" + j.num : ""), stageLabels[j.st] || j.st, "data-job", j.id, {progress: stageProgress[j.st] ?? null})),
+      approvals.map((j) => rowHTML(j.title, j.repo + (j.num ? " · #" + j.num : ""), "Aprovação pendente", "data-job", j.id, {extraClass: "is-approval", badgeTone: "ao-badge-wait"}))
+    );
+    const allTasksHTML = allTaskRows.join("") || '<p class="ao-empty">Sem tarefas ou decisões pendentes.</p>';
+    const allPRsHTML = prs.map((p) => pullRowHTML(s, p)).join("") || '<p class="ao-empty">Sem pull requests registados.</p>';
+    const allEventsHTML = events.map(eventRowHTML).join("") || '<p class="ao-empty">Sem atividade recente.</p>';
+    listDialogData = {tasks: allTasksHTML, prs: allPRsHTML, activity: allEventsHTML};
+    const previewTasks = taskFilterText ? activeTasks.concat(otherOpenTasks, approvals) : activeTasks;
+    byId("aoTasksList").innerHTML = previewTasks.slice(0, 4).map((job) =>
+      activeStages.includes(job.st) ? taskRowHTML(job)
+        : rowHTML(job.title, job.repo + (job.num ? " · #" + job.num : ""), stageLabels[job.st] || (job.st === "approve" ? "Aprovação pendente" : job.st), "data-job", job.id)
+    ).join("") ||
       '<p class="ao-empty">Sem tarefas em aberto.</p>';
-    const issueTotals = Object.fromEntries(["open", "waiting", "queued", "pr_open", "blocked"].map((key) => [key, issueSummary.reduce((sum, item) => sum + Number(item[key] || 0), 0)]));
-    const scanTimes = issueSummary.map((item) => Number(item.scan?.at || 0)).filter(Boolean);
-    const scanErrors = issueSummary.filter((item) => item.scan?.error);
-    const intakeNotReady = issueSummary.filter((item) => !item.intake_ready);
-    const scanNote = scanTimes.length ? "Última leitura " + datum(Math.max(...scanTimes)) : "À espera do primeiro scan do Scout";
-    const backlogNote = `${issueTotals.open}${issueSummary.some((item) => item.scan?.truncated) ? "+" : ""} abertos · ${issueTotals.waiting} por triagem · ${issueTotals.queued} no Apollo · ${issueTotals.pr_open} com PR · ${scanNote}${scanErrors.length ? " · erro: " + scanErrors.map((item) => item.repo).join(", ") : ""}${intakeNotReady.length ? " · CI por configurar: " + intakeNotReady.map((item) => item.repo).join(", ") : ""}`;
-    byId("aoIssueSummary").textContent = backlogNote;
-    const issueState = {waiting:"Por triar", reviewed:"Avaliado", filtered:"Ignorado", queued:"No Apollo", blocked:"Bloqueado", pr_open:"PR aberto", integrated:"Integrado", done:"Concluído"};
-    byId("aoIssueList").innerHTML = issues.length ? issues.slice(0, 40).map((issue) =>
-      rowHTML(issue.title, issue.repo + " · #" + issue.num + (issue.reason ? " · " + issue.reason : ""), issueState[issue.status] || issue.status, "data-pr-url", issue.url, "ao-issue-row")).join("") :
-      '<p class="ao-empty">' + (intakeNotReady.length ? "Configura um comando CI em Repositórios para o Scout iniciar o intake." : selectedRepo ? "Sem issues em cache neste repositório." : "Sem issues em cache; confirma se o intake está ativo em Repositórios.") + '</p>';
-    byId("aoPRList").innerHTML = prs.length ? prs.slice(0, 7).map((p) =>
-      rowHTML(p.title, p.repo + " · #" + p.num + (p.next_action ? " · " + p.next_action : ""), p.state || p.st || "Aberto", "data-pr-url", p.url || "")).join("") :
+    byId("aoPRList").innerHTML = openPRs.slice(0, 3).map((p) => pullRowHTML(s, p)).join("") ||
       '<p class="ao-empty">Sem pull requests registados.</p>';
-    byId("aoEventList").innerHTML = safeArray(s.ev).slice(0, 8).map((e) =>
-      '<div class="ao-event"><time>' + datum(e.t) + '</time><span class="ao-event-agent">' + escapeHTML(names[e.w] || e.w) +
-      '</span><span class="ao-event-message" title="' + escapeHTML(e.m) + '">' + escapeHTML(e.m) + '</span></div>').join("") ||
+    byId("aoEventList").innerHTML = events.slice(0, 8).map(eventRowHTML).join("") ||
       '<p class="ao-empty">Sem atividade recente.</p>';
     if (focusKey) {
       const parent = byId(focusKey.parent);
@@ -446,32 +461,47 @@
       else byId(focusKey.parent === "aoTasksList" ? "aoTasks" : "aoPulls").focus({preventScroll:true});
     }
   };
+  taskFilterInput.addEventListener("input", () => {
+    taskFilterText = taskFilterInput.value.trim().toLocaleLowerCase("pt-PT");
+    lastListSignature = "";
+    if (snapshot) renderLists(snapshot);
+  });
+  const stagedPanel = byId("aoStagedPanel");
+  const stagedModels = byId("aoStagedModels");
+  const stagedStatus = byId("aoStagedStatus");
+  const stagedPhasesList = byId("aoStagedPhases");
+  const stagedFeedback = byId("aoStagedFeedback");
   const renderRepos = (s) => {
-    const repos = [...new Set(safeArray(s.q).concat(safeArray(s.dn), safeArray(s.pr), safeArray(s.issue_summary)).map((v) => v.repo).filter(Boolean))].sort();
+    const configured = safeArray(s.rp);
+    const repos = [...new Set(configured.map((v) => v.repo).concat(safeArray(s.q), safeArray(s.dn), safeArray(s.pr)).map((v) => typeof v === "string" ? v : v.repo).filter(Boolean))].sort();
     if (selectedRepo && !repos.includes(selectedRepo)) selectedRepo = "";
-    const signature = JSON.stringify([repos, selectedRepo]);
+    const signature = JSON.stringify([repos, configured.map((entry) => [entry.repo, !!entry.on_]), selectedRepo]);
+    const projectSelect = byId("aoRepoFilter");
+    const optionSignature = JSON.stringify(repos);
+    if (projectSelect.dataset.signature !== optionSignature) {
+      projectSelect.replaceChildren(new Option("Todos os projetos", ""));
+      for (const repo of repos) projectSelect.add(new Option(repo.split("/").at(-1), repo));
+      projectSelect.dataset.signature = optionSignature;
+    }
+    projectSelect.value = selectedRepo;
     if (signature === lastRepoSignature) return;
     lastRepoSignature = signature;
+    byId("aoProjectCount").textContent = formatNum(configured.filter((entry) => !!entry.on_).length);
     const wrap = byId("aoRepos");
     const restoreFocus = wrap.contains(document.activeElement);
     wrap.replaceChildren();
-    const all = document.createElement("button");
-    all.type = "button"; all.className = "ao-repo-item" + (!selectedRepo ? " is-selected" : "");
-    all.textContent = "Todos"; all.dataset.repo = "";
-    all.addEventListener("click", () => { selectedRepo = ""; renderRepos(snapshot); renderLists(snapshot); });
-    wrap.appendChild(all);
     for (const repo of repos) {
       const item = document.createElement("button");
       item.type = "button"; item.className = "ao-repo-item" + (selectedRepo === repo ? " is-selected" : "");
-      item.textContent = repo;
-      item.title = repo;
+      item.innerHTML = '<span class="ao-repo-dot ' + (configured.find((entry) => entry.repo === repo)?.on_ ? 'is-enabled' : '') + '" aria-hidden="true"></span><span>' + escapeHTML(repo.split("/").at(-1)) + '</span>';
+      item.title = repo + (configured.some((entry) => entry.repo === repo && entry.on_) ? " · ativo" : " · configurado / sem atividade");
       item.dataset.repo = repo;
-      item.addEventListener("click", () => { selectedRepo = repo; renderRepos(snapshot); renderLists(snapshot); });
+      item.addEventListener("click", () => { selectedRepo = repo; renderRepos(snapshot); renderLists(snapshot); renderPipeline(snapshot); renderOfficeCheck(snapshot); });
       wrap.appendChild(item);
     }
     if (!repos.length) {
       const empty = document.createElement("div");
-      empty.className = "ao-muted"; empty.textContent = "Sem repositórios nos registos atuais.";
+      empty.className = "ao-muted"; empty.textContent = "Sem repositórios configurados.";
       wrap.appendChild(empty);
     }
     if (restoreFocus) {
@@ -480,6 +510,13 @@
       target?.focus({preventScroll:true});
     }
   };
+  byId("aoRepoFilter").addEventListener("change", (event) => {
+    selectedRepo = event.currentTarget.value;
+    renderRepos(snapshot);
+    renderLists(snapshot);
+    renderPipeline(snapshot);
+    renderOfficeCheck(snapshot);
+  });
   // Unlike the limited queue preview, s.n contains the server's full database counts.
   const pipelineSteps = [
     {label: "Pendente", statuses: ["ready"]},
@@ -493,11 +530,16 @@
     {label: "Aprovação", statuses: ["approve"]},
     {label: "Submissão", statuses: ["submit"]}
   ];
+  const officePhases = [
+    {key:"develop", label:"Desenvolver", statuses:["ready","vet","hunt","repro","fix"]},
+    {key:"test", label:"Testar", statuses:["ci"]},
+    {key:"review", label:"Rever", statuses:["review"]},
+    {key:"integrate", label:"Integrar", statuses:["gate","approve","submit"]}
+  ];
   const pipeline = byId("aoPipeline");
   pipeline.innerHTML = pipelineSteps.map(({label}, i) =>
     '<div class="ao-pipeline-stage" role="group" data-pipeline-index="' + i +
-    '"><span class="ao-pipeline-index">' + String(i + 1).padStart(2, "0") +
-    '</span><strong>' + label +
+    '"><strong>' + label +
     '</strong><span class="ao-pipeline-value">—</span></div>'
   ).join("");
   /**
@@ -506,8 +548,10 @@
    */
   const renderPipeline = (s) => {
     const counts = s.n && typeof s.n === "object" ? s.n : {};
+    const repoCounts = selectedRepo ? safeArray(s.byRepo).filter((row) => row.repo === selectedRepo)
+      .reduce((total, row) => { total[row.st] = Number(row.n) || 0; return total; }, {}) : counts;
     const values = pipelineSteps.map(({statuses}) =>
-      statuses.reduce((sum, key) => sum + Math.max(0, Number(counts[key]) || 0), 0)
+      statuses.reduce((sum, key) => sum + Math.max(0, Number(repoCounts[key]) || 0), 0)
     );
     const signature = JSON.stringify(values);
     if (signature === lastPipelineSignature) return;
@@ -519,20 +563,139 @@
       item.setAttribute("aria-label", pipelineSteps[i].label + ": " + formatNum(values[i]) + (values[i] === 1 ? " tarefa" : " tarefas"));
     }
   };
-  const countTotals = (s) => {
+  let lastOfficeCheckSignature = "";
+  const renderOfficeCheck = (s) => {
     const counts = s.n && typeof s.n === "object" ? s.n : {};
+    const repoCounts = selectedRepo ? safeArray(s.byRepo).filter((row) => row.repo === selectedRepo)
+      .reduce((total, row) => { total[row.st] = Number(row.n) || 0; return total; }, {}) : counts;
+    const values = officePhases.map(({statuses}) => statuses.reduce((sum, key) =>
+      sum + Math.max(0, Number(repoCounts[key]) || 0), 0));
+    const signature = JSON.stringify(values);
+    if (signature === lastOfficeCheckSignature) return;
+    lastOfficeCheckSignature = signature;
+    const nodes = byId("aoOfficeCheck").children;
+    for (let i = 0; i < values.length; i++) {
+      const item = nodes[i], value = values[i], label = officePhases[i].label;
+      item.dataset.active = String(value > 0);
+      item.querySelector(".ao-check-count").textContent = formatNum(value);
+      item.setAttribute("aria-label", label + ": " + formatNum(value) + (value === 1 ? " tarefa" : " tarefas"));
+    }
+  };
+  const stagedPhases = [
+    {key:"red", label:"RED · teste regressivo", short:"RED"},
+    {key:"green", label:"GREEN · correção", short:"GREEN"},
+    {key:"ci", label:"CI · testes", short:"CI"},
+    {key:"review", label:"REVIEWER · revisão", short:"REVIEW"},
+    {key:"approval", label:"Aprovação humana", short:"Humana"}
+  ];
+  const stagedRank = {fix:0, ci:1, review:2, gate:3, approve:4, submit:5, done:6};
+  const resolveStagedPipeline = (s) => {
+    const config = s?.tdd && typeof s.tdd === "object" ? s.tdd : {};
+    const repos = safeArray(config.repos).filter((repo) => typeof repo === "string");
+    if (config.active !== true || !repos.length) return {visible:false};
+    const belongs = (job) => job && repos.includes(job.repo) && ["fix", "hunt"].includes(job.kind);
+    const open = safeArray(s.q).filter(belongs);
+    const fixer = s.w?.fixer || {};
+    const current = open.find((job) => String(job.id) === String(fixer.job));
+    const job = current || open[0] || safeArray(s.dn).find((item) => item.st === "drop" && belongs(item));
+    if (!job) return {
+      visible:true, config, job:null,
+      phases:stagedPhases.map((phase) => ({...phase, state:"pending"})),
+      status:"À espera de tarefa staged", notice:null
+    };
+
+    const workerOwnsJob = String(fixer.job) === String(job.id);
+    const latestEvent = safeArray(s.ev).find((event) => String(event?.j) === String(job.id));
+    const message = String(latestEvent?.m || (workerOwnsJob ? fixer.say : "") || "").trim();
+    const stage = String(job.st || "");
+    const rank = Object.hasOwn(stagedRank, stage) ? stagedRank[stage] : -1;
+    const redCurrent = stage === "fix" && workerOwnsJob && /^RED(?:\b|:)/i.test(message);
+    const greenCurrent = stage === "fix" && workerOwnsJob && /^GREEN(?:\b|\s|:)/i.test(message);
+    const phases = stagedPhases.map((phase) => {
+      let state = "pending";
+      if (phase.key === "red") {
+        state = redCurrent ? "active" : (job.red_commit || job.red_stage === "committed" || job.green_commit || rank >= 1) ? "complete" : "pending";
+      } else if (phase.key === "green") {
+        state = greenCurrent ? "active" : (job.green_commit || rank >= 1) ? "complete" : "pending";
+      } else if (phase.key === "ci") {
+        state = stage === "ci" ? "active" : rank > 1 ? "complete" : "pending";
+      } else if (phase.key === "review") {
+        state = stage === "review" ? "active" : rank > 3 ? "complete" : "pending";
+      } else if (phase.key === "approval") {
+        state = stage === "approve" ? "active" : rank > 4 ? "complete" : "pending";
+      }
+      return {...phase, state};
+    });
+    const recovering = /\bresum(?:e|ed|ing)\b|\brecover(?:y|ed)?\b/i.test(message);
+    const rejected = stage === "drop" || /\breject(?:ed|ion)?\b|back to fixer|gave up|attempt failed|proof missing|changes requested|reviewer objections/i.test(message);
+    const notice = recovering ? {kind:"recovery", label:"Recuperação", message}
+      : rejected ? {kind:"rejection", label:"Rejeição", message:String(job.why || message || "Candidato recusado")}
+      : null;
+    const status = notice?.label || (stage === "approve" ? "Aprovação humana pendente"
+      : stage === "submit" ? "Aprovado · a submeter"
+      : stage === "review" ? "Revisão independente"
+      : stage === "ci" ? "CI em execução"
+      : stage === "gate" ? "Validação automática"
+      : stage === "fix" ? (greenCurrent ? "GREEN em execução" : redCurrent ? "RED em execução" : "Fixer em execução")
+      : stage === "drop" ? "Rejeição"
+      : "Tarefa " + stage);
+    return {visible:true, config, job, phases, status, notice};
+  };
+  let lastStagedSignature = "";
+  const renderStagedPipeline = (s) => {
+    const view = resolveStagedPipeline(s);
+    stagedPanel.hidden = !view.visible;
+    if (!view.visible) { lastStagedSignature = ""; return; }
+    const signature = JSON.stringify(view);
+    if (signature === lastStagedSignature) return;
+    lastStagedSignature = signature;
+    const modelName = (value) => value && typeof A.mdn === "function" ? A.mdn(value) : value || "Sem modelo configurado";
+    const primary = view.config.primary || "";
+    const reviewer = view.config.reviewer || "";
+    const independent = !!primary && !!reviewer && primary !== reviewer;
+    const fallback = view.config.fallback
+      ? modelName(view.config.fallback) + (view.config.fallback_effort ? " · esforço " + view.config.fallback_effort : " · fallback")
+      : "Sem fallback configurado";
+    const compactModel = (value) => modelName(value).replace(/\s·\s(?:local|ChatGPT)$/i, "");
+    const compactFallback = view.config.fallback
+      ? compactModel(view.config.fallback) + (view.config.fallback_effort ? " · esforço " + view.config.fallback_effort : " · fallback")
+      : fallback;
+    stagedModels.textContent = "FIXER: " + compactModel(primary) + " · Fallback: " + compactFallback +
+      " · REVIEWER: " + compactModel(reviewer) + (independent ? " · independente" : " · separação por confirmar");
+    stagedStatus.textContent = view.status;
+    stagedStatus.dataset.state = view.notice?.kind || (view.job?.st === "approve" ? "approval" : "normal");
+    if (!stagedPhasesList.children.length) {
+      stagedPhasesList.innerHTML = stagedPhases.map((phase, index) =>
+        '<li class="ao-staged-phase" data-stage="' + phase.key + '" title="' + escapeHTML(phase.label) + '"><span class="ao-staged-index">' +
+        String(index + 1).padStart(2, "0") + '</span><strong>' + phase.short +
+        '</strong><small>À espera</small></li>'
+      ).join("");
+    }
+    const stateLabels = {active:"Em curso", complete:"Concluído", pending:"À espera"};
+    for (let i = 0; i < view.phases.length; i++) {
+      const phase = view.phases[i], item = stagedPhasesList.children[i];
+      item.dataset.state = phase.state;
+      item.setAttribute("aria-label", phase.label + ": " + stateLabels[phase.state]);
+      item.querySelector("small").textContent = stateLabels[phase.state];
+    }
+    stagedFeedback.hidden = !view.notice;
+    const jobTag = view.job ? (view.job.num ? "#" + view.job.num : "job " + view.job.id) : "";
+    stagedFeedback.textContent = view.notice
+      ? view.notice.label + (jobTag ? " · " + jobTag : "") + (view.notice.message ? " · " + view.notice.message : "")
+      : "";
+  };
+  const countTotals = (s) => {
+    const allCounts = s.n && typeof s.n === "object" ? s.n : {};
+    const counts = selectedRepo ? safeArray(s.byRepo).filter((row) => row.repo === selectedRepo)
+      .reduce((total, row) => { total[row.st] = Number(row.n) || 0; return total; }, {}) : allCounts;
     const active = Object.entries(counts)
       .filter(([key]) => key !== "done" && key !== "drop")
       .reduce((total, [, amount]) => total + Math.max(0, Number(amount) || 0), 0);
-    return {active, done: Math.max(0, Number(counts.done) || 0)};
+    return {active, done:Math.max(0, Number(counts.done) || 0)};
   };
-  /**
-   * Draw 30 daily UTC buckets to match backend mergedAt grouping.
-   * The source reports UTC dates; local calendar dates would shift buckets.
-   * @param {object} s Server state containing s.mg merge history.
-   */
+  const hourLabel = (ago) => { const d = new Date(Date.now() - ago * 3600000); return String(d.getHours()).padStart(2, "0") + "h"; };
+  /** Draw the backend's UTC merge counts over a rolling 30-day window. */
   const renderMerges = (s) => {
-    // The Rust backend groups GitHub mergedAt values by UTC date.
     const now = Date.now();
     const todayUtc = new Date(now).toISOString().slice(0, 10);
     const signature = JSON.stringify([s.mg, todayUtc]);
@@ -540,18 +703,63 @@
     lastMergeSignature = signature;
     const counts = new Map(safeArray(s.mg).map((item) => [item.d, Number(item.n) || 0]));
     const days = [];
-    for (let i=29;i>=0;i--) {
+    for (let i = 29; i >= 0; i--) {
       const key = new Date(now - i * 86400000).toISOString().slice(0, 10);
-      days.push({date:key,count:counts.get(key)||0});
+      days.push({date:key, count:counts.get(key) || 0});
     }
-    const max = Math.max(1,...days.map((d)=>d.count));
+    const max = Math.max(1, ...days.map((day) => day.count));
     byId("aoMergeChart").innerHTML = '<div class="ao-merge-graph" role="img" aria-label="Gráfico de integrações dos últimos 30 dias">' +
-      days.map((d) => '<span title="' + d.date + ': ' + d.count + ' PRs" style="height:' + Math.max(2,d.count/max*100) + '%" class="' + (d.count?"ao-bar-live":"ao-bar-zero") + '"></span>').join("") +
+      days.map((day) => '<span title="' + day.date + ': ' + day.count + ' PRs" style="height:' + Math.max(2, day.count / max * 100) + '%" class="' + (day.count ? "ao-bar-live" : "ao-bar-zero") + '"></span>').join("") +
       '</div><div class="ao-trend-labels"><span>Há 30 dias</span><span>Hoje (UTC)</span></div>';
   };
   /**
+   * Draw 24 hourly buckets of really-completed tasks (s.prod24 = {g,n} by hours-ago).
+   * @param {object} s Server state with prod24 productivity history.
+   */
+  const renderProductivity = (s) => {
+    const rows = safeArray(s.prod24);
+    const signature = JSON.stringify([rows, Math.floor(Date.now() / 3600000)]);
+    if (signature === lastProdSignature) return;
+    lastProdSignature = signature;
+    const total = rows.reduce((t, r) => t + (Number(r.n) || 0), 0);
+    const counts = new Map(rows.map((r) => [Number(r.g), Number(r.n) || 0]));
+    const hours = [];
+    for (let i = 23; i >= 0; i--) hours.push({ago: i, n: counts.get(i) || 0});
+    const max = Math.max(1, ...hours.map((h) => h.n));
+    const top = max <= 4 ? 5 : Math.ceil(max / 5) * 5;
+    const yTicks = total
+      ? [top, Math.round(top * 0.75), Math.round(top * 0.5), Math.round(top * 0.25), 0]
+      : ["", "", "", "", 0];
+    const xIdx = [0, 4, 8, 12, 16, 20, 23];
+    const xLabels = xIdx.map((i) => hours[i].ago === 0 ? "Agora" : hourLabel(hours[i].ago));
+    byId("aoProductivityChart").innerHTML =
+      '<div class="ao-prod">' +
+        '<div class="ao-prod-yaxis" aria-hidden="true">' + yTicks.map((t) => '<span>' + t + '</span>').join("") + '</div>' +
+        '<div class="ao-prod-main">' +
+        '<div class="ao-merge-graph" role="img" aria-label="' + (total
+          ? "Tarefas concluídas por hora nas últimas 24 horas"
+          : "Nenhuma tarefa concluída nas últimas 24 horas") + '">' +
+            hours.map((h) => '<span title="' + hourLabel(h.ago) + ': ' + h.n + ' tarefas" style="height:' + (h.n ? Math.max(2, h.n / top * 100) : 0) + '%" class="' + (h.n ? "ao-bar-live" : "ao-bar-zero") + '"></span>').join("") +
+          '</div>' +
+          (total ? "" : '<span class="ao-prod-empty">Sem conclusões registadas</span>') +
+          '<div class="ao-prod-xaxis" aria-hidden="true">' + xLabels.map((l) => '<span>' + l + '</span>').join("") + '</div>' +
+        '</div>' +
+      '</div>';
+  };
+  // Compact sparkline for the "Concluídas (24 h)" metric, from the same real buckets.
+  const renderDoneSpark = (s) => {
+    const el = byId("aoMetricDoneSpark");
+    if (!el) return;
+    const counts = new Map(safeArray(s.prod24).map((r) => [Number(r.g), Number(r.n) || 0]));
+    const bars = [];
+    for (let i = 11; i >= 0; i--) bars.push((counts.get(i * 2) || 0) + (counts.get(i * 2 + 1) || 0));
+    const max = Math.max(1, ...bars);
+    el.innerHTML = bars.some((b) => b > 0)
+      ? bars.map((b) => '<i style="height:' + Math.max(12, b / max * 100) + '%"></i>').join("") : "";
+  };
+  /**
    * Show measured host telemetry only while its heartbeat and state are fresh.
-   * Previous readings are labeled as history, never current performance.
+   * Older readings are labeled as history, never as current performance.
    * @param {object} s Server state with hosts, telemetry and connectivity.
    */
   const renderMachines = (s) => {
@@ -559,15 +767,19 @@
     if (signature === lastMachineSignature) return;
     lastMachineSignature = signature;
     const hosts = safeArray(s.hs), live = s.hst || {};
-    if (!hosts.length) { byId("aoMachines").innerHTML = '<p class="ao-empty">Ainda não existem máquinas configuradas.</p>'; return; }
-    byId("aoMachines").innerHTML = hosts.slice(0,4).map((h)=>{
-      const info = live[h.id] || {};
-      const enabled = !!h.on_;
-      const unavailable = enabled && s.o?.net?.[h.id] === false;
+    const machineList = byId("aoMachines");
+    if (!hosts.length) {
+      machineList.innerHTML = '<p class="ao-empty">Ainda não existem máquinas configuradas.</p>';
+      return;
+    }
+    machineList.innerHTML = hosts.slice(0, 4).map((host) => {
+      const info = live[host.id] || {};
+      const enabled = !!host.on_;
+      const unavailable = enabled && s.o?.net?.[host.id] === false;
       const age = Date.now() - Number(info.t || 0);
       const recent = enabled && !unavailable && !app.classList.contains("ao-data-stale") && age >= 0 && age < 120_000;
       const status = !enabled ? "Desativada" : unavailable ? "Indisponível" : recent ? "Dados recentes" : "Por confirmar";
-      let pieces = [];
+      const pieces = [];
       if (Number.isFinite(Number(info.cpu)) && Number(info.cpu) > 0) pieces.push(info.cpu + " núcleos");
       if (info.load != null && Number.isFinite(Number(info.load)) && Number(info.load) >= 0) {
         pieces.push("Carga " + Number(info.load).toLocaleString("pt-PT", {maximumFractionDigits:2}));
@@ -575,44 +787,41 @@
       if (info.temp != null && Number.isFinite(Number(info.temp))) {
         pieces.push(Number(info.temp).toLocaleString("pt-PT", {maximumFractionDigits:1}) + " °C");
       }
-      if (Array.isArray(info.mem) && Number(info.mem[0])>0) {
-        const used = (Number(info.mem[0])-Number(info.mem[1]))/1024;
-        pieces.push(used.toFixed(1) + " / " + (Number(info.mem[0])/1024).toFixed(1) + " GB RAM");
+      if (Array.isArray(info.mem) && Number(info.mem[0]) > 0) {
+        const used = (Number(info.mem[0]) - Number(info.mem[1])) / 1024;
+        pieces.push(used.toFixed(1) + " / " + (Number(info.mem[0]) / 1024).toFixed(1) + " GB RAM");
       }
-      if (Array.isArray(info.disk) && Number(info.disk[0])>0) pieces.push(info.disk[1] + " GB livres");
-      // Never present old CPU/RAM/temperature readings as if they were live.
+      if (Array.isArray(info.disk) && Number(info.disk[0]) > 0) pieces.push(info.disk[1] + " GB livres");
       const lastSeen = Number(info.t);
       const timestamp = Number.isFinite(lastSeen) && lastSeen > 0
-        ? new Date(lastSeen).toLocaleString("pt-PT", {
-            day:"2-digit", month:"2-digit", hour:"2-digit", minute:"2-digit"
-          })
+        ? new Date(lastSeen).toLocaleString("pt-PT", {day:"2-digit", month:"2-digit", hour:"2-digit", minute:"2-digit"})
         : null;
-      const description = recent
-        ? (pieces.join(" · ") || "Sem métricas de hardware")
+      const description = recent ? (pieces.join(" · ") || "Sem métricas de hardware")
         : timestamp ? "Última leitura: " + timestamp : "Sem leituras recentes";
       return '<div class="ao-machine-row"><span class="ao-host-dot ' + (recent ? "ao-host-up" : "ao-host-down") + '"></span><span><strong>' +
-        escapeHTML(h.id) + '</strong><small>' + escapeHTML(description) + '</small></span><em>' +
-        status + '</em></div>';
+        escapeHTML(host.id) + '</strong><small>' + escapeHTML(description) + '</small></span><em>' + status + '</em></div>';
     }).join("");
   };
   const markStale = () => {
     app.classList.add("ao-data-stale");
     clearReactions();
     // Preserve the last task records, but never claim a worker is still active.
-    for (const role of roles) {
+    for (const role of officeRoles) {
       const desk = stationNodes[role];
+      if (!desk) continue;
       desk.dataset.mode = "unknown";
       desk.querySelector(".ao-station-state").textContent = "Por confirmar";
       desk.setAttribute("aria-label", "Ver agente " + names[role] + ". Estado por confirmar");
-      const row = byId("aoAgentList").querySelector('[data-agent="' + role + '"]');
-      const status = row?.querySelector(".ao-agent-status");
-      if (status) {
-        status.textContent = "Por confirmar";
-        status.className = "ao-agent-status ao-state-unknown";
-      }
     }
     byId("aoMetricWorkers").textContent = "—";
+    for (const role of roles) {
+      const row = agentList.querySelector('[data-role="' + role + '"]');
+      const status = row?.querySelector(".ao-agent-status");
+      if (row) { row.dataset.state = "unknown"; row.classList.remove("ao-state-work", "ao-state-paused"); }
+      if (status) status.textContent = "Por confirmar";
+    }
     byId("aoAgentSummary").textContent = "Sem atualização recente";
+    byId("aoMetricWorkers").textContent = "—";
     if (snapshot) renderMachines(snapshot);
   };
   /**
@@ -629,16 +838,38 @@
     const timeElement = byId("aoUpdatedAt");
     if (timeElement.textContent !== timeLabel) timeElement.textContent = timeLabel;
     app.classList.remove("ao-data-stale");
+    const me = typeof s.me === "string" ? s.me.trim() : "";
+    const greeting = greetWord() + (me ? ", " + me + " 👋" : " 👋");
+    if (byId("aoGreeting").textContent !== greeting) byId("aoGreeting").textContent = greeting;
+    const userName = me || "Utilizador";
+    const nameEl = byId("aoUserName");
+    if (nameEl && nameEl.textContent !== userName) nameEl.textContent = userName;
+    const initials = me ? me.split(/\s+/).filter(Boolean).map((p) => p[0]).join("").slice(0, 2).toUpperCase() : "·";
+    const initEl = byId("aoUserInitials");
+    if (initEl && initEl.textContent !== initials) initEl.textContent = initials;
     const isPaused = paused(s), isOffline = offline(s), isWarn = !!s.o?.warn;
     const state = byId("aoOfficeStatus");
-    state.className = "ao-status-chip" + (isPaused || isWarn ? " is-paused" : "");
-    const statusLabel = isOffline ? "Serviços externos indisponíveis" : isPaused ? "Escritório em pausa" : isWarn ? "Aviso de utilização" : "Ligação ativa";
+    state.className = "ao-status-chip" + (isPaused || isWarn || isOffline ? " is-paused" : "");
+    const statusLabel = isOffline ? "Serviços externos indisponíveis" : isPaused ? "Escritório em pausa" : isWarn ? "Aviso de utilização" : "Sistema operacional";
     if (state.textContent !== statusLabel) state.textContent = statusLabel;
+    const approvalsPending = safeArray(s.q).filter((j) => j.st === "approve" && (!selectedRepo || j.repo === selectedRepo)).length;
+    const bellDot = byId("aoBell")?.querySelector(".ao-bell-dot");
+    if (bellDot) bellDot.hidden = approvalsPending === 0;
+    byId("aoBell")?.setAttribute("aria-label", approvalsPending ? approvalsPending + " decisão(ões) pendente(s)" : "Sem notificações");
     const connection = isOffline ? "Problema em serviços externos" : "Dados em tempo real";
     if (byId("aoConnection").textContent !== connection) byId("aoConnection").textContent = connection;
-    byId("aoPause").textContent = s.o?.man ? "Retomar escritório" : "Pausar escritório";
-    byId("aoPause").disabled = !s.o;
-    renderDiag(s); updateAgents(s); renderPipeline(s); renderRepos(s); renderLists(s); renderMerges(s); renderMachines(s);
+    byId("aoConnection").closest(".ao-sidebar-footer").dataset.state = isOffline ? "offline" : isPaused ? "paused" : isWarn ? "warning" : "live";
+    const officeMode = isPaused ? "Escritório em pausa" : isOffline ? "Dados externos indisponíveis" : "Estado sincronizado";
+    byId("aoOfficeMode").textContent = officeMode;
+    byId("aoOfficeMode").classList.toggle("is-paused", isPaused || isOffline || isWarn);
+    const pauseLabel = isPaused ? "Retomar escritório" : "Pausar escritório";
+    const pauseButton = byId("aoPause");
+    byId("aoPauseLabel").textContent = pauseLabel;
+    pauseButton.setAttribute("aria-label", pauseLabel);
+    pauseButton.title = pauseLabel;
+    pauseButton.dataset.state = isPaused ? "paused" : "running";
+    pauseButton.disabled = !s.o;
+    updateAgents(s); renderPipeline(s); renderOfficeCheck(s); renderStagedPipeline(s); renderRepos(s); renderLists(s); renderMerges(s); renderProductivity(s); renderMachines(s);
     if (selected) showAgent(selected, false);
   };
   const overlay = byId("aoAgentOverlay");
@@ -654,16 +885,19 @@
     const stage = stale ? "unknown" : mode(snapshot, role);
     selected = role;
     byId("aoDetailTitle").textContent = names[role];
+    const avatar = byId("aoDetailAvatar");
+    if (avatar) { avatar.src = "/assets/agents/" + role + ".webp"; avatar.alt = names[role]; }
     const jobs = safeArray(snapshot.q);
     const job = w.job != null ? jobs.find((j) => String(j.id) === String(w.job)) : null;
     const recent = lastCommands(w);
-    const signature = JSON.stringify([role, stage, stale, w.md, w.say, w.idle_reason, w.mood, recent, job?.id, job?.title]);
+    const current = typeof w.say === "string" ? w.say.trim() : "";
+    const signature = JSON.stringify([role, stage, stale, w.md, w.say, w.mood, recent, job?.id, job?.title]);
     if (!focus && signature === lastDetailSignature) return;
     lastDetailSignature = signature;
     const rows = [
       ["Estado",stale ? "Por confirmar — dados desatualizados" : statusText[stage]],
       ["Modelo",w.md ? A.mdn(w.md) : "Sem modelo atribuído"],
-      ["Atividade",w.say ? (stage === "work" ? w.say : "Último registo: " + w.say) : "Sem informação adicional"]
+      ["Atividade",current ? (stage === "work" ? current : "Último registo: " + current) : "Sem informação adicional"]
     ];
     if (!stale && stage !== "work" && w.idle_reason) {
       rows.push(["Motivo da espera", String(w.idle_reason)]);
@@ -707,6 +941,54 @@
     overlay.hidden = true; selected = null;
     if (lastFocus?.isConnected) lastFocus.focus();
   };
+  const listOverlay = byId("aoListOverlay");
+  let listReturnFocus = null;
+  const listViews = {
+    tasks: {title: "Tarefas e decisões", icon: "tasks.svg", count: "aoTaskSummary"},
+    prs: {title: "Pull Requests", icon: "pulls.svg", count: "aoPRSummary"},
+    activity: {title: "Histórico de atividade", icon: "activity-wave.svg", count: "aoActivitySummary"}
+  };
+  const hideList = () => {
+    if (listOverlay.hidden) return;
+    listOverlay.hidden = true;
+    if (listReturnFocus?.isConnected) listReturnFocus.focus();
+  };
+  const showList = (kind) => {
+    const view = listViews[kind];
+    if (!view) return;
+    listReturnFocus = document.activeElement;
+    byId("aoListDialogTitle").textContent = view.title;
+    byId("aoListDialogIcon").src = "/assets/icons/" + view.icon;
+    byId("aoListDialogCount").textContent = byId(view.count).textContent;
+    const content = byId("aoListDialogContent");
+    content.innerHTML = '<div class="ao-list ao-list-expanded">' + (listDialogData[kind] || '<p class="ao-empty">Sem registos.</p>') + '</div>';
+    if (kind === "tasks" && !stagedPanel.hidden) {
+      const stagedCopy = stagedPanel.cloneNode(true);
+      stagedCopy.removeAttribute("id");
+      stagedCopy.classList.remove("ao-staged-panel");
+      stagedCopy.setAttribute("aria-label", "Estado do pipeline test-first");
+      stagedCopy.querySelectorAll("[id]").forEach((node) => node.removeAttribute("id"));
+      content.appendChild(stagedCopy);
+    }
+    listOverlay.hidden = false;
+    byId("aoListClose").focus();
+  };
+  byId("aoListClose").addEventListener("click", hideList);
+  listOverlay.addEventListener("click", (e) => { if (e.target === listOverlay) hideList(); });
+  const onListModalKeydown = (e) => {
+    if (listOverlay.hidden) return;
+    if (e.key === "Escape") { e.preventDefault(); hideList(); return; }
+    if (e.key !== "Tab") return;
+    const items = Array.from(listOverlay.querySelectorAll("button:not([hidden]):not(:disabled)"));
+    if (!items.length) { e.preventDefault(); return; }
+    const first = items[0], last = items[items.length - 1];
+    if (e.shiftKey && (document.activeElement === first || document.activeElement === listOverlay.querySelector(".ao-list-dialog"))) {
+      e.preventDefault(); last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault(); first.focus();
+    }
+  };
+  document.addEventListener("keydown", onListModalKeydown);
   byId("aoDetailClose").addEventListener("click", hideAgent);
   overlay.addEventListener("click", (e) => { if (e.target === overlay) hideAgent(); });
   const onModalKeydown = (e) => {
@@ -725,8 +1007,9 @@
   document.addEventListener("keydown", onModalKeydown);
   const handlers = {repos:"bRepos",hosts:"bHosts",costs:"bCost",settings:"bSet",steward:"bSteward"};
   app.addEventListener("click", (event) => {
-    const node = event.target.closest("[data-role],[data-agent],[data-job],[data-pr-url],[data-target],[data-open]");
+    const node = event.target.closest("[data-role],[data-agent],[data-job],[data-pr-url],[data-target],[data-open],[data-open-list]");
     if (!node) return;
+    if (node.dataset.openList) { showList(node.dataset.openList); return; }
     if (node.dataset.role || node.dataset.agent) { showAgent(node.dataset.role || node.dataset.agent); return; }
     if (node.dataset.job) { A.job?.(Number(node.dataset.job)); return; }
     if (node.dataset.prUrl) { A.open?.(node.dataset.prUrl); return; }
@@ -736,7 +1019,10 @@
       byId(node.dataset.target)?.scrollIntoView({
         behavior: animationsOn && !reduced ? "smooth" : "auto", block: "start"
       });
-      app.querySelectorAll(".ao-nav-item").forEach((n) => n.classList.toggle("is-active", n === node));
+      // Only sidebar items drive the active-nav highlight; "Ver todas" links don't.
+      if (node.classList.contains("ao-nav-item")) {
+        app.querySelectorAll(".ao-nav-item").forEach((n) => n.classList.toggle("is-active", n === node));
+      }
     }
   });
   byId("aoPause").addEventListener("click", () => byId("bPause")?.click());
@@ -749,14 +1035,24 @@
     unsubscribe();
     A.stopOfficeMotion?.();
     document.removeEventListener("keydown", onModalKeydown);
+    document.removeEventListener("keydown", onListModalKeydown);
     document.removeEventListener("visibilitychange", onVisibilityChange);
     if (staleTimer !== null) clearInterval(staleTimer);
     console.error("Apollo Control Room: reverting to original interface", error);
+    if (pixelStage) {
+      if (pixelCanvas && pixelCanvas.parentElement !== pixelStage) pixelStage.appendChild(pixelCanvas);
+      if (pixelMerge && pixelMerge.parentElement !== pixelStage) pixelStage.appendChild(pixelMerge);
+    }
+    if (pixelTip && pixelTipParent) {
+      const next = pixelTipNext?.parentElement === pixelTipParent ? pixelTipNext : null;
+      pixelTipParent.insertBefore(pixelTip, next);
+    }
     app.remove();
     legacy.replaceWith(...Array.from(legacy.children));
     document.body.classList.remove("ao-enabled");
     document.body.classList.add("ao-fallback-no-pixel");
     A.disablePixelArt = true;
+    A.pixelDashboard = false;
     A.modernRoom = false;
   };
   // Keep legacy onState intact. State subscribers are isolated by o.js.
@@ -769,7 +1065,20 @@
   }
   // When startup recovery already restored the old interface, do not
   // register a timer or any additional work for the removed dashboard.
-  if (!healthy) return;
+  if (!healthy) return; // Keep the connection status timers scoped to the mounted dashboard.
+  // Live local clock (presentation of the real current time, not server data).
+  const months = ["jan","fev","mar","abr","mai","jun","jul","ago","set","out","nov","dez"];
+  const tickClock = () => {
+    if (!app.isConnected) { clearInterval(clockTimer); return; }
+    const d = new Date();
+    const hm = String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+    const dt = d.getDate() + " " + months[d.getMonth()] + " " + d.getFullYear();
+    const c = byId("aoClock"), dl = byId("aoDate");
+    if (c && c.textContent !== hm) c.textContent = hm;
+    if (dl && dl.textContent !== dt) dl.textContent = dt;
+  };
+  tickClock();
+  const clockTimer = setInterval(tickClock, 15000);
   // Keep the connection label honest if WebSocket and polling stop updating.
   staleTimer = setInterval(() => {
     if (!healthy || !app.isConnected) { clearInterval(staleTimer); return; }
@@ -780,5 +1089,6 @@
     if (state.textContent !== "Dados desatualizados") state.textContent = "Dados desatualizados";
     byId("aoConnection").textContent = "Sem atualizações recentes";
     byId("aoUpdatedAt").textContent = "Sem atualização recente";
+    byId("aoConnection").closest(".ao-sidebar-footer").dataset.state = "stale";
   }, 5000);
 })();

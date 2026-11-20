@@ -23,26 +23,37 @@ function fixture() {
       return this.children.filter(n=>n.className?.includes("ao-repo-item"));
     }
   };
+  const selector={
+    children:[],value:"",handlers:{},dataset:{},
+    replaceChildren(){this.children=[]},
+    add(option){this.children.push(option)},
+    appendChild(node){this.children.push(node)},
+    addEventListener(event,handler){this.handlers[event]=handler},
+    get options(){return this.children}
+  };
   document.createElement=(tag)=>({
-    tagName:tag, dataset:{}, className:"", textContent:"", handlers:{},
+    tagName:tag, dataset:{}, className:"", textContent:"", value:"", handlers:{},
     addEventListener(event,handler){this.handlers[event]=handler},
     focus(){document.activeElement=this},
     click(){this.focus();this.handlers.click?.()},
   });
   const mock=runInNewContext("(() => {" +
     " let lastRepoSignature='',selectedRepo='',snapshot=null;"+
-    " const byId=(id)=>{if(id!=='aoRepos')throw Error(id);return __wrap};"+
+    " const byId=(id)=>{if(id==='aoRepos')return __wrap;if(id==='aoRepoFilter')return __selector;if(id==='aoProjectCount')return {textContent:''};throw Error(id)};"+
     " const safeArray=(v)=>Array.isArray(v)?v:[];"+
-    " const renderLists=()=>{};"+implementation+
+    " const formatNum=(n)=>String(Number(n||0));"+
+    " const escapeHTML=(value)=>String(value??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]));"+
+    " const renderLists=()=>{};const renderPipeline=()=>{};const renderOfficeCheck=()=>{};"+implementation+
     " return {renderRepos, setSnapshot(s){snapshot=s}}; })()",
-    {document,__wrap:wrap});
+    {document,__wrap:wrap,__selector:selector,Option:function(label,value){return {label,value}}});
   const state=(repos)=>({q:repos.map((repo)=>({repo})),pr:[],dn:[]});
-  return {document,wrap,mock,state};
+  return {document,wrap,selector,mock,state};
 }
 
 test("repository switch keeps keyboard focus on the newly selected filter",()=>{
   const h=fixture();const s=h.state(["owner/one","owner/two"]);
   h.mock.setSnapshot(s);h.mock.renderRepos(s);
+  assert.ok(h.selector.options.some(x=>x.value==="owner/one"));
   const first=h.wrap.children.find(x=>x.dataset.repo==="owner/one");
   first.focus();
   const second=h.wrap.children.find(x=>x.dataset.repo==="owner/two");

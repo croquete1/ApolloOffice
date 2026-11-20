@@ -1078,6 +1078,7 @@ mod t {
                 dir: dd.join("repo").display().to_string(),
                 w: String::new(),
                 md: String::new(),
+            staged: false,
             });
             let (_, js) = ask1(&a, o).await.unwrap();
             assert_eq!(js["ok"], true, "{fmt}");
@@ -1204,6 +1205,7 @@ print('9 frozen independent addition cases PASS')
             dir: repo.display().to_string(),
             w: "repro".into(),
             md: String::new(),
+            staged: false,
         });
         let reproduced = ask1(&a, repro).await;
         println!(
@@ -1230,6 +1232,7 @@ print('9 frozen independent addition cases PASS')
             dir: repo.display().to_string(),
             w: "fixer".into(),
             md: String::new(),
+            staged: false,
         });
         let result = ask1(&a, fixer).await;
         println!(
@@ -1334,6 +1337,7 @@ print('9 frozen independent addition cases PASS')
             dir: dir.clone(),
             w: "repro".into(),
             md: String::new(),
+            staged: false,
         });
         let result = ask1(&a, ask).await;
         println!(
@@ -1424,6 +1428,7 @@ print('7 frozen independent cases PASS')
             dir: repo.display().to_string(),
             w: "fixer".into(),
             md: String::new(),
+            staged: false,
         });
         let result = ask1(&a, o).await;
         let after = verify();

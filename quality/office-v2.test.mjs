@@ -64,12 +64,14 @@ test("reduced motion and the animation switch prohibit new poses",()=>{
   assert.equal(set.size,0);
 });
 
-test("the premium room loads before the live dashboard, which remains primary",()=>{
-  assert.ok(html.indexOf("office-v2.js")<html.indexOf("control-room.js"));
-  assert.ok(html.indexOf("control-room.css")<html.indexOf("office-v2.css"));
+test("the old vector room stays unloaded while the original pixel canvas is active",()=>{
+  assert.doesNotMatch(html,/office-v2\.js|office-v2\.css/);
+  assert.match(html,/pixel-dashboard\.css/);
+  assert.match(html,/id="cv"/);
   assert.match(modern,/window\.AOOfficeV2\?\.decorate/);
   assert.match(modern,/window\.AOOfficeV2\?\.onAgentState/);
-  assert.ok(modern.indexOf("ao-operations-grid")<modern.indexOf("ao-primary-grid"));
+  assert.match(modern,/pixelCanvas && pixelOffice/);
+  assert.ok(modern.indexOf("ao-primary-grid")<modern.indexOf("ao-operations-grid"));
 });
 
 test("the walker has leg cycles, real handoff gesture and reduced-motion support",()=>{

@@ -122,6 +122,16 @@
         <div class="hint">Issues with one of these labels are never picked up. Labels like paused, blocked, on hold, epic or tracking are always skipped.</div>
         <label>Test command</label><input type="text" name="ci" value="${esc(r.ci)}" placeholder="e.g. cargo test, npm test, pytest">
         <div class="hint">Runs from the repository root. A fix is only submitted when this passes.</div>
+        <label>Automatic merge</label>${tg("merge", r.merge ?? 1, "merge bug-fix PRs when GitHub checks pass")}
+        <div class="hint">Only new Apollo Office bug-fix PRs qualify. Features and existing PRs stay untouched. Missing, pending or failed checks leave the PR open; GitHub branch rules and merge queues still apply.</div>
+        <label>PR Steward · merges</label>${tg("auto_merge", r.auto_merge, "revalidate and merge eligible existing PRs")}
+        <div class="hint">Disabled by default. Rechecks the current PR head with the repository CI command and independent Reviewer before merging. Requires a clean branch, resolved review threads, safe file paths and current GitHub status checks.</div>
+        <label>Local merge mode</label>${tg("local_merge", r.local_merge, "allow proof-based merge when GitHub branch protection is absent")}
+        <div class="warn">Requires PR Steward merges above. Uses stored ApolloOffice CI and Reviewer proofs for the same commit and tree. This does not provide GitHub branch protection. Disabled by default.</div>
+        <label>PR review routing</label>${tg("steward_repair", r.steward_repair, "send validated human change requests to the Fixer")}
+        <div class="hint">Disabled by default. Only handles current-head requests from repository collaborators on ApolloOffice PRs; normal Guard, CI and review gates still apply.</div>
+        <label>Temporary failure recovery</label>${tg("auto_recover_drops", r.auto_recover_drops, "retry only safe temporary failures")}
+        <div class="hint">Disabled by default. Only retries eligible failures from before publication and sends each retry through the normal gates.</div>
         <label>Setup command</label><input type="text" name="setup" value="${esc(r.setup)}" placeholder="optional, e.g. npm ci">
         <div class="hint">Runs before every job, after checkout.</div>
         <label>PR language</label><select name="lang" aria-label="Idioma das Pull Requests"><option value="en" ${r.lang !== "pt-PT" ? "selected" : ""}>English</option><option value="pt-PT" ${r.lang === "pt-PT" ? "selected" : ""}>Português de Portugal (PT-PT)</option></select>
@@ -137,7 +147,7 @@
         <label>Recuperação segura de drops</label>${tg("auto_recover_drops", r.auto_recover_drops, "Repetir apenas falhas temporárias anteriores à publicação")}
         <div class="hint">Desligado por defeito. No máximo duas tentativas nas 48 horas após o drop, com intervalo mínimo de cinco minutos. Nunca retenta drops deliberados, revisões rejeitadas, trabalhos publicados ou com aprovação anterior. Cada tentativa volta aos gates normais.</div>
         <label>Limits</label><div class="lm"><span>open</span><input type="number" name="maxo" min="0" max="10000" value="${r.maxo}"><span>new per day</span><input type="number" name="maxd" min="0" max="10000" value="${r.maxd}"><span>USD per day</span><input type="number" name="bud" min="0" step="0.01" value="${r.bud || 0}"></div>
-        <div class="hint">Set open or new per day to 0 for unlimited PRs. Queue capacity, CI and review still apply. The daily budget counts API keys only; 0 = no limit.</div>
+        <div class="hint">Most open PRs at once and new PRs per day; set either to 0 for no limit. The daily budget counts API keys only; 0 = no limit.</div>
         <label>PR footer</label>${tg("nm", r.nm ?? 1, "mention ApolloOffice with a link")}
         <div class="hint">The AI note and the Co-Authored-By trailers are always added.</div>
         <label>Your rules</label><textarea name="rules" placeholder="optional, e.g. never touch the plugin API">${esc(r.rules)}</textarea>
@@ -626,12 +636,8 @@
       };
       return;
     }
-    const failure = j.failure?.stage
-      ? `<div class="sec"><h4>Diagnóstico técnico</h4><div class="box"><div class="msg">Fase: ${esc(j.failure.stage)} · Saída: ${esc(j.failure.exit_code)} · Máquina: ${esc(j.failure.host || "—")}</div><pre class="df">${esc(j.failure.output || "Sem detalhes")}</pre></div></div>`
-      : "";
     B.innerHTML = `<div class="sec"><div class="box"><div class="hd2"><b>${esc(j.title)}</b><span class="pill">${esc(j.st)}</span></div><div class="msg">${esc(j.repo)} ${esc(tag)} · ${esc(work)}${j.h ? " · " + esc(j.h) : ""}\n${esc(j.why || "")}</div>${cs}
-      <div class="acts">${j.url ? `<button data-u="${esc(j.url)}">Open on GitHub</button>` : ""}${!["done", "drop"].includes(j.st) ? `<button class="dng" data-d="${id}">Drop</button>` : ""}${j.st === "drop" && j.kind === "fix" ? `<button data-rq="${id}" ${window.AO.retryStates?.get(id)?.pending ? "disabled" : ""}>Try again</button>` : ""}</div>${j.st === "drop" && j.kind === "fix" ? `<div class="msg${window.AO.retryStates?.get(id)?.error ? " bad2" : ""}" data-requeue-message="${id}" aria-live="polite">${esc(window.AO.retryStates?.get(id)?.error || "")}</div>` : ""}</div></div>
-      ${failure}
+      <div class="acts">${j.url ? `<button data-u="${esc(j.url)}">Open on GitHub</button>` : ""}${!["done", "drop"].includes(j.st) ? `<button class="dng" data-d="${id}">Drop</button>` : ""}${j.st === "drop" && j.kind === "fix" ? `<button data-rq="${id}">Try again</button>` : ""}</div></div></div>
       ${j.df ? `<div class="sec"><h4>Diff</h4>${dview(j.df)}</div>` : ""}
       <div class="sec"><h4>Log</h4><div class="log">${ev || `<div class="empty">nothing yet</div>`}</div></div>`;
   };
@@ -643,7 +649,7 @@
     show("Set up ApolloOffice", "setup");
     const row = (k, l) => `<div class="ck" style="margin:4px 0"><b class="${ck[k].ok ? "ok2" : "bad2"}">${ck[k].ok ? "ok" : "missing"}</b> ${l}: ${esc(ck[k].m)}</div>`;
     const hs = cfg.hosts.length, rs = cfg.repos.length;
-    B.innerHTML = `<div class="sec"><h4>1 · Tools</h4><div class="box">${row("git", "git")}${row("bash", "bash")}${row("gh", "GitHub CLI")}${row("claude", "Claude Code")}${row("docker", "Docker")}<div class="acts"><button id="br">Check again</button></div></div></div>
+    B.innerHTML = `<div class="sec"><h4>1 · Tools</h4><div class="box">${row("git", "git")}${row("bash", "bash")}${row("gh", "GitHub CLI")}${row("claude", "Claude Code")}${row("codex", "Codex CLI")}${row("docker", "Docker")}<div class="acts"><button id="br">Check again</button></div></div></div>
       <div class="sec"><h4>2 · Where code is built</h4><div class="box"><div class="ck"><b class="${hs ? "ok2" : "bad2"}">${hs ? "ok" : "todo"}</b> ${hs ? hs + " machine(s)" : "Add this computer (Docker recommended)."}</div><div class="acts"><button id="bh">${hs ? "Machines" : "Add machine"}</button></div></div></div>
       <div class="sec"><h4>3 · Repositories</h4><div class="box"><div class="ck"><b class="${rs ? "ok2" : "bad2"}">${rs ? "ok" : "todo"}</b> ${rs ? rs + " repository(s)" : "Add a GitHub repository to work on."}</div><div class="acts"><button id="bp">${rs ? "Repos" : "Add repository"}</button></div></div></div>
       <div class="msg">Workers use your own Claude Code login and your own GitHub account. Pull requests wait for your approval unless you change that per repository.</div>`;
@@ -653,9 +659,11 @@
   };
 
   const steward = async () => {
-    show("Gestão de PRs · diagnóstico", "steward");
+    show("PR Steward · diagnóstico", "steward");
     B.innerHTML = '<div class="msg">A consultar a fila de revisão…</div>';
-    const data = await get("/api/steward");
+    let data;
+    try { data = await get("/api/steward"); }
+    catch (error) { B.innerHTML = `<div class="warn">Não foi possível consultar o Steward: ${esc(error.message || error)}</div>`; return; }
     const reports = data.repos || [];
     const shortSha = (sha) => typeof sha === "string" && sha ? sha.slice(0, 10) : "n/d";
     const elapsed = (ms) => {
@@ -664,40 +672,31 @@
     };
     B.innerHTML = `<div class="sec"><div class="box">
       <b>PR Steward — análise automática</b>
-      <div class="hint">Consulta o GitHub periodicamente. Identifica duplicações, conflitos, checks e revisões pendentes. O estado «CI: aprovado» não dispensa provas de testes completos nem as regras de proteção da branch. CodeRabbit isolado não é CI. A integração é opcional e fica desligada por omissão.</div>
+      <div class="hint">Consulta o GitHub periodicamente. Identifica PRs duplicadas, conflitos, checks e revisões pendentes. As opções de integração são configuradas em Repos e ficam desligadas por omissão.</div>
       <div class="acts"><button id="steRefresh" type="button">Atualizar painel</button></div>
     </div></div>
-    ${reports.map(({ repo, report, error, merge_error, repair_error, close_error, drops }) => {
+    ${reports.map(({ repo, report, error, merge_error, repair_error, drops }) => {
       const rows = [...(report?.prs || [])].sort((a,b) => (Number(a.priority ?? 9) - Number(b.priority ?? 9)) || (Number(b.number) - Number(a.number)));
       const at = report?.at ? new Date(report.at).toLocaleString("pt-PT") : "sem leitura";
-      const mode = !report?.merge_enabled
-        ? "Apenas auditoria — integrações desativadas"
-        : report?.local_merge_enabled
-          ? "Integração local com provas obrigatórias (sem proteção GitHub)"
-          : "Integração com proteção GitHub obrigatória";
-      const repairs = report?.repair_enabled ? "Encaminhamento de revisões ativo (só PRs próprias)" : "Encaminhamento de revisões desativado";
-      const closing = report?.close_enabled ? "Fecho automático de PRs substituídas ativo" : "Fecho automático de PRs substituídas desativado";
+      const mode = !report?.merge_enabled ? "Apenas auditoria — integrações desativadas" : report?.local_merge_enabled ? "Integração local com provas obrigatórias" : "Integração com proteção GitHub obrigatória";
+      const repairs = report?.repair_enabled ? "Encaminhamento de revisões ativo" : "Encaminhamento de revisões desativado";
       return `<div class="sec"><h4>${esc(repo)}</h4><div class="box">
-        <div class="msg">${rows.length} PRs abertas · ${esc(at)} · ${esc(mode)} · ${esc(repairs)} · ${esc(closing)} · Revalidações pendentes: ${esc(String(report?.queue?.pending_rechecks ?? 0))} · mais antiga: ${esc(elapsed(report?.queue?.oldest_age_ms))}${error?.error ? " · Último erro: " + esc(error.error) : ""}</div>
+        <div class="msg">${rows.length} PRs abertas · ${esc(at)} · ${esc(mode)} · ${esc(repairs)} · Revalidações pendentes: ${esc(String(report?.queue?.pending_rechecks ?? 0))} · mais antiga: ${esc(elapsed(report?.queue?.oldest_age_ms))}${error?.error ? " · Último erro: " + esc(error.error) : ""}</div>
         ${repair_error?.error ? `<div class="warn">Revisão não encaminhada: ${esc(repair_error.error)}</div>` : ""}
         ${merge_error?.reason ? `<div class="warn">Integração bloqueada: ${esc(merge_error.reason)}</div>` : ""}
-        ${close_error?.error ? `<div class="warn">Fecho automático não executado: ${esc(close_error.error)}</div>` : ""}
-        <div class="hint">Drops: ${esc(String(drops?.total ?? 0))} · Recuperação automática: ${drops?.enabled ? "ativa" : "desativada"} · Potencialmente recuperáveis: ${esc(String((drops?.jobs || []).filter(j => j.safe_auto).length))} (nos últimos 25).</div>
-        ${(drops?.jobs || []).slice(0, 5).map(j => `<div class="hint">Trabalho #${esc(String(j.id))} · ${esc(j.category)} · ${esc(j.reason)} · tentativas: ${esc(String(j.attempts))}</div>`).join("")}
+        <div class="hint">Falhas registadas: ${esc(String(drops?.total ?? 0))} · recuperação automática: ${drops?.enabled ? "ativa" : "desativada"} · recuperáveis: ${esc(String((drops?.jobs || []).filter(j => j.safe_auto).length))}</div>
         ${!report || report.error ? '<div class="warn">Sem diagnóstico completo. Não é possível concluir que alguma PR esteja pronta.</div>' : ""}
         ${rows.length ? rows.map((p) => `<div class="ck" style="margin:5px 0;align-items:flex-start;gap:8px">
-          <span class="pill">${esc(String(p.number))}</span>
-          <div style="flex:1;min-width:0">
+          <span class="pill">${esc(String(p.number))}</span><div style="flex:1;min-width:0">
             <a href="${esc(p.url || "#")}" target="_blank" rel="noopener noreferrer"><b>${esc(p.title || "PR")}</b></a>
             <div class="hint">Prioridade P${esc(String(p.priority ?? 9))} · Estado: ${esc(p.state)} · CI: ${esc(p.checks)} · Revisão: ${esc(p.review || "não verificada")}</div>
             <div class="hint">HEAD ${esc(shortSha(p.head_sha))} · base ${esc(p.base || "?")} @ ${esc(shortSha(p.base_sha))} · atualizada: ${esc(p.updated_at ? new Date(p.updated_at).toLocaleString("pt-PT") : "n/d")}</div>
             <div class="hint">Próximo passo: ${esc(p.next_action || "Rever PR")}</div>
-            ${p.recheck ? `<div class="hint">Revalidação #${esc(String(p.recheck.id))}: ${esc(p.recheck.state)} · ${esc(elapsed(p.recheck.age_ms))} · HEAD/base desta PR: ${p.recheck.matches_head && p.recheck.matches_base ? "atuais" : "desatualizados"}${p.recheck.why ? " · " + esc(p.recheck.why) : ""}</div>` : ""}
-            ${p.branch_update ? `<div class="${p.branch_update.status === "error" || p.branch_update.status === "blocked" ? "warn" : "hint"}">Atualização da branch: ${esc(p.branch_update.message || p.branch_update.error || p.branch_update.status)} · ${esc(p.branch_update.status)}${p.branch_update.at ? " · " + esc(new Date(p.branch_update.at).toLocaleString("pt-PT")) : ""}</div>` : ""}
+            ${p.recheck ? `<div class="hint">Revalidação #${esc(String(p.recheck.id))}: ${esc(p.recheck.state)} · ${esc(elapsed(p.recheck.age_ms))} · HEAD/base: ${p.recheck.matches_head && p.recheck.matches_base ? "atuais" : "desatualizados"}${p.recheck.why ? " · " + esc(p.recheck.why) : ""}</div>` : ""}
+            ${p.branch_update ? `<div class="${p.branch_update.status === "error" || p.branch_update.status === "blocked" ? "warn" : "hint"}">Atualização da branch: ${esc(p.branch_update.message || p.branch_update.error || p.branch_update.status)} · ${esc(p.branch_update.status)}</div>` : ""}
             ${p.overlaps?.length ? `<div class="hint bad2">Ficheiros em comum com: #${p.overlaps.map(Number).join(", #")}</div>` : ""}
-            ${p.possible_duplicates?.length ? `<div class="hint bad2">Possível duplicação da mesma issue: #${p.possible_duplicates.map(Number).join(", #")}</div>` : ""}
-          </div>
-        </div>`).join("") : '<div class="empty">Não foram identificadas PRs nesta leitura.</div>'}
+            ${p.possible_duplicates?.length ? `<div class="hint bad2">Possível duplicação da issue: #${p.possible_duplicates.map(Number).join(", #")}</div>` : ""}
+          </div></div>`).join("") : '<div class="empty">Não foram identificadas PRs nesta leitura.</div>'}
       </div></div>`;
     }).join("") || '<div class="empty">Não existem repositórios ativos.</div>'}`;
     B.querySelector("#steRefresh").onclick = steward;

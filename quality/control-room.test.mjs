@@ -8,6 +8,7 @@ import { Script } from "node:vm";
 const read = (file) => readFileSync(new URL("../" + file, import.meta.url), "utf8");
 const html = read("ui/index.html");
 const css = read("ui/control-room.css");
+const pixelCss = read("ui/pixel-dashboard.css");
 const modern = read("ui/control-room.js");
 const original = read("ui/o.js");
 const handoffs = read("ui/office-motion.js");
@@ -18,24 +19,18 @@ test("frontend scripts parse without extra dependencies", () => {
   assert.doesNotThrow(() => new Script(handoffs, { filename: "office-motion.js" }));
 });
 
-test("pixel-art office stays the default, modern dashboard requires explicit opt-in", () => {
-  assert.match(modern, /new URLSearchParams\(window\.location\.search\)\.get\("ui"\)/);
-  assert.match(modern, /if \(requestedUi !== "modern"\) return/);
-  assert.match(original, /requestAnimationFrame\(frame\)/);
-  assert.match(html, /<canvas id="cv"><\/canvas>/);
-});
-
-// As leituras e os limites da telemetria são agora testados no navegador,
-// com eventos de hover reais e snapshots frescos, antigos e inválidos.
-
-test("Control Room is loaded after the original application", () => {
+test("pixel skin and operational modules load after the original application", () => {
   assert.match(html, /href="control-room\.css"/);
+  assert.match(html, /href="pixel-dashboard\.css"/);
   const iO = html.indexOf('src="o.js"');
   const iP = html.indexOf('src="p.js"');
   const iModern = html.indexOf('src="control-room.js"');
   assert.ok(iO >= 0 && iP > iO && iModern > iP);
-  const iWalk = html.indexOf('src="office-motion.js"');
-  assert.ok(iWalk > iModern, "handoff code must load after the modern dashboard");
+  assert.doesNotMatch(html, /src="(?:office-motion|office-v2)\.js"/);
+  assert.match(modern, /aoProductivityChart/);
+  assert.match(modern, /aoMachines/);
+  assert.match(modern, /aoStagedPanel/);
+  assert.match(modern, /aoTaskFilter/);
 });
 
 test("integrated fixes count merged PRs on the tracked default branch", () => {
@@ -73,6 +68,17 @@ test("all ten original agents have distinct live stations", () => {
   assert.match(handoffs, /A\.subscribeState\(\(s\)/);
 });
 
+test("the pilot model assignments have readable provider and model names", () => {
+  const start = original.indexOf("  const mdn = (md) =>");
+  const end = original.indexOf("  window.AO.mdn = mdn;", start);
+  assert.ok(start >= 0 && end > start, "model formatter must be present");
+  const mdn = new Script(`(() => {${original.slice(start, end)}; return mdn;})()`)
+    .runInNewContext();
+  assert.equal(mdn("ollama:qwen3:8b"), "Qwen3 8B · local");
+  assert.equal(mdn("codex:gpt-6-luna"), "GPT-6 Luna · ChatGPT");
+  assert.equal(mdn("cc:opus"), "Claude Opus");
+});
+
 test("motion can be disabled and stays accessible", () => {
   assert.match(css, /prefers-reduced-motion:\s*reduce/);
   assert.match(css, /\.ao-motion-disabled/);
@@ -88,12 +94,15 @@ test("no fictional GPU data or percentages of task completion", () => {
   assert.doesNotMatch(modern, /Ações Rápidas|Nova tarefa|Executar testes/);
 });
 
-test("retired pixel canvas stays hidden in modern and emergency fallback modes", () => {
-  assert.match(original, /window\.AO\?\.modernRoom \|\| window\.AO\?\.disablePixelArt/);
+test("the pixel canvas is the active office inside the live dashboard", () => {
+  assert.match(original, /window\.AO\?\.disablePixelArt \|\| \(window\.AO\?\.modernRoom && !window\.AO\?\.pixelDashboard\)/);
+  assert.match(original, /cv\.parentElement \|\| \$\("stage"\)/);
+  assert.match(modern, /pixelCanvas && pixelOffice/);
+  assert.match(modern, /A\.pixelDashboard = true/);
   assert.match(modern, /A\.modernRoom = false/);
-  assert.match(modern, /A\.disablePixelArt = true/);
-  assert.match(modern, /ao-fallback-no-pixel/);
-  assert.match(css, /body\.ao-fallback-no-pixel #cv/);
+  assert.match(modern, /A\.disablePixelArt = false/);
+  assert.match(pixelCss, /\.ao-office > #cv/);
+  assert.match(pixelCss, /image-rendering:pixelated/);
   assert.match(modern, /legacy\.replaceWith/);
 });
 
@@ -176,7 +185,7 @@ test("all pipeline values derive from the server's untruncated status counts", (
 
 test("celebrations require a recently observed finished job and reduced-motion permission", () => {
   assert.match(modern, /const activeJob = w\.job;/);
-  assert.match(modern, /String\(j\.id\) === priorJob/);
+  assert.match(modern, /String\(job\.id\) === priorJob/);
   assert.match(modern, /age >= 0 && age <= 60_000/);
   assert.match(modern, /prefers-reduced-motion: reduce/);
 });
@@ -206,12 +215,12 @@ test("handoff engine supports explicit unmount disposal", () => {
 });
 
 
-test("operational dashboard precedes the secondary virtual office", () => {
+test("the pixel office leads the detailed workflow modules", () => {
   const iMetrics = modern.indexOf('<section class="ao-metrics"');
   const iPipeline = modern.indexOf('<section class="ao-panel ao-pipeline-panel"');
   const iOperations = modern.indexOf('<section class="ao-operations-grid"');
   const iOffice = modern.indexOf('<section class="ao-primary-grid"');
-  assert.ok(iMetrics >= 0 && iPipeline > iMetrics && iOperations > iPipeline && iOffice > iOperations);
+  assert.ok(iMetrics >= 0 && iOffice > iMetrics && iPipeline > iOffice && iOperations > iPipeline);
 });
 
 test("approval is not conflated with automated gate and submission", () => {
@@ -234,5 +243,5 @@ test("stale agent detail does not advertise historical work as current", () => {
   assert.match(modern, /const stage = stale \? "unknown" : mode\(snapshot, role\)/);
   assert.match(modern, /"Por confirmar — dados desatualizados"/);
   assert.match(modern, /"Último registo: " \+ current/);
-  assert.match(modern, /"Último registo: " \+ w\.say/);
+  assert.match(modern, /"Último registo: " \+ current/);
 });

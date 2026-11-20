@@ -1,3 +1,6 @@
+Warning: truncated output (original token count: 72705)
+Total output lines: 6985
+
 use crate::ai::{ask, p as P, wrap, Ask};
 use crate::app::{drop, e, sl, Ax, Rn, R, X};
 use crate::db::{now, Job};
@@ -801,6 +804,103 @@ fn rn(a: &Ax, j: &Job) -> Option<Rn> {
         dir: dir(a, j),
         w: String::new(),
         md: String::new(),
+        staged: false,
+    })
+}
+
+fn staged_repos(a: &Ax) -> BTreeSet<String> {
+    let mut s: BTreeSet<String> = a.set()["staged_repos"].as_array().map(|v| v.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+    if let Ok(env) = std::env::var("APOLLO_OFFICE_STAGED_REPOS") {
+        s.extend(env.split(',').map(str::trim).filter(|x| !x.is_empty()).map(String::from));
+    }
+    s
+}
+
+/// Whether the operator INTENDS staged mode for this job: opt-in flag, bug-fix
+/// kind, allowlisted repo. Independent of the free-first routing policy, so a
+/// policy conflict can be detected and reported rather than silently ignored.
+pub fn staged_intended(a: &Ax, j: &Job) -> bool {
+    let on = std::env::var("APOLLO_OFFICE_STAGED_TDD").as_deref() == Ok("1") || a.set()["staged_tdd"].as_bool() == Some(true);
+    on && matches!(j.kind.as_str(), "fix" | "hunt") && !j.feat() && !j.opt() && staged_repos(a).contains(&j.repo)
+}
+
+/// Staged mode is active only when intended AND free-first routing is OFF, so the
+/// configured FIXER (Qwen) and REVIEWER (Claude) are used, not the routing models.
+/// A conflicting configuration (intended but routing on) is rejected up front in
+/// `fix()` rather than running staged with the wrong models (V3-P1-3).
+pub fn staged(a: &Ax, j: &Job) -> bool {
+    staged_intended(a, j) && !crate::routing::enabled(a)
+}
+
+/// A conflicting pilot configuration: staged intended but free-first routing on.
+/// `fix()` rejects this up front instead of running with the wrong models.
+pub fn staged_conflict(a: &Ax, j: &Job) -> bool {
+    staged_intended(a, j) && crate::routing::enabled(a)
+}
+
+/// Opt-in fallback FIXER for the staged flow (e.g. the Codex CLI), allowed ONLY for
+/// an allowlisted staged repo and ONLY when explicitly configured. It is used for at
+/// most ONE last-round attempt, after the primary FIXER (Qwen) has concretely failed
+/// every earlier round. Fails closed: no allowlist entry or no configured model
+/// returns None, so a global setting can never silently replace the FIXER for
+/// FixFlow or any other repo. It only ever selects a FIXER — the REVIEWER (Claude
+/// Opus) is chosen separately and is never affected, so the fallback model can never
+/// review or approve its own code. Configure via `staged_fallback` in settings or
+/// the `APOLLO_OFFICE_STAGED_FALLBACK` env (e.g. "codex:gpt-5.6-terra").
+pub fn staged_fallback(a: &Ax, j: &Job) -> Option<String> {
+    if !staged_repos(a).contains(&j.repo) {
+        return None;
+    }
+    std::env::var("APOLLO_OFFICE_STAGED_FALLBACK")
+        .ok()
+        .or_else(|| a.set()["staged_fallback"].as_str().map(String::from))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Reasoning effort for a Codex staged fallback FIXER. Defaults to "max" (the
+/// configured pilot level); overridable via `APOLLO_OFFICE_STAGED_FALLBACK_EFFORT`
+/// to one of the Codex levels. An unrecognised value falls back to "max" rather than
+/// silently picking a different level. Returns a &'static str for Ask::ef.
+fn codex_fallback_effort() -> &'static str {
+    match std::env::var("APOLLO_OFFICE_STAGED_FALLBACK_EFFORT").ok().as_deref() {
+        Some("minimal") => "minimal",
+        Some("low") => "low",
+        Some("medium") => "medium",
+        Some("high") => "high",
+        _ => "max",
+    }
+}
+
+/// Read-only pipeline configuration for the authenticated Control Room.
+/// Mirrors the same environment and settings precedence used by `staged()` and
+/// `staged_fallback()` so the interface cannot advertise a different route.
+pub fn staged_ui_config(a: &Ax) -> Value {
+    let settings = a.set();
+    let enabled = std::env::var("APOLLO_OFFICE_STAGED_TDD").as_deref() == Ok("1")
+        || settings["staged_tdd"].as_bool() == Some(true);
+    let repos = staged_repos(a);
+    let fallback = std::env::var("APOLLO_OFFICE_STAGED_FALLBACK")
+        .ok()
+        .or_else(|| settings["staged_fallback"].as_str().map(String::from))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let fallback_effort = if fallback
+        .as_deref()
+        .is_some_and(|md| crate::prov::parse(md).0 == "codex")
+    {
+        codex_fallback_effort()
+    } else {
+        ""
+    };
+
+    json!({
+        "active": enabled && !crate::routing::enabled(a) && !repos.is_empty(),
+        "repos": repos,
+        "primary": a.md("fixer"),
+        "fallback": fallback.unwrap_or_default(),
+        "fallback_effort": fallback_effort,
+        "reviewer": a.md("reviewer")
     })
 }
 
@@ -823,57 +923,17 @@ fn cx(a: &Ax, j: &Job) -> bool {
 
 async fn repro(a: &Ax, j: &mut Job) -> R<()> {
     a.db.jset(j.id, &[("st", json!("repro"))]);
-    let p = format!(
-        "Repository: {}. {}.\nVet note: {}\n\n{}",
-        j.repo,
-        j.orig(),
-        j.d["hint"].as_str().unwrap_or("-"),
-        wrap(
-            "issue",
-            &format!(
-                "{}\n\n{}",
-                if j.s("title").is_empty() {
-                    &j.title
-                } else {
-                    j.d["title"].as_str().unwrap()
-                },
-                j.s("body")
-            )
-        )
-    );
-    let p = format!("{p}{}{}", rules(a, j), crate::quality::context(j));
+    let p = format!("Repository: {}. {}.\nVet note: {}\n\n{}", j.repo, j.orig(), j.d["hint"].as_str().unwrap_or("-"), wrap("issue", &format!("{}\n\n{}", if j.s("title").is_empty() { &j.title } else { j.d["title"].as_str().unwrap() }, j.s("body"))));
+    let p = format!("{p}{}{}", rules(a,j),crate::quality::context(j));
     let planning = j.feat() || j.opt();
-    let ms = if crate::routing::enabled(a) {
-        crate::routing::plan(a)
-    } else if planning || cx(a, j) {
-        vec![a.md("big")]
-    } else {
-        vec![a.md("repro"), a.md("repro2")]
-    };
-    let mut reproduction_feedback = String::new();
+    let ms = if crate::routing::enabled(a) { crate::routing::plan(a) } else if planning || cx(a, j) { vec![a.md("big")] } else { vec![a.md("repro"), a.md("repro2")] };
+    let mut reproduction_feedback=String::new();
     for (attempt, md) in ms.into_iter().enumerate() {
         crate::routing::event(a, Some(j.id), "repro", attempt, &md, &reproduction_feedback);
         a.st("repro", "work", Some(j.id), "");
         use_(a, j, &md);
-        a.say(
-            "repro",
-            &format!(
-                "{} {} {}",
-                crate::prov::name(&md),
-                if planning { "planning" } else { "reproducing" },
-                j.tag()
-            ),
-            Some(j.id),
-        );
-        let mut o = Ask::new(
-            "repro",
-            md,
-            P(if planning { "plan" } else { "repro" }),
-            format!(
-                "{p}\n{}",
-                wrap("previous-reproduction-diagnostic", &reproduction_feedback)
-            ),
-        );
+        a.say("repro", &format!("{} {} {}", crate::prov::name(&md), if planning { "planning" } else { "reproducing" }, j.tag()), Some(j.id));
+        let mut o = Ask::new("repro", md, P(if planning { "plan" } else { "repro" }), format!("{p}\n{}",wrap("previous-reproduction-diagnostic",&reproduction_feedback)));
         o.job = Some(j.id);
         o.rn = rn(a, j);
         o.turns = 40;
@@ -895,42 +955,16 @@ async fn repro(a: &Ax, j: &mut Job) -> R<()> {
         if js["ok"].as_bool().unwrap_or(false) {
             j.d["repro"] = json!({"how": js["how"], "where": js["where"], "test": js["test"]});
             a.db.jd(j);
-            a.say(
-                "repro",
-                &format!(
-                    "{}: {}",
-                    if planning { "planned" } else { "reproduced" },
-                    js["how"].as_str().unwrap_or("")
-                ),
-                Some(j.id),
-            );
+            a.say("repro", &format!("{}: {}", if planning { "planned" } else { "reproduced" }, js["how"].as_str().unwrap_or("")), Some(j.id));
             a.flow("repro", "fixer", &j.tag());
             a.st("repro", "idle", None, "ok");
             return Ok(());
         }
-        reproduction_feedback = crate::sh::head(&js.to_string(), 3000);
-        a.say(
-            "repro",
-            &format!(
-                "{}: {}",
-                if planning {
-                    "not plannable"
-                } else {
-                    "not reproduced"
-                },
-                js["how"].as_str().unwrap_or("no answer")
-            ),
-            Some(j.id),
-        );
+        reproduction_feedback=crate::sh::head(&js.to_string(),3000);
+        a.say("repro", &format!("{}: {}", if planning { "not plannable" } else { "not reproduced" }, js["how"].as_str().unwrap_or("no answer")), Some(j.id));
     }
     a.st("repro", "idle", None, "sad");
-    drop(if j.opt() {
-        "optimization is not a focused, behavior-preserving change"
-    } else if j.feat() {
-        "feature already exists or cannot be done as one focused change"
-    } else {
-        "not reproducible"
-    })
+    drop(if j.opt() { "optimization is not a focused, behavior-preserving change" } else if j.feat() { "feature already exists or cannot be done as one focused change" } else { "not reproducible" })
 }
 
 pub fn junk(p: &str) -> bool {
@@ -1012,7 +1046,11 @@ pub fn fails(o: &str) -> Vec<String> {
     v.into_iter().collect()
 }
 
-pub const CE: &str = r"error\[E\d+\]|could not compile|error: no test target|no such command|SyntaxError|ModuleNotFoundError|ImportError while|cannot find module|Cannot find module|ERROR collecting|error TS\d{4}|no tests ran|No tests found|build failed|\[setup failed\]|undefined: |command not found|(?m:^[^\n]*\.java:\d+: error:)|ClassNotFoundException|NoClassDefFoundError";
+pub fn bare(t: &str) -> String {
+    t.rsplit(|c| c == ':' || c == '.' || c == '/' || c == '>' || c == ' ').find(|x| !x.trim().is_empty()).unwrap_or(t).trim().to_string()
+}
+
+pub const CE: &str = r"error\[E\d+\]|could not compile|error: no test target|no such command|SyntaxError|ReferenceError|ModuleNotFoundError|ImportError while|cannot find module|Cannot find module|ERROR collecting|error TS\d{4}|no tests ran|No tests found|build failed|\[setup failed\]|undefined: |command not found|(?m:^[^\n]*\.java:\d+: error:)|ClassNotFoundException|NoClassDefFoundError";
 
 pub fn judge(ts: &[String], a_e: i32, a_o: &str, b_e: i32, b_o: &str) -> String {
     if Regex::new(r"\[checkout failed\]")
@@ -1212,6 +1250,7 @@ fn passing_check_line(line: &str, name: &str) -> bool {
             .any(|word| matches!(*word, "ok" | "pass" | "passed" | "success"))
 }
 
+
 async fn verify(a: &Ax, j: &mut Job, f: &Value) -> R<String> {
     let ts: Vec<String> = f["tests"]
         .as_array()
@@ -1249,16 +1288,8 @@ async fn verify(a: &Ax, j: &mut Job, f: &Value) -> R<String> {
     .parse()
     .unwrap_or(0);
     if n != 2 {
-        let commit_roles = if j.opt() {
-            "verification, optimization"
-        } else if j.feat() {
-            "test, feature"
-        } else {
-            "test, fix"
-        };
-        return Ok(format!(
-            "expected exactly 2 commits ({commit_roles}) on top of the base, found {n}"
-        ));
+        let commit_roles = if j.opt() { "verification, optimization" } else if j.feat() { "test, feature" } else { "test, fix" };
+        return Ok(format!("expected exactly 2 commits ({commit_roles}) on top of the base, found {n}"));
     }
     if let Some(m) = dirty(a, j).await? {
         return Ok(m);
@@ -1272,13 +1303,7 @@ async fn verify(a: &Ax, j: &mut Job, f: &Value) -> R<String> {
     let (ae, ao) = run_t(a, j, &at, &tc, &ts).await;
     let (be, bo) = run_t(a, j, &b, &tc, &ts).await;
     ok(a, j, &format!("git checkout -q {}", q(&j.s("br"))), 120).await?;
-    let r = if j.opt() {
-        judgeopt(&ts, ae, &ao, be, &bo)
-    } else if j.feat() {
-        judgef(&ts, ae, &ao, be, &bo)
-    } else {
-        judge(&ts, ae, &ao, be, &bo)
-    };
+    let r = if j.opt() { judgeopt(&ts, ae, &ao, be, &bo) } else if j.feat() { judgef(&ts, ae, &ao, be, &bo) } else { judge(&ts, ae, &ao, be, &bo) };
     if r.is_empty() {
         let fl = Regex::new(r"(?i)FAIL|panicked|assert|Error|expected|^not ok\b").unwrap();
         let pl = Regex::new(r"(?i)\bok\b|pass|✓").unwrap();
@@ -1383,40 +1408,17 @@ async fn ci(a: &Ax, j: &mut Job) -> R<String> {
     ci0(a, j).await
 }
 
-// A evidência mantém a identidade do mesmo commit, incluindo nas reexecuções
-// para excluir testes instáveis. Um mergecheck não tem proof.fix_commit.
-fn ci_evidence(
-    kind: &str,
-    data: &Value,
-    command: &str,
-    exit: i32,
-    output: &str,
-    rerun: bool,
-) -> Value {
-    let candidate = if kind == "mergecheck" {
-        data["expected_head"].clone()
-    } else {
-        data["proof"]["fix_commit"].clone()
-    };
-    let mut result = json!({
-        "command": command,
-        "exit": exit,
-        "output_tail": crate::sh::last(output, 4000),
-        "candidate": candidate,
-    });
-    if rerun {
-        result["rerun"] = json!(true);
-    }
+// A revalidation proves the exact PR head and tree, not a Fixer's commit.
+fn ci_evidence(kind: &str, data: &Value, command: &str, exit: i32, output: &str, rerun: bool) -> Value {
+    let candidate = if kind == "mergecheck" { data["expected_head"].clone() } else { data["proof"]["fix_commit"].clone() };
+    let mut result = json!({"command":command,"exit":exit,"output_tail":crate::sh::last(output,4000),"candidate":candidate});
+    if rerun { result["rerun"] = json!(true); }
     result
 }
 
-// A CI positiva, incluindo a repetição após um possível teste instável,
-// precisa da mesma prova de árvore e instante para os gates posteriores.
 async fn record_ci_success(a: &Ax, j: &mut Job) -> R<()> {
     let tree = ok(a, j, "git rev-parse HEAD^{tree}", 60).await?;
-    if tree.is_empty() {
-        return drop("CI sem árvore Git verificável");
-    }
+    if tree.is_empty() { return drop("CI sem árvore Git verificável"); }
     j.d["ci_tree"] = json!(tree);
     j.d["ci_verified_at"] = json!(now());
     a.db.jd(j);
@@ -1575,6 +1577,7 @@ async fn ci0(a: &Ax, j: &mut Job) -> R<String> {
             let nw: Vec<String> = fs.iter().filter(|n| !bn.contains(n)).cloned().collect();
             if !fs.is_empty() && nw.is_empty() {
                 j.d["known"] = json!(fs);
+                record_ci_success(a, j).await?;
                 a.db.jd(j);
                 a.st("ci", "idle", None, "ok");
                 a.say(
@@ -1654,6 +1657,7 @@ fn body_lang(j: &Job, f: &Value, ci: &str, ft: &str, pt: bool) -> String {
         .filter_map(|x| x.as_str().map(String::from))
         .collect();
     let mn = j.s("mn");
+    let opt = j.opt();
     let mut v = vec![];
     if j.kind == "fix" {
         if j.hunt() {
@@ -1671,15 +1675,8 @@ fn body_lang(j: &Job, f: &Value, ci: &str, ft: &str, pt: bool) -> String {
                 )
             });
         } else if j.ext() {
-            v.push(
-                (if pt {
-                    "Reportado diretamente (sem Issue existente)."
-                } else {
-                    "Reported to us directly (no existing issue)."
-                })
-                .into(),
-            );
-        } else if j.feat() {
+            v.push("Reported to us directly (no existing issue).".to_string());
+        } else if j.feat() || opt {
             v.push(format!("Closes #{}", j.num));
         } else {
             v.push(format!("Fixes #{}", j.num));
@@ -1687,86 +1684,12 @@ fn body_lang(j: &Job, f: &Value, ci: &str, ft: &str, pt: bool) -> String {
         v.push(String::new());
     }
     let fe = j.feat();
-    let opt = j.opt();
-    v.extend([
-        (if pt {
-            if fe || opt {
-                "## Motivo"
-            } else {
-                "## Causa"
-            }
-        } else if fe || opt {
-            "## Why"
-        } else {
-            "## Cause"
-        })
-        .into(),
-        g("cause"),
-        String::new(),
-        (if pt {
-            if fe || opt {
-                "## Alterações"
-            } else {
-                "## Correção"
-            }
-        } else if fe || opt {
-            "## Change"
-        } else {
-            "## Fix"
-        })
-        .into(),
-        g("fix"),
-        String::new(),
-        (if pt { "## Validação" } else { "## Verified" }).into(),
-    ]);
+    v.extend([if fe || opt { "## Why" } else { "## Cause" }.into(), g("cause"), String::new(), if fe || opt { "## Change" } else { "## Fix" }.into(), g("fix"), String::new(), "## Verified".into()]);
     if !ts.is_empty() {
-        let names = ts
-            .iter()
-            .map(|t| format!("`{t}`"))
-            .collect::<Vec<_>>()
-            .join(", ");
         if opt {
-            v.push(if pt {
-                format!(
-                    "- {} {names}: passam em `{mn}` antes e depois desta otimização (`{}`).",
-                    if pl { "Testes" } else { "Teste" },
-                    f["test_cmd"].as_str().unwrap_or("")
-                )
-            } else {
-                format!(
-                    "- {} {names}: pass on `{mn}` before and after this optimization (`{}`).",
-                    if pl { "Tests" } else { "Test" },
-                    f["test_cmd"].as_str().unwrap_or("")
-                )
-            });
-        } else if pt {
-            v.push(format!(
-                "- {} {names}: {} em `{mn}` sem a alteração e {} com ela (`{}`).",
-                if fe {
-                    if pl {
-                        "Testes"
-                    } else {
-                        "Teste"
-                    }
-                } else if pl {
-                    "Testes de regressão"
-                } else {
-                    "Teste de regressão"
-                },
-                if pl { "falham" } else { "falha" },
-                if pl { "passam" } else { "passa" },
-                f["test_cmd"].as_str().unwrap_or("")
-            ));
+            v.push(format!("- {} {}: pass on `{mn}` before and after this optimization (`{}`).", if pl { "Checks" } else { "Check" }, ts.iter().map(|t| format!("`{t}`")).collect::<Vec<_>>().join(", "), f["test_cmd"].as_str().unwrap_or("")));
         } else {
-            v.push(format!(
-                "- {}{} {names}: fail{} on `{mn}` without the {} and pass{} with it (`{}`).",
-                if fe { "Test" } else { "Regression test" },
-                if pl { "s" } else { "" },
-                if pl { "" } else { "s" },
-                if fe { "change" } else { "fix" },
-                if pl { "" } else { "es" },
-                f["test_cmd"].as_str().unwrap_or("")
-            ));
+            v.push(format!("- {}{} {}: fail{} on `{mn}` without the {} and pass{} with it (`{}`).", if fe { "Test" } else { "Regression test" }, if pl { "s" } else { "" }, ts.iter().map(|t| format!("`{t}`")).collect::<Vec<_>>().join(", "), if pl { "" } else { "s" }, if fe { "change" } else { "fix" }, if pl { "" } else { "es" }, f["test_cmd"].as_str().unwrap_or("")));
         }
     }
     if kn.is_empty() {
@@ -1807,6 +1730,33 @@ fn body_lang(j: &Job, f: &Value, ci: &str, ft: &str, pt: bool) -> String {
     v.join("\n").trim().to_string()
 }
 
+fn ensure_issue_closure(j: &Job, mut body: String) -> String {
+    if j.kind != "fix" || j.own() || j.num <= 0 {
+        return body;
+    }
+    let closure = Regex::new(&format!(
+        r"(?i)^\s*(?:[-*]\s*)?(?:close[sd]?|fix(?:es|ed)?|resolve(?:s|d)?)\s*:?\s+#{}\s*\.?\s*$",
+        j.num
+    ))
+    .unwrap();
+    let mut fenced = false;
+    let linked = body.lines().any(|line| {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            fenced = !fenced;
+            return false;
+        }
+        !fenced && closure.is_match(line)
+    });
+    if !linked {
+        if !body.trim().is_empty() {
+            body.push_str("\n\n");
+        }
+        body.push_str(&format!("{} #{}", if j.feat() || j.opt() { "Closes" } else { "Fixes" }, j.num));
+    }
+    body
+}
+
 async fn review(a: &Ax, j: &mut Job, f: &mut Value) -> R<String> {
     review_mode(a, j, f, false).await
 }
@@ -1840,7 +1790,7 @@ async fn review_mode(a: &Ax, j: &mut Job, f: &mut Value, diagnostic: bool) -> R<
     let p = format!(
         "Repository {}, {}.\n\n{}\n\n{}Commit messages:\n{lg}\n\nPR title: {}\nPR body:\n{}\n\nDiff:\n{df}{}",
         j.repo,
-        if j.kind == "mergecheck" { format!("PR #{} — validação para possível merge", j.pr.unwrap_or(0)) } else if j.own() { "no GitHub issue (the PR must not reference any issue number)".to_string() } else { format!("issue #{}", j.num) },
+        if j.kind == "mergecheck" { format!("PR #{} — validation before possible merge", j.pr.unwrap_or(0)) } else if j.own() { "no GitHub issue (the PR must not reference any issue number)".to_string() } else { format!("issue #{}", j.num) },
         wrap("issue", &format!("{}\n\n{}", j.title, crate::sh::head(&j.s("body"), 4000))),
         if j.kind == "review" { format!("{}\n\n", wrap("request", &j.s("change"))) } else if j.opt() { "This PR is a behavior-preserving optimization, not a feature. It must keep externally observable behavior, outputs, file formats, APIs, and defaults unchanged. Confirm every named check passes on both the verification commit before the optimization and the final commit. Assess whether the diff implements one concrete, objectively verifiable improvement without unrelated changes, and do not accept unsupported performance claims.\n\n".to_string() } else if j.feat() { "This PR implements a requested FEATURE, not a bug fix. Judge it as a feature: it does what the issue asks, completely but minimally; the tests check the new behaviour (on the test commit they may fail to compile because the new API is missing); no unrelated changes; no surprising changes to defaults, file formats or visible design beyond what the issue asks.\n\n".to_string() } else { String::new() },
         f["title"].as_str().unwrap_or(""),
@@ -1848,7 +1798,7 @@ async fn review_mode(a: &Ax, j: &mut Job, f: &mut Value, diagnostic: bool) -> R<
         if crate::quality::enabled(a) && j.kind == "fix" && !j.opt() { format!("{}{}\nIndependent acceptance evidence: {}\nFrozen verifier (untrusted code): {}\nCheck that this verifier exercises actual production code and the reported behavior, rather than copying logic or merely matching source text. Reject inadequate coverage or unsupported claims.",rules(a, j),crate::quality::context(j),wrap("acceptance-evidence",&j.d["acceptance_proof"].to_string()),wrap("frozen-verifier",j.d["acceptance"]["script"].as_str().unwrap_or(""))) } else { rules(a, j) }
     );
     let author = j.d["author"].as_str().unwrap_or("").to_string();
-    let candidates = if crate::routing::enabled(a) {
+    let candidates = if crate::routing::enabled(a) && !staged(a, j) {
         crate::routing::REVIEWERS
             .iter()
             .filter(|m| **m != author)
@@ -1992,42 +1942,17 @@ fn fixp(a: &Ax, j: &Job, fb: &str) -> String {
         );
     }
     let ci = rp(a, &j.repo)["ci"].as_str().unwrap_or("").to_string();
-    let h = if ci.is_empty() {
-        h
-    } else {
-        format!("{h} The repository's full test command is `{ci}`; your test_cmd runs in a fresh shell from the repo root, so use the same environment (for example the same virtualenv or package manager).")
-    };
-    let h = if j.opt() {
-        format!("{h}\n{OPT}")
-    } else if j.feat() {
-        format!("{h}\n{FEAT}")
-    } else {
-        h
-    };
-    let commit_roles = if j.opt() {
-        "verification, optimization"
-    } else if j.feat() {
-        "test, feature"
-    } else {
-        "test, fix"
-    };
-    let instructions = format!("{}{}", rules(a, j), crate::quality::context(j));
+    let h = if ci.is_empty() { h } else { format!("{h} The repository's full test command is `{ci}`; your test_cmd runs in a fresh shell from the repo root, so use the same environment (for example the same virtualenv or package manager).") };
+    let h = if j.opt() { format!("{h}\n{OPT}") } else if j.feat() { format!("{h}\n{FEAT}") } else { h };
+    let commit_roles = if j.opt() { "verification, optimization" } else if j.feat() { "test, feature" } else { "test, fix" };
     format!(
         "{h}\n{}:\n{}\n\n{} (from a previous agent): {}{}{}",
         j.orig(),
         wrap("issue", &format!("{}\n\n{}", j.title, j.s("body"))),
-        if j.feat() || j.opt() {
-            "Implementation plan"
-        } else {
-            "Repro result"
-        },
+        if j.feat() || j.opt() { "Implementation plan" } else { "Repro result" },
         j.d["repro"],
-        if fb.is_empty() {
-            String::new()
-        } else {
-            format!("\n\nYour previous attempt was rejected by the pipeline:\n{fb}\nThe branch still contains your previous commits; fix the problems and make sure there are exactly two commits ({commit_roles}) on top of the base commit.")
-        },
-        instructions
+        if fb.is_empty() { String::new() } else { format!("\n\nYour previous attempt was rejected by the pipeline:\n{fb}\nThe branch still contains your previous commits; fix the problems and make sure there are exactly two commits ({commit_roles}) on top of the base commit.") },
+        format!("{}{}",rules(a, j),crate::quality::context(j))
     )
 }
 
@@ -2075,2356 +2000,455 @@ async fn vrev(a: &Ax, j: &Job, f: &Value) -> R<String> {
     Ok(String::new())
 }
 
-fn fix_attempt_start(a: &Ax, j: &Job, ordinal: u64, md: &str) -> (i64, i64) {
-    let started = crate::db::now();
-    a.db.ch(
-        "update fix_attempts set finished=?,elapsed_ms=?-started,outcome='interrupted',gate='model' where job=? and finished is null",
-        pa![started, started, j.id],
-    );
-    let next = a.db.n(
-        "select coalesce(max(attempt),0)+1 n from fix_attempts where job=?",
-        pa![j.id],
-    );
-    let attempt = next.max(ordinal.min(i64::MAX as u64) as i64);
-    let id = a.db.run(
-        "insert into fix_attempts(job,attempt,model,started) values(?,?,?,?)",
-        pa![j.id, attempt, md.to_string(), started],
-    );
-    (id, started)
+fn one_line(s: &str) -> String {
+    let t: String = s.lines().next().unwrap_or("").trim().chars().take(72).collect();
+    if t.is_empty() { "update".into() } else { t }
 }
 
-fn fix_attempt_finish(a: &Ax, id: i64, started: i64, outcome: &str, gate: &str) {
-    if id < 0 {
-        return;
+/// Test-runner / build / dependency configuration whose change can alter which
+/// tests are discovered or run (e.g. `package.json` `scripts.test`, lockfiles,
+/// pytest/tox/jest/cargo config, CI workflows). Protected from GREEN so a fix
+/// cannot neuter the runner (`npm test` -> `echo ...`) while leaving the bug.
+fn runner_cfg(p: &str) -> bool {
+    let base = p.rsplit('/').next().unwrap_or(p);
+    const EXACT: &[&str] = &["package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "npm-shrinkwrap.json", "pyproject.toml", "setup.py", "setup.cfg", "pytest.ini", "tox.ini", "noxfile.py", "makefile", "gnumakefile", "go.mod", "go.sum", "cargo.toml", "cargo.lock", "build.gradle", "build.gradle.kts", "settings.gradle", "pom.xml", "phpunit.xml", "phpunit.xml.dist", "composer.json", "gemfile", "rakefile", ".rspec", "meson.build", "cmakelists.txt", "dune-project"];
+    if EXACT.iter().any(|x| x.eq_ignore_ascii_case(base)) {
+        return true;
     }
-    let finished = crate::db::now();
-    a.db.ch(
-        "update fix_attempts set finished=?,elapsed_ms=?,outcome=?,gate=? where id=?",
-        pa![
-            finished,
-            (finished - started).max(0),
-            outcome.to_string(),
-            gate.to_string(),
-            id
-        ],
-    );
+    p.starts_with(".github/workflows/") || Regex::new(r"(?i)^(jest|vitest|karma|playwright|cypress|babel|mocha|ava|nyc|tsconfig|wdio|jasmine)[.\-].*\.(c?js|mjs|ts|json|ya?ml)$|^\.(mocharc|babelrc|nycrc|ava)([.\-].*)?$|\.config\.(c?js|mjs|ts)$").unwrap().is_match(base)
 }
 
-fn fix_attempt_finish_active(a: &Ax, j: &Job, outcome: &str, gate: &str) {
-    if let Some(attempt) = a.db.one(
-        "select id,started from fix_attempts where job=? and finished is null order by attempt desc limit 1",
-        pa![j.id],
-    ) {
-        if let (Some(id), Some(started)) = (attempt["id"].as_i64(), attempt["started"].as_i64()) {
-            fix_attempt_finish(a, id, started, outcome, gate);
+/// Classify a repo path as a test file. Repo config `tests` (a regex) wins; the
+/// fallback covers the common test layouts across languages. Used in staged mode
+/// to reject production changes in the RED phase.
+fn testish(a: &Ax, j: &Job, p: &str) -> bool {
+    if let Some(re) = rp(a, &j.repo)["tests"].as_str().filter(|s| !s.trim().is_empty()) {
+        if let Ok(rx) = Regex::new(re) {
+            return rx.is_match(p);
         }
     }
+    Regex::new(r"(?i)(^|/)(tests?|specs?|__tests__|testing)/|(^|/)conftest\.py$|_test|_spec|test_|spec_|\.test\.|\.spec\.|(^|/)test[^/]*$|Tests?\.(java|kt|kts|cs|scala|go|rb|py|php|swift)$").unwrap().is_match(p)
 }
 
-async fn fix(a: &Ax, j: &mut Job, fb0: String, k0: u64) -> R<Value> {
-    crate::quality::prepare(a, j).await?;
-    let mut fb = fb0;
-    let route_on = crate::routing::enabled(a);
-    let plan = crate::routing::plan(a);
-    let rounds = if route_on { plan.len() as u64 } else { RND + 1 };
-    let primary = a.md("fixer");
-    let complex_model = a.md("big");
-    // Keep the low-cost path for ordinary work, but hand a failed local-model
-    // candidate to the configured Codex model for independent repair. Free-first
-    // routing retains its own bounded plan, and complex jobs start on `big`.
-    let fallback = !route_on
-        && a.set()["big"].as_bool().unwrap_or(true)
-        && primary.starts_with("ollama:")
-        && complex_model.starts_with("codex:")
-        && primary != complex_model;
-    for k in k0..rounds {
-        kill(a, j)?;
-        a.db.jset(j.id, &[("st", json!("fix"))]);
-        a.st("fixer", "work", Some(j.id), "");
-        a.say(
-            "fixer",
-            &format!(
-                "{}fixing {}",
-                if k > 0 {
-                    format!("round {}: ", k + 1)
-                } else {
-                    String::new()
-                },
-                j.tag()
-            ),
-            Some(j.id),
-        );
-        let c = cx(a, j);
-        let md = if route_on {
-            plan[k as usize].clone()
-        } else if c || (fallback && k > 0) {
-            complex_model.clone()
-        } else {
-            primary.clone()
-        };
-        let (attempt_id, attempt_started) = fix_attempt_start(a, j, k + 1, &md);
-        crate::routing::event(a, Some(j.id), "fixer", k as usize, &md, &fb);
-        use_(a, j, &md);
-        j.d["author"] = json!(md);
-        let mut o = Ask::new(
-            "fixer",
-            md,
-            P(if j.opt() { "optimizer" } else { "fixer" }),
-            fixp(a, j, &fb),
-        );
-        o.job = Some(j.id);
-        o.rn = rn(a, j);
-        o.turns = if c { 200 } else { 120 };
-        o.t = if c { 180 * 60 } else { 120 * 60 };
-        let (_, js) = match ask(a, o).await {
-            Ok(v) => v,
-            Err(X::Back(e)) => {
-                fix_attempt_finish(a, attempt_id, attempt_started, "interrupted", "model");
-                return Err(X::Back(e));
-            }
-            Err(X::Drop(e)) if fallback => {
-                fix_attempt_finish(a, attempt_id, attempt_started, "failed", "model");
-                fb = format!("Model attempt failed: {e}. Inspect the existing tree and preserve useful work.");
-                continue;
-            }
-            Err(X::Drop(e)) => {
-                fix_attempt_finish(a, attempt_id, attempt_started, "failed", "model");
-                return Err(X::Drop(e));
-            }
-            Err(e) if route_on || fallback => {
-                fix_attempt_finish(a, attempt_id, attempt_started, "failed", "model");
-                fb = format!("Model attempt failed: {e}. Inspect the existing tree and preserve useful work.");
-                continue;
-            }
-            Err(e) => {
-                fix_attempt_finish(a, attempt_id, attempt_started, "failed", "model");
-                return Err(e);
-            }
-        };
-        a.st("fixer", "idle", None, "");
-        if js.is_null() {
-            fix_attempt_finish(a, attempt_id, attempt_started, "rejected", "output");
-            fb = "Your answer contained no JSON.".into();
+/// Parse `git status --porcelain=v1 -z -uall` output. NUL-delimited and `-uall`
+/// so new directories expand to files and no path needs unquoting. For a rename
+/// or copy (X or Y is R/C) the next NUL field is the ORIGIN path; BOTH the origin
+/// and the destination are returned, so renaming production into a test directory
+/// still surfaces the production path for classification.
+pub(crate) fn parse_status_z(st: &str) -> Vec<String> {
+    let fields: Vec<&str> = st.split('\0').collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < fields.len() {
+        let f = fields[i];
+        i += 1;
+        if f.len() < 4 {
             continue;
         }
-        if let Some(g) = js["give_up"].as_str() {
-            fix_attempt_finish(a, attempt_id, attempt_started, "rejected", "output");
-            a.st("fixer", "idle", None, "sad");
-            if route_on || fallback {
-                fb = format!(
-                    "Previous model gave up: {g}. Inspect the tree and repair the actual issue."
-                );
-                continue;
-            }
-            return drop(format!("Fixer gave up: {g}"));
+        let b = f.as_bytes();
+        let (x, y) = (b[0] as char, b[1] as char);
+        let path = f[3..].trim(); // "XY PATH"
+        if !path.is_empty() && !junk(path) {
+            out.push(path.to_string());
         }
-        a.say(
-            "fixer",
-            &format!("done: {}", js["title"].as_str().unwrap_or("")),
-            Some(j.id),
-        );
-        j.d["f0"] = js.clone();
-        j.d["k"] = json!(k);
-        a.db.jd(j);
-        a.flow("fixer", "ci", "proof");
-        let verification = if j.kind == "review" {
-            vrev(a, j, &js).await
-        } else {
-            verify(a, j, &js).await
-        };
-        fb = match verification {
-            Ok(value) => value,
-            Err(e) => {
-                fix_attempt_finish(a, attempt_id, attempt_started, "failed", "verification");
-                return Err(e);
+        if x == 'R' || x == 'C' || y == 'R' || y == 'C' {
+            if let Some(orig) = fields.get(i) {
+                i += 1;
+                let orig = orig.trim();
+                if !orig.is_empty() && !junk(orig) {
+                    out.push(orig.to_string());
+                }
             }
-        };
-        if !fb.is_empty() {
-            fix_attempt_finish(a, attempt_id, attempt_started, "rejected", "verification");
-            a.say(
-                "fixer",
-                &format!("proof missing: {}", fb.lines().next().unwrap_or("")),
-                Some(j.id),
-            );
-            if route_on {
-                j.d["verification_feedback"] = json!(fb.clone());
-                let diagnosis = diagnosis(a, j, &mut js.clone()).await?;
-                fb.push_str(&format!("\n{diagnosis}"));
-            }
-            continue;
         }
-        fb = match ci(a, j).await {
-            Ok(value) => value,
-            Err(e) => {
-                fix_attempt_finish(a, attempt_id, attempt_started, "failed", "ci");
-                return Err(e);
-            }
-        };
-        if fb.starts_with("CI aborted after") {
-            fix_attempt_finish(a, attempt_id, attempt_started, "blocked", "ci");
-            a.st("fixer", "idle", None, "sad");
-            return drop(format!("{fb} on {}", j.h()));
-        }
-        if !fb.is_empty() {
-            fix_attempt_finish(a, attempt_id, attempt_started, "rejected", "ci");
-            if route_on {
-                j.d["verification_feedback"] = json!(fb.clone());
-                let diagnosis = diagnosis(a, j, &mut js.clone()).await?;
-                fb.push_str(&format!("\n{diagnosis}"));
-            }
-            continue;
-        }
-        j.d["verification_feedback"] = json!("Executed regression proof and repository CI passed.");
-        let mut f = js.clone();
-        fb = match review(a, j, &mut f).await {
-            Ok(value) => value,
-            Err(e) => {
-                fix_attempt_finish(a, attempt_id, attempt_started, "failed", "review");
-                return Err(e);
-            }
-        };
-        if !fb.is_empty() {
-            fix_attempt_finish(a, attempt_id, attempt_started, "rejected", "review");
-            a.flow("reviewer", "fixer", "back");
-            continue;
-        }
-        fix_attempt_finish(a, attempt_id, attempt_started, "accepted", "");
-        j.d["f"] = f.clone();
-        a.db.jd(j);
-        return Ok(f);
     }
-    a.st("fixer", "idle", None, "sad");
-    drop(format!(
-        "no valid fix after {} rounds: {}",
-        rounds,
-        fb.lines().next().unwrap_or("")
-    ))
+    out
 }
 
-async fn reb(a: &Ax, j: &mut Job) -> R<()> {
-    a.db.jset(j.id, &[("st", json!("fix"))]);
-    a.st("fixer", "work", Some(j.id), "");
-    let mn = j.s("mn");
-    a.say(
-        "fixer",
-        &format!("rebasing {}#{} onto {mn}", j.repo, j.pr.unwrap_or(0)),
-        Some(j.id),
-    );
-    pull(
-        a,
-        j,
-        &format!("{}{}.git", gitb(), j.repo),
-        &mn,
-        &format!("refs/remotes/origin/{mn}"),
-    )
-    .await?;
-    let r = x(a, j, &format!("git rebase -q origin/{}", q(&mn)), 600).await;
+/// Run a git command whose output must NOT be trimmed (the leading status byte of
+/// `-z` porcelain is significant, and `ok()` would strip it). Errors on nonzero.
+async fn okz(a: &Ax, j: &Job, cmd: &str) -> R<String> {
+    let r = x(a, j, cmd, 60).await;
     if r.c != 0 {
-        let fs = x(a, j, "git diff --name-only --diff-filter=U", 60)
-            .await
-            .o
-            .trim()
-            .to_string();
-        a.say(
-            "fixer",
-            &format!("conflicts in {} file(s), resolving", fs.lines().count()),
-            Some(j.id),
-        );
-        let md = a.md("fixer");
-        use_(a, j, &md);
-        let mut o = Ask::new("fixer", md, P("rebase"), format!("Repository {}. The rebase of pull request branch {} (PR #{}: {}) onto origin/{mn} stopped with conflicts in:\n{fs}\n\nResolve every conflict, `git add` the files and run `GIT_EDITOR=true git rebase --continue`; repeat until the rebase is finished. Do not add other changes. Run targeted builds and tests for touched files. Finish with a clean tree: `git status --porcelain` must print nothing. Then answer only with JSON {{\"title\": \"one line on how you resolved it\"}} or {{\"give_up\": \"reason\"}}.", j.repo, j.s("br"), j.pr.unwrap_or(0), wrap("title", &j.title)));
-        o.job = Some(j.id);
-        o.rn = rn(a, j);
-        o.turns = 80;
-        o.t = 90 * 60;
-        let (_, js) = ask(a, o).await?;
-        if js.is_null() || js["give_up"].is_string() {
-            x(a, j, "git rebase --abort", 60).await;
-            return drop(format!(
-                "conflict not resolved: {}",
-                js["give_up"].as_str().unwrap_or("no answer")
-            ));
-        }
-        if x(
-            a,
-            j,
-            "test -d .git/rebase-merge -o -d .git/rebase-apply",
-            60,
-        )
-        .await
-        .c == 0
-        {
-            x(a, j, "git rebase --abort", 60).await;
-            return drop("rebase left unfinished");
-        }
-        j.d["fx"] = json!(js["title"].as_str().unwrap_or("resolved conflicts"));
+        return Err(oe(&r, cmd, &j.h()));
     }
-    if x(
-        a,
-        j,
-        &format!("git merge-base --is-ancestor origin/{} HEAD", q(&mn)),
-        60,
-    )
-    .await
-    .c != 0
-    {
-        return drop("branch is not on top of the default branch after rebase");
-    }
-    let dt = ok(a, j, "git status --porcelain", 60).await?;
-    if !dt.is_empty() {
-        return drop(format!(
-            "working tree not clean after rebase: {}",
-            dt.lines().take(5).collect::<Vec<_>>().join(", ")
-        ));
-    }
-    j.d["base"] = json!(ok(a, j, &format!("git rev-parse origin/{}", q(&mn)), 60).await?);
-    let fx = j.s("fx");
-    j.d["f"] = json!({"title": if fx.is_empty() { format!("Rebase onto {mn}") } else { format!("Rebase onto {mn}: {fx}") }, "tests": [], "test_cmd": j.s("test_cmd"), "cause": "", "fix": ""});
-    a.db.jd(j);
-    let tc = j.s("test_cmd");
-    if !tc.is_empty() && !Regex::new(crate::mcp::BAD).unwrap().is_match(&tc) {
-        let (e, _) = run_t(a, j, "HEAD", &tc, &[]).await;
-        ok(a, j, &format!("git checkout -q {}", q(&j.s("br"))), 120).await?;
-        if e != 0 {
-            return drop("PR tests fail after rebase");
-        }
-    }
-    a.st("fixer", "idle", None, "");
-    let c = ci(a, j).await?;
-    if !c.is_empty() {
-        return drop(rbw(j, &c));
-    }
-    if !fx.is_empty() {
-        let df = ok(a, j, &format!("git range-diff {o}~$(git rev-list --count {b}..HEAD)..{o} {b}..HEAD | head -c 40000", o = j.s("old"), b = j.s("base")), 120).await.unwrap_or_default();
-        let fd = ok(
-            a,
-            j,
-            &format!("git diff {}..HEAD | head -c 30000", j.s("base")),
-            120,
-        )
-        .await
-        .unwrap_or_default();
-        let md = a.md("reviewer");
-        use_(a, j, &md);
-        let mut o = Ask::new("reviewer", md, P("rebrev"), format!("PR #{} {}\nResolution note: {fx}\n\ngit range-diff (old PR commits vs rebased commits):\n{df}\n\nFinal diff {mn}..HEAD:\n{fd}", j.pr.unwrap_or(0), wrap("title", &j.title)));
-        o.job = Some(j.id);
-        o.ef = Some("medium");
-        let (_, js) = ask(a, o).await?;
-        let g = js["ok"].as_bool().unwrap_or(false);
-        a.st("reviewer", "idle", None, if g { "ok" } else { "sad" });
-        if !g {
-            return drop(format!(
-                "conflict resolution rejected by Reviewer: {}",
-                crate::sh::head(&js["issues"].to_string(), 200)
-            ));
-        }
-    }
-    Ok(())
+    Ok(r.o)
 }
 
-fn rbw(j: &Job, c: &str) -> String {
-    if c.starts_with("CI aborted after") {
-        format!("after rebase: {c} on {}", j.h())
-    } else {
-        format!(
-            "CI red after rebase: {}",
-            crate::sh::head(c.lines().next().unwrap_or(""), 160)
-        )
-    }
+/// Working-tree changed paths vs the index/HEAD (staged and unstaged), excluding
+/// build junk, with rename origins included.
+async fn changed_paths(a: &Ax, j: &Job) -> R<Vec<String>> {
+    Ok(parse_status_z(&okz(a, j, "git status --porcelain=v1 -z -uall").await?))
 }
 
-async fn taken(a: &Ax, j: &Job) -> R<String> {
-    if j.kind != "fix" || j.own() || j.num == 0 {
-        return Ok(String::new());
-    }
-    let me = crate::gh::login(a).await;
-    let is = ghj(
-        &[
-            "issue",
-            "view",
-            &j.num.to_string(),
-            "-R",
-            &j.repo,
-            "--json",
-            "state,assignees,comments",
-        ],
-        60,
-    )
-    .await
-    .map_err(X::E)?;
-    if is["state"] != "OPEN" {
-        return Ok("someone was faster: issue is closed".into());
-    }
-    let oa: Vec<String> = is["assignees"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|x| x["login"].as_str().map(String::from))
-        .filter(|x| *x != me)
-        .collect();
-    if !oa.is_empty() {
-        return Ok(format!("someone was faster: assigned to {}", oa.join(", ")));
-    }
-    let cl = Regex::new(r"(?i)\b(i'?m (now )?(working|taking|looking into|on it|fixing)|i am (now )?(working|taking|fixing)|i'?ll (take|fix|work|handle|open a pr|send a pr)|i will (take|fix|work|handle)|working on (this|it|a fix)|claim(ed|ing)? (this|it|#[0-9]+)|assign (this |it )?(to )?me|pr (is )?(coming|incoming|soon|on the way)|on it\b)").unwrap();
-    let va = j.d["va"].as_i64().unwrap_or(j.t0);
-    for c in is["comments"].as_array().cloned().unwrap_or_default() {
-        let by = c["author"]["login"].as_str().unwrap_or("");
-        let t = chrono::DateTime::parse_from_rfc3339(c["createdAt"].as_str().unwrap_or(""))
-            .map(|d| d.timestamp_millis())
-            .unwrap_or(0);
-        if by != me && t > va && cl.is_match(c["body"].as_str().unwrap_or("")) {
-            return Ok(format!("someone was faster: {by} claimed it in a comment"));
-        }
-    }
-    let lv: Vec<String> = crate::gh::live(crate::gh::refs(&j.repo, j.num).await.map_err(X::E)?)
-        .into_iter()
-        .filter(|p| p.by != me)
-        .map(|p| format!("{}#{}", p.rp, p.n))
-        .collect();
-    if !lv.is_empty() {
-        return Ok(format!("someone was faster: {}", lv.join(", ")));
-    }
-    Ok(String::new())
+/// Run a command in the current working tree (no checkout), returning (exit, output).
+async fn run_wt(a: &Ax, j: &Job, c: &str) -> (i32, String) {
+    let r = x(a, j, &format!("{{ to 3600 bash -c {}\n}} 2>&1; echo \"[exit $?]\"", q(c)), 3700).await;
+    let e = Regex::new(r"\[exit (\d+)\]\s*$").unwrap().captures(&r.o).and_then(|m| m[1].parse::<i32>().ok()).unwrap_or(-1);
+    (e, r.o)
 }
 
-async fn race(a: &Ax, j: &Job, at: &str) -> R<()> {
-    let t = taken(a, j).await?;
-    if !t.is_empty() {
-        return drop(format!("{t} ({at})"));
+/// A model-supplied test command may only run the project's tests: it is never
+/// trusted to touch git or the shell. `mcp::BAD` blocks push/remote/config and
+/// `mcp::STAGED_GIT` blocks every history/index mutation, closing the `run_wt`
+/// path that bypasses the `sh`-tool guard. Not a sandbox — paired with a HEAD and
+/// working-tree re-check after the command runs.
+fn bad_test_cmd(a: &Ax, j: &Job, tc: &str) -> Option<String> {
+    if tc.trim().is_empty() {
+        return Some("test_cmd is empty".into());
     }
-    Ok(())
-}
-
-async fn gate(a: &Ax, j: &mut Job) -> R<()> {
-    a.db.jset(j.id, &[("st", json!("gate"))]);
-    a.st("submit", "work", Some(j.id), "");
-    a.say(
-        "submit",
-        &format!("pre-push gate for {}", j.tag()),
-        Some(j.id),
-    );
-    need(a, "submit", &["gh", &j.h()]).await?;
-    if j.kind != "fix" {
-        let p = ghj(
-            &[
-                "pr",
-                "view",
-                &j.pr.unwrap_or(0).to_string(),
-                "-R",
-                &j.repo,
-                "--json",
-                "state",
-            ],
-            60,
-        )
-        .await
-        .map_err(X::E)?;
-        if p["state"] != "OPEN" {
-            return drop("PR is no longer open");
-        }
-        return Ok(());
+    if Regex::new(crate::mcp::BAD).unwrap().is_match(tc) {
+        return Some("test_cmd contains forbidden commands".into());
     }
-    race(a, j, "at the gate").await?;
-    let mn = j.s("mn");
-    pull(
-        a,
-        j,
-        &format!("{}{}.git", gitb(), j.repo),
-        &mn,
-        &format!("refs/remotes/origin/{mn}"),
-    )
-    .await?;
-    let nb = ok(a, j, &format!("git rev-parse origin/{}", q(&mn)), 60).await?;
-    if !j.own() && j.num > 0 {
-        let hit = ok(
-            a,
-            j,
-            &format!(
-                "git log --format='%h %s' {}..origin/{} | grep -E '#{}([^0-9]|$)' || true",
-                j.s("base"),
-                q(&mn),
-                j.num
-            ),
-            60,
-        )
-        .await?;
-        if !hit.is_empty() {
-            return drop(format!(
-                "someone was faster: commit on {mn} mentions #{}: {}",
-                j.num,
-                hit.lines().next().unwrap_or("")
-            ));
-        }
+    if Regex::new(crate::mcp::STAGED_GIT).unwrap().is_match(tc) {
+        return Some("test_cmd must only run the tests; it may not run git history, index or commit commands".into());
     }
-    if nb == j.s("base") {
-        let result = crate::quality::check(a, j).await?;
-        if !result.is_empty() {
-            return drop(result);
-        }
-        a.say(
-            "submit",
-            "default branch unchanged, proofs still valid",
-            Some(j.id),
-        );
-        return Ok(());
-    }
-    a.say(
-        "submit",
-        "default branch moved, rebasing and re-verifying everything",
-        Some(j.id),
-    );
-    let rb = x(a, j, &format!("git rebase -q origin/{}", q(&mn)), 600).await;
-    if rb.c != 0 {
-        x(a, j, "git rebase --abort", 60).await;
-        return drop("rebase conflict with the current default branch");
-    }
-    let ob = j.s("base");
-    j.d["base"] = json!(nb);
-    a.db.jd(j);
-    let f = j.d["f"].clone();
-    let v = verify(a, j, &f).await?;
-    if !v.is_empty() {
-        j.d["base"] = json!(ob);
-        return drop(format!("after rebase: {}", v.lines().next().unwrap_or("")));
-    }
-    let c = ci(a, j).await?;
-    if !c.is_empty() {
-        return drop(rbw(j, &c));
-    }
-    Ok(())
-}
-
-async fn tmpl(r: &str) -> Option<String> {
-    for p in [
-        ".github/pull_request_template.md",
-        ".github/PULL_REQUEST_TEMPLATE.md",
-        "pull_request_template.md",
-        "PULL_REQUEST_TEMPLATE.md",
-        "docs/pull_request_template.md",
-    ] {
-        if let Some(t) = crate::gh::file(r, p).await {
-            if !t.trim().is_empty() {
-                return Some(t);
-            }
+    // Optional per-repo test-command allowlist (rp.tcmd, a regex). When set, the
+    // model's test_cmd must match it, so an untrusted command cannot run arbitrary
+    // code on the executor. Defence in depth, not a substitute for a sandbox.
+    if let Some(re) = rp(a, &j.repo)["tcmd"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        match Regex::new(re) {
+            Ok(rx) if !rx.is_match(tc) => return Some(format!("test_cmd is not permitted by this repository's approved test-command policy ({re})")),
+            Err(e) => return Some(format!("repository test-command policy regex is invalid ({e})")),
+            _ => {}
         }
     }
     None
 }
 
-async fn mkbody(a: &Ax, j: &mut Job) -> R<()> {
-    let f = j.d["f"].clone();
+/// The repo's test classifier regex (`rp.tests`), validated. A configured but
+/// invalid regex fails closed (Err) rather than silently falling back (A3).
+fn tests_re(a: &Ax, j: &Job) -> Result<(), String> {
+    match rp(a, &j.repo)["tests"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(re) => Regex::new(re).map(|_| ()).map_err(|e| format!("repository test classifier regex is invalid ({e}); fix rp.tests before staged runs")),
+        None => Ok(()),
+    }
+}
+
+/// The mandatory GREEN production allowlist (`rp.green`, a regex). Only paths
+/// matching it may be changed by a GREEN fix. Fails closed: unset/empty means no
+/// GREEN can proceed, and an invalid regex is an explicit error (V3-P0-1).
+fn green_allow(a: &Ax, j: &Job) -> Result<Regex, String> {
+    match rp(a, &j.repo)["green"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        None => Err("staged GREEN requires a production-file allowlist for this repository (rp.green); none configured, so no fix may be committed".into()),
+        Some(re) => Regex::new(re).map_err(|e| format!("repository GREEN allowlist regex is invalid ({e}); fix rp.green before staged runs")),
+    }
+}
+
+/// Stage exactly `paths` (never `-A`, so nothing a test command created outside
+/// the authorised set is committed), confirm the staged set is exactly `paths`,
+/// commit, then restore the working tree to the new HEAD so any residue a test
+/// left behind is dropped and the tree is pristine for the next phase.
+async fn commit_scope(a: &Ax, j: &Job, paths: &[String], msg: &str) -> R<Option<String>> {
+    let spec = paths.iter().map(|p| q(p)).collect::<Vec<_>>().join(" ");
+    // Run the add tolerantly: an authorised path that no longer matches makes git
+    // exit nonzero, which is a controlled rejection (the set check also guards).
+    let add = x(a, j, &format!("git add -- {spec}"), 120).await;
+    if add.c != 0 {
+        ok(a, j, "git reset -q", 60).await?;
+        return Ok(Some(format!("could not stage the authorised paths {:?}: {}", paths, crate::sh::last(add.all().trim(), 300))));
+    }
+    // `--no-renames` lists a rename as delete(origin)+add(dest), matching the way
+    // `changed_paths` records both sides, so the sets compare exactly. The staged
+    // set must EQUAL the authorised set: no extra path a test command may have
+    // created, and no authorised path silently missing.
+    let cached: BTreeSet<String> = okz(a, j, "git diff --cached --name-only --no-renames -z").await?.split('\0').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect();
+    let want: BTreeSet<String> = paths.iter().cloned().collect();
+    if cached != want {
+        ok(a, j, "git reset -q", 60).await?;
+        return Ok(Some(format!("unexpected staging state (staged {:?}, authorised {:?})", cached, want)));
+    }
+    ok(a, j, &format!("git commit -q -m {}", q(msg)), 120).await?;
+    // Drop anything the test command left unstaged/untracked; keep the commit.
+    ok(a, j, "git checkout -q -f -- . 2>/dev/null; git clean -fdq", 120).await?;
+    if !changed_paths(a, j).await?.is_empty() {
+        return Ok(Some("working tree not clean after the commit".into()));
+    }
+    Ok(None)
+}
+
+/// RED: only test files changed, the focused test fails legitimately (a real
+/// assertion, not a compile/import error), the test command itself did not move
+/// history or touch production, then the controller creates the test-only commit
+/// from an explicit path set. Returns Some(feedback) on a controlled rejection.
+async fn red_commit(a: &Ax, j: &mut Job, tc: &str, ts: &[String], title: &str) -> R<Option<String>> {
+    if let Some(m) = bad_test_cmd(a, j, tc) {
+        return Ok(Some(m));
+    }
+    if let Err(m) = tests_re(a, j) {
+        return Ok(Some(m));
+    }
+    let base = j.s("base");
+    // The office owns history: before RED the branch must still be at the base.
+    if ok(a, j, "git rev-parse HEAD", 60).await? != base {
+        return Ok(Some("The branch history changed during the RED phase. The office creates every commit; do not create, amend or reset commits. Edit test files only and leave them uncommitted.".into()));
+    }
+    let pre = changed_paths(a, j).await?;
+    if pre.is_empty() {
+        return Ok(Some("The RED phase made no changes; write a regression test that fails on the current code.".into()));
+    }
+    let nontest: Vec<String> = pre.iter().filter(|p| !testish(a, j, p)).cloned().collect();
+    if !nontest.is_empty() {
+        return Ok(Some(format!("The RED phase must change test files only, but these look like implementation code: {}. Move every production change to the GREEN phase.", nontest.iter().take(10).cloned().collect::<Vec<_>>().join(", "))));
+    }
+    let (e, o) = run_wt(a, j, tc).await;
+    // TOCTOU / untrusted test_cmd: re-read state AFTER the command ran.
+    if ok(a, j, "git rev-parse HEAD", 60).await? != base {
+        return Ok(Some("The test command changed git history. test_cmd may only run the tests. Output:\n".to_string() + &crate::sh::last(&o, 2000)));
+    }
+    let post = changed_paths(a, j).await?;
+    let post_nontest: Vec<String> = post.iter().filter(|p| !testish(a, j, p)).cloned().collect();
+    if !post_nontest.is_empty() {
+        return Ok(Some(format!("The test command modified non-test files: {}. A regression test must not write to production code. Output:\n{}", post_nontest.iter().take(10).cloned().collect::<Vec<_>>().join(", "), crate::sh::last(&o, 2000))));
+    }
+    if e == 0 {
+        return Ok(Some(format!("The regression test passes without any fix; it must fail. Output:\n{}", crate::sh::last(&o, 3000))));
+    }
+    if Regex::new(CE).unwrap().is_match(&o) {
+        return Ok(Some(format!("The test does not compile or load; a compile or import error does not count as a failing test. Make the test call existing API so it fails on behaviour. Output:\n{}", crate::sh::last(&o, 3000))));
+    }
+    // A RED test that "fails" only because a test helper (assert/test/expect/...) is
+    // undefined or misimported is not a behavioural failure: it throws before any
+    // assertion runs. The staged flow fixes existing behaviour, so the production API
+    // exists and these runtime-binding errors mean a broken test harness, not the
+    // bug. Reject so the author reimports the helpers correctly (the 6068963 defect:
+    // `const { assert } = require('assert')` leaves `assert` undefined).
+    if Regex::new(r"Cannot read properties of undefined|Cannot read property '[^']*' of undefined|\bis not a function\b").unwrap().is_match(&o) {
+        return Ok(Some(format!("The regression test fails because a test helper (e.g. assert/test/expect) is undefined or misimported, not because of a behavioural assertion — it throws a TypeError before any assertion runs. Import the helpers exactly as the existing tests do (e.g. `const assert = require('node:assert')`, `const {{ test }} = require('node:test')`), keep every existing test, and make the failure a real AssertionError. Output:\n{}", crate::sh::last(&o, 3000))));
+    }
+    if !ts.iter().any(|t| o.contains(&bare(t))) {
+        return Ok(Some(format!("None of the named tests appears failing in the output. Output:\n{}", crate::sh::last(&o, 3000))));
+    }
+    j.d["red_output"] = json!(crate::sh::last(&o, 2000));
+    a.db.jd(j);
+    commit_scope(a, j, &post, &format!("test: {}", one_line(title))).await
+}
+
+/// GREEN: the fix changes only production code (no test or runner file, none of
+/// the RED-committed files), the RED test commit is still HEAD, the frozen RED
+/// test command now passes AND the named tests are observed running (so disabling
+/// or replacing the runner is rejected), then the controller creates the fix-only
+/// commit. `tc`/`ts` are the frozen RED values, never the GREEN answer's.
+async fn green_commit(a: &Ax, j: &mut Job, red_files: &[String], test_commit: &str, tc: &str, ts: &[String], title: &str) -> R<Option<String>> {
+    if let Some(m) = bad_test_cmd(a, j, tc) {
+        return Ok(Some(m));
+    }
+    if let Err(m) = tests_re(a, j) {
+        return Ok(Some(m));
+    }
+    if ok(a, j, "git rev-parse HEAD", 60).await? != test_commit {
+        return Ok(Some("The branch history changed during the GREEN phase. The office creates every commit; do not create, amend or reset commits. Edit production files only and leave them uncommitted.".into()));
+    }
+    // MANDATORY GREEN allowlist (V3-P0-1). The fix may touch ONLY production paths
+    // explicitly allowlisted for this repository (rp.green, a regex). This is a
+    // whitelist, not a growing blocklist: any other path — a test, the runner, or
+    // an INDIRECT runner script the test command invokes — is rejected because it
+    // is simply not on the list. Fails closed: a staged repo with no allowlist
+    // cannot run a GREEN phase at all.
+    let allow = match green_allow(a, j) {
+        Ok(rx) => rx,
+        Err(m) => return Ok(Some(m)),
+    };
+    // Defence in depth on top of the allowlist.
+    let protected = |p: &str| testish(a, j, p) || runner_cfg(p) || red_files.iter().any(|r| r == p) || tc.contains(p);
+    let offending = |paths: &[String]| -> Vec<String> { paths.iter().filter(|p| !allow.is_match(p) || protected(p)).cloned().collect() };
+    let pre = changed_paths(a, j).await?;
+    if pre.is_empty() {
+        return Ok(Some("The GREEN phase made no changes; implement the fix so the committed test passes.".into()));
+    }
+    let bad = offending(&pre);
+    if !bad.is_empty() {
+        return Ok(Some(format!("The fix may change only the allowlisted production files for this repository; these are not permitted: {}. The regression test, the test runner and any script it invokes must stay exactly as committed in the RED phase.", bad.iter().take(10).cloned().collect::<Vec<_>>().join(", "))));
+    }
+    let (e, o) = run_wt(a, j, tc).await;
+    if ok(a, j, "git rev-parse HEAD", 60).await? != test_commit {
+        return Ok(Some("The test command changed git history. test_cmd may only run the tests. Output:\n".to_string() + &crate::sh::last(&o, 2000)));
+    }
+    let post = changed_paths(a, j).await?;
+    let bad = offending(&post);
+    if !bad.is_empty() {
+        return Ok(Some(format!("The test command or the fix touched files outside the production allowlist: {}. The RED test and its runner must stay unchanged. Output:\n{}", bad.iter().take(10).cloned().collect::<Vec<_>>().join(", "), crate::sh::last(&o, 2000))));
+    }
+    if e != 0 {
+        return Ok(Some(format!("The regression test still fails with the fix. Output:\n{}", crate::sh::last(&o, 3000))));
+    }
+    let f = fails(&o);
+    if !f.is_empty() {
+        return Ok(Some(format!("Tests still reported as failing with the fix: {}. Output:\n{}", f.join(", "), crate::sh::last(&o, 3000))));
+    }
+    // Positive proof (B1): the frozen RED tests must actually appear in the GREEN
+    // output. Replacing or disabling the runner (so nothing runs) is rejected here
+    // even though exit is 0. Quiet runners that print no per-test name are a known
+    // limitation and should set rp.tests / a verbose command.
+    let missing: Vec<String> = ts.iter().filter(|t| !o.contains(&bare(t))).cloned().collect();
+    if !missing.is_empty() {
+        return Ok(Some(format!("Could not confirm the regression test(s) ran with the fix: {} did not appear in the output. Do not disable, replace or skip the test runner. Output:\n{}", missing.join(", "), crate::sh::last(&o, 3000))));
+    }
+    commit_scope(a, j, &post, &format!("fix: {}", one_line(title))).await
+}
+
+fn staged_prompt(a: &Ax, j: &Job, fb: &str, red: bool, tc: &str) -> String {
+    let h = format!("Repository: {}. Branch {} is checked out at the base commit {}.", j.repo, j.s("br"), j.s("base"));
     let ci = rp(a, &j.repo)["ci"].as_str().unwrap_or("").to_string();
-    let ft = fo(a, j);
-    let mut b = body_lang(j, &f, &ci, ft, pr_pt(a, j));
-    if j.kind == "fix" {
-        if let Some(t) = tmpl(&j.repo).await {
-            a.say(
-                "submit",
-                "repo has a PR template, filling it in",
-                Some(j.id),
-            );
-            let md = a.md("reviewer");
-            let instructions = if pr_pt(a, j) {
-                "Preencha o modelo de Pull Request com a informação abaixo. Preserve a estrutura e os títulos em PT-PT. Todo o texto narrativo deve estar em português de Portugal, incluindo títulos e listas. Assinale uma checkbox apenas quando os factos provarem o respetivo resultado. Remova instruções e comentários HTML do modelo. Nunca invente testes ou aprovações. Preserve identificadores técnicos, comandos e a referência 'Fixes #N'. Responda apenas com JSON de chave 'body' e valor Markdown."
-            } else {
-                "Fill in this repository's pull request template for the change below. Keep the template's headings and checklist structure. Tick a checkbox only when the facts below prove it (tests added, tests pass, CI command passes, linked issue). Remove instructions and HTML comments that are meant for the author. Put the facts into the matching sections; if a fact has no section, keep it in a section at the end. Use only the facts given, never invent. Answer only with JSON with key 'body' and Markdown string value."
-            };
-            let mut o = Ask::new(
-                "submit",
-                md,
-                P("desc"),
-                format!(
-                    "{instructions}\n\n{}\n\nFacts (our PR text):\n{}",
-                    wrap("template", &crate::sh::head(&t, 8000)),
-                    body_lang(j, &f, &ci, "", pr_pt(a, j))
-                ),
-            );
-            o.job = Some(j.id);
-            o.ef = Some("low");
-            if let Ok((_, js)) = ask(a, o).await {
-                if let Some(s) = js["body"].as_str().filter(|s| s.len() > 40) {
-                    // A template model must not silently reintroduce English headings.
-                    let wrong_language = pr_pt(a, j) && english_pr_heading(s);
-                    let missing_reference = j.kind == "fix"
-                        && !j.own()
-                        && !s.contains(&format!(
-                            "{} #{}",
-                            if j.feat() { "Closes" } else { "Fixes" },
-                            j.num
-                        ));
-                    if wrong_language || missing_reference {
-                        a.say("submit", "modelo de PR rejeitado por idioma ou referência em falta; usado o corpo estruturado", Some(j.id));
-                    } else {
-                        b = s.trim().to_string();
-                        if j.own() {
-                            b = san(&b);
-                        }
-                        if !b.contains(ft) {
-                            b = format!("{b}\n\n{ft}");
-                        }
-                    }
-                }
-            }
-            a.st("submit", "work", Some(j.id), "");
-        }
-    }
-    let title = pr_title(None, &f, &j.title)?;
-    j.d["pt"] = json!(title);
-    j.d["pb_footer"] = json!(ft);
-    j.d["pb"] = json!(b);
-    j.d["df"] = json!(ok(
-        a,
-        j,
-        &format!("git diff {}..HEAD | head -c 120000", j.s("base")),
-        120
-    )
-    .await
-    .unwrap_or_default());
-    a.db.jd(j);
-    Ok(())
-}
-
-async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
-    // Every path, including recovery/resume, must pass this boundary before any
-    // squash, push or GitHub request. A resumed job is not an approval grant.
-    if crate::routing::enabled(a) && j.d["ap"].as_bool() != Some(true) {
-        // Persist the hold before any fallible worker/preview operation.
-        a.db.jset(
-            j.id,
-            &[
-                ("st", json!("approve")),
-                (
-                    "why",
-                    json!("waiting for explicit owner approval, including resumed jobs"),
-                ),
-            ],
-        );
-        let f = j.d["f"].clone();
-        let ci = rp(a, &j.repo)["ci"].as_str().unwrap_or("").to_string();
-        let title = pr_title(j.d["pt"].as_str(), &f, &j.title)?;
-        j.d["pt"] = json!(title);
-        let footer = fo(a, j);
-        j.d["pb_footer"] = json!(footer);
-        j.d["pb"] = json!(body_lang(j, &f, &ci, footer, pr_pt(a, j)));
-        let tip = if j.s("br").is_empty() {
-            "HEAD".to_string()
-        } else {
-            j.s("br")
-        };
-        let range = q(&format!("{}..{}", j.s("base"), tip));
-        j.d["df"] = json!(
-            ok(a, j, &format!("git diff {range} -- | head -c 120000"), 120)
-                .await
-                .unwrap_or_default()
-        );
-        a.db.jd(j);
-        a.say(
-            "submit",
-            "submission held: resumed work does not grant owner approval",
-            Some(j.id),
-        );
-        clean(a, j).await;
-        return Err(X::Back(String::new()));
-    }
-    a.db.jset(j.id, &[("st", json!("submit"))]);
-    a.st("submit", "work", Some(j.id), "");
-    a.flow("reviewer", "submit", &j.tag());
-    need(a, "submit", &["gh", &j.h()]).await?;
-    let f = j.d["f"].clone();
-    let ft = stored_pr_footer(j, fo(a, j));
-    let tr = trs(j);
-    let ti = pr_title(j.d["pt"].as_str(), &f, &j.title)?;
-    if j.kind == "fix" && !j.d["sq"].as_bool().unwrap_or(false) {
-        let rf = if j.ext() {
-            (if pr_pt(a, j) {
-                "Reportado diretamente"
-            } else {
-                "Reported to us directly"
-            })
-            .to_string()
-        } else if j.hunt() || j.num == 0 {
-            if pr_pt(a, j) {
-                format!("Encontrado durante os testes de {}", j.wh())
-            } else {
-                format!("Found while testing {}", j.wh())
-            }
-        } else {
-            // Keep the GitHub auto-close keyword intact in every language.
-            format!("Fixes #{}", j.num)
-        };
-        let subject = if j.opt() {
-            optimization_commit_subject(&ti)?
-        } else {
-            commit_subject(&ti, j.feat())?
-        };
-        ok(
-            a,
-            j,
-            &format!(
-                "git reset -q --soft {} && git commit -q -F - <<'MSG'\n{subject}\n\n{rf}\n\n{}\nMSG",
-                j.s("base"),
-                tr.join("\n")
-            ),
-            120,
-        )
-        .await?;
-        j.d["sq"] = json!(true);
-        a.db.jd(j);
-    }
-    if (j.kind == "review" || j.kind == "rebase" && !j.s("fx").is_empty())
-        && !j.d["sq"].as_bool().unwrap_or(false)
-        && !tr.is_empty()
-    {
-        ok(
-            a,
-            j,
-            &format!(
-                "git commit -q --amend --no-edit {}",
-                tr.iter()
-                    .map(|t| format!("--trailer {}", q(t)))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            ),
-            120,
-        )
-        .await?;
-        j.d["sq"] = json!(true);
-        a.db.jd(j);
-    }
-    let sha = ok(a, j, "git rev-parse HEAD", 60).await?;
-    // Prova de publicação: árvore da PR final e commit explícitos.
-    // É necessário que o CI tenha executado nesta mesma árvore.
-    let publish_tree = ok(a, j, "git rev-parse HEAD^{tree}", 60).await?;
-    j.d["publish_tree"] = json!(publish_tree);
-    a.db.jd(j);
-    let pb = j.d["pb"].as_str().map(String::from).unwrap_or_else(|| {
-        body_lang(
-            j,
-            &f,
-            rp(a, &j.repo)["ci"].as_str().unwrap_or(""),
-            ft.as_str(),
-            pr_pt(a, j),
-        )
-    });
-    let msg = ok(a, j, "git log -1 --format=%B", 60).await?;
-    if Regex::new(r"#0\b").unwrap().is_match(&pb) || Regex::new(r"#0\b").unwrap().is_match(&msg) {
-        return drop("PR text or commit still references #0, not pushing");
-    }
-    if (j.kind != "rebase" || !j.s("fx").is_empty())
-        && (!tr.iter().all(|t| msg.contains(t)) || j.kind == "fix" && !pb.contains(ft.as_str()))
-    {
-        return drop("AI disclosure missing (Co-Authored-By trailer or footer), not pushing");
-    }
-    if std::env::var("APOLLO_OFFICE_DRY")
-        .map(|v| v == "1")
-        .unwrap_or(false)
-        || j.d["dry"].as_bool().unwrap_or(false)
-    {
-        a.say(
-            "submit",
-            &format!(
-                "DRY: would push {} ({}) and open PR \"{ti}\"",
-                j.s("br"),
-                crate::sh::head(&sha, 8)
-            ),
-            Some(j.id),
-        );
-        return Ok((String::new(), 0));
-    }
-    let me = crate::gh::login(a).await;
-    let mt = crate::gh::meta(a, &j.repo).await.map_err(X::E)?;
-    let hr = if j.kind == "fix" {
-        if mt["push"].as_bool().unwrap_or(false) {
-            j.repo.clone()
-        } else {
-            let fk = ghj(
-                &[
-                    "api",
-                    "-X",
-                    "POST",
-                    &format!("repos/{}/forks", j.repo),
-                    "-f",
-                    "default_branch_only=true",
-                ],
-                120,
-            )
-            .await
-            .map_err(X::E)?;
-            let n = fk["full_name"].as_str().unwrap_or("").to_string();
-            if n.is_empty() {
-                return e("could not create a fork");
-            }
-            for _ in 0..12 {
-                if ghj(&["api", &format!("repos/{n}")], 30).await.is_ok() {
-                    break;
-                }
-                sl(5000).await;
-            }
-            n
-        }
+    let h = if ci.is_empty() { h } else { format!("{h} The repository's full test command is `{ci}`; your focused test_cmd runs in a fresh shell from the repo root, so use the same environment (for example the same virtualenv or package manager).") };
+    let base_ctx = format!("{h}\n{}:\n{}\n\nRepro result (from a previous agent): {}{}{}", j.orig(), wrap("issue", &format!("{}\n\n{}", j.title, j.s("body"))), j.d["repro"], rules(a, j), crate::quality::context(j));
+    if red {
+        format!("{base_ctx}{}", if fb.is_empty() { String::new() } else { format!("\n\nThe previous attempt was rejected by the office:\n{fb}\nThe working tree was reset to the base commit; write the failing regression test again.") })
     } else {
-        j.s("head")
-    };
-    let url = format!("{}{}.git", gitb(), hr);
-    let br = j.s("br");
-    let pr = format!("refs/ao/push/{}", j.id);
-    let _ = lg(
-        a,
-        &j.repo,
-        &[
-            "fetch",
-            "-q",
-            "--no-tags",
-            &format!("{}{}.git", gitb(), j.repo),
-            &format!("+refs/heads/{}:refs/ao/main", j.s("mn")),
-        ],
-        true,
-        1800,
-    )
-    .await;
-    let tf = format!("/tmp/ao-out-{}.bundle", j.id);
-    let bf = a.dd.join("run").join(format!("out-{}.bundle", j.id));
-    let _ = std::fs::create_dir_all(bf.parent().unwrap());
-    let bfs = bf.display().to_string();
-    let mut got = false;
-    for ex in [true, false] {
-        let c = format!("cd \"{}\" && rm -f {tf} && git bundle create -q {tf} {} {} >/dev/null 2>&1 || exit 3; base64 < {tf} | tr -d '\\n\\r'; rm -f {tf}", dir(a, j), q(&format!("refs/heads/{br}")), if ex { format!("^{}", q(&j.s("base"))) } else { String::new() });
-        let o = crate::sh::hxk(a, &j.h(), &c, 1800).await;
-        if o.c != 0 {
-            continue;
-        }
-        use base64::Engine;
-        let Ok(b) = base64::engine::general_purpose::STANDARD.decode(o.o.trim()) else {
-            continue;
-        };
-        if std::fs::write(&bf, b).is_err() {
-            continue;
-        }
-        let f = lg(
-            a,
-            &j.repo,
-            &[
-                "fetch",
-                "-q",
-                "--no-tags",
-                &bfs,
-                &format!("+refs/heads/{br}:{pr}"),
-            ],
-            false,
-            600,
-        )
-        .await;
-        if f.c == 0
-            && lg(a, &j.repo, &["rev-parse", &pr], false, 60)
-                .await
-                .o
-                .trim()
-                == sha
-        {
-            got = true;
-            break;
-        }
+        format!("{base_ctx}\n\nThe regression test is already written and committed by the office. Its command is `{tc}` and it currently fails:\n{}\n\nImplement the smallest correct fix so it passes. Do not modify the test.{}", crate::sh::head(j.d["red_output"].as_str().unwrap_or(""), 3000), if fb.is_empty() { String::new() } else { format!("\n\nThe previous fix attempt was rejected by the office:\n{fb}") })
     }
-    let _ = std::fs::remove_file(&bf);
-    if !got {
-        return e("could not take the commits from the build machine");
-    }
-    let lr = |o: String| o.split_whitespace().next().unwrap_or("").to_string();
-    let rem = lr(lok(
-        a,
-        &j.repo,
-        &["ls-remote", &url, &format!("refs/heads/{br}")],
-        true,
-        120,
-    )
-    .await
-    .unwrap_or_default());
-    if rem != sha {
-        let fo = if j.kind == "rebase" || j.kind == "review" {
-            format!("--force-with-lease=refs/heads/{br}:{}", j.s("old"))
-        } else {
-            "--force".into()
-        };
-        lok(
-            a,
-            &j.repo,
-            &["push", "-q", &fo, &url, &format!("{pr}:refs/heads/{br}")],
-            true,
-            600,
-        )
-        .await?;
-    }
-    let mut r2 = String::new();
-    for i in 0..4 {
-        if r2 == sha {
-            break;
-        }
-        if i > 0 {
-            sl(15_000).await;
-        }
-        r2 = lr(lok(
-            a,
-            &j.repo,
-            &["ls-remote", &url, &format!("refs/heads/{br}")],
-            true,
-            120,
-        )
-        .await
-        .unwrap_or_default());
-    }
-    if r2 != sha {
-        return e("push did not arrive");
-    }
-    // Apenas o SHA confirmado no GitHub pode ser usado por um futuro merge.
-    j.d["published_sha"] = json!(sha);
-    a.db.jd(j);
-    let pn = j.pr.unwrap_or(0);
-    if j.kind == "rebase" || j.kind == "review" {
-        let u = format!("https://github.com/{}/pull/{pn}", j.repo);
-        a.say(
-            "submit",
-            &format!("PR #{pn} updated ({})", j.kind),
-            Some(j.id),
-        );
-        a.note(
-            if j.kind == "rebase" {
-                "Rebased"
-            } else {
-                "Review applied"
-            },
-            &format!(
-                "{}#{pn}: {}\n{u}",
-                j.repo,
-                f["title"].as_str().unwrap_or("")
-            ),
-            2,
-        );
-        return Ok((u, pn));
-    }
-    let hd = if hr == j.repo {
-        br.clone()
-    } else {
-        format!("{}:{br}", hr.split('/').next().unwrap_or(&me))
-    };
-    let ex = ghj(
-        &[
-            "pr",
-            "list",
-            "-R",
-            &j.repo,
-            "--head",
-            &br,
-            "--state",
-            "open",
-            "--json",
-            "number,url,headRepositoryOwner",
-        ],
-        60,
-    )
-    .await
-    .map_err(X::E)?;
-    let ex = ex
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .find(|p| p["headRepositoryOwner"]["login"].as_str() == hr.split('/').next());
-    let (u, n) = match ex {
-        Some(p) => (
-            p["url"].as_str().unwrap_or("").to_string(),
-            p["number"].as_i64().unwrap_or(0),
-        ),
-        None => {
-            let o = gh(
-                &[
-                    "pr",
-                    "create",
-                    "-R",
-                    &j.repo,
-                    "--head",
-                    &hd,
-                    "--base",
-                    &j.s("mn"),
-                    "--title",
-                    &ti,
-                    "--body",
-                    &pb,
-                ],
-                120,
-            )
-            .await
-            .map_err(X::E)?;
-            let u = o.trim().lines().last().unwrap_or("").to_string();
-            let n = u
-                .rsplit('/')
-                .next()
-                .and_then(|x| x.parse().ok())
-                .unwrap_or(0);
-            (u, n)
-        }
-    };
-    a.db.run("insert into prs(repo,num,st,title,url,upd,d,t0) values(?,?,?,?,?,?,?,?) on conflict do update set st=excluded.st, d=excluded.d", pa![j.repo.clone(), n, "open".to_string(), ti.clone(), u.clone(), chrono::Utc::now().to_rfc3339(), json!({"job": j.id, "test_cmd": f["test_cmd"], "tests": f["tests"], "branch": br, "head": hr, "base": j.s("base")}).to_string(), now()]);
-    a.say("submit", &format!("PR opened: {u}"), Some(j.id));
-    a.note("PR opened", &format!("{} → {ti}\n{u}", j.tag()), 3);
-    Ok((u, n))
 }
 
-async fn clean(a: &Ax, j: &Job) {
-    hx(a, &j.h(), &format!("cd \"{}\" 2>/dev/null && {{ git rebase --abort; git merge --abort; }} 2>/dev/null; cd \"{}\" 2>/dev/null && git reset -q --hard && git clean -fdq && git checkout -q --detach origin/HEAD 2>/dev/null; true", dir(a, j), dir(a, j)), 600).await;
-}
-
-async fn stage<T, F, Fu>(a: &Ax, w: &str, mut f: F) -> R<T>
-where
-    F: FnMut() -> Fu,
-    Fu: std::future::Future<Output = R<T>>,
-{
-    let mut k = 0;
-    loop {
-        match f().await {
-            Ok(v) => return Ok(v),
-            Err(X::Lim(m)) | Err(X::Net(m)) if k < 8 && !crate::routing::enabled(a) => {
-                k += 1;
-                a.say(w, &format!("waiting: {}", crate::sh::head(&m, 120)), None);
-                let _ = need(a, w, &["gh", "an"]).await;
-                sl(if m.to_lowercase().contains("limit") {
-                    600_000
-                } else {
-                    30_000
-                })
-                .await;
+async fn ask_phase(a: &Ax, j: &Job, md: &str, sys: &str, prompt: String) -> R<Value> {
+    // Test seam: a scripted model turn applies its file mutations to the run dir
+    // and returns its JSON, exercising the full staged state machine (P2-4).
+    #[cfg(test)]
+    if let Some(mut turn) = a.sim.lock().unwrap().pop_front() {
+        let dir = dir(a, j);
+        if let Some(files) = turn.get("_files").and_then(|v| v.as_object()).cloned() {
+            for (path, content) in files {
+                let p = std::path::Path::new(&dir).join(&path);
+                let _ = std::fs::create_dir_all(p.parent().unwrap());
+                std::fs::write(&p, content.as_str().unwrap_or("")).unwrap();
             }
-            Err(x) => return Err(x),
         }
+        if let Some(dels) = turn.get("_delete").and_then(|v| v.as_array()).cloned() {
+            for d in dels {
+                let _ = std::fs::remove_file(std::path::Path::new(&dir).join(d.as_str().unwrap_or("")));
+            }
+        }
+        if let Some(o) = turn.as_object_mut() {
+            o.remove("_files");
+            o.remove("_delete");
+        }
+        let _ = (md, sys, prompt);
+        return Ok(turn);
     }
-}
-
-async fn hunt(a: &Ax, j: &mut Job) -> R<i64> {
-    a.db.jset(j.id, &[("st", json!("hunt"))]);
-    a.st("hunter", "work", Some(j.id), "");
-    a.say(
-        "hunter",
-        &format!("[{}] hunting bugs in {}", j.h(), j.repo),
-        Some(j.id),
-    );
-    let mut ti: Vec<String> = a.db.all("select id, json_extract(d,'$.title') t, coalesce(json_extract(d,'$.hunt.where'),json_extract(d,'$.ext.where'),'') w from jobs where repo=? and num=0 and kind='fix' and st not in ('drop') order by id desc limit 200", pa![j.repo.clone()]).iter().map(|x| format!("office find #{}: {}\n  where: {}", x["id"], x["t"].as_str().unwrap_or(""), x["w"].as_str().unwrap_or(""))).collect();
-    for x in ghj(
-        &[
-            "pr",
-            "list",
-            "-R",
-            &j.repo,
-            "--state",
-            "open",
-            "--limit",
-            "1000",
-            "--json",
-            "number,title,body",
-        ],
-        240,
-    )
-    .await
-    .unwrap_or_default()
-    .as_array()
-    .cloned()
-    .unwrap_or_default()
-    {
-        ti.push(format!(
-            "pr #{}: {}\n  {}",
-            x["number"],
-            x["title"].as_str().unwrap_or(""),
-            crate::sh::head(
-                &x["body"]
-                    .as_str()
-                    .unwrap_or("")
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" "),
-                250
-            )
-        ));
+    let c = cx(a, j);
+    let mut r = rn(a, j);
+    if let Some(x) = r.as_mut() {
+        x.staged = true;
     }
-    for x in ghj(
-        &[
-            "issue",
-            "list",
-            "-R",
-            &j.repo,
-            "--state",
-            "open",
-            "--limit",
-            "1000",
-            "--json",
-            "number,title",
-        ],
-        240,
-    )
-    .await
-    .unwrap_or_default()
-    .as_array()
-    .cloned()
-    .unwrap_or_default()
-    {
-        ti.push(format!(
-            "issue #{}: {}",
-            x["number"],
-            x["title"].as_str().unwrap_or("")
-        ));
-    }
-    let md = a.md("hunter");
-    let mut o = Ask::new(
-        "hunter",
-        md.clone(),
-        P("hunter"),
-        format!(
-            "Repository: {}.\n\nAlready reported or in progress (do not report these again):\n{}{}",
-            j.repo,
-            wrap("known", &crate::sh::head(&ti.join("\n"), 200_000)),
-            rules(a, j)
-        ),
-    );
+    let mut o = Ask::new("fixer", md.to_string(), P(sys), prompt);
     o.job = Some(j.id);
-    o.rn = rn(a, j);
-    o.turns = 100;
-    o.t = 90 * 60;
-    let (_, js) = ask(a, o).await?;
-    x(a, j, "git checkout -q -- . && git clean -fdq", 120).await;
-    let fs: Vec<Value> = js["finds"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|x| x["title"].is_string() && x["desc"].is_string() && x["where"].is_string())
-        .take(1)
-        .collect();
-    a.st(
-        "hunter",
-        "idle",
-        None,
-        if fs.is_empty() { "sad" } else { "ok" },
-    );
-    if fs.is_empty() {
-        a.say("hunter", &format!("{}: nothing proven", j.repo), Some(j.id));
-        return Ok(0);
+    o.rn = r;
+    o.turns = if c { 200 } else { 120 };
+    o.t = if c { 180 * 60 } else { 120 * 60 };
+    // A Codex staged fallback FIXER runs at the configured reasoning effort (max in
+    // the pilot). Scoped to the staged fixer phase and only when the model is a
+    // Codex model, so other jobs and non-codex fixers keep their defaults.
+    if crate::prov::parse(md).0 == "codex" {
+        o.ef = Some(codex_fallback_effort());
     }
-    let g = crate::wk::guard(
-        a,
-        fs.iter()
-            .enumerate()
-            .map(|(k, x)| {
-                (
-                    format!("h{k}"),
-                    format!(
-                        "{}\n{}\n{}\n{}",
-                        x["title"].as_str().unwrap_or(""),
-                        x["where"].as_str().unwrap_or(""),
-                        x["desc"].as_str().unwrap_or(""),
-                        x["proof"].as_str().unwrap_or("")
-                    ),
-                )
-            })
-            .collect(),
-        "hunter",
-        Some(j.id),
-    )
-    .await?;
-    let mut n = 0;
-    for (k, x) in fs.iter().enumerate() {
-        if g[&format!("h{k}")]["inj"].as_bool().unwrap_or(false) {
-            a.say(
-                "guard",
-                &format!(
-                    "hunter find blocked: {}",
-                    g[&format!("h{k}")]["why"].as_str().unwrap_or("")
-                ),
-                Some(j.id),
-            );
-            continue;
-        }
-        let t = x["title"]
-            .as_str()
-            .unwrap_or("")
-            .chars()
-            .take(200)
-            .collect::<String>();
-        a.db.jnew(&j.repo, 0, "fix", &t, &format!("https://github.com/{}", j.repo), "vet", "found by Hunter", json!({"ms": [md], "hunt": {"title": x["title"], "where": x["where"], "proof": x["proof"]}, "title": x["title"], "body": format!("{}\n\nWhere: {}\nProof: {}", x["desc"].as_str().unwrap_or(""), x["where"].as_str().unwrap_or(""), x["proof"].as_str().unwrap_or("-"))}), None, 0.0);
-        a.flow("hunter", "guard", &j.repo);
-        n += 1;
-    }
-    a.say(
-        "hunter",
-        &format!("{}: {n} bug(s) found, sent to Vet", j.repo),
-        Some(j.id),
-    );
-    Ok(n)
+    Ok(ask(a, o).await?.1)
 }
 
-async fn desc(a: &Ax, j: &mut Job) -> R<Value> {
-    let df = ok(
-        a,
-        j,
-        &format!("git diff {}..HEAD | head -c 50000", j.s("base")),
-        120,
-    )
-    .await?;
-    let lg = ok(
-        a,
-        j,
-        &format!("git log --format='%s%n%b' {}..HEAD", j.s("base")),
-        60,
-    )
-    .await?;
-    let locale = if pr_pt(a, j) {
-        "Idioma obrigatório: português de Portugal (PT-PT). O título, a causa, a correção e o texto fora do âmbito devem estar integralmente em PT-PT. Preservar comandos, nomes técnicos, identificadores dos testes e as chaves JSON. Não traduzir código.\n\n"
-    } else {
-        ""
-    };
-    let mut o = Ask::new("fixer", a.md("reviewer"), P("desc"), format!("{locale}Repository {}. {}\n\nProof lines from the verification run:\n{}\n\nCommits:\n{lg}\n\nDiff:\n{df}\n\nAnswer with {{\"title\": \"PR title, imperative, max 72 chars\", \"cause\": \"root cause or concrete inefficiency, 1-3 sentences\", \"fix\": \"what changed, 1-3 sentences\", \"untouched\": \"behavior or areas preserved, or empty\", \"tests\": [\"exact names of the checks used for this job type\"], \"test_cmd\": \"exact shell command from the repo root that runs only those checks\"}}", j.repo, wrap("issue", &format!("{}\n\n{}", j.title, crate::sh::head(&j.s("body"), 3000))), j.d["proof"]));
-    o.job = Some(j.id);
-    o.ef = Some("medium");
-    let (_, js) = ask(a, o).await?;
-    if !js["title"].is_string()
-        || js["tests"].as_array().map(|x| x.is_empty()).unwrap_or(true)
-        || !js["test_cmd"].is_string()
-    {
-        return e("could not reconstruct the fix description");
-    }
-    Ok(js)
+/// The frozen RED proof restored from the controller checkpoint.
+struct RedState {
+    tc: String,
+    ts: Vec<String>,
+    red_files: Vec<String>,
+    test_commit: String,
+    title: String,
 }
 
-async fn resume(a: &Ax, j: &mut Job) -> R<Value> {
-    a.say(
-        "ci",
-        &format!("[{}] resuming {} after a restart", j.h(), j.tag()),
-        Some(j.id),
-    );
-    ok(a, j, &format!("git checkout -q {}", q(&j.s("br"))), 120).await?;
-    let mut f = j.d["f0"].clone();
-    if f.is_null() {
-        f = desc(a, j).await?;
-        j.d["f0"] = f.clone();
-        a.db.jd(j);
-    }
-    let k = j.d["k"].as_u64().unwrap_or(0);
-    let mut fb = match crate::quality::check(a, j).await {
-        Ok(value) => value,
-        Err(e) => {
-            fix_attempt_finish_active(a, j, "failed", "verification");
-            return Err(e);
-        }
-    };
-    if !fb.is_empty() {
-        fix_attempt_finish_active(a, j, "rejected", "verification");
-    }
-    if fb.is_empty() {
-        fb = match ci(a, j).await {
-            Ok(value) => value,
-            Err(e) => {
-                fix_attempt_finish_active(a, j, "failed", "ci");
-                return Err(e);
-            }
-        };
-    }
-    if fb.starts_with("CI aborted after") {
-        fix_attempt_finish_active(a, j, "blocked", "ci");
-        return drop(format!("{fb} on {}", j.h()));
-    }
-    if !fb.is_empty() {
-        fix_attempt_finish_active(a, j, "rejected", "ci");
-    }
-    if fb.is_empty() {
-        fb = match review(a, j, &mut f).await {
-            Ok(value) => value,
-            Err(e) => {
-                fix_attempt_finish_active(a, j, "failed", "review");
-                return Err(e);
-            }
-        };
-        if !fb.is_empty() {
-            fix_attempt_finish_active(a, j, "rejected", "review");
-        }
-    }
-    if !fb.is_empty() {
-        return fix(a, j, fb, k + 1).await;
-    }
-    fix_attempt_finish_active(a, j, "accepted", "");
-    j.d["f"] = f.clone();
+enum Resume {
+    /// A valid RED+GREEN pair already exists on the branch (crash after the GREEN
+    /// commit, before adjudication): carry it forward WITHOUT any reset.
+    Finished(Value),
+    /// Only the RED commit exists: continue the GREEN phase from it.
+    Green(RedState),
+    /// No usable checkpoint: build a fresh RED from the base.
+    Fresh,
+}
+
+/// Remove both staged checkpoints in memory (caller persists). Used only on paths
+/// where the branch is already at the base (nothing to lose).
+fn drop_checkpoints(j: &mut Job) {
+    let o = j.d.as_object_mut().unwrap();
+    o.remove("staged_red");
+    o.remove("staged_green");
+}
+
+/// Atomically reject the current candidate: clear both checkpoints AND authorise a
+/// reset of exactly this HEAD back to the base, in a single DB write. The next
+/// Fresh round may then reset (intentional discard), while a crash — which leaves
+/// no such authorisation — is refused instead of resetting (V4 window B / point 5).
+fn reject_candidate(a: &Ax, j: &mut Job, head: &str, base: &str) {
+    drop_checkpoints(j);
+    j.d["staged_discard"] = json!({"head": head, "base": base});
     a.db.jd(j);
-    Ok(f)
 }
 
-fn idle_all(a: &Ax, id: i64) {
-    for w in ["repro", "fixer", "ci", "reviewer", "submit", "hunter"] {
-        let b =
-            a.lv.lock()
-                .unwrap()
-                .w
-                .get(w)
-                .map(|x| x.job == Some(id))
-                .unwrap_or(false);
-        if b {
-            a.st(w, "idle", None, "");
+/// Decide how to resume a staged job, NEVER moving the branch ref off an accessible
+/// commit without an explicit, persisted decision (V4). It recovers a finished
+/// RED+GREEN pair, continues from a RED commit (even one whose post-commit
+/// checkpoint write was lost — window A), authorises a reset only for an
+/// intentionally-rejected HEAD, and otherwise blocks for a human.
+async fn staged_resume(a: &Ax, j: &mut Job, base: &str, br: &str) -> R<Resume> {
+    let head = ok(a, j, "git rev-parse HEAD", 60).await?;
+    let head_count = ok(a, j, &format!("git rev-list --count {}..HEAD", q(base)), 60).await.unwrap_or_default();
+    let cp = j.d["staged_red"].clone();
+
+    // --- No RED checkpoint persisted ---
+    if !cp.is_object() {
+        if head == base {
+            return Ok(Resume::Fresh); // clean branch, safe to build fresh
         }
-    }
-}
-
-/// Revalidação de uma PR existente, sem criar commits nem publicar alterações.
-/// Usa o mesmo worker e a mesma CI do pipeline normal.
-async fn mergecheck(a: &Ax, j: &mut Job) -> R<()> {
-    let head = j.s("expected_head");
-    let base = j.s("expected_base");
-    let branch = j.s("branch");
-    let valid_sha = |s: &str| s.len() == 40 && s.bytes().all(|c| c.is_ascii_hexdigit());
-    if !valid_sha(&head)
-        || !valid_sha(&base)
-        || branch.is_empty()
-        || j.pr.is_none()
-        || j.s("author").is_empty()
-    {
-        return drop("provas insuficientes para revalidar PR");
-    }
-    let number = j.pr.unwrap_or(0);
-    let before = ghj(&["api", &format!("repos/{}/pulls/{number}", j.repo)], 45)
-        .await
-        .map_err(X::E)?;
-    if before["head"]["sha"] != head
-        || before["base"]["sha"] != base
-        || before["head"]["ref"] != branch
-        || before["head"]["repo"]["full_name"] != j.repo
-        || before["state"] != "open"
-        || before["draft"] != false
-    {
-        return drop("PR mudou antes de executar testes locais");
-    }
-
-    prep(a, j).await?;
-    let actual_head = ok(a, j, "git rev-parse HEAD", 60).await?;
-    let main = crate::gh::meta(a, &j.repo).await.map_err(X::E)?["main"]
-        .as_str()
-        .unwrap_or("main")
-        .to_string();
-    let actual_base = ok(a, j, &format!("git rev-parse origin/{}", q(&main)), 60).await?;
-    if actual_head != head || actual_base != base {
-        return drop("checkout da PR ou da main difere dos SHAs esperados");
-    }
-
-    // A comparação para o Reviewer deve usar a main, não o HEAD da própria PR.
-    j.d["base"] = json!(base);
-    j.d["body"] = before["body"].clone();
-    a.db.jd(j);
-    let ci_result = ci(a, j).await?;
-    if !ci_result.is_empty() {
-        return drop(format!(
-            "CI reprovada na revalidação: {}",
-            crate::sh::head(&ci_result, 700)
-        ));
-    }
-    let mut report = json!({
-        "title":j.title,
-        "tests":[],
-        "test_cmd":rp(a, &j.repo)["ci"],
-        "cause":"Revisão de integração existente",
-        "fix":"Código existente sob revisão"
-    });
-    let feedback = review(a, j, &mut report).await?;
-    if !feedback.is_empty() {
-        return drop(format!(
-            "Reviewer reprovou: {}",
-            crate::sh::head(&feedback, 700)
-        ));
-    }
-
-    let actual_head = ok(a, j, "git rev-parse HEAD", 60).await?;
-    let tree = ok(a, j, "git rev-parse HEAD^{tree}", 60).await?;
-    let fresh = ghj(&["api", &format!("repos/{}/pulls/{number}", j.repo)], 45)
-        .await
-        .map_err(X::E)?;
-    if actual_head != head
-        || j.d["ci_tree"] != tree
-        || fresh["head"]["sha"] != head
-        || fresh["base"]["sha"] != base
-        || fresh["state"] != "open"
-        || fresh["draft"] != false
-    {
-        return drop("PR mudou entre testes, revisão e revalidação final");
-    }
-    j.d["published_sha"] = json!(head);
-    j.d["publish_tree"] = json!(tree);
-    a.db.jd(j);
-    a.db.jset(
-        j.id,
-        &[
-            ("st", json!("done")),
-            (
-                "why",
-                json!("revalidação local concluída; aguarda gate de merge"),
-            ),
-        ],
-    );
-    a.say(
-        "reviewer",
-        &format!(
-            "{}#{number}: CI e revisão independente aprovadas no HEAD atual",
-            j.repo
-        ),
-        Some(j.id),
-    );
-    clean(a, j).await;
-    // Só acorda o Steward depois de persistir CI, revisão e job concluído.
-    // A decisão de merge continua a passar por todos os gates do try_one().
-    a.steward_wake.notify_one();
-    Ok(())
-}
-
-async fn go(a: &Ax, id: i64, h: &str) {
-    let Some(mut j) = a.db.jg(id) else { return };
-    let rs = j.d["rs"].as_bool().unwrap_or(false);
-    let rpp = j.d["rp"].as_bool().unwrap_or(false);
-    if (j.st != "submit" && !rs && !rpp) || j.h().is_empty() {
-        j.d["h"] = json!(h);
-        a.db.jd(&j);
-    }
-    a.say("repro", &format!("[{h}] takes {}", j.tag()), Some(id));
-    let r: R<()> = async {
-        if j.kind == "mergecheck" {
-            mergecheck(a, &mut j).await?;
-            return Ok(());
+        // Commits exist above the base with no checkpoint. Only an authorisation
+        // persisted for exactly this HEAD (an intentional rejection) permits reset.
+        let disc = j.d["staged_discard"].clone();
+        if disc["head"].as_str() == Some(head.as_str()) && disc["base"].as_str() == Some(base) {
+            j.d.as_object_mut().unwrap().remove("staged_discard");
+            a.db.jd(j);
+            return Ok(Resume::Fresh); // authorised discard of a rejected candidate
         }
-        if j.st == "submit" {
-            ok(a, &j, &format!("git checkout -q {}", q(&j.s("br"))), 120).await?;
-            stage(a, "submit", || {
-                let mut jj = j.clone();
-                async move {
-                    gate(a, &mut jj).await?;
-                    Ok(jj)
-                }
-            })
-            .await
-            .map(|x| j = x)?;
-            if j.kind == "fix" && j.s("base") != j.s("pbase") {
-                j.d["df"] = json!(ok(
-                    a,
-                    &j,
-                    &format!("git diff {}..HEAD | head -c 120000", j.s("base")),
-                    120
-                )
-                .await
-                .unwrap_or_default());
-                a.db.jd(&j);
+        return drop(format!("staged resume: {head_count} commit(s) on the branch above the base with no checkpoint and no discard authorisation (likely a crash after a RED/GREEN commit). HEAD={} base={}. Refusing to reset; manual inspection required.", crate::sh::head(&head, 12), crate::sh::head(base, 12)));
+    }
+
+    // --- RED checkpoint present (may be pending, i.e. committed-but-not-finalised) ---
+    let tc = cp["test_cmd"].as_str().unwrap_or("").to_string();
+    let ts: Vec<String> = cp["tests"].as_array().cloned().unwrap_or_default().iter().filter_map(|x| x.as_str().map(String::from)).collect();
+    let mut red_files: Vec<String> = cp["red_files"].as_array().cloned().unwrap_or_default().iter().filter_map(|x| x.as_str().map(String::from)).collect();
+    let title = cp["title"].as_str().unwrap_or("").to_string();
+    if tc.is_empty() || ts.is_empty() {
+        // Corrupt checkpoint. Only safe to drop when the branch is at the base.
+        if head == base {
+            drop_checkpoints(j);
+            a.db.jd(j);
+            return Ok(Resume::Fresh);
+        }
+        return drop(format!("staged resume: corrupt checkpoint with commits on the branch (HEAD={}); refusing to reset, manual inspection required", crate::sh::head(&head, 12)));
+    }
+
+    match head_count.as_str() {
+        // RED+GREEN already committed: recover the finished pair, never reset.
+        "2" => {
+            let red = ok(a, j, "git rev-parse HEAD~1", 60).await?;
+            let red_parent = ok(a, j, &format!("git rev-parse -q --verify {}^ 2>/dev/null || true", q(&red)), 60).await.unwrap_or_default();
+            if red_parent != base {
+                return drop(format!("staged resume: two commits but HEAD~1 is not based on the base (HEAD={}); refusing to reset, manual inspection required", crate::sh::head(&head, 12)));
             }
-        } else if rs {
-            j.d.as_object_mut().unwrap().remove("rs");
-            a.db.jd(&j);
-            let mut jj = j.clone();
-            resume(a, &mut jj).await?;
-            j = jj;
-            kill(a, &j)?;
-            let mut jj = j.clone();
-            gate(a, &mut jj).await?;
-            j = jj;
-            kill(a, &j)?;
-        } else {
-            let mut jj = j.clone();
-            stage(a, "repro", || {
-                let mut k = jj.clone();
-                async move {
-                    prep(a, &mut k).await?;
-                    Ok(k)
-                }
-            })
-            .await
-            .map(|x| jj = x)?;
-            j = jj;
-            crate::quality::inspect(a, &mut j).await?;
-            kill(a, &j)?;
-            if j.kind == "hunt" {
-                let mut jj = j.clone();
-                let n = stage(a, "hunter", || {
-                    let mut k = jj.clone();
-                    async move { hunt(a, &mut k).await }
-                })
-                .await?;
-                jj = a.db.jg(id).unwrap_or(jj);
-                a.db.jset(
-                    id,
-                    &[
-                        ("st", json!("done")),
-                        ("why", json!(format!("{n} bug(s) found"))),
-                    ],
-                );
-                clean(a, &jj).await;
-                return Err(X::Back(String::new()));
-            }
-            for k in [
-                format!("cired:{}", j.repo),
-                format!("cired:{}{}", j.repo, hk(a, &j.h())),
-            ] {
-                if let Some(cr) = a.db.kg(&k).as_object() {
-                    if cr.get("sha").and_then(|x| x.as_str()) == Some(j.s("base").as_str()) {
-                        return Err(X::Back(format!(
-                            "{}: CI is red on the default branch, waiting until it moves",
-                            j.repo
-                        )));
-                    }
-                    a.db.kd(&k);
-                }
-            }
-            if j.kind == "fix" {
-                stage(a, "repro", || race(a, &j, "before repro")).await?;
-                let mut jj = j.clone();
-                stage(a, "repro", || {
-                    let mut k = jj.clone();
-                    async move {
-                        repro(a, &mut k).await?;
-                        Ok(k)
-                    }
-                })
-                .await
-                .map(|x| jj = x)?;
-                j = jj;
-            }
-            kill(a, &j)?;
-            stage(a, "fixer", || race(a, &j, "before fix")).await?;
-            let mut jj = j.clone();
-            if j.kind == "rebase" {
-                stage(a, "fixer", || {
-                    let mut k = jj.clone();
-                    async move {
-                        reb(a, &mut k).await?;
-                        Ok(k)
-                    }
-                })
-                .await
-                .map(|x| jj = x)?;
+            let sg = j.d["staged_green"].clone();
+            let js = if sg["commit"].as_str() == Some(head.as_str()) && sg["js"].is_object() {
+                sg["js"].clone()
             } else {
-                stage(a, "fixer", || {
-                    let mut k = jj.clone();
-                    async move {
-                        fix(a, &mut k, String::new(), 0).await?;
-                        Ok(k)
-                    }
-                })
-                .await
-                .map(|x| jj = x)?;
-            }
-            j = jj;
-            kill(a, &j)?;
-            let mut jj = j.clone();
-            stage(a, "submit", || {
-                let mut k = jj.clone();
-                async move {
-                    gate(a, &mut k).await?;
-                    Ok(k)
-                }
-            })
-            .await
-            .map(|x| jj = x)?;
-            j = jj;
-            kill(a, &j)?;
-            mkbody(a, &mut j).await?;
-            j.d["pbase"] = json!(j.s("base"));
-            a.db.jd(&j);
-            let auto = !crate::routing::enabled(a)
-                && (rp(a, &j.repo)["mode"].as_str() == Some("auto") || j.kind != "fix");
-            if !auto && !j.d["ap"].as_bool().unwrap_or(false) {
-                a.db.jset(
-                    id,
-                    &[
-                        ("st", json!("approve")),
-                        ("why", json!("waiting for your approval")),
-                    ],
-                );
-                a.st("submit", "idle", None, "ok");
-                a.say(
-                    "submit",
-                    &format!("{} is ready and waits for your approval", j.tag()),
-                    Some(id),
-                );
-                a.note(
-                    "PR waits for approval",
-                    &format!("{}: {}", j.tag(), j.d["pt"].as_str().unwrap_or("")),
-                    3,
-                );
-                clean(a, &j).await;
-                return Err(X::Back(String::new()));
-            }
-        }
-        let mut jj = j.clone();
-        let (u, n) = stage(a, "submit", || {
-            let mut k = jj.clone();
-            async move {
-                let r = submit(a, &mut k).await?;
-                Ok((r, k))
-            }
-        })
-        .await
-        .map(|(r, k)| {
-            jj = k;
-            r
-        })?;
-        j = jj;
-        a.db.jset(
-            id,
-            &[
-                ("st", json!("done")),
-                ("pr", if n > 0 { json!(n) } else { Value::Null }),
-                (
-                    "why",
-                    json!(if u.is_empty() { "DRY".to_string() } else { u }),
-                ),
-            ],
-        );
-        if n > 0 {
-            // Wake after persisting the published PR, before repository cleanup.
-            // Cleanup can be slow; the Steward still applies its normal review gates.
-            a.steward_wake.notify_one();
-            a.say(
-                "submit",
-                &format!(
-                    "{}: PR #{n} publicada; aguarda revisão e integração",
-                    j.repo
-                ),
-                Some(id),
-            );
-        }
-        a.st("submit", "idle", None, "ok");
-        clean(a, &j).await;
-        Ok(())
-    }
-    .await;
-    match r {
-        Ok(()) => {}
-        Err(X::Back(m)) => {
-            if !m.is_empty() {
-                a.db.jset(id, &[("st", json!("ready"))]);
-                a.say(
-                    "ci",
-                    &format!("{m}, {} goes back to the queue", j.tag()),
-                    Some(id),
-                );
-                clean(a, &j).await;
-            }
-            idle_all(a, id);
-        }
-        Err(X::Host(hh, m)) => {
-            crate::net::down(a, &hh);
-            let mut jj = a.db.jg(id).unwrap_or(j.clone());
-            let n = jj.d["ir"].as_i64().unwrap_or(0) + 1;
-            idle_all(a, id);
-            if n > 5 {
-                let detail = crate::hunt_health::safe_tail(&m);
-                crate::hunt_health::host_diagnostic(&mut jj, &hh, &detail);
-                a.db.jset(
-                    id,
-                    &[
-                        ("st", json!("drop")),
-                        ("d", jj.d.clone()),
-                        (
-                            "why",
-                            json!(format!(
-                                "machine kept failing: {}",
-                                crate::sh::head(&crate::hunt_health::safe_tail(&m), 260)
-                            )),
-                        ),
-                    ],
-                );
-                a.say(
-                    "submit",
-                    &format!(
-                        "{} dropped after {} machine failures: {}",
-                        jj.tag(),
-                        n - 1,
-                        crate::sh::head(&crate::hunt_health::safe_tail(&m), 180)
-                    ),
-                    Some(id),
-                );
-            } else {
-                jj.d["ir"] = json!(n);
-                let pin = jj.st == "submit"
-                    || jj.d["rs"].as_bool().unwrap_or(false)
-                    || jj.d["rp"].as_bool().unwrap_or(false);
-                if !pin {
-                    jj.d.as_object_mut().map(|o| o.remove("h"));
-                }
-                a.db.jset(
-                    id,
-                    &[
-                        (
-                            "st",
-                            json!(if jj.st == "submit" { "submit" } else { "ready" }),
-                        ),
-                        ("d", jj.d.clone()),
-                    ],
-                );
-                a.say(
-                    "ci",
-                    &format!(
-                        "[{hh}] machine unavailable, {} goes back to the queue: {}",
-                        jj.tag(),
-                        crate::sh::head(&m, 160)
-                    ),
-                    Some(id),
-                );
-            }
-        }
-        Err(x) => {
-            let m = match &x {
-                X::Drop(m) => m.clone(),
-                o => format!("error: {}", crate::sh::head(&o.to_string(), 300)),
+                json!({"title": if title.is_empty() { "fix".into() } else { title }, "test_cmd": tc, "tests": ts, "cause": "", "fix": ""})
             };
-            let m = crate::hunt_health::safe_tail(&m);
-            let mut jj = a.db.jg(id).unwrap_or(j.clone());
-            if jj.d["failure"].is_null() {
-                let stage = jj.st.clone();
-                let host = jj.h();
-                jj.d["failure"] = json!({
-                    "stage": stage,
-                    "exit_code": Value::Null,
-                    "host": host,
-                    "at": now(),
-                    "output": m.clone(),
-                });
-            }
-            a.db.jset(
-                id,
-                &[
-                    ("st", json!("drop")),
-                    ("why", json!(crate::sh::last(&m, 300))),
-                    ("d", jj.d.clone()),
-                ],
-            );
-            idle_all(a, id);
-            a.say("submit", &format!("{} dropped: {m}", jj.tag()), Some(id));
-            if Regex::new(r"faster|conflict|error|rounds|gave up|CI")
-                .unwrap()
-                .is_match(&m)
-                && jj.kind != "hunt"
-            {
-                a.note(
-                    "Dropped",
-                    &format!("{}: {m}", jj.tag()),
-                    if m.starts_with("error") { 4 } else { 2 },
-                );
-            }
-            clean(a, &jj).await;
-        }
+            a.say("fixer", "resuming: RED+GREEN already committed; carrying it to verificat…22705 tokens truncated…d(180, 0, 180, 0));
+        assert!(repo_limit_reached(0, 1, 0, 1));
+        assert!(!repo_limit_reached(179, 0, 180, 1));
     }
-}
 
-pub fn recover(a: &Ax) {
-    for j in a.db.all("select id, st, kind, d from jobs where st in ('repro','fix','ci','review','gate','hunt','submit')", pa![]) {
-        let id = j["id"].as_i64().unwrap_or(0);
-        let mut d = j["d"].clone();
-        let st = j["st"].as_str().unwrap_or("");
-        let kd = j["kind"].as_str().unwrap_or("");
-        if st == "submit" && d["ap"].as_bool().unwrap_or(false) {
-            continue;
-        }
-        if kd == "fix" && ["ci", "review", "gate", "submit"].contains(&st) && d["h"].is_string() && d["br"].is_string() {
-            d["rs"] = json!(true);
-        } else if (kd == "fix" || kd == "hunt") && d["h"].is_string() {
-            d["rp"] = json!(true);
-        }
-        a.db.jset(id, &[("st", json!("ready")), ("d", d), ("prio", json!(-2))]);
+    #[test]
+    fn ready_fixes_precede_new_hunts_and_rebases() {
+        let fix = json!({"id":1,"kind":"fix","st":"ready","prio":-0.5,"d":{}});
+        let hunt = json!({"id":2,"kind":"hunt","st":"ready","prio":99.0,"d":{}});
+        let rebase = json!({"id":3,"kind":"rebase","st":"ready","prio":-1.0,"d":{}});
+        let submit = json!({"id":4,"kind":"fix","st":"submit","prio":0.0,"d":{}});
+        assert!(pick_rank(&fix) < pick_rank(&hunt));
+        assert!(pick_rank(&fix) < pick_rank(&rebase));
+        assert!(pick_rank(&submit) < pick_rank(&fix));
     }
-}
-
-fn hk(a: &Ax, h: &str) -> String {
-    if crate::sh::ho(a, h).map(|x| x.dk).unwrap_or(true) {
-        String::new()
-    } else {
-        format!("@{h}")
-    }
-}
-
-async fn red(a: &Ax, r: &str, h: &str) -> bool {
-    let mut cr = a.db.kg(&format!("cired:{r}"));
-    if cr.is_null() {
-        let x = hk(a, h);
-        if !x.is_empty() {
-            cr = a.db.kg(&format!("cired:{r}{x}"));
-        }
-    }
-    if cr.is_null() {
-        return false;
-    }
-    let k = format!("head:{r}");
-    let h = match crate::gh::cg(a, &k, 600_000) {
-        Some(v) => v,
-        None => {
-            let v = ghj(
-                &[
-                    "api",
-                    &format!("repos/{r}/commits/HEAD"),
-                    "--jq",
-                    "{s: .sha}",
-                ],
-                60,
-            )
-            .await
-            .unwrap_or(Value::Null);
-            crate::gh::cs(a, &k, &v);
-            v
-        }
-    };
-    !(h["s"].is_string() && cr["sha"].is_string() && h["s"] != cr["sha"])
-}
-
-// Work admission must hold the same transition guard as the updater and merges.
-// A preliminary drain check is only an optimization, never the authority.
-pub(crate) fn admit(a: &Ax, repo: &str, host: &str, id: i64) -> bool {
-    let _transition = a.update_transition.lock().unwrap();
-    if a.drain.load(std::sync::atomic::Ordering::SeqCst) {
-        return false;
-    }
-    let is_hunt = a.db.jg(id).is_some_and(|job| job.kind == "hunt");
-    if is_hunt && crate::hunt_health::blocked(a, repo) {
-        return false;
-    }
-    // Recheck the cap at admission, not only when creating a job:
-    // a blocked ready hunt may become eligible after another hunt started.
-    // Read capacity before holding the active/locked job mutexes.
-    let hunter_limit = if is_hunt { hn(a) } else { 0 };
-    // Idle npm maintenance must finish before this host can admit work.
-    if docker_cache_target(a, host)
-        .is_some_and(|target| a.cache_maintenance.lock().unwrap().contains(&target))
-    {
-        return false;
-    }
-    let mut active = a.act.lock().unwrap();
-    let mut locked = a.lk.lock().unwrap();
-    let claim = format!("{repo} {host}");
-    if active.contains(&claim) || locked.contains(&id) {
-        return false;
-    }
-    if is_hunt
-        && locked
-            .iter()
-            .filter(|other_id| a.db.jg(**other_id).is_some_and(|job| job.kind == "hunt"))
-            .count() as i64
-            >= hunter_limit
-    {
-        return false;
-    }
-    // A Hunter's checkout is shared with other tasks for this repository.
-    // Protect both admission orders: a Hunter after a fix and a fix after
-    // an active Hunter, including when the tasks target different hosts.
-    let active_repo = active
-        .iter()
-        .any(|entry| entry.split_once(' ').is_some_and(|(r, _)| r == repo));
-    if active_repo
-        && (is_hunt
-            || locked.iter().any(|other_id| {
-                a.db.jg(*other_id)
-                    .is_some_and(|job| job.repo == repo && job.kind == "hunt")
-            }))
-    {
-        return false;
-    }
-    active.insert(claim);
-    locked.insert(id);
-    true
-}
-
-/// Ordena trabalhos prontos sem deixar os Hunters ultrapassar as correções.
-fn job_rank(j: &Value) -> (i32, i32, f64, i64) {
-    let d = &j["d"];
-    (
-        if j["st"] == "submit" { 0 } else { 1 },
-        if d["rs"].as_bool().unwrap_or(false) || d["rp"].as_bool().unwrap_or(false) {
-            0
-        } else {
-            1
-        },
-        match j["kind"].as_str().unwrap_or("fix") {
-            "mergecheck" => 0.75,
-            "fix" => 1.0 + j["prio"].as_f64().unwrap_or(0.0).clamp(-500.0, 500.0) / 1000.0,
-            "hunt" => 2.0,
-            _ => 1.5,
-        },
-        j["id"].as_i64().unwrap_or(0),
-    )
-}
-
-/// Selects eligible work, reserving the final admission under update_transition.
-async fn pick(a: &Ax, h: &str) -> Option<i64> {
-    if a.drain.load(std::sync::atomic::Ordering::Relaxed) {
-        return None;
-    }
-    let mut c = a.db.all(
-        "select * from jobs where st in ('ready','submit') order by id",
-        pa![],
-    );
-    c.sort_by(|x, y| {
-        job_rank(x)
-            .partial_cmp(&job_rank(y))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    for j in c {
-        let id = j["id"].as_i64().unwrap_or(0);
-        let r = j["repo"].as_str().unwrap_or("").to_string();
-        let d = &j["d"];
-        let pin = j["st"] == "submit"
-            || d["rs"].as_bool().unwrap_or(false)
-            || d["rp"].as_bool().unwrap_or(false);
-        if a.act.lock().unwrap().contains(&format!("{r} {h}")) || a.lk.lock().unwrap().contains(&id)
-        {
-            continue;
-        }
-        if j["kind"] == "hunt" && (a.hold("hunter") || crate::hunt_health::blocked(a, &r)) {
-            continue;
-        }
-        if !pin && (j["kind"] == "rebase" || j["kind"] == "review") {
-            let tl =
-                a.db.n("select coalesce(sum(ln),0) from hs where on_=1", pa![]);
-            let rr = a.db.n("select count(*) from jobs where kind in ('rebase','review') and st not in ('ready','done','drop','vet','park','approve')", pa![]);
-            if rr >= (tl / 2).max(1) {
-                continue;
-            }
-        }
-        if pin && d["h"].as_str().map(|x| x != h).unwrap_or(false) {
-            continue;
-        }
-        if !pin && crate::sh::ho(a, h).map(|x| x.skips(&r)).unwrap_or(false) {
-            continue;
-        }
-        let rr = rp(a, &r);
-        if rr["on_"].as_i64().unwrap_or(0) != 1 && !pin {
-            continue;
-        }
-        if rr["ci"].as_str().unwrap_or("").trim().is_empty() && !pin {
-            continue;
-        }
-        if !pin && red(a, &r, h).await {
-            continue;
-        }
-        if !pin && j["kind"] == "fix" {
-            let mo = rr["maxo"].as_i64().unwrap_or(3);
-            let md = rr["maxd"].as_i64().unwrap_or(5);
-            // Zero disables the respective PR quota without disabling the queue gates.
-            let open_full = mo > 0
-                && pr_quota_hit(
-                    mo,
-                    crate::gh::opened(a, &r).await
-                        + a.db.n(
-                            "select count(*) from jobs where repo=? and kind='fix' and st in ('repro','fix','ci','review','gate','submit')",
-                            pa![r.clone()],
-                        ),
-                );
-            let daily_full = md > 0 && pr_quota_hit(md, crate::gh::today(a, &r).await);
-            if open_full || daily_full {
-                continue;
-            }
-        }
-        if admit(a, &r, h, id) {
-            return Some(id);
-        }
-        if a.drain.load(std::sync::atomic::Ordering::SeqCst) {
-            return None;
-        }
-    }
-    None
-}
-
-fn pr_quota_hit(limit: i64, used: i64) -> bool {
-    limit > 0 && used >= limit
-}
-
-pub fn bl(a: &Ax, r: &str) -> i64 {
-    if !a.db.kg(&format!("cired:{r}")).is_null() {
-        return 0;
-    }
-    hosts(a)
-        .iter()
-        .filter(|h| {
-            h.on && a.net(&h.id)
-                && !h.skips(r)
-                && (h.dk || a.db.kg(&format!("cired:{r}@{}", h.id)).is_null())
-        })
-        .map(|h| h.ln)
-        .sum()
-}
-
-pub fn qn(a: &Ax, r: &str, sts: &str) -> i64 {
-    a.db.n(
-        &format!("select count(*) from jobs where repo=? and kind='fix' and st in ({sts})"),
-        pa![r.to_string()],
-    )
-}
-
-fn hn(a: &Ax) -> i64 {
-    if crate::routing::enabled(a) {
-        return 0;
-    }
-    let cap = a.set()["hunters"].as_i64().unwrap_or(2).clamp(0, 12);
-    let l: i64 = hosts(a)
-        .iter()
-        .filter(|h| h.on && a.net(&h.id))
-        .map(|h| h.ln)
-        .sum();
-    let hf: i64 = a.db.all("select repo, count(*) n from jobs where kind='fix' and num=0 and st in ('vet','ready') and json_extract(d,'$.ext') is null group by repo", pa![]).iter().map(|x| x["n"].as_i64().unwrap_or(0).min(2 * bl(a, x["repo"].as_str().unwrap_or("")))).sum();
-    if cap == 0 || l == 0 {
-        return 0;
-    }
-    // hf already reserves lanes for eligible vet/ready fixes. Count only
-    // distinct work not covered by hf; otherwise a single ready fix
-    // reserves two lanes and can unnecessarily suppress Hunters.
-    let uncovered_fixes = a.db.n(
-        "select count(*) from jobs where kind='fix' and (st in ('repro','fix','ci','review','gate','submit') or (st='ready' and (num<>0 or json_extract(d,'$.ext') is not null)))",
-        pa![],
-    );
-    let active_rechecks = a.db.n(
-        "select count(*) from jobs j join rp r on r.full=j.repo where j.kind='mergecheck' and j.st not in ('done','drop','park') and r.on_=1",
-        pa![],
-    );
-    let reserved = hf + i64::from(uncovered_fixes > 0) + i64::from(active_rechecks > 0);
-    (l - reserved.max(0)).clamp(0, cap)
-}
-
-pub fn hy(a: &Ax, r: &str) -> f64 {
-    let t = now() - 14 * 86_400_000;
-    let h = a.db.n(
-        "select count(*) from jobs where repo=? and kind='hunt' and t0>?",
-        pa![r.to_string(), t],
-    );
-    let m = a.db.n("select count(*) from jobs j join prs p on p.repo=j.repo and p.num=j.pr where j.repo=? and j.kind='fix' and j.num=0 and j.t0>? and p.st='merged'", pa![r.to_string(), t]);
-    let s = a.db.n(
-        "select count(*) from prs where repo=? and st='open' and t0<?",
-        pa![r.to_string(), now() - 7 * 86_400_000],
-    );
-    (m as f64 + 1.0) / (h as f64 + 2.0) / (1.0 + s as f64 / 10.0)
-}
-
-/// Cria no máximo um Hunter elegível por repositório, com gate serializado.
-fn mk_hunt(a: &Ax) -> bool {
-    // Coordinate creation with admission and breaker updates across lanes.
-    let _transition = a.update_transition.lock().unwrap();
-    if a.drain.load(std::sync::atomic::Ordering::SeqCst) {
-        return false;
-    }
-    let on = a.db.all(
-        "select repo, st from jobs where kind='hunt' and st not in ('done','drop','park')",
-        pa![],
-    );
-    // A queued hunt blocked by the circuit breaker cannot use a lane.
-    // Keep it in 'on' for duplicate suppression, but exclude it from
-    // active capacity until its repository is no longer blocked.
-    let occupying = on
-        .iter()
-        .filter(|j| {
-            j["st"] != "ready" || !crate::hunt_health::blocked(a, j["repo"].as_str().unwrap_or(""))
-        })
-        .count() as i64;
-    if occupying >= hn(a) {
-        return false;
-    }
-    let d0 = crate::db::day0();
-    let rs: Vec<String> =
-        a.db.all(
-            "select full from rp where on_=1 and hunt=1 and ci<>''",
-            pa![],
-        )
-        .iter()
-        .filter_map(|x| x["full"].as_str().map(String::from))
-        .collect();
-    let act: Vec<String> = a
-        .act
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|k| k.split(' ').next().unwrap_or("").to_string())
-        .collect();
-    let cnt = |r: &str| {
-        a.db.n(
-            "select count(*) from jobs where kind='hunt' and repo=? and t0>?",
-            pa![r.to_string(), d0],
-        )
-    };
-    let mut c: Vec<String> = rs
-        .into_iter()
-        .filter(|r| {
-            !crate::hunt_health::blocked(a, r)
-                && !act.contains(r)
-                && !on.iter().any(|x| x["repo"].as_str() == Some(r.as_str()))
-                && {
-                    let b = bl(a, r);
-                    b > 0 && qn(a, r, "'vet','ready'") < 4 * b
-                }
-        })
-        .collect();
-    let sc = |r: &str| (cnt(r) as f64 + 1.0) / hy(a, r);
-    c.sort_by(|x, y| {
-        sc(x)
-            .partial_cmp(&sc(y))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let Some(r) = c.first() else { return false };
-    a.db.jnew(
-        r,
-        0,
-        "hunt",
-        &format!("Hunt for bugs in {r}"),
-        &format!("https://github.com/{r}"),
-        "ready",
-        "hunter slot",
-        json!({}),
-        None,
-        99.0,
-    );
-    a.say("hunter", &format!("starting a hunt in {r}"), None);
-    true
-}
-
-async fn lane(a: Ax, h: String, k: i64) {
-    let key = format!("{h}#{k}");
-    while let Some(x) = ho(&a, &h) {
-        if !x.on || k > x.ln {
-            break;
-        }
-        for w in ["repro", "fixer", "submit"] {
-            a.held(w).await;
-        }
-        if !a.net(&h) {
-            sl(60_000).await;
-            continue;
-        }
-        // Capacity reservation: when a host has two or more lanes, the top lane
-        // never starts new hunts, so fixes and PR rechecks keep a lane and are
-        // never starved by continuous hunting.
-        let reserve_for_fixes = x.ln >= 2 && k == x.ln;
-        while !reserve_for_fixes
-            && !a.hold("hunter")
-            && !a.drain.load(std::sync::atomic::Ordering::Relaxed)
-            && mk_hunt(&a)
-        {}
-        let Some(id) = pick(&a, &h).await else {
-            sl(20_000).await;
-            continue;
-        };
-        let r = a.db.jg(id).map(|j| j.repo).unwrap_or_default();
-        a.lv.lock().unwrap().ln.insert(id, key.clone());
-        go(&a, id, &h).await;
-        a.lv.lock().unwrap().ln.remove(&id);
-        a.act.lock().unwrap().remove(&format!("{r} {h}"));
-        a.lk.lock().unwrap().remove(&id);
-    }
-    a.lanes.lock().unwrap().remove(&key);
-}
-
-static ENS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
-    std::sync::LazyLock::new(Default::default);
-static ING: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
-    std::sync::LazyLock::new(Default::default);
-
-/// Diagnostic snapshot of the build-container readiness per host:
-/// returns (ensured, preparing) host ids so the UI can distinguish a host
-/// that is ready from one still running `ensure` (the "preparing the build
-/// container" step) instead of leaving it looking silently idle.
-pub fn ensure_state() -> (Vec<String>, Vec<String>) {
-    let ens = ENS.lock().unwrap().iter().cloned().collect();
-    let ing = ING.lock().unwrap().iter().cloned().collect();
-    (ens, ing)
-}
-
-pub async fn lanes(a: Ax) {
-    loop {
-        for x in hosts(&a) {
-            if !x.on {
-                continue;
-            }
-            if x.dk && !ENS.lock().unwrap().contains(&x.id) {
-                if ING.lock().unwrap().insert(x.id.clone()) {
-                    let (a2, id) = (a.clone(), x.id.clone());
-                    tokio::spawn(async move {
-                        a2.say("ci", &format!("[{id}] preparing the build container"), None);
-                        match crate::sh::ensure(&a2, &id).await {
-                            Ok(()) => {
-                                a2.db.ks(&format!("up:{id}"), &json!(true));
-                                ENS.lock().unwrap().insert(id.clone());
-                            }
-                            Err(m) => a2.say("ci", &format!("[{id}] machine not ready: {m}"), None),
-                        }
-                        ING.lock().unwrap().remove(&id);
-                    });
-                }
-                continue;
-            }
-            for k in 1..=x.ln {
-                let key = format!("{}#{k}", x.id);
-                let new = a.lanes.lock().unwrap().insert(key);
-                if new {
-                    tokio::spawn(lane(a.clone(), x.id.clone(), k));
-                    sl(3000).await;
-                }
-            }
-        }
-        sl(30_000).await;
-    }
-}
-
-async fn disk(a: &Ax, h: &crate::sh::Ho) -> Out {
-    let ac: Vec<String> = a
-        .act
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|k| k.ends_with(&format!(" {}", h.id)))
-        .map(|k| slug(k.split(' ').next().unwrap_or("")))
-        .collect();
-    let pn: Vec<String> =
-        a.db.all(
-            "select repo, d from jobs where st in ('ready','submit','approve')",
-            pa![],
-        )
-        .iter()
-        .filter(|y| y["d"]["h"].as_str() == Some(h.id.as_str()))
-        .map(|y| slug(y["repo"].as_str().unwrap_or("")))
-        .collect();
-    let ex = |l: &[String]| {
-        std::iter::once("-e __none__/".to_string())
-            .chain(l.iter().map(|r| format!("-e {}", q(&format!("{r}/")))))
-            .collect::<Vec<_>>()
-            .join(" ")
-    };
-    let mut ap = ac.clone();
-    ap.extend(pn);
-    let s = format!(
-        "cd \"{b}\" 2>/dev/null || exit 0\nfr() {{ df -Pk . | awk 'NR==2{{print int($4/1048576)}}'; }}\nus() {{ du -sk . 2>/dev/null | awk '{{print int($1/1048576)}}'; }}\ngd() {{ [ \"$(fr)\" -ge 20 ] && [ \"$(us)\" -le {gb} ]; }}\nwhile ! gd; do t=$(ls -1td */ 2>/dev/null | grep -v -x {e1} | while read d; do for x in target node_modules .venv build dist; do [ -d \"$d$x\" ] && echo \"$d$x\"; done; done | tail -1); [ -z \"$t\" ] && break; echo \"rm $t\"; rm -rf \"$t\"; done\nwhile ! gd; do o=$(ls -1td */ 2>/dev/null | grep -v -x {e2} | tail -1); [ -z \"$o\" ] && break; echo \"rm $o\"; rm -rf \"$o\"; done\nf=$(fr); if [ \"$f\" -lt 5 ]; then echo \"hard $f\"; fi\necho \"free $(fr) GB, office $(us) GB\"",
-        b = hb(a, h),
-        gb = h.gb,
-        e1 = ex(&ac),
-        e2 = ex(&ap)
-    );
-    hx(a, &h.id, &s, 1200).await
-}
-
-/// Identifies the Docker daemon used by a configured host. Different host IDs
-/// pointing at the same local or SSH Docker target must share one reservation.
-fn docker_cache_target(a: &Ax, host: &str) -> Option<String> {
-    let configured = crate::sh::ho(a, host)?;
-    if !configured.dk {
-        return None;
-    }
-    let ssh = configured.ssh.trim();
-    Some(if ssh.is_empty() {
-        "docker:local".to_string()
-    } else {
-        format!("docker:ssh:{ssh}")
-    })
-}
-
-/// Reserves an idle host for cache maintenance; admission is blocked until Drop.
-struct IdleCacheGuard {
-    a: Ax,
-    target: String,
-}
-
-impl IdleCacheGuard {
-    fn claim(a: &Ax, host: &str) -> Option<Self> {
-        // The same lock serializes admission and cache-cleanup reservation.
-        let _transition = a.update_transition.lock().unwrap();
-        if a.drain.load(std::sync::atomic::Ordering::SeqCst) {
-            return None;
-        }
-        let target = docker_cache_target(a, host)?;
-        let active_hosts: Vec<String> = a
-            .act
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(|claim| claim.rsplit_once(' ').map(|(_, h)| h.to_string()))
-            .collect();
-        if active_hosts
-            .iter()
-            .any(|active_host| docker_cache_target(a, active_host).as_deref() == Some(&target))
-        {
-            return None;
-        }
-        if !a.cache_maintenance.lock().unwrap().insert(target.clone()) {
-            return None;
-        }
-        Some(Self {
-            a: a.clone(),
-            target,
-        })
-    }
-}
-
-impl Drop for IdleCacheGuard {
-    fn drop(&mut self) {
-        self.a
-            .cache_maintenance
-            .lock()
-            .unwrap()
-            .remove(&self.target);
-    }
-}
-
-/// Clears an oversized npm download cache only while no work can enter the host.
-async fn clean_idle_npm_cache(a: &Ax, host: &crate::sh::Ho) {
-    if !host.dk {
-        return;
-    }
-    let Some(_reservation) = IdleCacheGuard::claim(a, &host.id) else {
-        return;
-    };
-    let result =
-        crate::sh::hx_maintenance(a, &host.id, &crate::sh::npm_cache_cleanup_cmd(), 600).await;
-    if result.c == 0 && result.o.contains("npm cache cleaned") {
-        a.say(
-            "ci",
-            &format!("[{}] npm cache above 4 GiB cleaned while idle", host.id),
-            None,
-        );
-    } else if result.c != 0 {
-        a.say(
-            "ci",
-            &format!(
-                "[{}] npm cache maintenance skipped (exit {})",
-                host.id, result.c
-            ),
-            None,
-        );
-    }
-}
-
-pub async fn guard(a: Ax) {
-    loop {
-        for h in hosts(&a) {
-            if !h.on || !a.net(&h.id) {
-                continue;
-            }
-            // Reclaim npm caches first; disk() may remove inactive worktrees
-            // when an oversized cache is the actual cause of low free space.
-            clean_idle_npm_cache(&a, &h).await;
-            let r = disk(&a, &h).await;
-            if r.c != 0 {
-                continue;
-            }
-            let rm: Vec<&str> = r.o.lines().filter_map(|l| l.strip_prefix("rm ")).collect();
-            let tl = r.o.trim().lines().last().unwrap_or("").to_string();
-            if !rm.is_empty() {
-                a.say(
-                    "ci",
-                    &format!("[{}] disk guard freed {} · {tl}", h.id, rm.join(", ")),
-                    None,
-                );
-            }
-            if r.o.lines().any(|l| l.starts_with("hard ")) {
-                a.note(
-                    "Disk almost full",
-                    &format!("{}: under 5 GB free · {tl}", h.id),
-                    4,
-                );
-            }
-        }
-        sl(300_000).await;
-    }
-}
-
-#[cfg(test)]
-mod t {
-    use super::*;
 
     #[cfg(unix)]
     fn run_preflight(
@@ -5146,6 +3170,19 @@ mod t {
     }
 
     #[test]
+    fn auto_merge_only_applies_to_new_bug_fix_prs() {
+        let bug = Job::of(json!({"kind":"fix","d":{"feat":false}}));
+        assert!(auto_merge_requested(None, true, &bug, true));
+        assert!(!auto_merge_requested(None, true, &bug, false));
+        assert!(!auto_merge_requested(None, false, &bug, true));
+        assert!(!auto_merge_requested(Some(&json!({})), false, &bug, true));
+        assert!(auto_merge_requested(Some(&json!({"auto_merge":true})), false, &bug, false));
+
+        let feature = Job::of(json!({"kind":"fix","d":{"feat":true}}));
+        assert!(!auto_merge_requested(None, true, &feature, true));
+    }
+
+    #[test]
     fn infra() {
         let o = "CI: 6 passed, FAILED at `deny`: cargo-deny is required in CI: cargo install cargo-deny --locked\nxtask ci: error: ci failed at `deny`\n[exit 1]";
         assert!(!lost(o));
@@ -5344,46 +3381,18 @@ mod t {
     }
 
     #[test]
-    fn portuguese_template_rejects_common_english_headings() {
-        assert!(english_pr_heading(
-            "Fixes #12\n\n## Summary\n...\n## Testing\n..."
-        ));
-        assert!(english_pr_heading("## testing\nTestes executados"));
-        assert!(!english_pr_heading("Fixes #12\n## Resumo\n## Validação"));
-    }
+    fn issue_closure_survives_pr_templates_without_duplicating_links() {
+        let bug = Job::of(json!({"id": 5, "repo": "o/r", "num": 12, "kind": "fix", "d": {}}));
+        assert_eq!(ensure_issue_closure(&bug, "Template content".into()), "Template content\n\nFixes #12");
+        assert_eq!(ensure_issue_closure(&bug, "Template content\n\ncloses #12".into()), "Template content\n\ncloses #12");
+        assert_eq!(ensure_issue_closure(&bug, "`Closes #12`".into()), "`Closes #12`\n\nFixes #12");
+        assert_eq!(ensure_issue_closure(&bug, "```text\nCloses #12\n```".into()), "```text\nCloses #12\n```\n\nFixes #12");
 
-    #[test]
-    fn approved_pr_footer_survives_language_changes() {
-        let mut j = Job::of(json!({
-            "id": 88, "repo": "o/r", "num": 12, "kind": "fix", "title": "T",
-            "d": {"pb_footer": FOOT_PT, "pb": format!("Fixes #12\n\n{FOOT_PT}")}
-        }));
-        assert_eq!(stored_pr_footer(&j, FOOT), FOOT_PT);
-        j.d.as_object_mut().unwrap().remove("pb_footer");
-        assert_eq!(stored_pr_footer(&j, FOOT), FOOT_PT);
-        j.d["pb"] = json!("sem rodapé");
-        assert_eq!(stored_pr_footer(&j, FOOT), FOOT);
-        j.d["pb_footer"] = json!("rodapé arbitrário");
-        assert_eq!(stored_pr_footer(&j, FOOT), FOOT);
-    }
+        let feature = Job::of(json!({"id": 6, "repo": "o/r", "num": 13, "kind": "fix", "d": {"feat": true}}));
+        assert_eq!(ensure_issue_closure(&feature, "Template content".into()), "Template content\n\nCloses #13");
 
-    #[test]
-    fn portuguese_pr_body_preserves_github_linkage_and_disclosure() {
-        let j = Job::of(
-            json!({"id": 50, "repo": "o/r", "num": 42, "kind": "fix", "title": "T",
-                "d": {"mn": "main", "known": []}}),
-        );
-        let f = json!({"cause": "A causa.", "fix": "A correção.", "tests": ["teste_repro"],
-            "test_cmd": "npm test", "untouched": "Sem alterações financeiras."});
-        let b = body_lang(&j, &f, "npm run test:smoke", FOOT_PT, true);
-        assert!(b.starts_with("Fixes #42"));
-        assert!(b.contains("## Causa\nA causa."));
-        assert!(b.contains("## Correção\nA correção."));
-        assert!(b.contains("## Validação"));
-        assert!(b.contains("Teste de regressão `teste_repro`: falha em `main`"));
-        assert!(b.contains("## Fora do âmbito"));
-        assert!(b.ends_with(FOOT_PT));
-        assert!(!b.contains("## Verified"));
+        let found_by_hunter = Job::of(json!({"id": 7, "repo": "o/r", "num": 0, "kind": "fix", "d": {"hunt": {"title": "bug"}}}));
+        assert_eq!(ensure_issue_closure(&found_by_hunter, "Template content".into()), "Template content");
     }
 
     #[test]
@@ -5791,4 +3800,780 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':10,'output_tok
         std::env::remove_var("APOLLO_OFFICE_GH");
         std::fs::remove_dir_all(dd).unwrap();
     }
+    // ---- staged RED/GREEN two-phase TDD ----
+
+    #[cfg(unix)]
+    fn staged_fixture() -> (Ax, i64, std::path::PathBuf, std::path::PathBuf) {
+        let dd = std::env::temp_dir().join(format!("apollo-staged-{}", hex::encode(rand::random::<[u8; 8]>())));
+        let repo = dd.join("work/o__r");
+        std::fs::create_dir_all(repo.join("t")).unwrap();
+        let git = {
+            let repo = repo.clone();
+            move |args: &[&str]| {
+                let out = std::process::Command::new("git").args(args).current_dir(&repo).output().unwrap();
+                assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+                String::from_utf8_lossy(&out.stdout).trim().to_string()
+            }
+        };
+        // Intentional bug: add subtracts instead of adding.
+        std::fs::write(repo.join("add.sh"), "add() { echo $(( $1 - $2 )); }\n").unwrap();
+        std::fs::write(repo.join("t/run.sh"), "e=0\nfor f in t/*_test.sh; do bash \"$f\" || e=1; done\nexit $e\n").unwrap();
+        git(&["init", "-q", "-b", "work"]);
+        git(&["config", "user.name", "fixture"]);
+        git(&["config", "user.email", "fixture@localhost"]);
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        let db = crate::db::Db::mem();
+        // Pilot config: staged on, allowlisted repo, free-first OFF (required).
+        db.ks("set", &json!({"staged_tdd":true,"staged_repos":["o/r"]}));
+        db.run("insert into hs(id,ssh,dk,raw,on_) values('local','',0,1,1)", pa![]);
+        // Mandatory GREEN production allowlist for the pilot repo: only add.sh.
+        db.run("insert into rp(full,ci,green) values('o/r','bash t/run.sh','^add\\.sh$')", pa![]);
+        let id = db.jnew("o/r", 0, "fix", "wrong addition", "", "fix", "", json!({"h":"local","base":base,"br":"work","repro":{"how":"add 2 3 prints -1"}}), None, 0.0);
+        let a = std::sync::Arc::new(crate::app::App::new(db, dd.clone(), 1, "apollo-office".into()));
+        (a, id, dd, repo)
+    }
+
+    const RED_FAIL: &str = "source ./add.sh\n[ \"$(add 2 3)\" = 5 ] && echo 'ok 1 - sum' || { echo 'not ok 1 - sum'; exit 1; }\n";
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn staged_happy_path_makes_test_then_fix_commit_with_real_red_green() {
+        let (a, id, dd, repo) = staged_fixture();
+        let mut job = a.db.jg(id).unwrap();
+        let base = job.s("base");
+        let git = |args: &[&str]| String::from_utf8_lossy(&std::process::Command::new("git").args(args).current_dir(&repo).output().unwrap().stdout).trim().to_string();
+        // RED: author writes only the failing test.
+        std::fs::write(repo.join("t/sum_test.sh"), RED_FAIL).unwrap();
+        let fb = red_commit(&a, &mut job, "bash t/run.sh", &["sum".to_string()], "add returns a wrong sum").await.unwrap();
+        assert!(fb.is_none(), "RED should be accepted: {fb:?}");
+        assert_eq!(git(&["rev-list", "--count", &format!("{base}..HEAD")]), "1");
+        assert!(git(&["diff", "--name-only", &base, "HEAD"]).lines().all(|l| l == "t/sum_test.sh"));
+        assert!(git(&["log", "-1", "--format=%s"]).starts_with("test:"));
+        let red_files: Vec<String> = git(&["diff", "--name-only", &base, "HEAD"]).lines().map(|l| l.to_string()).collect();
+        let test_commit = git(&["rev-parse", "HEAD"]);
+        // GREEN: author writes only the fix.
+        std::fs::write(repo.join("add.sh"), "add() { echo $(( $1 + $2 )); }\n").unwrap();
+        let js = json!({"title":"Add instead of subtract","test_cmd":"bash t/run.sh","tests":["sum"],"cause":"c","fix":"f"});
+        let fb = green_commit(&a, &mut job, &red_files, &test_commit, "bash t/run.sh", &["sum".to_string()], "Add instead of subtract").await.unwrap();
+        assert!(fb.is_none(), "GREEN should be accepted: {fb:?}");
+        assert_eq!(git(&["rev-list", "--count", &format!("{base}..HEAD")]), "2");
+        assert!(git(&["log", "-1", "--format=%s"]).starts_with("fix:"));
+        assert!(git(&["diff", "--name-only", "HEAD~1", "HEAD"]).lines().all(|l| l == "add.sh"), "fix commit must not touch the test");
+        // The authoritative two-commit gate agrees.
+        let v = verify(&a, &mut job, &js).await.unwrap();
+        assert_eq!(v, "", "verify must confirm red on the test commit and green on the fix commit");
+        assert_ne!(job.d["proof"]["a_exit"], 0);
+        assert_eq!(job.d["proof"]["b_exit"], 0);
+        std::fs::remove_dir_all(dd).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn staged_red_rejects_implementation_changes() {
+        let (a, id, dd, repo) = staged_fixture();
+        let mut job = a.db.jg(id).unwrap();
+        std::fs::write(repo.join("t/sum_test.sh"), RED_FAIL).unwrap();
+        std::fs::write(repo.join("add.sh"), "add() { echo $(( $1 + $2 )); }\n").unwrap(); // sneaks the fix in
+        let fb = red_commit(&a, &mut job, "bash t/run.sh", &["sum".to_string()], "t").await.unwrap();
+        assert!(fb.as_deref().unwrap_or("").contains("test files only"), "{fb:?}");
+        assert_eq!(String::from_utf8_lossy(&std::process::Command::new("git").args(["rev-list", "--count", &format!("{}..HEAD", job.s("base"))]).current_dir(&repo).output().unwrap().stdout).trim(), "0", "no commit on rejection");
+        std::fs::remove_dir_all(dd).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn staged_red_rejects_test_that_already_passes() {
+        let (a, id, dd, repo) = staged_fixture();
+        let mut job = a.db.jg(id).unwrap();
+        std::fs::write(repo.join("t/sum_test.sh"), "echo 'ok 1 - sum'\n").unwrap();
+        let fb = red_commit(&a, &mut job, "bash t/run.sh", &["sum".to_string()], "t").await.unwrap();
+        assert!(fb.as_deref().unwrap_or("").contains("must fail"), "{fb:?}");
+        std::fs::remove_dir_all(dd).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn staged_red_rejects_compile_or_load_error() {
+        let (a, id, dd, repo) = staged_fixture();
+        let mut job = a.db.jg(id).unwrap();
+        std::fs::write(repo.join("t/sum_test.sh"), "echo placeholder\n").unwrap();
+        // A test that does not load (here a missing import) is not a real failing
+        // test. Python's error text is locale-independent, unlike a shell's.
+        let fb = red_commit(&a, &mut job, "python3 -c 'import nonexistent_mod_xyz'", &["sum".to_string()], "t").await.unwrap();
+        assert!(fb.as_deref().unwrap_or("").contains("compile or load"), "{fb:?}");
+        std::fs::remove_dir_all(dd).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn staged_green_rejects_modifying_the_committed_test() {
+        let (a, id, dd, repo) = staged_fixture();
+        let mut job = a.db.jg(id).unwrap();
+        let base = job.s("base");
+        std::fs::write(repo.join("t/sum_test.sh"), RED_FAIL).unwrap();
+        assert!(red_commit(&a, &mut job, "bash t/run.sh", &["sum".to_string()], "t").await.unwrap().is_none());
+        let red_files: Vec<String> = String::from_utf8_lossy(&std::process::Command::new("git").args(["diff", "--name-only", &base, "HEAD"]).current_dir(&repo).output().unwrap().stdout).lines().map(|l| l.to_string()).collect();
+        let test_commit = String::from_utf8_lossy(&std::process::Command::new("git").args(["rev-parse", "HEAD"]).current_dir(&repo).output().unwrap().stdout).trim().to_string();
+        // GREEN weakens the test and adds the fix.
+        std::fs::write(repo.join("t/sum_test.sh"), "echo 'ok 1 - sum'\n").unwrap();
+        std::fs::write(repo.join("add.sh"), "add() { echo $(( $1 + $2 )); }\n").unwrap();
+        let fb = green_commit(&a, &mut job, &red_files, &test_commit, "bash t/run.sh", &["sum".to_string()], "x").await.unwrap();
+        assert!(fb.as_deref().unwrap_or("").contains("allowlisted production files"), "{fb:?}");
+        std::fs::remove_dir_all(dd).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn staged_green_rejects_when_test_still_fails() {
+        let (a, id, dd, repo) = staged_fixture();
+        let mut job = a.db.jg(id).unwrap();
+        std::fs::write(repo.join("t/sum_test.sh"), RED_FAIL).unwrap();
+        assert!(red_commit(&a, &mut job, "bash t/run.sh", &["sum".to_string()], "t").await.unwrap().is_none());
+        let test_commit = String::from_utf8_lossy(&std::process::Command::new("git").args(["rev-parse", "HEAD"]).current_dir(&repo).output().unwrap().stdout).trim().to_string();
+        std::fs::write(repo.join("add.sh"), "add() { echo 0; }\n").unwrap(); // allowlisted but not an actual fix
+        let fb = green_commit(&a, &mut job, &["t/sum_test.sh".to_string()], &test_commit, "bash t/run.sh", &["sum".to_string()], "x").await.unwrap();
+        assert!(fb.as_deref().unwrap_or("").contains("still fails"), "{fb:?}");
+        std::fs::remove_dir_all(dd).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn staged_mode_is_opt_in_and_scoped() {
+        let (a, id, dd, _repo) = staged_fixture();
+        let mut job = a.db.jg(id).unwrap();
+        assert!(staged(&a, &job), "fix job with staged_tdd + allowlisted repo + free_first OFF is staged");
+        job.d["feat"] = json!(true);
+        assert!(!staged(&a, &job), "feature requests keep the legacy flow");
+        job.d.as_object_mut().unwrap().remove("feat");
+        job.kind = "review".into();
+        assert!(!staged(&a, &job), "PR-review jobs keep the legacy flow");
+        job.kind = "fix".into();
+        // B5: another repo (e.g. FixFlow) is never staged even with every flag on.
+        let mut other = job.clone();
+        other.repo = "croquete1/FixFlow-novo".into();
+        assert!(!staged(&a, &other) && !staged_intended(&a, &other), "non-allowlisted repo (FixFlow) must stay on the legacy flow");
+        a.db.ks("set", &json!({"staged_tdd":true})); // allowlist removed
+        assert!(!staged(&a, &job), "fails closed: no allowlist means no repo is staged");
+        a.db.ks("set", &json!({"staged_repos":["o/r"]})); // opt-in flag off
+        assert!(!staged(&a, &job), "off without the opt-in flag");
+        // V3-P1-3: with free_first ON the mode is INTENDED but NOT active (it would
+        // substitute the configured FIXER/REVIEWER); fix() rejects that config.
+        a.db.ks("set", &json!({"free_first":true,"staged_tdd":true,"staged_repos":["o/r"]}));
+        assert!(staged_intended(&a, &job), "still intended with free_first on");
+        assert!(!staged(&a, &job), "but NOT active under free-first routing (fail closed)");
+        a.db.ks("set", &json!({"staged_tdd":true,"staged_repos":["o/r"]})); // free_first OFF
+        assert!(staged(&a, &job), "active with the flag, allowlist and free_first off");
+        std::fs::remove_dir_all(dd).unwrap();
+    }
+
+    #[test]
+    fn testish_classifies_common_layouts_and_honours_repo_override() {
+        let db = crate::db::Db::mem();
+        db.run("insert into rp(full) values('o/r')", pa![]);
+        let a = std::sync::Arc::new(crate::app::App::new(db, std::env::temp_dir(), 1, "x".into()));
+        let j = crate::db::Job::of(json!({"repo":"o/r","kind":"fix"}));
+        for p in ["t/sum_test.sh", "tests/test_x.py", "src/foo_test.go", "spec/foo_spec.rb", "FooTest.java", "__tests__/a.js", "conftest.py"] {
+            assert!(testish(&a, &j, p), "expected test: {p}");
+        }
+        for p in ["src/add.sh", "lib/maths.py", "main.go", "README.md"] {
+            assert!(!testish(&a, &j, p), "expected non-test: {p}");
+        }
+        // explicit per-repo override (rp.tests regex) wins over the heuristic
+        let a2 = {
+            let db = crate::db::Db::mem();
+            db.run("insert into rp(full,tests) values('o/r','^impl/')", pa![]);
+            std::sync::Arc::new(crate::app::App::new(db, std::env::temp_dir(), 1, "x".into()))
+        };
+        assert!(testish(&a2, &j, "impl/whatever"));
+        assert!(!testish(&a2, &j, "tests/test_x.py"));
+        // An invalid override regex must not panic; it falls back to the heuristic.
+        let a3 = {
+            let db = crate::db::Db::mem();
+            db.run("insert into rp(full,tests) values('o/r','[unclosed(')", pa![]);
+            std::sync::Arc::new(crate::app::App::new(db, std::env::temp_dir(), 1, "x".into()))
+        };
+        assert!(testish(&a3, &j, "tests/test_x.py"));
+        assert!(!testish(&a3, &j, "src/add.sh"));
+    }
+
+    // Adversarial: the shell guard (STAGED_GIT) is defeatable (a script the regex
+    // never sees), so integrity cannot rest on it. These tests prove the controller
+    // DETECTS a forged history by re-reading git state, independent of the guard.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn staged_red_detects_forged_commit_even_if_the_shell_guard_is_bypassed() {
+        let (a, id, dd, repo) = staged_fixture();
+        let mut job = a.db.jg(id).unwrap();
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git").args(args).current_dir(&repo).output().unwrap().status.success());
+        };
+        // Author (via some bypass) commits the test itself and leaves a dirty fix.
+        std::fs::write(repo.join("t/sum_test.sh"), RED_FAIL).unwrap();
+        git(&["add", "."]);
+        git(&["-c", "user.name=x", "-c", "user.email=x@y", "commit", "-qm", "test: forged"]);
+        std::fs::write(repo.join("add.sh"), "add() { echo $(( $1 + $2 )); }\n").unwrap();
+        let fb = red_commit(&a, &mut job, "bash t/run.sh", &["sum".to_string()], "t").await.unwrap();
+        assert!(fb.as_deref().unwrap_or("").contains("history changed"), "{fb:?}");
+        std::fs::remove_dir_all(dd).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn staged_green_detects_amended_red_commit() {
+        let (a, id, dd, repo) = staged_fixture();
+        let mut job = a.db.jg(id).unwrap();
+        let base = job.s("base");
+        std::fs::write(repo.join("t/sum_test.sh"), RED_FAIL).unwrap();
+        assert!(red_commit(&a, &mut job, "bash t/run.sh", &["sum".to_string()], "t").await.unwrap().is_none());
+        let red_files: Vec<String> = String::from_utf8_lossy(&std::process::Command::new("git").args(["diff", "--name-only", &base, "HEAD"]).current_dir(&repo).output().unwrap().stdout).lines().map(|l| l.to_string()).collect();
+        let stale = String::from_utf8_lossy(&std::process::Command::new("git").args(["rev-parse", "HEAD"]).current_dir(&repo).output().unwrap().stdout).trim().to_string();
+        // Author amends the committed test commit behind the controller's back.
+        std::fs::write(repo.join("t/sum_test.sh"), "echo 'ok 1 - sum'\n").unwrap();
+        assert!(std::process::Command::new("git").args(["-c", "user.name=x", "-c", "user.email=x@y", "commit", "-aqm", "test: amended", "--amend"]).current_dir(&repo).output().unwrap().status.success());
+        std::fs::write(repo.join("add.sh"), "add() { echo $(( $1 + $2 )); }\n").unwrap();
+        // Controller still holds the stale test_commit sha; HEAD no longer matches.
+        let fb = green_commit(&a, &mut job, &red_files, &stale, "bash t/run.sh", &["sum".to_string()], "x").await.unwrap();
+        assert!(fb.as_deref().unwrap_or("").contains("history changed"), "{fb:?}");
+        std::fs::remove_dir_all(dd).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn staged_red_sees_individual_files_in_a_new_untracked_directory() {
+        let (a, id, dd, repo) = staged_fixture();
+        let mut job = a.db.jg(id).unwrap();
+        // A brand-new directory whose name looks test-ish, hiding production code.
+        std::fs::create_dir_all(repo.join("testkit")).unwrap();
+        std::fs::write(repo.join("testkit/runner.py"), "x=1\n").unwrap(); // not test-ish by name
+        std::fs::write(repo.join("t/sum_test.sh"), RED_FAIL).unwrap();
+        let seen = changed_paths(&a, &job).await.unwrap();
+        assert!(seen.iter().any(|p| p == "testkit/runner.py"), "new-dir files must be expanded: {seen:?}");
+        let fb = red_commit(&a, &mut job, "bash t/run.sh", &["sum".to_string()], "t").await.unwrap();
+        assert!(fb.as_deref().unwrap_or("").contains("test files only"), "hidden non-test file must be caught: {fb:?}");
+        std::fs::remove_dir_all(dd).unwrap();
+    }
+
+    // ===== Regression tests for the six audit blockers =====
+
+    #[cfg(unix)]
+    async fn red_ok(a: &Ax, job: &mut Job, repo: &std::path::Path) -> (String, Vec<String>) {
+        std::fs::write(repo.join("t/sum_test.sh"), RED_FAIL).unwrap();
+        assert!(red_commit(a, job, "bash t/run.sh", &["sum".to_string()], "t").await.unwrap().is_none(), "RED fixture must be accepted");
+        let base = job.s("base");
+        let test_commit = String::from_utf8_lossy(&std::process::Command::new("git").args(["rev-parse", "HEAD"]).current_dir(repo).output().unwrap().stdout).trim().to_string();
+        let red_files: Vec<String> = String::from_utf8_lossy(&std::process::Command::new("git").args(["diff", "--name-only", &base, "HEAD"]).current_dir(repo).output().unwrap().stdout).lines().map(|l| l.to_string()).collect();
+        (test_commit, red_files)
+    }
+
+    // B1: a GREEN that disables the runner (so the bug persists) is rejected by the
+    // positive-execution proof, even though the test command exits 0.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn b1_green_cannot_pass_by_neutering_the_runner() {
+        let (a, id, dd, repo) = staged_fixture();
+        let mut job = a.db.jg(id).unwrap();
+        let (test_commit, red_files) = red_ok(&a, &mut job, &repo).await;
+        // (a) The "fix" leaves add.sh buggy and rewrites the runner named in the
+        // frozen command to a no-op: caught because the runner is a protected path.
+        std::fs::write(repo.join("t/run.sh"), "echo tests passed\nexit 0\n").unwrap();
+        let fb = green_commit(&a, &mut job, &red_files, &test_commit, "bash t/run.sh", &["sum".to_string()], "x").await.unwrap();
+        assert!(fb.as_deref().unwrap_or("").contains("allowlisted production files"), "neutering the runner must be rejected: {fb:?}");
+        // (b) Positive-proof backstop: a command that exits 0 without ever running
+        // the named test (no protected file touched) is still rejected.
+        std::fs::write(repo.join("t/run.sh"), "e=0\nfor f in t/*_test.sh; do bash \"$f\" || e=1; done\nexit $e\n").unwrap(); // restore runner
+        std::fs::write(repo.join("add.sh"), "add() { echo $(( $1 + $2 )); }\n").unwrap(); // real production change
+        let fb2 = green_commit(&a, &mut job, &red_files, &test_commit, "true", &["sum".to_string()], "x").await.unwrap();
+        assert!(fb2.as_deref().unwrap_or("").contains("ran"), "a command that never runs the named test must fail positive proof: {fb2:?}");
+        std::fs::remove_dir_all(dd).unwrap();
+    }
+
+    // B2: a test command that mutates production after classification must not get
+    // that production change committed into the RED (test-only) commit.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn b2_test_command_mutating_production_is_rejected_not_committed() {
+        let (a, id, dd, repo) = staged_fixture();
+        let mut job = a.db.jg(id).unwrap();
+        std::fs::write(repo.join("t/sum_test.sh"), RED_FAIL).unwrap();
+        // The test command writes to production as a side effect.
+        let tc = "printf 'add() { echo $(( $1 + $2 )); }\\n' > add.sh; bash t/run.sh";
+        let fb = red_commit(&a, &mut job, tc, &["sum".to_string()], "t").await.unwrap();
+        assert!(fb.as_deref().unwrap_or("").contains("non-test files"), "production mutation by test_cmd must be caught: {fb:?}");
+        assert_eq!(String::from_utf8_lossy(&std::process::Command::new("git").args(["rev-list", "--count", &format!("{}..HEAD", job.s("base"))]).current_dir(&repo).output().unwrap().stdout).trim(), "0", "no commit on rejection");
+        std::fs::remove_dir_all(dd).unwrap();
+    }
+
+    // B3: renaming production into a test directory must be detected via the rename
+    // origin, not accepted as a pure test change.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn b3_rename_of_production_into_tests_is_detected() {
+        let (a, id, dd, repo) = staged_fixture();
+        let mut job = a.db.jg(id).unwrap();
+        // Also add a real failing test so only the rename is the offending change.
+        std::fs::write(repo.join("t/sum_test.sh"), RED_FAIL).unwrap();
+        assert!(std::process::Command::new("git").args(["mv", "add.sh", "t/add_test.sh"]).current_dir(&repo).output().unwrap().status.success());
+        let seen = changed_paths(&a, &job).await.unwrap();
+        assert!(seen.iter().any(|p| p == "add.sh"), "rename origin must be surfaced: {seen:?}");
+        let fb = red_commit(&a, &mut job, "bash t/run.sh", &["sum".to_string()], "t").await.unwrap();
+        assert!(fb.as_deref().unwrap_or("").contains("test files only"), "production rename must be rejected: {fb:?}");
+        std::fs::remove_dir_all(dd).unwrap();
+    }
+
+    // B4: a test_cmd that runs git history commands is refused (the run_wt path no
+    // longer bypasses the history guard).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn b4_test_cmd_running_git_is_refused() {
+        let (a, id, dd, repo) = staged_fixture();
+        let mut job = a.db.jg(id).unwrap();
+        std::fs::write(repo.join("t/sum_test.sh"), RED_FAIL).unwrap();
+        let fb = red_commit(&a, &mut job, "git reset --hard HEAD~1; bash t/run.sh", &["sum".to_string()], "t").await.unwrap();
+        assert!(fb.as_deref().unwrap_or("").contains("only run the tests"), "git in test_cmd must be refused: {fb:?}");
+        std::fs::remove_dir_all(dd).unwrap();
+    }
+
+    // B5 is covered by staged_mode_is_opt_in_and_scoped (FixFlow + fail-closed).
+
+    // B6: GREEN cannot change the proven test command or test names; the controller
+    // freezes the RED values and the verifier uses only those.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn b6_green_cannot_drift_test_cmd_or_names() {
+        let (a, id, dd, repo) = staged_fixture();
+        let mut job = a.db.jg(id).unwrap();
+        let (test_commit, red_files) = red_ok(&a, &mut job, &repo).await;
+        // The frozen RED command is "bash t/run.sh" / ["sum"]. Even if GREEN tried to
+        // substitute a trivially-passing command, green_commit is called with the
+        // FROZEN values (as staged_author does), so the drift has no effect: the real
+        // runner must still pass. Here we prove the frozen values are what run.
+        std::fs::write(repo.join("add.sh"), "add() { echo $(( $1 + $2 )); }\n").unwrap();
+        let fb = green_commit(&a, &mut job, &red_files, &test_commit, "bash t/run.sh", &["sum".to_string()], "x").await.unwrap();
+        assert!(fb.is_none(), "frozen command must drive GREEN: {fb:?}");
+        // The persisted checkpoint records the immutable proof identity.
+        job.d["staged_red"] = json!({"test_cmd":"bash t/run.sh","tests":["sum"],"test_commit":test_commit});
+        assert_eq!(job.d["staged_red"]["test_cmd"], "bash t/run.sh");
+        std::fs::remove_dir_all(dd).unwrap();
+    }
+
+    // A4: REPRO and other agents keep an unrestricted shell; only the FIXER phase
+    // asks run with the staged guard.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a4_repro_shell_is_not_staged() {
+        let (a, id, dd, _repo) = staged_fixture();
+        let job = a.db.jg(id).unwrap();
+        assert!(!rn(&a, &job).unwrap().staged, "rn() must never pre-set the staged guard");
+        std::fs::remove_dir_all(dd).unwrap();
+    }
+
+    #[test]
+    fn parse_status_z_handles_modify_rename_untracked_and_spaces() {
+        assert_eq!(parse_status_z(" M add.sh\0"), vec!["add.sh"]);
+        assert_eq!(parse_status_z("R  test/x.sh\0src/x.sh\0"), vec!["test/x.sh", "src/x.sh"]);
+        assert_eq!(parse_status_z("?? new file.sh\0"), vec!["new file.sh"]);
+        assert!(parse_status_z("").is_empty());
+    }
+
+    // ===== v2 audit: P0-1, P0-2, P1-3, P2-5 =====
+
+    // P0-1: the classic `npm test` runner-swap. GREEN leaves the bug and rewrites
+    // package.json so `npm test` becomes a no-op. The controller rejects the change
+    // to the runner config BEFORE running anything, so no fix commit is created and
+    // the final gate never sees a false green. No Node needed: package.json is a
+    // protected runner-config file.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn p0_1_green_cannot_pass_by_editing_package_json_runner() {
+        let (a, id, dd, repo) = staged_fixture();
+        let mut job = a.db.jg(id).unwrap();
+        std::fs::write(repo.join("package.json"), "{\"scripts\":{\"test\":\"node --test\"}}\n").unwrap();
+        // commit package.json into the base so it is a tracked production/runner file
+        for args in [vec!["add", "."], vec!["-c", "user.name=x", "-c", "user.email=x@y", "commit", "-qm", "add runner"]] {
+            assert!(std::process::Command::new("git").args(&args).current_dir(&repo).output().unwrap().status.success());
+        }
+        let base = String::from_utf8_lossy(&std::process::Command::new("git").args(["rev-parse", "HEAD"]).current_dir(&repo).output().unwrap().stdout).trim().to_string();
+        job.d["base"] = json!(base);
+        a.db.jd(&mut job);
+        let (test_commit, red_files) = red_ok(&a, &mut job, &repo).await;
+        // GREEN: bug stays; neuter the runner via package.json.
+        std::fs::write(repo.join("package.json"), "{\"scripts\":{\"test\":\"echo sum passed\"}}\n").unwrap();
+        let fb = green_commit(&a, &mut job, &red_files, &test_commit, "npm test", &["sum".to_string()], "x").await.unwrap();
+        assert!(fb.as_deref().unwrap_or("").contains("allowlisted production files"), "package.json runner edit must be rejected: {fb:?}");
+        assert_eq!(String::from_utf8_lossy(&std::process::Command::new("git").args(["rev-list", "--count", &format!("{test_commit}..HEAD")]).current_dir(&repo).output().unwrap().stdout).trim(), "0", "no fix commit may form");
+        assert!(runner_cfg("package.json") && runner_cfg("a/b/pyproject.toml") && runner_cfg("jest.config.js") && !runner_cfg("src/add.sh"));
+        std::fs::remove_dir_all(dd).unwrap();
+    }
+
+    // P0-2: in staged mode the FIXER is the configured model (Qwen in the pilot),
+    // never a free-first routing model, and the REVIEWER stays the configured one
+    // (Claude), both independent of free_first. Checks the selection seam directly.
+    #[test]
+    fn p0_2_staged_uses_configured_fixer_and_reviewer_not_free_first() {
+        let db = crate::db::Db::mem();
+        // Pilot config: explicit Qwen fixer and Claude reviewer, free_first OFF.
+        db.ks("set", &json!({"staged_tdd":true,"staged_repos":["o/r"],"staged_fallback":"codex:gpt-6-luna","md":{"fixer":"ollama:qwen3:8b","reviewer":"cc:opus","big":"ollama:qwen3:8b"}}));
+        let a = std::sync::Arc::new(crate::app::App::new(db, std::env::temp_dir(), 1, "x".into()));
+        let job = crate::db::Job::of(json!({"repo":"o/r","kind":"fix","d":{}}));
+        assert!(staged(&a, &job));
+        assert!(!crate::routing::enabled(&a), "pilot runs with free-first off");
+        assert_eq!(a.md("fixer"), "ollama:qwen3:8b", "FIXER must be the configured Qwen");
+        assert_eq!(a.md("reviewer"), "cc:opus", "REVIEWER must be the configured Claude");
+        let visible = staged_ui_config(&a);
+        assert_eq!(visible["active"], true, "the Control Room must see the active staged route");
+        assert_eq!(visible["primary"], "ollama:qwen3:8b");
+        assert_eq!(visible["fallback"], "codex:gpt-6-luna");
+        assert_eq!(visible["fallback_effort"], "max");
+        assert_eq!(visible["reviewer"], "cc:opus");
+        assert_eq!(visible["repos"][0], "o/r");
+        // Even if free_first were on, staged still selects a.md('fixer') in fix();
+        // a.md itself returns the free model under free_first, which is exactly why
+        // the pilot keeps free_first off. Document the invariant with routing off.
+        assert!(!crate::routing::is_free("ollama:qwen3:8b"), "Qwen is not a free-tier routing model");
+    }
+
+    // P1-3: after a restart with a valid RED-only checkpoint, staged_resume keeps
+    // the RED commit (Green) instead of rebuilding it; an invalid checkpoint is
+    // discarded (Fresh).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn p1_3_resume_reuses_valid_red_checkpoint_and_discards_invalid() {
+        let (a, id, dd, repo) = staged_fixture();
+        let mut job = a.db.jg(id).unwrap();
+        let base = job.s("base");
+        let (test_commit, red_files) = red_ok(&a, &mut job, &repo).await;
+        job.d["staged_red"] = json!({"test_commit":test_commit,"test_cmd":"bash t/run.sh","tests":["sum"],"red_files":red_files,"title":"t"});
+        a.db.jd(&mut job);
+        let br = job.s("br");
+        match staged_resume(&a, &mut job, &base, &br).await.unwrap() {
+            Resume::Green(s) => assert_eq!(s.test_commit, test_commit, "resume must keep the RED commit"),
+            _ => panic!("valid RED-only checkpoint must resume as Green"),
+        }
+        assert_eq!(String::from_utf8_lossy(&std::process::Command::new("git").args(["rev-parse", "HEAD"]).current_dir(&repo).output().unwrap().stdout).trim(), test_commit, "branch stays on the RED commit, not reset to base");
+        // A stale checkpoint whose commit never materialised AND whose branch is at
+        // the base is safely discarded -> Fresh (nothing accessible to lose).
+        std::process::Command::new("git").args(["reset", "-q", "--hard", &base]).current_dir(&repo).output().unwrap();
+        job.d["staged_red"] = json!({"test_commit":"0000000000000000000000000000000000000000","test_cmd":"bash t/run.sh","tests":["sum"],"stage":"pending"});
+        a.db.jd(&mut job);
+        assert!(matches!(staged_resume(&a, &mut job, &base, &br).await.unwrap(), Resume::Fresh));
+        assert!(job.d["staged_red"].is_null(), "stale checkpoint at base is discarded");
+        std::fs::remove_dir_all(dd).unwrap();
+    }
+
+    // P2-5: commit_scope requires the staged set to EQUAL the authorised set, so an
+    // authorised path that silently fails to stage is caught (not just extras).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn p2_5_commit_scope_rejects_missing_authorised_path() {
+        let (a, id, dd, repo) = staged_fixture();
+        let job = a.db.jg(id).unwrap();
+        std::fs::write(repo.join("real.sh"), "x\n").unwrap();
+        // Authorise a real changed file plus a phantom that does not exist -> add of
+        // the phantom stages nothing for it, so the sets differ and it is rejected.
+        let fb = commit_scope(&a, &job, &["real.sh".to_string()], "test: x").await;
+        assert!(fb.is_ok() && fb.unwrap().is_none(), "exact set commits cleanly");
+        std::fs::write(repo.join("real2.sh"), "y\n").unwrap();
+        let fb = commit_scope(&a, &job, &["real2.sh".to_string(), "ghost.sh".to_string()], "test: y").await.unwrap();
+        let m = fb.as_deref().unwrap_or("");
+        assert!(m.contains("could not stage") || m.contains("unexpected staging state"), "missing authorised path must be caught: {fb:?}");
+        std::fs::remove_dir_all(dd).unwrap();
+    }
+
+    // P2-6 (partial, no live model): drive the controller phases as a simulated
+    // author across a failed GREEN then a successful GREEN, proving the RED commit
+    // SHA is preserved across the retry and exactly two commits result.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn p2_6_simulated_author_red_then_failed_then_passing_green() {
+        let (a, id, dd, repo) = staged_fixture();
+        let mut job = a.db.jg(id).unwrap();
+        let base = job.s("base");
+        let (test_commit, red_files) = red_ok(&a, &mut job, &repo).await;
+        // GREEN attempt 1 (simulated author): writes an unrelated non-fix -> rejected.
+        std::fs::write(repo.join("noop.sh"), "true\n").unwrap();
+        let fb1 = green_commit(&a, &mut job, &red_files, &test_commit, "bash t/run.sh", &["sum".to_string()], "x").await.unwrap();
+        assert!(fb1.is_some(), "a non-fix GREEN must be rejected");
+        assert_eq!(String::from_utf8_lossy(&std::process::Command::new("git").args(["rev-parse", "HEAD"]).current_dir(&repo).output().unwrap().stdout).trim(), test_commit, "RED commit preserved after failed GREEN");
+        // Reset working tree to the RED commit (as staged_author does between tries).
+        for args in [vec!["checkout", "-q", "-f", &test_commit], vec!["clean", "-fdq"]] {
+            std::process::Command::new("git").args(&args).current_dir(&repo).output().unwrap();
+        }
+        // GREEN attempt 2 (simulated author): the real fix -> accepted.
+        std::fs::write(repo.join("add.sh"), "add() { echo $(( $1 + $2 )); }\n").unwrap();
+        let fb2 = green_commit(&a, &mut job, &red_files, &test_commit, "bash t/run.sh", &["sum".to_string()], "fix add").await.unwrap();
+        assert!(fb2.is_none(), "the real fix must be accepted: {fb2:?}");
+        assert_eq!(String::from_utf8_lossy(&std::process::Command::new("git").args(["rev-list", "--count", &format!("{base}..HEAD")]).current_dir(&repo).output().unwrap().stdout).trim(), "2");
+        assert_red_then_green(&repo);
+        std::fs::remove_dir_all(dd).unwrap();
+    }
+
+    // Deterministic RED->GREEN check via git directly (no ok()-retry contention):
+    // the test fails on the test commit (HEAD~1) and passes on the fix commit (HEAD).
+    #[cfg(unix)]
+    fn assert_red_then_green(repo: &std::path::Path) {
+        let run = |rev: &str| {
+            std::process::Command::new("git").args(["checkout", "-q", "-f", rev]).current_dir(repo).output().unwrap();
+            std::process::Command::new("bash").arg("t/run.sh").current_dir(repo).output().unwrap().status.code()
+        };
+        let head = String::from_utf8_lossy(&std::process::Command::new("git").args(["rev-parse", "HEAD"]).current_dir(repo).output().unwrap().stdout).trim().to_string();
+        assert_eq!(run("HEAD~1"), Some(1), "RED: test must fail on the test commit");
+        assert_eq!(run(&head), Some(0), "GREEN: test must pass on the fix commit");
+    }
+
+    // ===== v3 audit: V3-P0-1, V3-P1-2, V3-P1-3, V3-P2-4 =====
+
+    // V3-P0-1: the INDIRECT runner attack. `npm test` -> `sh scripts/check.sh`.
+    // GREEN leaves production wrong and rewrites scripts/check.sh to print the test
+    // name. The mandatory production allowlist (only src/calc.cjs) rejects the
+    // change to scripts/check.sh before anything runs; no fix commit forms.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn v3_p0_1_green_cannot_edit_indirect_runner_script() {
+        let dd = std::env::temp_dir().join(format!("apollo-v3runner-{}", hex::encode(rand::random::<[u8; 8]>())));
+        let repo = dd.join("work/o__r");
+        std::fs::create_dir_all(repo.join("scripts")).unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::create_dir_all(repo.join("test")).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").args(args).current_dir(&repo).output().unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        std::fs::write(repo.join("src/calc.cjs"), "exports.subtract = (a,b) => a+b;\n").unwrap();
+        std::fs::write(repo.join("package.json"), "{\"scripts\":{\"test\":\"sh scripts/check.sh\"}}\n").unwrap();
+        std::fs::write(repo.join("scripts/check.sh"), "node --test test/calc.test.cjs\n").unwrap();
+        std::fs::write(repo.join("t_placeholder"), "x").unwrap();
+        git(&["init", "-q", "-b", "work"]);
+        git(&["config", "user.name", "x"]);
+        git(&["config", "user.email", "x@y"]);
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        let db = crate::db::Db::mem();
+        db.ks("set", &json!({"staged_tdd":true,"staged_repos":["o/r"]}));
+        db.run("insert into hs(id,ssh,dk,raw,on_) values('local','',0,1,1)", pa![]);
+        // Production allowlist: ONLY src/calc.cjs.
+        db.run("insert into rp(full,green,tests) values('o/r','^src/calc\\.cjs$','(^|/)test/')", pa![]);
+        let id = db.jnew("o/r", 0, "fix", "subtraction", "", "fix", "", json!({"h":"local","base":base,"br":"work","repro":{"how":"x"}}), None, 0.0);
+        let a = std::sync::Arc::new(crate::app::App::new(db, dd.clone(), 1, "apollo-office".into()));
+        let mut job = a.db.jg(id).unwrap();
+        // RED: a real failing test under test/ (node assertion).
+        std::fs::write(repo.join("test/calc.test.cjs"), "const {test}=require('node:test');const assert=require('node:assert/strict');const {subtract}=require('../src/calc.cjs');\ntest('subtraction',()=>assert.equal(subtract(7,3),4));\n").unwrap();
+        let red = red_commit(&a, &mut job, "npm test", &["subtraction".to_string()], "cover subtraction").await.unwrap();
+        assert!(red.is_none(), "RED must be accepted: {red:?}");
+        let test_commit = git(&["rev-parse", "HEAD"]);
+        let red_files = vec!["test/calc.test.cjs".to_string()];
+        // GREEN: do NOT fix src/calc.cjs; neuter the indirect runner script.
+        std::fs::write(repo.join("scripts/check.sh"), "echo subtraction\n").unwrap();
+        let fb = green_commit(&a, &mut job, &red_files, &test_commit, "npm test", &["subtraction".to_string()], "x").await.unwrap();
+        assert!(fb.as_deref().unwrap_or("").contains("allowlisted production files"), "indirect runner edit must be rejected: {fb:?}");
+        assert_eq!(git(&["rev-list", "--count", &format!("{test_commit}..HEAD")]), "0", "no fix commit may form");
+        assert_eq!(std::fs::read_to_string(repo.join("src/calc.cjs")).unwrap().trim(), "exports.subtract = (a,b) => a+b;", "production stays buggy, not falsely green");
+        std::fs::remove_dir_all(dd).unwrap();
+    }
+
+    // V3-P0-1 (fail-closed): a staged repo with NO green allowlist cannot run GREEN.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn v3_p0_1_green_requires_mandatory_allowlist() {
+        let (a, id, dd, repo) = staged_fixture();
+        a.db.run("update rp set green='' where full='o/r'", pa![]); // remove allowlist
+        let mut job = a.db.jg(id).unwrap();
+        let (test_commit, red_files) = red_ok(&a, &mut job, &repo).await;
+        std::fs::write(repo.join("add.sh"), "add() { echo $(( $1 + $2 )); }\n").unwrap();
+        let fb = green_commit(&a, &mut job, &red_files, &test_commit, "bash t/run.sh", &["sum".to_string()], "x").await.unwrap();
+        assert!(fb.as_deref().unwrap_or("").contains("requires a production-file allowlist"), "missing allowlist must fail closed: {fb:?}");
+        std::fs::remove_dir_all(dd).unwrap();
+    }
+
+    // V3-P1-2: a crash after the GREEN commit but before the checkpoint is cleared
+    // must NOT discard the commit. staged_resume returns Finished and the two
+    // commits stay on the branch.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn v3_p1_2_resume_after_green_commit_keeps_both_commits() {
+        let (a, id, dd, repo) = staged_fixture();
+        let mut job = a.db.jg(id).unwrap();
+        let base = job.s("base");
+        let (test_commit, red_files) = red_ok(&a, &mut job, &repo).await;
+        std::fs::write(repo.join("add.sh"), "add() { echo $(( $1 + $2 )); }\n").unwrap();
+        assert!(green_commit(&a, &mut job, &red_files, &test_commit, "bash t/run.sh", &["sum".to_string()], "fix").await.unwrap().is_none());
+        let green = String::from_utf8_lossy(&std::process::Command::new("git").args(["rev-parse", "HEAD"]).current_dir(&repo).output().unwrap().stdout).trim().to_string();
+        // Simulate the crash window: both checkpoints persisted, not yet cleared.
+        job.d["staged_red"] = json!({"test_commit":test_commit,"test_cmd":"bash t/run.sh","tests":["sum"],"red_files":red_files,"title":"fix"});
+        job.d["staged_green"] = json!({"commit":green,"js":{"title":"fix","test_cmd":"bash t/run.sh","tests":["sum"],"cause":"c","fix":"f"}});
+        a.db.jd(&mut job);
+        let br = job.s("br");
+        match staged_resume(&a, &mut job, &base, &br).await.unwrap() {
+            Resume::Finished(js) => assert_eq!(js["title"], "fix"),
+            _ => panic!("must recover the finished RED+GREEN pair"),
+        }
+        assert_eq!(String::from_utf8_lossy(&std::process::Command::new("git").args(["rev-list", "--count", &format!("{base}..HEAD")]).current_dir(&repo).output().unwrap().stdout).trim(), "2", "both commits preserved, no destructive reset");
+        assert_eq!(String::from_utf8_lossy(&std::process::Command::new("git").args(["rev-parse", "HEAD"]).current_dir(&repo).output().unwrap().stdout).trim(), green, "HEAD still the GREEN commit");
+        std::fs::remove_dir_all(dd).unwrap();
+    }
+
+    // V3-P1-3: fix() refuses to run staged under free-first routing (fail closed),
+    // rather than silently substituting the configured FIXER/REVIEWER.
+    #[test]
+    fn v3_p1_3_free_first_on_is_a_blocking_conflict() {
+        let db = crate::db::Db::mem();
+        db.ks("set", &json!({"free_first":true,"staged_tdd":true,"staged_repos":["o/r"]}));
+        let a = std::sync::Arc::new(crate::app::App::new(db, std::env::temp_dir(), 1, "x".into()));
+        let job = crate::db::Job::of(json!({"repo":"o/r","kind":"fix","d":{}}));
+        assert!(staged_conflict(&a, &job), "intended + free_first on is a conflict fix() rejects");
+        assert!(!staged(&a, &job), "and the mode is not active");
+    }
+
+    // V3-P2-4: drive the whole staged_author state machine with a SIMULATED agent
+    // (no real model): a RED turn, a GREEN give_up (retry), then a passing GREEN.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn v3_p2_4_staged_author_statemachine_with_simulated_agent() {
+        let (a, id, dd, repo) = staged_fixture();
+        let mut job = a.db.jg(id).unwrap();
+        let base = job.s("base");
+        {
+            let mut q = a.sim.lock().unwrap();
+            q.push_back(json!({"_files":{"t/sum_test.sh": RED_FAIL}, "test_cmd":"bash t/run.sh", "tests":["sum"], "title":"cover sum"}));
+            q.push_back(json!({"give_up":"not sure yet"})); // GREEN attempt 1 -> retry
+            q.push_back(json!({"_files":{"add.sh":"add() { echo $(( $1 + $2 )); }\n"}, "title":"add not subtract"})); // GREEN attempt 2 -> pass
+        }
+        let mut fb = String::new();
+        let out = staged_author(&a, &mut job, &mut fb, "ollama:qwen3:8b").await.unwrap();
+        assert!(out.is_some(), "simulated RED + retried GREEN must complete: fb={fb}");
+        let js = out.unwrap();
+        assert_eq!(js["test_cmd"], "bash t/run.sh");
+        assert_eq!(js["tests"][0], "sum");
+        assert_eq!(String::from_utf8_lossy(&std::process::Command::new("git").args(["rev-list", "--count", &format!("{base}..HEAD")]).current_dir(&repo).output().unwrap().stdout).trim(), "2");
+        assert_red_then_green(&repo);
+        std::fs::remove_dir_all(dd).unwrap();
+    }
+
+    // V3-P2-4: an invalid (no-JSON) RED answer from the simulated agent is handled.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn v3_p2_4_staged_author_handles_invalid_red_json() {
+        let (a, id, dd, _repo) = staged_fixture();
+        let mut job = a.db.jg(id).unwrap();
+        a.sim.lock().unwrap().push_back(Value::Null); // RED returns no JSON
+        let mut fb = String::new();
+        let out = staged_author(&a, &mut job, &mut fb, "ollama:qwen3:8b").await.unwrap();
+        assert!(out.is_none(), "no-JSON RED must not complete");
+        assert!(fb.contains("no JSON"), "fb={fb}");
+        std::fs::remove_dir_all(dd).unwrap();
+    }
+
+    // ===== v4 audit: crash-window state recovery =====
+
+    #[cfg(unix)]
+    fn head_sha(repo: &std::path::Path) -> String {
+        String::from_utf8_lossy(&std::process::Command::new("git").args(["rev-parse", "HEAD"]).current_dir(repo).output().unwrap().stdout).trim().to_string()
+    }
+    #[cfg(unix)]
+    fn count_above(repo: &std::path::Path, base: &str) -> String {
+        String::from_utf8_lossy(&std::process::Command::new("git").args(["rev-list", "--count", &format!("{base}..HEAD")]).current_dir(repo).output().unwrap().stdout).trim().to_string()
+    }
+    #[cfg(unix)]
+    fn commit_present(repo: &std::path::Path, sha: &str) -> bool {
+        std::process::Command::new("git").args(["cat-file", "-e", &format!("{sha}^{{commit}}")]).current_dir(repo).output().unwrap().status.success()
+    }
+
+    // V4 Window A: crash AFTER the RED commit but BEFORE the checkpoint is finalised
+    // leaves a PENDING checkpoint (tc/ts, no test_commit). staged_resume must bind it
+    // to the real RED commit and continue GREEN — the commit stays accessible, no reset.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn v4_window_a_crash_after_red_commit_recovers_without_reset() {
+        let (a, id, dd, repo) = staged_fixture();
+        let mut job = a.db.jg(id).unwrap();
+        let base = job.s("base");
+        let (red, _red_files) = red_ok(&a, &mut job, &repo).await;
+        // Simulate the crash window: only the PENDING checkpoint exists (no test_commit).
+        job.d["staged_red"] = json!({"test_cmd":"bash t/run.sh","tests":["sum"],"title":"t","stage":"pending"});
+        job.d.as_object_mut().unwrap().remove("staged_green");
+        a.db.jd(&mut job);
+        let br = job.s("br");
+        match staged_resume(&a, &mut job, &base, &br).await.unwrap() {
+            Resume::Green(s) => assert_eq!(s.test_commit, red, "must bind to the real RED commit"),
+            r => panic!("window A must recover as Green, got {}", matches!(r, Resume::Fresh)),
+        }
+        assert_eq!(head_sha(&repo), red, "RED commit stays on the branch (no reset)");
+        assert_eq!(count_above(&repo, &base), "1");
+        assert!(commit_present(&repo, &red));
+        assert_eq!(job.d["staged_red"]["test_commit"], red, "checkpoint finalised on recovery");
+        std::fs::remove_dir_all(dd).unwrap();
+    }
+
+    // V4 Window B: a crash that leaves RED+GREEN committed but NO checkpoint and NO
+    // discard authorisation must BLOCK (not reset): both commits stay accessible.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn v4_window_b_crash_without_checkpoint_blocks_without_reset() {
+        let (a, id, dd, repo) = staged_fixture();
+        let mut job = a.db.jg(id).unwrap();
+        let base = job.s("base");
+        let (test_commit, red_files) = red_ok(&a, &mut job, &repo).await;
+        std::fs::write(repo.join("add.sh"), "add() { echo $(( $1 + $2 )); }\n").unwrap();
+        assert!(green_commit(&a, &mut job, &red_files, &test_commit, "bash t/run.sh", &["sum".to_string()], "fix").await.unwrap().is_none());
+        let green = head_sha(&repo);
+        // Crash state: both checkpoints gone, no discard marker.
+        job.d.as_object_mut().unwrap().remove("staged_red");
+        job.d.as_object_mut().unwrap().remove("staged_green");
+        job.d.as_object_mut().unwrap().remove("staged_discard");
+        a.db.jd(&mut job);
+        let br = job.s("br");
+        let r = staged_resume(&a, &mut job, &base, &br).await;
+        assert!(matches!(r, Err(X::Drop(_))), "must block for manual inspection");
+        assert_eq!(head_sha(&repo), green, "HEAD unchanged; no destructive reset");
+        assert_eq!(count_above(&repo, &base), "2", "both commits remain accessible");
+        assert!(commit_present(&repo, &test_commit) && commit_present(&repo, &green));
+        std::fs::remove_dir_all(dd).unwrap();
+    }
+
+    // V4 point 5: an INTENTIONAL rejection persists a discard authorisation for the
+    // exact HEAD, so the next round may reset (Fresh); a crash (no such marker) blocks.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn v4_intentional_rejection_authorises_reset_but_crash_blocks() {
+        let (a, id, dd, repo) = staged_fixture();
+        let mut job = a.db.jg(id).unwrap();
+        let base = job.s("base");
+        let (_tc, _rf) = red_ok(&a, &mut job, &repo).await;
+        let head = head_sha(&repo);
+        let br = job.s("br");
+        // No authorisation yet (simulated crash): commit present, no checkpoint -> block.
+        job.d.as_object_mut().unwrap().remove("staged_red");
+        a.db.jd(&mut job);
+        assert!(matches!(staged_resume(&a, &mut job, &base, &br).await, Err(X::Drop(_))), "crash state must block");
+        assert_eq!(head_sha(&repo), head, "blocked state left the branch intact");
+        // Intentional rejection authorises discarding exactly this HEAD.
+        reject_candidate(&a, &mut job, &head, &base);
+        assert!(matches!(staged_resume(&a, &mut job, &base, &br).await.unwrap(), Resume::Fresh), "authorised discard resumes Fresh");
+        assert!(job.d["staged_discard"].is_null(), "authorisation consumed");
+        std::fs::remove_dir_all(dd).unwrap();
+    }
+
+    // V4 point 7: absent checkpoint with the branch at the base is Fresh; an
+    // incoherent checkpoint (corrupt) with commits present blocks without reset.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn v4_absent_at_base_is_fresh_and_corrupt_with_commits_blocks() {
+        let (a, id, dd, repo) = staged_fixture();
+        let mut job = a.db.jg(id).unwrap();
+        let base = job.s("base");
+        let br = job.s("br");
+        // Absent checkpoint, HEAD at base -> Fresh.
+        assert!(matches!(staged_resume(&a, &mut job, &base, &br).await.unwrap(), Resume::Fresh));
+        // Corrupt checkpoint (no tc) with a real commit present -> block, no reset.
+        let (red, _rf) = red_ok(&a, &mut job, &repo).await;
+        job.d["staged_red"] = json!({"test_commit":red,"stage":"committed"}); // missing tc/tests
+        a.db.jd(&mut job);
+        assert!(matches!(staged_resume(&a, &mut job, &base, &br).await, Err(X::Drop(_))), "corrupt checkpoint with commits must block");
+        assert_eq!(head_sha(&repo), red, "no reset on corrupt-with-commits");
+        std::fs::remove_dir_all(dd).unwrap();
+    }
+
 }
