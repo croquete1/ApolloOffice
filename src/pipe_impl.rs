@@ -418,6 +418,7 @@ fn pr_title(preferred: Option<&str>, f: &Value, fallback: &str) -> R<String> {
     e("cannot publish a pull request without a title")
 }
 
+#[cfg(test)]
 fn commit_subject(title: &str, feature: bool) -> R<String> {
     commit_subject_kind(title, if feature { "feat" } else { "fix" })
 }
@@ -448,6 +449,7 @@ fn optimization_commit_subject(title: &str) -> R<String> {
         .to_string())
 }
 
+#[cfg(test)]
 fn commit_subject_kind(title: &str, kind: &str) -> R<String> {
     let title = title
         .lines()
@@ -1044,7 +1046,11 @@ pub fn fails(o: &str) -> Vec<String> {
 }
 
 pub fn bare(t: &str) -> String {
-    t.rsplit(|c| c == ':' || c == '.' || c == '/' || c == '>' || c == ' ').find(|x| !x.trim().is_empty()).unwrap_or(t).trim().to_string()
+    t.rsplit([':', '.', '/', '>', ' '])
+        .find(|x| !x.trim().is_empty())
+        .unwrap_or(t)
+        .trim()
+        .to_string()
 }
 
 pub const CE: &str = r"error\[E\d+\]|could not compile|error: no test target|no such command|SyntaxError|ReferenceError|ModuleNotFoundError|ImportError while|cannot find module|Cannot find module|ERROR collecting|error TS\d{4}|no tests ran|No tests found|build failed|\[setup failed\]|undefined: |command not found|(?m:^[^\n]*\.java:\d+: error:)|ClassNotFoundException|NoClassDefFoundError";
@@ -1943,13 +1949,14 @@ fn fixp(a: &Ax, j: &Job, fb: &str) -> String {
     let h = if j.opt() { format!("{h}\n{OPT}") } else if j.feat() { format!("{h}\n{FEAT}") } else { h };
     let commit_roles = if j.opt() { "verification, optimization" } else if j.feat() { "test, feature" } else { "test, fix" };
     format!(
-        "{h}\n{}:\n{}\n\n{} (from a previous agent): {}{}{}",
+        "{h}\n{}:\n{}\n\n{} (from a previous agent): {}{}{}{}",
         j.orig(),
         wrap("issue", &format!("{}\n\n{}", j.title, j.s("body"))),
         if j.feat() || j.opt() { "Implementation plan" } else { "Repro result" },
         j.d["repro"],
         if fb.is_empty() { String::new() } else { format!("\n\nYour previous attempt was rejected by the pipeline:\n{fb}\nThe branch still contains your previous commits; fix the problems and make sure there are exactly two commits ({commit_roles}) on top of the base commit.") },
-        format!("{}{}",rules(a, j),crate::quality::context(j))
+        rules(a, j),
+        crate::quality::context(j)
     )
 }
 

@@ -318,7 +318,10 @@ impl Job {
         } else if self.feat() {
             format!("Feature request, issue #{}", self.num)
         } else if self.opt() {
-            format!("Behaviour-preserving optimization request, issue #{}", self.num)
+            format!(
+                "Behaviour-preserving optimization request, issue #{}",
+                self.num
+            )
         } else {
             format!("Issue #{}", self.num)
         }

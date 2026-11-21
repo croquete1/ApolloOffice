@@ -17,6 +17,8 @@ mod routing;
 mod sh;
 mod star;
 mod steward;
+// This opt-in cleanup implementation is retained until its Control Room toggle ships.
+#[allow(dead_code)]
 mod steward_close;
 mod steward_merge;
 mod steward_repair;

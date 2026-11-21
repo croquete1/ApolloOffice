@@ -1234,7 +1234,10 @@ mod tests {
             "test \"$(node --version)\" = v24.22.3",
             "test \"$(npm --version)\" = 12.2.0",
         ] {
-            assert!(super::DF.contains(marker), "missing worker image setting: {marker}");
+            assert!(
+                super::DF.contains(marker),
+                "missing worker image setting: {marker}"
+            );
         }
         assert!(!super::DF.contains("python3-dev nodejs npm"));
     }

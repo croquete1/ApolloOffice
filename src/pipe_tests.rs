@@ -1772,7 +1772,7 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':10,'output_tok
         }
         let base = String::from_utf8_lossy(&std::process::Command::new("git").args(["rev-parse", "HEAD"]).current_dir(&repo).output().unwrap().stdout).trim().to_string();
         job.d["base"] = json!(base);
-        a.db.jd(&mut job);
+        a.db.jd(&job);
         let (test_commit, red_files) = red_ok(&a, &mut job, &repo).await;
         // GREEN: bug stays; neuter the runner via package.json.
         std::fs::write(repo.join("package.json"), "{\"scripts\":{\"test\":\"echo sum passed\"}}\n").unwrap();
@@ -1821,7 +1821,7 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':10,'output_tok
         let base = job.s("base");
         let (test_commit, red_files) = red_ok(&a, &mut job, &repo).await;
         job.d["staged_red"] = json!({"test_commit":test_commit,"test_cmd":"bash t/run.sh","tests":["sum"],"red_files":red_files,"title":"t"});
-        a.db.jd(&mut job);
+        a.db.jd(&job);
         let br = job.s("br");
         match staged_resume(&a, &mut job, &base, &br).await.unwrap() {
             Resume::Green(s) => assert_eq!(s.test_commit, test_commit, "resume must keep the RED commit"),
@@ -1832,7 +1832,7 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':10,'output_tok
         // the base is safely discarded -> Fresh (nothing accessible to lose).
         std::process::Command::new("git").args(["reset", "-q", "--hard", &base]).current_dir(&repo).output().unwrap();
         job.d["staged_red"] = json!({"test_commit":"0000000000000000000000000000000000000000","test_cmd":"bash t/run.sh","tests":["sum"],"stage":"pending"});
-        a.db.jd(&mut job);
+        a.db.jd(&job);
         assert!(matches!(staged_resume(&a, &mut job, &base, &br).await.unwrap(), Resume::Fresh));
         assert!(job.d["staged_red"].is_null(), "stale checkpoint at base is discarded");
         std::fs::remove_dir_all(dd).unwrap();
@@ -1980,7 +1980,7 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':10,'output_tok
         // Simulate the crash window: both checkpoints persisted, not yet cleared.
         job.d["staged_red"] = json!({"test_commit":test_commit,"test_cmd":"bash t/run.sh","tests":["sum"],"red_files":red_files,"title":"fix"});
         job.d["staged_green"] = json!({"commit":green,"js":{"title":"fix","test_cmd":"bash t/run.sh","tests":["sum"],"cause":"c","fix":"f"}});
-        a.db.jd(&mut job);
+        a.db.jd(&job);
         let br = job.s("br");
         match staged_resume(&a, &mut job, &base, &br).await.unwrap() {
             Resume::Finished(js) => assert_eq!(js["title"], "fix"),
@@ -2070,7 +2070,7 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':10,'output_tok
         // Simulate the crash window: only the PENDING checkpoint exists (no test_commit).
         job.d["staged_red"] = json!({"test_cmd":"bash t/run.sh","tests":["sum"],"title":"t","stage":"pending"});
         job.d.as_object_mut().unwrap().remove("staged_green");
-        a.db.jd(&mut job);
+        a.db.jd(&job);
         let br = job.s("br");
         match staged_resume(&a, &mut job, &base, &br).await.unwrap() {
             Resume::Green(s) => assert_eq!(s.test_commit, red, "must bind to the real RED commit"),
@@ -2099,7 +2099,7 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':10,'output_tok
         job.d.as_object_mut().unwrap().remove("staged_red");
         job.d.as_object_mut().unwrap().remove("staged_green");
         job.d.as_object_mut().unwrap().remove("staged_discard");
-        a.db.jd(&mut job);
+        a.db.jd(&job);
         let br = job.s("br");
         let r = staged_resume(&a, &mut job, &base, &br).await;
         assert!(matches!(r, Err(X::Drop(_))), "must block for manual inspection");
@@ -2122,7 +2122,7 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':10,'output_tok
         let br = job.s("br");
         // No authorisation yet (simulated crash): commit present, no checkpoint -> block.
         job.d.as_object_mut().unwrap().remove("staged_red");
-        a.db.jd(&mut job);
+        a.db.jd(&job);
         assert!(matches!(staged_resume(&a, &mut job, &base, &br).await, Err(X::Drop(_))), "crash state must block");
         assert_eq!(head_sha(&repo), head, "blocked state left the branch intact");
         // Intentional rejection authorises discarding exactly this HEAD.
@@ -2146,7 +2146,7 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':10,'output_tok
         // Corrupt checkpoint (no tc) with a real commit present -> block, no reset.
         let (red, _rf) = red_ok(&a, &mut job, &repo).await;
         job.d["staged_red"] = json!({"test_commit":red,"stage":"committed"}); // missing tc/tests
-        a.db.jd(&mut job);
+        a.db.jd(&job);
         assert!(matches!(staged_resume(&a, &mut job, &base, &br).await, Err(X::Drop(_))), "corrupt checkpoint with commits must block");
         assert_eq!(head_sha(&repo), red, "no reset on corrupt-with-commits");
         std::fs::remove_dir_all(dd).unwrap();

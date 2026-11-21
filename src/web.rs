@@ -492,7 +492,14 @@ async fn checks(a: &Ax) -> Value {
             .await
         }
     };
-    let (g, h, c, d, b, codex) = tokio::join!(v(&tool("git"), &["--version"]), v(&tool("gh"), &["api", "user", "--jq", ".login"]), v(&tool("claude"), &["--version"]), v(&tool("docker"), &["info", "--format", "{{.ServerVersion}}"]), v(&crate::sh::bash(), &["-c", "echo ok"]), v(&tool("codex"), &["--version"]));
+    let (g, h, c, d, b, codex) = tokio::join!(
+        v(&tool("git"), &["--version"]),
+        v(&tool("gh"), &["api", "user", "--jq", ".login"]),
+        v(&tool("claude"), &["--version"]),
+        v(&tool("docker"), &["info", "--format", "{{.ServerVersion}}"]),
+        v(&crate::sh::bash(), &["-c", "echo ok"]),
+        v(&tool("codex"), &["--version"])
+    );
     let _ = a;
     json!({
         "git": {"ok": g.c == 0, "m": if g.c == 0 { g.o.trim().to_string() } else { "Install git: https://git-scm.com".into() }},
@@ -702,8 +709,26 @@ fn pr_lang(value: &str) -> &'static str {
     }
 }
 
-
-const RPF: &[&str] = &["iss", "hunt", "feat", "nm", "on_", "merge", "auto_merge", "local_merge", "steward_repair", "auto_recover_drops", "maxo", "maxd", "bud", "ci", "setup", "rules", "mode", "skl"];
+const RPF: &[&str] = &[
+    "iss",
+    "hunt",
+    "feat",
+    "nm",
+    "on_",
+    "merge",
+    "auto_merge",
+    "local_merge",
+    "steward_repair",
+    "auto_recover_drops",
+    "maxo",
+    "maxd",
+    "bud",
+    "ci",
+    "setup",
+    "rules",
+    "mode",
+    "skl",
+];
 const HSF: &[&str] = &["id", "ssh", "dk", "ln", "ci", "gb", "raw", "no", "cpu"];
 
 fn export(a: &Ax) -> Value {
@@ -1401,6 +1426,7 @@ fn rid(s: &str) -> Option<String> {
     }
 }
 
+#[cfg(test)]
 fn branch_update_matches_pr(update: &Value, head: &Value, base: &Value) -> bool {
     let status = update["status"].as_str().unwrap_or("");
     if matches!(status, "error" | "blocked") {
@@ -1420,7 +1446,10 @@ fn steward_report(a: &Ax, repo: &str) -> Value {
         pa![repo.to_string(), now() - 90 * 86_400_000],
     );
     let at = now();
-    let active: Vec<_> = jobs.iter().filter(|j| !matches!(j["st"].as_str(), Some("done" | "drop"))).collect();
+    let active: Vec<_> = jobs
+        .iter()
+        .filter(|j| !matches!(j["st"].as_str(), Some("done" | "drop")))
+        .collect();
     if let Some(prs) = report["prs"].as_array_mut() {
         for pr in prs {
             let number = pr["number"].as_i64().unwrap_or(0);
@@ -1447,7 +1476,12 @@ fn steward_report(a: &Ax, repo: &str) -> Value {
                 })
             }).unwrap_or(Value::Null);
             let update = a.db.kg(&format!("steward:update:{repo}#{number}"));
-            pr["branch_update"] = if update["head"] == pr["head_sha"] || update["base"] == pr["base_sha"] { update } else { Value::Null };
+            pr["branch_update"] =
+                if update["head"] == pr["head_sha"] || update["base"] == pr["base_sha"] {
+                    update
+                } else {
+                    Value::Null
+                };
         }
     }
     report["queue"] = json!({
@@ -1483,7 +1517,9 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
         ("GET", "/api/job") => {
             let id: i64 = qv("id").parse().unwrap_or(0);
             match a.db.one("select * from jobs where id=?", pa![id]) {
-                Some(j) => js(json!({"id": j["id"], "repo": j["repo"], "num": j["num"], "kind": j["kind"], "work_class": work_class(&j), "title": j["title"], "url": j["url"], "st": j["st"], "why": j["why"], "failure": j["d"]["failure"], "pt": j["d"]["pt"], "pb": j["d"]["pb"], "df": j["d"]["df"], "proof": j["d"]["proof"], "known": j["d"]["known"], "h": j["d"]["h"], "ext": j["d"]["ext"]["src"], "cost": a.db.one("select sum(case when sub=0 then usd end) usd, sum(case when sub=1 then usd end) val, sum(tin+tcw+tcr) ti, sum(tout) tou, count(*) n from cost where job=?", pa![id]), "ev": a.db.all("select t,w,m from ev where j=? order by id desc limit 80", pa![id])})),
+                Some(j) => js(
+                    json!({"id": j["id"], "repo": j["repo"], "num": j["num"], "kind": j["kind"], "work_class": work_class(&j), "title": j["title"], "url": j["url"], "st": j["st"], "why": j["why"], "failure": j["d"]["failure"], "pt": j["d"]["pt"], "pb": j["d"]["pb"], "df": j["d"]["df"], "proof": j["d"]["proof"], "known": j["d"]["known"], "h": j["d"]["h"], "ext": j["d"]["ext"]["src"], "cost": a.db.one("select sum(case when sub=0 then usd end) usd, sum(case when sub=1 then usd end) val, sum(tin+tcw+tcr) ti, sum(tout) tou, count(*) n from cost where job=?", pa![id]), "ev": a.db.all("select t,w,m from ev where j=? order by id desc limit 80", pa![id])}),
+                ),
                 None => er(StatusCode::NOT_FOUND, "no such job"),
             }
         }
@@ -1602,7 +1638,26 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                     js(json!({"full": r, "ci": c, "setup": s, "cfg": cfg(a)}))
                 }
                 "set" => {
-                    for (k, kind) in [("iss", 0), ("hunt", 0), ("feat", 0), ("nm", 0), ("on_", 0), ("merge", 0), ("auto_merge", 0), ("local_merge", 0), ("steward_repair", 0), ("auto_recover_drops", 0), ("maxo", 1), ("maxd", 1), ("bud", 3), ("ci", 2), ("setup", 2), ("rules", 2), ("mode", 2), ("skl", 2)] {
+                    for (k, kind) in [
+                        ("iss", 0),
+                        ("hunt", 0),
+                        ("feat", 0),
+                        ("nm", 0),
+                        ("on_", 0),
+                        ("merge", 0),
+                        ("auto_merge", 0),
+                        ("local_merge", 0),
+                        ("steward_repair", 0),
+                        ("auto_recover_drops", 0),
+                        ("maxo", 1),
+                        ("maxd", 1),
+                        ("bud", 3),
+                        ("ci", 2),
+                        ("setup", 2),
+                        ("rules", 2),
+                        ("mode", 2),
+                        ("skl", 2),
+                    ] {
                         let v = &b[k];
                         if v.is_null() {
                             continue;
@@ -2113,19 +2168,41 @@ mod t {
     #[test]
     fn state_exposes_staged_route_and_only_checkpoint_summaries() {
         let db = crate::db::Db::mem();
-        db.ks("set", &json!({
-            "staged_tdd": true,
-            "staged_repos": ["o/r"],
-            "md": {"fixer": "ollama:qwen3:8b", "reviewer": "cc:opus"}
-        }));
-        db.run("insert into rp(full,on_) values(?,1)", pa!["o/r".to_string()]);
+        db.ks(
+            "set",
+            &json!({
+                "staged_tdd": true,
+                "staged_repos": ["o/r"],
+                "md": {"fixer": "ollama:qwen3:8b", "reviewer": "cc:opus"}
+            }),
+        );
+        db.run(
+            "insert into rp(full,on_) values(?,1)",
+            pa!["o/r".to_string()],
+        );
         db.jnew("o/r", 1, "fix", "bug", "", "fix", "", json!({
             "staged_red": {"stage": "committed", "test_commit": "red-sha", "test_cmd": "private command"},
             "staged_green": {"commit": "green-sha", "js": {"private": "result"}}
         }), None, 0.0);
-        db.run("insert into jobs(id,repo,num,kind,title,url,st,t1) values(?,?,?,?,?,?,?,?)",
-            pa![99, "o/r".to_string(), 2, "fix".to_string(), "recent done".to_string(), "".to_string(), "done".to_string(), now()]);
-        let a = std::sync::Arc::new(crate::app::App::new(db, std::env::temp_dir(), 1, "x".into()));
+        db.run(
+            "insert into jobs(id,repo,num,kind,title,url,st,t1) values(?,?,?,?,?,?,?,?)",
+            pa![
+                99,
+                "o/r".to_string(),
+                2,
+                "fix".to_string(),
+                "recent done".to_string(),
+                "".to_string(),
+                "done".to_string(),
+                now()
+            ],
+        );
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::env::temp_dir(),
+            1,
+            "x".into(),
+        ));
 
         let snapshot = state(&a);
         assert_eq!(snapshot["tdd"]["active"], true);
@@ -2145,11 +2222,22 @@ mod t {
     #[test]
     fn repository_auto_merge_setting_is_configurable_and_exported() {
         let db = crate::db::Db::mem();
-        db.run("insert into rp(full) values(?)", pa!["owner/repo".to_string()]);
-        let a = std::sync::Arc::new(crate::app::App::new(db.clone(), std::env::temp_dir(), 1, "x".into()));
+        db.run(
+            "insert into rp(full) values(?)",
+            pa!["owner/repo".to_string()],
+        );
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db.clone(),
+            std::env::temp_dir(),
+            1,
+            "x".into(),
+        ));
         assert_eq!(cfg(&a)["repos"][0]["merge"], 1);
         assert_eq!(export(&a)["repos"][0]["merge"], 1);
-        db.run("update rp set merge=0 where full=?", pa!["owner/repo".to_string()]);
+        db.run(
+            "update rp set merge=0 where full=?",
+            pa!["owner/repo".to_string()],
+        );
         assert_eq!(cfg(&a)["repos"][0]["merge"], 0);
         assert_eq!(export(&a)["repos"][0]["merge"], 0);
     }

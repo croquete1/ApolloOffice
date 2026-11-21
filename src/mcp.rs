@@ -377,10 +377,32 @@ mod t {
     #[test]
     fn staged_git_blocks_history_mutations_but_not_inspection_or_tests() {
         let r = regex::Regex::new(STAGED_GIT).unwrap();
-        for c in ["git commit -m x", "git reset --hard HEAD~1", "git rebase -i main", "git cherry-pick abc", "git checkout -B x base", "git revert HEAD", "git commit-tree t", "git update-ref refs/heads/x y", "git clean -fdq", "FOO=1 git  commit --amend"] {
+        for c in [
+            "git commit -m x",
+            "git reset --hard HEAD~1",
+            "git rebase -i main",
+            "git cherry-pick abc",
+            "git checkout -B x base",
+            "git revert HEAD",
+            "git commit-tree t",
+            "git update-ref refs/heads/x y",
+            "git clean -fdq",
+            "FOO=1 git  commit --amend",
+        ] {
             assert!(r.is_match(c), "should block: {c}");
         }
-        for c in ["git status --porcelain", "git diff HEAD", "git log --oneline", "git show HEAD", "git rev-parse HEAD", "git grep -n foo", "git ls-files", "bash t/run.sh", "pytest -k foo", "cargo test"] {
+        for c in [
+            "git status --porcelain",
+            "git diff HEAD",
+            "git log --oneline",
+            "git show HEAD",
+            "git rev-parse HEAD",
+            "git grep -n foo",
+            "git ls-files",
+            "bash t/run.sh",
+            "pytest -k foo",
+            "cargo test",
+        ] {
             assert!(!r.is_match(c), "should allow: {c}");
         }
     }
@@ -388,20 +410,43 @@ mod t {
     #[cfg(unix)]
     #[tokio::test]
     async fn staged_run_refuses_model_commit_but_allows_test_run() {
-        let root = std::env::temp_dir().join(format!("apollo-staged-sh-{}", hex::encode(rand::random::<[u8; 8]>())));
+        let root = std::env::temp_dir().join(format!(
+            "apollo-staged-sh-{}",
+            hex::encode(rand::random::<[u8; 8]>())
+        ));
         std::fs::create_dir_all(&root).unwrap();
         let db = crate::db::Db::mem();
         db.run("insert into hs(id,on_) values('local',1)", crate::pa![]);
         let a = std::sync::Arc::new(crate::app::App::new(db, root.clone(), 1, "x".into()));
-        let r = Rn { h: "local".into(), dir: root.display().to_string(), staged: true, ..Default::default() };
-        let err = call(&a, &r, "sh", &json!({"cmd": "git commit -m sneaky"})).await.unwrap_err();
+        let r = Rn {
+            h: "local".into(),
+            dir: root.display().to_string(),
+            staged: true,
+            ..Default::default()
+        };
+        let err = call(&a, &r, "sh", &json!({"cmd": "git commit -m sneaky"}))
+            .await
+            .unwrap_err();
         assert!(err.contains("controlled by the office"), "{err}");
         // non-git work still runs in staged mode
-        let ok = call(&a, &r, "sh", &json!({"cmd": "echo hello"})).await.unwrap();
+        let ok = call(&a, &r, "sh", &json!({"cmd": "echo hello"}))
+            .await
+            .unwrap();
         assert!(ok.contains("hello") && ok.contains("[exit 0]"), "{ok}");
         // without staged the same command is permitted (legacy behaviour unchanged)
-        let legacy = Rn { h: "local".into(), dir: root.display().to_string(), ..Default::default() };
-        let out = call(&a, &legacy, "sh", &json!({"cmd": "git init -q && git status --porcelain; echo done"})).await.unwrap();
+        let legacy = Rn {
+            h: "local".into(),
+            dir: root.display().to_string(),
+            ..Default::default()
+        };
+        let out = call(
+            &a,
+            &legacy,
+            "sh",
+            &json!({"cmd": "git init -q && git status --porcelain; echo done"}),
+        )
+        .await
+        .unwrap();
         assert!(out.contains("done"), "{out}");
         std::fs::remove_dir_all(root).unwrap();
     }

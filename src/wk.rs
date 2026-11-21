@@ -1,5 +1,5 @@
 use crate::ai::{ask, by_id, p as P, wrap, Ask};
-use crate::app::{sl, Ax, X, R};
+use crate::app::{sl, Ax, R, X};
 use crate::db::{now, Job};
 use crate::net::need;
 use crate::pa;
@@ -91,12 +91,15 @@ fn issue_priority(issue: &Value) -> i64 {
         .into_iter()
         .flatten()
         .filter_map(|label| label["name"].as_str())
-        .map(|label| match label.trim().to_ascii_lowercase().replace('_', "-").as_str() {
-            "p0" | "priority:p0" | "priority:0" | "priority:critical" | "critical" | "blocker" => 0,
-            "p1" | "priority:p1" | "priority:1" | "priority:high" | "high" => 1,
-            "p3" | "priority:p3" | "priority:3" | "priority:low" | "low" => 3,
-            _ => 2,
-        })
+        .map(
+            |label| match label.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+                "p0" | "priority:p0" | "priority:0" | "priority:critical" | "critical"
+                | "blocker" => 0,
+                "p1" | "priority:p1" | "priority:1" | "priority:high" | "high" => 1,
+                "p3" | "priority:p3" | "priority:3" | "priority:low" | "low" => 3,
+                _ => 2,
+            },
+        )
         .min()
         .unwrap_or(2)
 }
@@ -370,7 +373,13 @@ async fn scout1(a: &Ax) -> R<()> {
             }
         }
         let mut nw = nk;
-        nw.sort_by_key(|issue| (issue_priority(issue), issue_age_key(issue), issue["number"].as_i64().unwrap_or(i64::MAX)));
+        nw.sort_by_key(|issue| {
+            (
+                issue_priority(issue),
+                issue_age_key(issue),
+                issue["number"].as_i64().unwrap_or(i64::MAX),
+            )
+        });
         if nw.is_empty() {
             continue;
         }
@@ -487,9 +496,24 @@ async fn scout1(a: &Ax) -> R<()> {
                     continue;
                 }
                 let v = &js[&id];
-                data["cx"] = json!(if v["cx"] == "complex" { "complex" } else { "simple" });
+                data["cx"] = json!(if v["cx"] == "complex" {
+                    "complex"
+                } else {
+                    "simple"
+                });
                 data["feat"] = json!(fe && v["kind"] == "feat");
-                a.db.jnew(&r, n, "fix", &ti, &u, "vet", v["why"].as_str().unwrap_or(""), data, None, 0.0);
+                a.db.jnew(
+                    &r,
+                    n,
+                    "fix",
+                    &ti,
+                    &u,
+                    "vet",
+                    v["why"].as_str().unwrap_or(""),
+                    data,
+                    None,
+                    0.0,
+                );
                 a.flow("scout", "vet", &id);
                 a.say(
                     "scout",
@@ -1243,14 +1267,20 @@ async fn repo_default_branch(
 }
 
 fn checks_green(checks: &Value) -> bool {
-    let Some(checks) = checks.as_array() else { return false };
-    !checks.is_empty() && checks.iter().all(|check| {
-        if check["state"].is_string() {
-            return check["state"] == "SUCCESS";
-        }
-        check["status"] == "COMPLETED"
-            && matches!(check["conclusion"].as_str(), Some("SUCCESS" | "NEUTRAL" | "SKIPPED"))
-    })
+    let Some(checks) = checks.as_array() else {
+        return false;
+    };
+    !checks.is_empty()
+        && checks.iter().all(|check| {
+            if check["state"].is_string() {
+                return check["state"] == "SUCCESS";
+            }
+            check["status"] == "COMPLETED"
+                && matches!(
+                    check["conclusion"].as_str(),
+                    Some("SUCCESS" | "NEUTRAL" | "SKIPPED")
+                )
+        })
 }
 
 fn verified_bug_job(job: &Job) -> bool {
@@ -1258,12 +1288,26 @@ fn verified_bug_job(job: &Job) -> bool {
         && job.kind == "fix"
         && !job.feat()
         && !job.opt()
-        && job.d["proof"]["a_exit"].as_i64().map(|e| e != 0).unwrap_or(false)
+        && job.d["proof"]["a_exit"]
+            .as_i64()
+            .map(|e| e != 0)
+            .unwrap_or(false)
         && job.d["proof"]["b_exit"].as_i64() == Some(0)
-        && !job.d["proof"]["command"].as_str().unwrap_or("").trim().is_empty()
-        && job.d["f"]["tests"].as_array().map(|t| !t.is_empty()).unwrap_or(false)
+        && !job.d["proof"]["command"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+        && job.d["f"]["tests"]
+            .as_array()
+            .map(|t| !t.is_empty())
+            .unwrap_or(false)
         && job.d["ci_evidence"]["exit"].as_i64() == Some(0)
-        && !job.d["ci_evidence"]["command"].as_str().unwrap_or("").trim().is_empty()
+        && !job.d["ci_evidence"]["command"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
         && job.d["last_review"]["verdict"]["ok"] == true
 }
 
@@ -1304,7 +1348,15 @@ fn auto_merge_blocker(pr: &Value, job: &Job, saved: &Value, me: &str) -> Option<
     None
 }
 
-fn save_auto_merge_state(a: &Ax, repo: &str, number: i64, mut data: Value, status: &str, reason: &str, head: &str) {
+fn save_auto_merge_state(
+    a: &Ax,
+    repo: &str,
+    number: i64,
+    mut data: Value,
+    status: &str,
+    reason: &str,
+    head: &str,
+) {
     if !data.is_object() {
         data = json!({});
     }
@@ -1314,23 +1366,49 @@ fn save_auto_merge_state(a: &Ax, repo: &str, number: i64, mut data: Value, statu
     data["merge_status"] = json!(status);
     data["merge_reason"] = json!(reason);
     data["merge_state_head"] = json!(head);
-    a.db.run("update prs set d=? where repo=? and num=?", pa![data.to_string(), repo.to_string(), number]);
+    a.db.run(
+        "update prs set d=? where repo=? and num=?",
+        pa![data.to_string(), repo.to_string(), number],
+    );
     if changed {
         a.say("watcher", &format!("{repo}#{number}: {reason}"), None);
     }
 }
 
-async fn try_auto_merge(a: &Ax, repo: &str, number: i64, pr: &Value, saved: &Value, me: &str) -> R<bool> {
+async fn try_auto_merge(
+    a: &Ax,
+    repo: &str,
+    number: i64,
+    pr: &Value,
+    saved: &Value,
+    me: &str,
+) -> R<bool> {
     if saved["auto_merge"].as_bool() != Some(true) {
         return Ok(false);
     }
     let head = pr["headRefOid"].as_str().unwrap_or("").to_string();
     let Some(job_id) = saved["job"].as_i64() else {
-        save_auto_merge_state(a, repo, number, saved.clone(), "blocked", "Apollo Office job evidence is missing.", &head);
+        save_auto_merge_state(
+            a,
+            repo,
+            number,
+            saved.clone(),
+            "blocked",
+            "Apollo Office job evidence is missing.",
+            &head,
+        );
         return Ok(false);
     };
     let Some(job) = a.db.jg(job_id) else {
-        save_auto_merge_state(a, repo, number, saved.clone(), "blocked", "Apollo Office job evidence is no longer available.", &head);
+        save_auto_merge_state(
+            a,
+            repo,
+            number,
+            saved.clone(),
+            "blocked",
+            "Apollo Office job evidence is no longer available.",
+            &head,
+        );
         return Ok(false);
     };
     if let Some(reason) = auto_merge_blocker(pr, &job, saved, me) {
@@ -1341,7 +1419,10 @@ async fn try_auto_merge(a: &Ax, repo: &str, number: i64, pr: &Value, saved: &Val
         return Ok(false);
     }
     let recent_attempt = saved["merge_attempt_head"].as_str() == Some(&head)
-        && saved["merge_attempt_at"].as_i64().map(|t| now() - t < 30 * 60_000).unwrap_or(false);
+        && saved["merge_attempt_at"]
+            .as_i64()
+            .map(|t| now() - t < 30 * 60_000)
+            .unwrap_or(false);
     if recent_attempt {
         return Ok(false);
     }
@@ -1349,19 +1430,79 @@ async fn try_auto_merge(a: &Ax, repo: &str, number: i64, pr: &Value, saved: &Val
     let mut data = saved.clone();
     data["merge_attempt_head"] = json!(head);
     data["merge_attempt_at"] = json!(now());
-    a.db.run("update prs set d=? where repo=? and num=?", pa![data.to_string(), repo.to_string(), number]);
-    match gh(&["pr", "merge", &number.to_string(), "-R", repo, "--auto", "--squash", "--match-head-commit", &head], 120).await {
+    a.db.run(
+        "update prs set d=? where repo=? and num=?",
+        pa![data.to_string(), repo.to_string(), number],
+    );
+    match gh(
+        &[
+            "pr",
+            "merge",
+            &number.to_string(),
+            "-R",
+            repo,
+            "--auto",
+            "--squash",
+            "--match-head-commit",
+            &head,
+        ],
+        120,
+    )
+    .await
+    {
         Ok(_) => {
             data["merge_enabled_head"] = json!(head);
-            save_auto_merge_state(a, repo, number, data, "enabled", "All observed checks passed; GitHub auto-merge is enabled.", &head);
-            let fresh = ghj(&["pr", "view", &number.to_string(), "-R", repo, "--json", "state,mergedAt,updatedAt,title,url"], 60).await.map_err(X::E)?;
+            save_auto_merge_state(
+                a,
+                repo,
+                number,
+                data,
+                "enabled",
+                "All observed checks passed; GitHub auto-merge is enabled.",
+                &head,
+            );
+            let fresh = ghj(
+                &[
+                    "pr",
+                    "view",
+                    &number.to_string(),
+                    "-R",
+                    repo,
+                    "--json",
+                    "state,mergedAt,updatedAt,title,url",
+                ],
+                60,
+            )
+            .await
+            .map_err(X::E)?;
             if fresh["mergedAt"].is_string() || fresh["state"] == "MERGED" {
                 let updated = fresh["updatedAt"].as_str().unwrap_or("").to_string();
                 let merged = fresh["mergedAt"].as_str().map(String::from);
-                a.db.run("update prs set st='merged', title=?, upd=?, merged=? where repo=? and num=?", pa![fresh["title"].as_str().unwrap_or("").to_string(), updated, merged, repo.to_string(), number]);
-                a.note("Merged", &format!("{repo}#{number} {}\n{}", fresh["title"].as_str().unwrap_or(""), fresh["url"].as_str().unwrap_or("")), 3);
+                a.db.run(
+                    "update prs set st='merged', title=?, upd=?, merged=? where repo=? and num=?",
+                    pa![
+                        fresh["title"].as_str().unwrap_or("").to_string(),
+                        updated,
+                        merged,
+                        repo.to_string(),
+                        number
+                    ],
+                );
+                a.note(
+                    "Merged",
+                    &format!(
+                        "{repo}#{number} {}\n{}",
+                        fresh["title"].as_str().unwrap_or(""),
+                        fresh["url"].as_str().unwrap_or("")
+                    ),
+                    3,
+                );
                 a.flow("watcher", "submit", "merged");
-                a.say("watcher", &format!("{repo}#{number} merged after all GitHub checks passed"), None);
+                a.say(
+                    "watcher",
+                    &format!("{repo}#{number} merged after all GitHub checks passed"),
+                    None,
+                );
                 a.db.ks("lm", &json!({"repo": repo, "num": number, "title": fresh["title"], "url": fresh["url"], "t": now()}));
                 a.db.ks(&format!("wm:{repo}#{number}"), &json!(now()));
                 late(a, repo, number, me, &fresh).await?;
@@ -1371,7 +1512,11 @@ async fn try_auto_merge(a: &Ax, repo: &str, number: i64, pr: &Value, saved: &Val
         Err(error) => {
             let reason = "GitHub did not enable auto-merge; see the watcher log.";
             save_auto_merge_state(a, repo, number, data, "blocked", reason, &head);
-            a.say("watcher", &format!("{repo}#{number}: {}", crate::sh::head(&error, 240)), None);
+            a.say(
+                "watcher",
+                &format!("{repo}#{number}: {}", crate::sh::head(&error, 240)),
+                None,
+            );
         }
     }
     Ok(false)
@@ -1609,7 +1754,9 @@ mod t {
     #[test]
     fn checks_must_exist_and_all_be_green() {
         assert!(!checks_green(&json!([])));
-        assert!(!checks_green(&json!([{"__typename":"CheckRun","status":"IN_PROGRESS"}])));
+        assert!(!checks_green(
+            &json!([{"__typename":"CheckRun","status":"IN_PROGRESS"}])
+        ));
         assert!(!checks_green(&json!([
             {"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"},
             {"__typename":"StatusContext","state":"FAILURE"}
@@ -1667,7 +1814,17 @@ mod t {
     #[test]
     fn repositories_default_auto_merge_on_for_new_bug_fixes() {
         let db = crate::db::Db::mem();
-        db.run("insert into rp(full) values(?)", pa!["owner/repo".to_string()]);
-        assert_eq!(db.one("select merge from rp where full=?", pa!["owner/repo".to_string()]).unwrap()["merge"], 1);
+        db.run(
+            "insert into rp(full) values(?)",
+            pa!["owner/repo".to_string()],
+        );
+        assert_eq!(
+            db.one(
+                "select merge from rp where full=?",
+                pa!["owner/repo".to_string()]
+            )
+            .unwrap()["merge"],
+            1
+        );
     }
 }
