@@ -16,6 +16,7 @@ create table if not exists rp(id integer primary key, full text unique, iss int 
 create table if not exists hs(id text primary key, ssh text default '', dk int default 0, ln int default 1, ci int default 1, gb int default 50, raw int default 0, on_ int default 1, t0 int);
 create table if not exists jobs(id integer primary key, repo text, num int, kind text default 'fix', title text, url text, st text, why text default '', d text default '{}', pr int, prio real default 0, t0 int, t1 int);
 create index if not exists jobs_st on jobs(st);
+create index if not exists jobs_issue_latest on jobs(repo, num, kind, id desc);
 create table if not exists ev(id integer primary key, t int, w text, m text, j int);
 create table if not exists prs(repo text, num int, st text, title text, url text, upd text, merged text, d text default '{}', t0 int, primary key(repo, num));
 create table if not exists github_issues(repo text not null, num int not null, title text not null, url text not null, author text default '', updated text default '', labels text default '[]', assignees text default '[]', seen_at int not null default 0, is_open int not null default 1, skip_reason text default '', primary key(repo, num));
