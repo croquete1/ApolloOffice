@@ -99,11 +99,11 @@ serviço, restaurar a cópia `.old`, iniciar o serviço e investigar.
 ## 3. Estado de publicação
 
 As releases assinadas deste fork são independentes das versões upstream. A
-release assinada atualmente instalada/preparada é `fork-v0.10.14`, publicada em
-21/11/2026. A versão `0.10.15` contém as correções de diagnóstico e visibilidade
-do PR Steward; só a tag e os três assets da GitHub Release confirmam que a nova
-versão assinada foi publicada. Consultar a release mais recente no GitHub antes
-de instalar ou anunciar uma atualização.
+versão `0.10.15`, publicada como `fork-v0.10.15` em 21/11/2026, está instalada
+neste computador e inclui as correções de diagnóstico e visibilidade do PR
+Steward. O número em `Cargo.toml` indica a versão do código; só a tag e os três
+assets da GitHub Release confirmam uma publicação assinada. Consultar a release
+mais recente no GitHub antes de instalar ou anunciar uma atualização.
 
 A validação nativa inicial de `0.10.1 → 0.10.2` está documentada em
 [o roteiro de validação](first-signed-upgrade-test.md). As atualizações
