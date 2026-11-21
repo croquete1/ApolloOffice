@@ -455,7 +455,12 @@
     byId("aoEventList").innerHTML = events.slice(0, 8).map(eventRowHTML).join("") ||
       '<p class="ao-empty">Sem atividade recente.</p>';
     const stewardPRs = safeArray(s.pr_steward?.prs).filter((pr) => !selectedRepo || pr.repo === selectedRepo);
-    byId("aoStewardSummary").textContent = formatNum(stewardPRs.length) + " na fila";
+    const stewardRepo = safeArray(s.pr_steward?.repos).find((repo) => repo.repo === selectedRepo);
+    const stewardTotalValue = selectedRepo ? stewardRepo?.total : s.pr_steward?.total;
+    const stewardBlockedValue = selectedRepo ? stewardRepo?.blocked : s.pr_steward?.blocked;
+    const stewardTotal = Number.isFinite(Number(stewardTotalValue)) ? Number(stewardTotalValue) : stewardPRs.length;
+    const stewardBlocked = Number.isFinite(Number(stewardBlockedValue)) ? Number(stewardBlockedValue) : stewardPRs.length;
+    byId("aoStewardSummary").textContent = formatNum(stewardTotal) + " abertas · " + formatNum(stewardBlocked) + " por tratar";
     byId("aoIssues").innerHTML = stewardPRs.slice(0, 6).map((pr) => rowHTML(
       (pr.num ? "#" + pr.num + " · " : "") + (pr.title || "Pull request"),
       [pr.repo, pr.next_action].filter(Boolean).join(" · "),

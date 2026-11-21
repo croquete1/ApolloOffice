@@ -99,9 +99,9 @@ serviço, restaurar a cópia `.old`, iniciar o serviço e investigar.
 ## 3. Estado de publicação
 
 As releases assinadas deste fork são independentes das versões upstream. A
-última release assinada antes da preparação da versão `0.10.14` foi
-`fork-v0.10.13`, publicada em 21/11/2026. O número em `Cargo.toml` indica a
-versão do código; só a tag e os três assets da GitHub Release confirmam que uma
+release assinada atualmente instalada/preparada é `fork-v0.10.14`, publicada em
+21/11/2026. A versão `0.10.15` contém as correções de diagnóstico e visibilidade
+do PR Steward; só a tag e os três assets da GitHub Release confirmam que a nova
 versão assinada foi publicada. Consultar a release mais recente no GitHub antes
 de instalar ou anunciar uma atualização.
 

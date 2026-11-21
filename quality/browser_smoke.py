@@ -32,6 +32,7 @@ def fixture(active: bool, telemetry: str = "", codex: dict | None = None) -> dic
         for role in ROLES
     }
     jobs, counts, events, prs = [], {}, [], []
+    steward_prs = []
     if active:
         workers["fixer"].update({
             "st": "work", "say": "GREEN: implementing the fix for #123",
@@ -52,12 +53,23 @@ def fixture(active: bool, telemetry: str = "", codex: dict | None = None) -> dic
         }]
         counts = {"fix": 1, "done": 6}
         events = [{"t": stamp, "w": "fixer", "m": "GREEN: implementing the fix for #123", "j": 17}]
+        steward_prs = [{
+            "repo": "example/apollo", "num": number, "title": f"Steward PR {number}",
+            "url": f"https://github.com/example/apollo/pull/{number}",
+            "state": "ci_pendente", "priority": number, "next_action": "Aguardar testes",
+        } for number in range(1, 41)]
     return {
         "t": stamp, "v": "smoke-fixture", "nr": 1,
         "o": {"off": False, "man": False, "pause": "", "warn": False,
               "net": {"local": True, "gh": True, "an": True}},
         "w": workers, "q": jobs, "dn": [], "pr": prs, "mg": [], "ev": events,
         "n": counts, "done24": 3 if active else 0,
+        "pr_steward": {
+            "total": 112 if active else 0,
+            "blocked": 108 if active else 0,
+            "repos": [{"repo": "example/apollo", "total": 112, "blocked": 108}] if active else [],
+            "prs": steward_prs,
+        },
         "delivery": {"merged_fixes": 1 if active else 0},
         "prod24": [{"g": 2, "n": 1}, {"g": 0, "n": 2}] if active else [],
         "fl": [], "ln": {}, "cil": {},
@@ -145,6 +157,8 @@ class Handler(SimpleHTTPRequestHandler):
                "O PR real não aparece no módulo de pull requests");
         assert(document.getElementById("aoEventList").textContent.includes("implementing the fix for #123"),
                "O evento real não aparece no módulo de atividade");
+        assert(document.getElementById("aoStewardSummary").textContent.includes("112 abertas · 108 por tratar"),
+               "A fila do Steward mostra apenas a amostra de PRs em vez do total do relatório");
         assert(document.getElementById("aoRepoFilter").value === "" &&
                Array.from(repoFilter.options).some(option => option.value === "example/apollo"),
                "O filtro não contém o repositório ativo");
