@@ -44,27 +44,28 @@ async fn ck(a: &Ax, k: &str) -> bool {
                 .await
                 .is_ok()
         }
-        h => {
-            match ho(a, h) {
-                Some(x) => {
-                    let dkcheck = format!(
-                        "docker inspect -f '{{{{.State.Status}}}}' {} | grep -qx running",
-                        crate::sh::ct()
-                    );
-                    let o = hraw(
-                        &x,
-                        &format!("{{ {HW}; }} 2>/dev/null; {}", if x.dk { dkcheck.as_str() } else { "true" }),
-                        45,
-                    )
-                    .await;
-                    if o.c == 0 {
-                        a.lv.lock().unwrap().hst.insert(h.to_string(), hw(&o.o));
-                    }
-                    o.c == 0
+        h => match ho(a, h) {
+            Some(x) => {
+                let dkcheck = format!(
+                    "docker inspect -f '{{{{.State.Status}}}}' {} | grep -qx running",
+                    crate::sh::ct()
+                );
+                let o = hraw(
+                    &x,
+                    &format!(
+                        "{{ {HW}; }} 2>/dev/null; {}",
+                        if x.dk { dkcheck.as_str() } else { "true" }
+                    ),
+                    45,
+                )
+                .await;
+                if o.c == 0 {
+                    a.lv.lock().unwrap().hst.insert(h.to_string(), hw(&o.o));
                 }
-                None => false,
+                o.c == 0
             }
-        }
+            None => false,
+        },
     }
 }
 

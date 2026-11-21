@@ -1044,7 +1044,11 @@ pub fn fails(o: &str) -> Vec<String> {
 }
 
 pub fn bare(t: &str) -> String {
-    t.rsplit(|c| c == ':' || c == '.' || c == '/' || c == '>' || c == ' ').find(|x| !x.trim().is_empty()).unwrap_or(t).trim().to_string()
+    t.rsplit([':', '.', '/', '>', ' '])
+        .find(|x| !x.trim().is_empty())
+        .unwrap_or(t)
+        .trim()
+        .to_string()
 }
 
 pub const CE: &str = r"error\[E\d+\]|could not compile|error: no test target|no such command|SyntaxError|ReferenceError|ModuleNotFoundError|ImportError while|cannot find module|Cannot find module|ERROR collecting|error TS\d{4}|no tests ran|No tests found|build failed|\[setup failed\]|undefined: |command not found|(?m:^[^\n]*\.java:\d+: error:)|ClassNotFoundException|NoClassDefFoundError";
@@ -1943,13 +1947,14 @@ fn fixp(a: &Ax, j: &Job, fb: &str) -> String {
     let h = if j.opt() { format!("{h}\n{OPT}") } else if j.feat() { format!("{h}\n{FEAT}") } else { h };
     let commit_roles = if j.opt() { "verification, optimization" } else if j.feat() { "test, feature" } else { "test, fix" };
     format!(
-        "{h}\n{}:\n{}\n\n{} (from a previous agent): {}{}{}",
+        "{h}\n{}:\n{}\n\n{} (from a previous agent): {}{}{}{}",
         j.orig(),
         wrap("issue", &format!("{}\n\n{}", j.title, j.s("body"))),
         if j.feat() || j.opt() { "Implementation plan" } else { "Repro result" },
         j.d["repro"],
         if fb.is_empty() { String::new() } else { format!("\n\nYour previous attempt was rejected by the pipeline:\n{fb}\nThe branch still contains your previous commits; fix the problems and make sure there are exactly two commits ({commit_roles}) on top of the base commit.") },
-        format!("{}{}",rules(a, j),crate::quality::context(j))
+        rules(a, j),
+        crate::quality::context(j)
     )
 }
 
@@ -3295,7 +3300,11 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
     let ti = pr_title(j.d["pt"].as_str(), &f, &j.title)?;
     if j.kind == "fix" && !j.d["sq"].as_bool().unwrap_or(false) {
         let rf = if j.ext() { "Reported to us directly".to_string() } else if j.hunt() || j.num == 0 { format!("Found while testing {}", j.wh()) } else if j.opt() { format!("Closes #{}", j.num) } else { format!("Fixes #{}", j.num) };
-        let subject = if j.opt() { optimization_commit_subject(&ti)? } else { ti.clone() };
+        let subject = if j.opt() {
+            optimization_commit_subject(&ti)?
+        } else {
+            commit_subject(&ti, j.feat())?
+        };
         ok(a, j, &format!("git reset -q --soft {} && git commit -q -F - <<'MSG'\n{subject}\n\n{rf}\n\n{}\nMSG", j.s("base"), tr.join("\n")), 120).await?;
         j.d["sq"] = json!(true);
         a.db.jd(j);

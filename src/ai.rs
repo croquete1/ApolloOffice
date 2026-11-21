@@ -1078,7 +1078,7 @@ mod t {
                 dir: dd.join("repo").display().to_string(),
                 w: String::new(),
                 md: String::new(),
-            staged: false,
+                staged: false,
             });
             let (_, js) = ask1(&a, o).await.unwrap();
             assert_eq!(js["ok"], true, "{fmt}");
