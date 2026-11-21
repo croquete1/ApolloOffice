@@ -1,6 +1,6 @@
 use crate::ai::{ask, by_id, p as P, wrap, Ask};
-use crate::app::{sl, Ax, R, X};
-use crate::db::now;
+use crate::app::{sl, Ax, X, R};
+use crate::db::{now, Job};
 use crate::net::need;
 use crate::pa;
 use crate::pipe::{bl, qn, rp};
@@ -78,11 +78,53 @@ pub fn errm(e: &X) -> String {
     }
 }
 
-// Keep issue intake bounded while allowing repositories to exceed the former 200-item cap.
+// Bound intake while recording whether the GitHub listing was truncated.
 const ISSUE_SCAN_LIMIT: usize = 500;
 
 fn issue_scan_truncated(count: usize) -> bool {
     count >= ISSUE_SCAN_LIMIT
+}
+
+fn issue_priority(issue: &Value) -> i64 {
+    issue["labels"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|label| label["name"].as_str())
+        .map(|label| match label.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+            "p0" | "priority:p0" | "priority:0" | "priority:critical" | "critical" | "blocker" => 0,
+            "p1" | "priority:p1" | "priority:1" | "priority:high" | "high" => 1,
+            "p3" | "priority:p3" | "priority:3" | "priority:low" | "low" => 3,
+            _ => 2,
+        })
+        .min()
+        .unwrap_or(2)
+}
+
+fn issue_age_key(issue: &Value) -> i64 {
+    issue["createdAt"]
+        .as_str()
+        .or_else(|| issue["updatedAt"].as_str())
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.timestamp_millis())
+        .unwrap_or(i64::MAX)
+}
+
+fn issue_updated_at(value: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|value| value.timestamp_millis())
+}
+
+fn changed_since_drop(updated_at: &str, created_at: i64, data: &Value) -> bool {
+    let Some(current) = issue_updated_at(updated_at) else {
+        return false;
+    };
+    let previous = data["source_updated_at"]
+        .as_str()
+        .and_then(issue_updated_at)
+        .unwrap_or(created_at);
+    current > previous
 }
 
 async fn scout1(a: &Ax) -> R<()> {
@@ -105,6 +147,7 @@ async fn scout1(a: &Ax) -> R<()> {
         let sk = skl(r["skl"].as_str().unwrap_or(""));
         let r = r["full"].as_str().unwrap_or("").to_string();
         let b = bl(a, &r);
+        let cap = 4 * b;
         let iv = ivl(a, &r);
         let cooling_down = iv > 0
             && a.db
@@ -127,7 +170,7 @@ async fn scout1(a: &Ax) -> R<()> {
                 "--limit",
                 &issue_limit,
                 "--json",
-                "number,title,body,author,updatedAt,labels,assignees,url",
+                "number,title,body,author,createdAt,updatedAt,labels,assignees,url",
             ],
             120,
         )
@@ -251,12 +294,20 @@ async fn scout1(a: &Ax) -> R<()> {
                 );
                 continue;
             }
-            if a.db.n(
-                "select count(*) from jobs where repo=? and num=?",
+            if let Some(previous) = a.db.one(
+                "select id,st,t0,d from jobs where repo=? and num=? and kind='fix' order by id desc limit 1",
                 pa![r.clone(), n],
-            ) > 0
-            {
-                continue;
+            ) {
+                if previous["st"] != "drop" {
+                    continue;
+                }
+                let data = previous["d"]
+                    .as_str()
+                    .and_then(|value| serde_json::from_str::<Value>(value).ok())
+                    .unwrap_or_else(|| json!({}));
+                if !changed_since_drop(&up, previous["t0"].as_i64().unwrap_or(0), &data) {
+                    continue;
+                }
             }
             if a.db
                 .one(
@@ -318,12 +369,17 @@ async fn scout1(a: &Ax) -> R<()> {
                 nk.push(i);
             }
         }
-        let nw = nk;
+        let mut nw = nk;
+        nw.sort_by_key(|issue| (issue_priority(issue), issue_age_key(issue), issue["number"].as_i64().unwrap_or(i64::MAX)));
         if nw.is_empty() {
             continue;
         }
         a.say("scout", &format!("{r}: {} new issues", nw.len()), None);
         for b in nw.chunks(15) {
+            let room = (cap - qn(a, &r, "'vet','ready'")).max(0) as usize;
+            if room == 0 {
+                break;
+            }
             let ids: Vec<String> = b.iter().map(|i| format!("{r}#{}", i["number"])).collect();
             let p = format!(
                 "{}\n\nUse exactly these ids as JSON keys, in this order: {}",
@@ -378,6 +434,7 @@ async fn scout1(a: &Ax) -> R<()> {
             if pk.is_empty() {
                 continue;
             }
+            pk.truncate(room);
             let g = guard(
                 a,
                 pk.iter()
@@ -405,6 +462,10 @@ async fn scout1(a: &Ax) -> R<()> {
                     .as_str()
                     .map(String::from)
                     .unwrap_or(format!("https://github.com/{r}/issues/{n}"));
+                let mut data = json!({
+                    "source_updated_at": i["updatedAt"],
+                    "issue_priority": issue_priority(&i)
+                });
                 if g[&id]["inj"].as_bool().unwrap_or(false) {
                     a.db.jnew(
                         &r,
@@ -414,7 +475,7 @@ async fn scout1(a: &Ax) -> R<()> {
                         &u,
                         "drop",
                         &format!("Guard: {}", g[&id]["why"].as_str().unwrap_or("")),
-                        json!({}),
+                        data,
                         None,
                         0.0,
                     );
@@ -426,7 +487,9 @@ async fn scout1(a: &Ax) -> R<()> {
                     continue;
                 }
                 let v = &js[&id];
-                a.db.jnew(&r, n, "fix", &ti, &u, "vet", v["why"].as_str().unwrap_or(""), json!({"cx": if v["cx"] == "complex" { "complex" } else { "simple" }, "feat": fe && v["kind"] == "feat"}), None, 0.0);
+                data["cx"] = json!(if v["cx"] == "complex" { "complex" } else { "simple" });
+                data["feat"] = json!(fe && v["kind"] == "feat");
+                a.db.jnew(&r, n, "fix", &ti, &u, "vet", v["why"].as_str().unwrap_or(""), data, None, 0.0);
                 a.flow("scout", "vet", &id);
                 a.say(
                     "scout",
@@ -1179,6 +1242,141 @@ async fn repo_default_branch(
     branch
 }
 
+fn checks_green(checks: &Value) -> bool {
+    let Some(checks) = checks.as_array() else { return false };
+    !checks.is_empty() && checks.iter().all(|check| {
+        if check["state"].is_string() {
+            return check["state"] == "SUCCESS";
+        }
+        check["status"] == "COMPLETED"
+            && matches!(check["conclusion"].as_str(), Some("SUCCESS" | "NEUTRAL" | "SKIPPED"))
+    })
+}
+
+fn verified_bug_job(job: &Job) -> bool {
+    job.st == "done"
+        && job.kind == "fix"
+        && !job.feat()
+        && !job.opt()
+        && job.d["proof"]["a_exit"].as_i64().map(|e| e != 0).unwrap_or(false)
+        && job.d["proof"]["b_exit"].as_i64() == Some(0)
+        && !job.d["proof"]["command"].as_str().unwrap_or("").trim().is_empty()
+        && job.d["f"]["tests"].as_array().map(|t| !t.is_empty()).unwrap_or(false)
+        && job.d["ci_evidence"]["exit"].as_i64() == Some(0)
+        && !job.d["ci_evidence"]["command"].as_str().unwrap_or("").trim().is_empty()
+        && job.d["last_review"]["verdict"]["ok"] == true
+}
+
+fn auto_merge_blocker(pr: &Value, job: &Job, saved: &Value, me: &str) -> Option<&'static str> {
+    if saved["auto_merge"].as_bool() != Some(true) {
+        return Some("automatic merge is disabled for this pull request");
+    }
+    if !verified_bug_job(job) {
+        return Some("the Apollo Office regression, CI, or independent review proof is incomplete");
+    }
+    if pr["state"] != "OPEN" || pr["mergedAt"].is_string() {
+        return Some("the pull request is no longer open");
+    }
+    if pr["isDraft"] == true {
+        return Some("the pull request is still a draft");
+    }
+    if pr["headRepositoryOwner"]["login"].as_str() != Some(me) {
+        return Some("the pull request head is not owned by this GitHub account");
+    }
+    if pr["headRefName"].as_str() != saved["branch"].as_str() {
+        return Some("the pull request branch changed after Apollo Office submitted it");
+    }
+    if pr["headRefOid"].as_str() != saved["head_sha"].as_str() {
+        return Some("the pull request commit changed after Apollo Office submitted it");
+    }
+    if pr["baseRefName"].as_str() != saved["base_branch"].as_str() {
+        return Some("the pull request base branch changed after Apollo Office submitted it");
+    }
+    if pr["reviewDecision"] == "CHANGES_REQUESTED" {
+        return Some("a reviewer requested changes");
+    }
+    if pr["mergeable"] != "MERGEABLE" {
+        return Some("GitHub has not confirmed that the pull request is mergeable");
+    }
+    if !checks_green(&pr["statusCheckRollup"]) {
+        return Some("GitHub checks are missing, pending, or not all green");
+    }
+    None
+}
+
+fn save_auto_merge_state(a: &Ax, repo: &str, number: i64, mut data: Value, status: &str, reason: &str, head: &str) {
+    if !data.is_object() {
+        data = json!({});
+    }
+    let changed = data["merge_status"].as_str() != Some(status)
+        || data["merge_reason"].as_str() != Some(reason)
+        || data["merge_state_head"].as_str() != Some(head);
+    data["merge_status"] = json!(status);
+    data["merge_reason"] = json!(reason);
+    data["merge_state_head"] = json!(head);
+    a.db.run("update prs set d=? where repo=? and num=?", pa![data.to_string(), repo.to_string(), number]);
+    if changed {
+        a.say("watcher", &format!("{repo}#{number}: {reason}"), None);
+    }
+}
+
+async fn try_auto_merge(a: &Ax, repo: &str, number: i64, pr: &Value, saved: &Value, me: &str) -> R<bool> {
+    if saved["auto_merge"].as_bool() != Some(true) {
+        return Ok(false);
+    }
+    let head = pr["headRefOid"].as_str().unwrap_or("").to_string();
+    let Some(job_id) = saved["job"].as_i64() else {
+        save_auto_merge_state(a, repo, number, saved.clone(), "blocked", "Apollo Office job evidence is missing.", &head);
+        return Ok(false);
+    };
+    let Some(job) = a.db.jg(job_id) else {
+        save_auto_merge_state(a, repo, number, saved.clone(), "blocked", "Apollo Office job evidence is no longer available.", &head);
+        return Ok(false);
+    };
+    if let Some(reason) = auto_merge_blocker(pr, &job, saved, me) {
+        save_auto_merge_state(a, repo, number, saved.clone(), "waiting", reason, &head);
+        return Ok(false);
+    }
+    if saved["merge_enabled_head"].as_str() == Some(&head) {
+        return Ok(false);
+    }
+    let recent_attempt = saved["merge_attempt_head"].as_str() == Some(&head)
+        && saved["merge_attempt_at"].as_i64().map(|t| now() - t < 30 * 60_000).unwrap_or(false);
+    if recent_attempt {
+        return Ok(false);
+    }
+
+    let mut data = saved.clone();
+    data["merge_attempt_head"] = json!(head);
+    data["merge_attempt_at"] = json!(now());
+    a.db.run("update prs set d=? where repo=? and num=?", pa![data.to_string(), repo.to_string(), number]);
+    match gh(&["pr", "merge", &number.to_string(), "-R", repo, "--auto", "--squash", "--match-head-commit", &head], 120).await {
+        Ok(_) => {
+            data["merge_enabled_head"] = json!(head);
+            save_auto_merge_state(a, repo, number, data, "enabled", "All observed checks passed; GitHub auto-merge is enabled.", &head);
+            let fresh = ghj(&["pr", "view", &number.to_string(), "-R", repo, "--json", "state,mergedAt,updatedAt,title,url"], 60).await.map_err(X::E)?;
+            if fresh["mergedAt"].is_string() || fresh["state"] == "MERGED" {
+                let updated = fresh["updatedAt"].as_str().unwrap_or("").to_string();
+                let merged = fresh["mergedAt"].as_str().map(String::from);
+                a.db.run("update prs set st='merged', title=?, upd=?, merged=? where repo=? and num=?", pa![fresh["title"].as_str().unwrap_or("").to_string(), updated, merged, repo.to_string(), number]);
+                a.note("Merged", &format!("{repo}#{number} {}\n{}", fresh["title"].as_str().unwrap_or(""), fresh["url"].as_str().unwrap_or("")), 3);
+                a.flow("watcher", "submit", "merged");
+                a.say("watcher", &format!("{repo}#{number} merged after all GitHub checks passed"), None);
+                a.db.ks("lm", &json!({"repo": repo, "num": number, "title": fresh["title"], "url": fresh["url"], "t": now()}));
+                a.db.ks(&format!("wm:{repo}#{number}"), &json!(now()));
+                late(a, repo, number, me, &fresh).await?;
+                return Ok(true);
+            }
+        }
+        Err(error) => {
+            let reason = "GitHub did not enable auto-merge; see the watcher log.";
+            save_auto_merge_state(a, repo, number, data, "blocked", reason, &head);
+            a.say("watcher", &format!("{repo}#{number}: {}", crate::sh::head(&error, 240)), None);
+        }
+    }
+    Ok(false)
+}
+
 async fn watch1(a: &Ax) -> R<()> {
     need(a, "watcher", &["gh"]).await?;
     a.st("watcher", "work", None, "");
@@ -1225,7 +1423,12 @@ async fn watch1(a: &Ax) -> R<()> {
             }
             a.db.ks(&sk, &json!(now()));
         }
-        let v = match ghj(&["pr", "view", &n.to_string(), "-R", &r, "--json", "state,mergedAt,updatedAt,title,url,mergeable,headRefName,headRepositoryOwner,headRepository,baseRefName,reviewDecision"], 60).await {
+        let fields = if p["d"]["auto_merge"].as_bool() == Some(true) {
+            "state,mergedAt,updatedAt,title,url,mergeable,headRefName,headRepositoryOwner,headRepository,baseRefName,reviewDecision,isDraft,headRefOid,statusCheckRollup"
+        } else {
+            "state,mergedAt,updatedAt,title,url,mergeable,headRefName,headRepositoryOwner,headRepository,baseRefName,reviewDecision"
+        };
+        let v = match ghj(&["pr", "view", &n.to_string(), "-R", &r, "--json", fields], 60).await {
             Ok(v) => v,
             Err(e) => {
                 a.say("watcher", &format!("{r}#{n}: {}", crate::sh::head(&e, 200)), None);
@@ -1263,6 +1466,9 @@ async fn watch1(a: &Ax) -> R<()> {
             a.flow("watcher", "fixer", "rebase");
             a.say("watcher", &format!("{tag} has a merge conflict, sent to rebase"), None);
         }
+        if p["d"]["auto_merge"].as_bool() == Some(true) && try_auto_merge(a, &r, n, &v, &p["d"], &me).await? {
+            continue;
+        }
         if p["upd"].as_str() == Some(up.as_str()) && p["d"]["seen"].as_bool().unwrap_or(false) {
             continue;
         }
@@ -1285,7 +1491,8 @@ async fn watch1(a: &Ax) -> R<()> {
             nw = pending(nw, &lc);
         }
         if first {
-            let mut d = p["d"].clone();
+            let mut d = a.db.one("select d from prs where repo=? and num=?", pa![r.clone(), n]).map(|row| row["d"].clone()).unwrap_or_else(|| p["d"].clone());
+            if !d.is_object() { d = json!({}); }
             d["seen"] = json!(true);
             a.db.run("update prs set d=? where repo=? and num=?", pa![d.to_string(), r.clone(), n]);
         }
@@ -1397,5 +1604,70 @@ mod t {
         assert_eq!(v.len(), 1);
         assert_eq!(v[0]["at"], "2026-10-19T10:00:00Z");
         assert_eq!(pending(vec![c("2026-10-18T10:00:00Z")], "").len(), 1);
+    }
+
+    #[test]
+    fn checks_must_exist_and_all_be_green() {
+        assert!(!checks_green(&json!([])));
+        assert!(!checks_green(&json!([{"__typename":"CheckRun","status":"IN_PROGRESS"}])));
+        assert!(!checks_green(&json!([
+            {"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"},
+            {"__typename":"StatusContext","state":"FAILURE"}
+        ])));
+        assert!(checks_green(&json!([
+            {"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"},
+            {"__typename":"CheckRun","status":"COMPLETED","conclusion":"SKIPPED"},
+            {"__typename":"StatusContext","state":"SUCCESS"}
+        ])));
+    }
+
+    #[test]
+    fn auto_merge_requires_verified_bug_work_and_the_exact_green_head() {
+        let job = Job::of(json!({
+            "id": 7, "repo": "owner/repo", "num": 12, "kind": "fix", "st": "done",
+            "d": {
+                "feat": false,
+                "proof": {"a_exit": 1, "b_exit": 0, "command": "node test.js"},
+                "f": {"tests": ["regression"], "test_cmd": "node test.js"},
+                "ci_evidence": {"exit": 0, "command": "npm test"},
+                "last_review": {"verdict": {"ok": true}}
+            }
+        }));
+        let saved = json!({"auto_merge": true, "job": 7, "branch": "fix/7-bug", "head_sha": "abc123", "base_branch": "main"});
+        let pr = json!({
+            "state": "OPEN", "mergedAt": null, "isDraft": false, "mergeable": "MERGEABLE",
+            "headRepositoryOwner": {"login": "owner"}, "headRefName": "fix/7-bug", "headRefOid": "abc123",
+            "baseRefName": "main", "reviewDecision": "REVIEW_REQUIRED",
+            "statusCheckRollup": [{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"}]
+        });
+        assert_eq!(auto_merge_blocker(&pr, &job, &saved, "owner"), None);
+
+        let mut pending = pr.clone();
+        pending["statusCheckRollup"] = json!([]);
+        assert!(auto_merge_blocker(&pending, &job, &saved, "owner").is_some());
+
+        let mut changed_head = pr.clone();
+        changed_head["headRefOid"] = json!("new-sha");
+        assert!(auto_merge_blocker(&changed_head, &job, &saved, "owner").is_some());
+
+        let mut draft = pr;
+        draft["isDraft"] = json!(true);
+        assert!(auto_merge_blocker(&draft, &job, &saved, "owner").is_some());
+
+        let mut changes_requested = draft;
+        changes_requested["isDraft"] = json!(false);
+        changes_requested["reviewDecision"] = json!("CHANGES_REQUESTED");
+        assert!(auto_merge_blocker(&changes_requested, &job, &saved, "owner").is_some());
+
+        let mut feature = job;
+        feature.d["feat"] = json!(true);
+        assert!(!verified_bug_job(&feature));
+    }
+
+    #[test]
+    fn repositories_default_auto_merge_on_for_new_bug_fixes() {
+        let db = crate::db::Db::mem();
+        db.run("insert into rp(full) values(?)", pa!["owner/repo".to_string()]);
+        assert_eq!(db.one("select merge from rp where full=?", pa!["owner/repo".to_string()]).unwrap()["merge"], 1);
     }
 }

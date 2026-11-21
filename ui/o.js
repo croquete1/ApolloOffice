@@ -11,7 +11,7 @@
     pr_recheck: "revalidação de PR",
     pr_review: "revisão de PR",
     branch_update: "atualização de branch",
-  }[kind] || "tarefa");
+  }[kind] || kind || "tarefa");
 
   const get = async (p) => {
     const r = await fetch(p, { cache: "no-store" });
@@ -413,14 +413,15 @@
 
   let last = performance.now();
   const frame = (schedule = true) => {
-    // Um snapshot pode chegar quando o navegador suspendeu RAF (headless,
-    // separador em segundo plano ou poupança de energia). frame(false) desenha
-    // o estado recebido sem criar um segundo ciclo de animação.
-    if (window.AO?.modernRoom || window.AO?.disablePixelArt) {
-      if (schedule !== false) setTimeout(() => requestAnimationFrame(frame), 1500);
+    // A separate modern-only renderer can leave this fallback canvas idle.
+    // The pixel dashboard keeps the canvas visible and shares its motion toggle.
+    if (window.AO?.disablePixelArt || (window.AO?.modernRoom && !window.AO?.pixelDashboard)) {
+      if (schedule) setTimeout(() => requestAnimationFrame(frame), 1500);
       return;
     }
-    const t = (performance.now() - t0) / 1000;
+    const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+    const moving = !reduced && window.AO?.pixelMotion !== false;
+    const t = moving ? (performance.now() - t0) / 1000 : 0;
     c.imageSmoothingEnabled = false;
     fc.imageSmoothingEnabled = false;
     hits = [];
@@ -433,14 +434,14 @@
     intake(t);
     RK().forEach(([h, lb], i) => rack(272 + i * 19, 100, t, h, lb));
     teams(t);
-    confetti(t);
+    if (moving) confetti(t);
     const hh = hov && hits.find((h) => h.k === hov);
     if (hh) {
       const [x0, y0, x1, y1] = hh.b, cl = "#75746f";
       for (const [x, y, dx, dy] of [[x0, y0, 1, 1], [x1, y0, -1, 1], [x0, y1, 1, -1], [x1, y1, -1, -1]]) { px(dx > 0 ? x : x - 3, y, 4, 1, cl); px(x - (dx > 0 ? 0 : 1), dy > 0 ? y : y - 3, 1, 4, cl); }
     }
     if (S?.o?.off) { c.globalAlpha = 0.25; px(0, 35, VW, VH - 35, "#000"); c.globalAlpha = 1; }
-    const dp = Math.min(window.devicePixelRatio || 1, 2), sg = $("stage"), inset = 12;
+    const dp = Math.min(window.devicePixelRatio || 1, 2), sg = cv.parentElement || $("stage"), inset = 12;
     const fit = Math.max(0, Math.min((sg.clientWidth - inset * 2) / VW, (sg.clientHeight - inset * 2) / VH));
     const renderScale = Math.min(fit * dp, 8);
     const width = Math.max(1, Math.round(VW * renderScale)), height = Math.max(1, Math.round(VH * renderScale));
@@ -458,11 +459,29 @@
         mg.hidden = false;
       }
     } else if (!mg.hidden) mg.hidden = true;
-    if (schedule !== false) requestAnimationFrame(frame);
+    if (schedule) {
+      if (moving) requestAnimationFrame(frame);
+      else setTimeout(() => requestAnimationFrame(frame), 1500);
+    }
   };
 
-  const ago = (t, nowMs = Date.now()) => {
-    const s = Math.max(0, (nowMs - t) / 1000);
+  const stage = cv.parentElement || $("stage");
+  if (window.ResizeObserver && stage) {
+    let resizeQueued = false;
+    new ResizeObserver(() => {
+      if (resizeQueued) return;
+      resizeQueued = true;
+      requestAnimationFrame(() => {
+        resizeQueued = false;
+        frame(false);
+      });
+    }).observe(stage);
+  } else {
+    window.addEventListener("resize", () => frame(false), { passive: true });
+  }
+
+  const ago = (t) => {
+    const s = Math.max(0, (Date.now() - t) / 1000);
     return s < 60 ? Math.round(s) + "s" : s < 3600 ? Math.round(s / 60) + "m" : s < 86400 ? Math.round(s / 3600) + "h" : Math.round(s / 86400) + "d";
   };
   const hm = (t) => new Date(t).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
@@ -473,9 +492,10 @@
   window.AO.GEAR = GEAR;
   const mdn = (md) => {
     if (!md) return "";
-    const i = md.indexOf(":"), p = i > 0 ? md.slice(0, i) : "", m = ["codex", "anthropic", "openai", "gemini", "ollama"].includes(p) ? md.slice(i + 1) : md;
-    const c = m.includes("haiku") ? "Haiku" : m.includes("sonnet") ? "Sonnet" : m.includes("opus") ? "Opus" : m.split("/").pop();
-    return p === "ollama" ? c + " · local" : p === "codex" ? c + " · ChatGPT" : p === "anthropic" ? c + " · API" : c;
+    const i = md.indexOf(":"), p = i > 0 ? md.slice(0, i) : "", m = ["cc", "codex", "anthropic", "openai", "gemini", "ollama"].includes(p) ? md.slice(i + 1) : md;
+    const c = m.includes("haiku") ? "Haiku" : m.includes("sonnet") ? "Sonnet" : m.includes("opus") ? "Opus"
+      : /^qwen3:8b$/i.test(m) ? "Qwen3 8B" : /^gpt-6-luna$/i.test(m) ? "GPT-6 Luna" : m.split("/").pop();
+    return p === "ollama" ? c + " · local" : p === "codex" ? c + " · ChatGPT" : p === "anthropic" ? c + " · API" : p === "cc" ? "Claude " + c : c;
   };
   window.AO.mdn = mdn;
   const tiles = () => {
@@ -510,12 +530,65 @@
 
   const rn = (j) => (j.repo.split("/")[1] || j.repo) + (j.num ? "#" + j.num : "");
   const sel = new Set();
-  // A queue snapshot can replace a button while its request is still in flight.
+  // Keep retry feedback attached to the job while live snapshots replace rows.
   const retryStates = new Map();
   window.AO.retryStates = retryStates;
+  const stagedPhases = [
+    {key:"red", label:"RED"},
+    {key:"green", label:"GREEN"},
+    {key:"ci", label:"CI"},
+    {key:"review", label:"REVIEW"},
+    {key:"approval", label:"HUMAN"}
+  ];
+  const stagedRanks = {fix:0, ci:1, review:2, gate:3, approve:4, submit:5, done:6};
+  const stagedSummary = (s) => {
+    const config = s.tdd && typeof s.tdd === "object" ? s.tdd : {};
+    const repos = Array.isArray(config.repos) ? config.repos.filter((repo) => typeof repo === "string") : [];
+    if (config.active !== true || !repos.length) return "";
+    const belongs = (job) => job && job.work_class !== "optimization" && repos.includes(job.repo) && ["fix", "hunt"].includes(job.kind);
+    const open = s.q.filter(belongs);
+    const fixer = s.w?.fixer || {};
+    const job = open.find((item) => String(item.id) === String(fixer.job)) || open[0] || s.dn.find((item) => item.st === "drop" && belongs(item));
+    let status = "À espera de tarefa staged", notice = "";
+    let phases = stagedPhases.map((phase) => ({...phase, state:"pending"}));
+    if (job) {
+      const owns = String(fixer.job) === String(job.id);
+      const event = s.ev.find((item) => String(item?.j) === String(job.id));
+      const message = String(event?.m || (owns ? fixer.say : "") || "").trim();
+      const stage = String(job.st || ""), rank = Object.hasOwn(stagedRanks, stage) ? stagedRanks[stage] : -1;
+      const red = stage === "fix" && owns && /^RED(?:\b|:)/i.test(message);
+      const green = stage === "fix" && owns && /^GREEN(?:\b|\s|:)/i.test(message);
+      phases = stagedPhases.map((phase) => {
+        let state = "pending";
+        if (phase.key === "red") state = red ? "active" : (job.red_commit || job.red_stage === "committed" || job.green_commit || rank >= 1) ? "complete" : "pending";
+        else if (phase.key === "green") state = green ? "active" : (job.green_commit || rank >= 1) ? "complete" : "pending";
+        else if (phase.key === "ci") state = stage === "ci" ? "active" : rank > 1 ? "complete" : "pending";
+        else if (phase.key === "review") state = stage === "review" ? "active" : rank > 3 ? "complete" : "pending";
+        else if (phase.key === "approval") state = stage === "approve" ? "active" : rank > 4 ? "complete" : "pending";
+        return {...phase, state};
+      });
+      const recovering = /\bresum(?:e|ed|ing)\b|\brecover(?:y|ed)?\b/i.test(message);
+      const rejected = stage === "drop" || /\breject(?:ed|ion)?\b|back to fixer|gave up|attempt failed|proof missing|changes requested|reviewer objections/i.test(message);
+      if (recovering || rejected) {
+        status = recovering ? "Recuperação" : "Rejeição";
+        notice = String(job.why || message || (recovering ? "A tarefa foi retomada." : "O candidato foi recusado."));
+      } else {
+        status = stage === "approve" ? "Aprovação humana pendente"
+          : stage === "submit" ? "Aprovado · a submeter"
+          : stage === "review" ? "Revisão independente"
+          : stage === "ci" ? "CI em execução"
+          : stage === "gate" ? "Validação automática"
+          : stage === "fix" ? (green ? "GREEN em execução" : red ? "RED em execução" : "Fixer em execução")
+          : "Tarefa " + stage;
+      }
+    }
+    const phaseMarkup = phases.map((phase) => `<span class="queue-staged-phase" data-state="${phase.state}" aria-label="${phase.label}: ${phase.state}">${phase.label}</span>`).join("");
+    const jobLabel = job ? (job.num ? "#" + job.num : "job " + job.id) + " · " + job.title : "";
+    return `<section class="queue-staged" aria-label="Pipeline test-first"><div class="queue-staged-head"><strong>Test-first</strong><span class="queue-staged-status">${esc(status)}</span></div>${jobLabel ? `<span class="queue-staged-job" title="${esc(jobLabel)}">${esc(jobLabel)}</span>` : ""}<div class="queue-staged-phases">${phaseMarkup}</div>${notice ? `<span class="queue-staged-notice" title="${esc(notice)}">${esc(notice)}</span>` : ""}</section>`;
+  };
   const jrow = (j, x) => {
     const retry = retryStates.get(j.id);
-    const kind = workLabel(j.work_class);
+    const kind = workLabel(j.work_class || j.kind || "job");
     const reason = retry?.error || (j.st === "ci" && S.cil[j.id] ? S.cil[j.id] : j.why || "");
     const repo = rn(j);
     return `<div class="row queue-row${j.st === "approve" ? " apr" : ""}">${j.st === "approve" && x ? `<input type="checkbox" class="bk" data-k="${j.id}" ${sel.has(j.id) ? "checked" : ""} aria-label="select">` : ""}<span class="pill ${STC[j.st] || ""}" title="${esc(kind + " · " + j.st)}">${esc(j.st)}</span><div class="ti"><a class="a" href="#" data-j="${j.id}" title="${esc(j.title)}">${esc(j.title)}</a><div class="queue-meta"><span class="queue-kind" title="${esc(kind)}">${esc(kind)}</span>${reason ? `<span class="queue-why${retry?.error ? " bad2" : ""}" title="${esc(reason)}">${esc(reason)}</span>` : ""}</div></div><span class="rp"><span class="queue-repo" title="${esc(repo)}">${esc(repo)}</span>${j.st === "approve" ? ` <button class="go" data-j="${j.id}">review</button>` : ""}${x && j.st !== "approve" ? ` <button class="x" data-d="${j.id}" title="drop">✕</button>` : ""}${!x && j.st === "drop" && j.kind === "fix" ? ` <button class="x" data-rq="${j.id}" title="try again" ${retry?.pending ? "disabled" : ""}>↻</button>` : ""}</span></div>`;
@@ -525,14 +598,14 @@
     if (!S) return;
     const rows = S.issue_backlog || [];
     const summaries = S.issue_summary || [];
-    const totals = Object.fromEntries(["open", "waiting", "reviewed", "filtered", "queued", "blocked", "pr_open", "integrated", "done"].map((key) => [key, summaries.reduce((sum, item) => sum + Number(item[key] || 0), 0)]));
+    const keys = ["open", "waiting", "reviewed", "filtered", "queued", "blocked", "pr_open", "integrated", "done"];
+    const totals = Object.fromEntries(keys.map((key) => [key, summaries.reduce((sum, item) => sum + Number(item[key] || 0), 0)]));
     const truncated = summaries.some((item) => item.scan?.truncated);
     const errors = summaries.filter((item) => item.scan?.error);
     const ready = summaries.some((item) => item.scan?.at);
     const intakeNotReady = summaries.filter((item) => !item.intake_ready);
-    const issueCount = `${totals.open}${truncated ? "+" : ""} open`;
     const stages = [totals.waiting && `${totals.waiting} to triage`, totals.queued && `${totals.queued} in Apollo`, totals.pr_open && `${totals.pr_open} with PR`].filter(Boolean);
-    $("issueSummary").textContent = [issueCount, ...stages].join(" · ") || (ready ? "no open issues" : "waiting for Scout");
+    $("issueSummary").textContent = [`${totals.open}${truncated ? "+" : ""} open`, ...stages].join(" · ") || (ready ? "no open issues" : "waiting for Scout");
     const scans = summaries.map((item) => item.scan?.at || 0).filter(Boolean);
     const lastScan = scans.length ? new Date(Math.max(...scans)).toLocaleString() : "not scanned yet";
     const notes = [`Last GitHub scan: ${lastScan}`, "showing up to 80 cached issues, most actionable first"];
@@ -544,13 +617,9 @@
     $("issueScan").textContent = notes.join(" · ");
     const query = $("issueFilter").value.trim().toLocaleLowerCase();
     const matches = rows.filter((issue) => !query || [issue.repo, issue.num, issue.title, issue.status, issue.reason, issue.author].join(" ").toLocaleLowerCase().includes(query));
-    const status = {
-      waiting: ["to triage", "wait"], reviewed: ["reviewed", ""], filtered: ["filtered", "filtered"],
-      queued: ["in Apollo", "queued"], blocked: ["blocked", "blocked"], pr_open: ["PR open", "info"],
-      integrated: ["merged", "ok"], done: ["done", "ok"],
-    };
+    const labels = {waiting:["to triage","wait"],reviewed:["reviewed",""],filtered:["filtered","filtered"],queued:["in Apollo","queued"],blocked:["blocked","blocked"],pr_open:["PR open","info"],integrated:["merged","ok"],done:["done","ok"]};
     $("githubIssues").innerHTML = matches.length ? matches.map((issue) => {
-      const [label, cls] = status[issue.status] || [issue.status || "unknown", ""];
+      const [label, cls] = labels[issue.status] || [issue.status || "unknown", ""];
       const repo = issue.repo.split("/")[1] || issue.repo;
       const detail = issue.reason || (issue.job_stage ? `Apollo · ${issue.job_stage}` : "");
       const pr = issue.pr_url ? ` · <a href="${esc(issue.pr_url)}" target="_blank" rel="noopener">view PR</a>` : "";
@@ -560,37 +629,21 @@
 
   const lists = () => {
     const q = S.q;
-    // Keep errors and pending retries through state refreshes, but discard
-    // resolved jobs so old diagnostics never leak into a different state.
-    const dropped = new Set([...q, ...S.dn].filter(j => j.st === "drop").map(j => j.id));
-    for (const [id, retry] of retryStates) {
-      if (!retry.pending && !dropped.has(id)) retryStates.delete(id);
-    }
+    const dropped = new Set([...q, ...S.dn].filter((job) => job.st === "drop").map((job) => job.id));
+    for (const [id, retry] of retryStates) if (!retry.pending && !dropped.has(id)) retryStates.delete(id);
     const query = $("queueFilter").value.trim().toLocaleLowerCase();
     const matches = (j) => !query || [j.title, j.repo, j.num, j.kind, j.work_class, j.st, j.why, S.cil[j.id], workLabel(j.work_class), retryStates.get(j.id)?.error].join(" ").toLocaleLowerCase().includes(query);
     const queued = q.filter(matches), recent = S.dn.filter(matches);
     const suspended = S.ops?.blocked_hunts?.length || 0;
-    $("qn").textContent = (query ? `${queued.length} de ${q.length}` : q.length ? q.length + " trabalhos" : "") +
-      (suspended ? " · " + suspended + " Hunter(s) suspenso(s)" : "");
+    $("qn").textContent = (query ? `${queued.length} of ${q.length}` : q.length ? q.length + " jobs" : "") + (suspended ? ` · ${suspended} Hunter(s) suspended` : "");
     const aps = q.filter((j) => j.st === "approve").map((j) => j.id);
     for (const k of [...sel]) if (!aps.includes(k)) sel.delete(k);
     const bk = aps.length > 1 ? `<div class="bkb"><label class="ck"><input type="checkbox" id="bkA" ${sel.size === aps.length ? "checked" : ""}> all ${aps.length}</label><span class="sp"></span>${sel.size ? `<button class="go" id="bkS">submit ${sel.size}</button><button class="dng" id="bkD">drop ${sel.size}</button>` : `<span class="k">select pull requests to submit together</span>`}</div>` : "";
     const empty = query ? (!queued.length && !recent.length ? `<div class="empty">no matching work</div>` : "") : !q.length ? `<div class="empty">nothing waiting</div>` : "";
-    $("queue").innerHTML = bk + queued.slice(0, 16).map((j) => jrow(j, true)).join("") +
-      (recent.length ? `<div class="sub">recent${query ? " · " + recent.length : ""}</div>` + recent.slice(0, 12).map((j) => jrow(j, false)).join("") : "") + empty;
+    $("queue").innerHTML = stagedSummary(S) + bk + (queued.length ? queued.slice(0, 16).map((j) => jrow(j, true)).join("") : "") + (recent.length ? `<div class="sub">recent${query ? ` · ${recent.length}` : ""}</div>` + recent.slice(0, 12).map((j) => jrow(j, false)).join("") : "") + empty;
     renderIssueBacklog();
-    const steward = S.pr_steward || {};
-    const counts = S.pr_counts || {};
-    const hasStewardReport = (steward.repos || []).some((repo) => Number(repo.at || 0) > 0);
-    const op = hasStewardReport ? Number(steward.total || 0) : Number(counts.open ?? S.pr.filter((p) => p.st === "open").length);
-    const mg = Number(counts.merged ?? S.pr.filter((p) => p.st === "merged").length);
-    const prStats = [`${op} open`, `${mg} merged`];
-    if (hasStewardReport) {
-      prStats.push(`${Number(steward.final_check || 0)} need final checks`);
-      if (Number(steward.review_requested || 0)) prStats.push(`${Number(steward.review_requested)} changes requested`);
-    }
-    $("prn").textContent = prStats.join(" · ");
-    $("prn").title = hasStewardReport ? `Steward scan: ${(steward.repos || []).filter((repo) => repo.at).map((repo) => `${repo.repo} ${new Date(repo.at).toLocaleString()}`).join(" · ")}` : "Counts from locally recorded pull requests; steward has not completed a scan yet";
+    const op = S.pr.filter((p) => p.st === "open").length, mg = S.pr.filter((p) => p.st === "merged").length;
+    $("prn").textContent = `${op} open · ${mg} merged`;
     $("prs").innerHTML = S.pr.length ? S.pr.slice(0, 16).map((p) => `<div class="row"><span class="pill ${p.st === "merged" ? "ok" : p.st === "closed" ? "bad" : "info"}">${esc(p.st)}</span><div class="ti"><a class="a" href="#" data-u="${esc(p.url)}">${esc(p.title)}</a></div><span class="rp">${esc(rn({ repo: p.repo, num: p.num }))}</span></div>`).join("") : `<div class="empty">no pull requests yet</div>`;
     const m = Object.fromEntries(S.mg.map((x) => [x.d, x.n]));
     const days = [...Array(30)].map((_, i) => new Date(Date.now() - (29 - i) * 86400000).toISOString().slice(0, 10));

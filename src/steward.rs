@@ -8,7 +8,10 @@ use crate::sh::ghj;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
-const PAGE_LIMIT: &str = "200";
+// The GitHub CLI cap caused a busy repository with 200+ open PRs to fail
+// closed forever. Scan up to the CLI's 1000-item ceiling and still refuse
+// automatic actions when the result set reaches that ceiling.
+const PAGE_LIMIT: &str = "1000";
 
 /// Reviews automáticas não constituem provas de testes.
 fn is_review_bot(check: &Value) -> bool {
@@ -218,7 +221,7 @@ pub async fn scan(a: &Ax, repo: &str) -> Result<(), String> {
             "--limit",
             PAGE_LIMIT,
             "--json",
-            "number,title,body,url,author,isDraft,headRefOid,baseRefName,baseRefOid,createdAt,updatedAt,mergeStateStatus,reviewDecision,statusCheckRollup,files",
+            "number,title,body,url,isDraft,headRefOid,baseRefName,baseRefOid,createdAt,updatedAt,mergeStateStatus,reviewDecision,statusCheckRollup,files",
         ],
         90,
     )
@@ -240,10 +243,6 @@ pub async fn scan(a: &Ax, repo: &str) -> Result<(), String> {
     ) == 1;
     let repair_enabled = a.db.n(
         "select steward_repair from rp where full=? and on_=1",
-        pa![repo.to_string()],
-    ) == 1;
-    let close_enabled = a.db.n(
-        "select steward_close from rp where full=? and on_=1",
         pa![repo.to_string()],
     ) == 1;
     let local_merge_enabled = a.db.n(
@@ -270,18 +269,9 @@ pub async fn scan(a: &Ax, repo: &str) -> Result<(), String> {
             "read_only": !merge_enabled,
             "merge_enabled": merge_enabled,
             "local_merge_enabled": local_merge_enabled,
-            "repair_enabled": repair_enabled,
-            "close_enabled": close_enabled
+            "repair_enabled": repair_enabled
         }),
     );
-    if close_enabled {
-        if let Err(error) = crate::steward_close::run(a, repo, list).await {
-            a.db.ks(
-                &format!("steward:close_error:{repo}"),
-                &json!({"at":now(),"error":crate::sh::head(&error,500)}),
-            );
-        }
-    }
     if repair_enabled {
         crate::steward_repair::run(a, repo, list, &report).await;
     }

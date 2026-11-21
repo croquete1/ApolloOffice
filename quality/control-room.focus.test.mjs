@@ -48,19 +48,29 @@ function scene() {
   createList("aoEventList");
   elements.aoIssueSummary={textContent:""};
   elements.aoIssueList={innerHTML:""};
-  for (const id of ["aoMetricQueue","aoMetricPR","aoMetricDone","aoTasks","aoPulls"]) {
+  elements.aoStewardSummary={textContent:""};
+  elements.aoIssues={innerHTML:""};
+  for (const id of ["aoMetricQueue","aoMetricPR","aoMetricDone","aoTasks","aoPulls",
+    "aoTaskSummary","aoPRSummary","aoActivitySummary","aoTaskFilter"]) {
     elements[id]={textContent:"",focus(){document.activeElement=this}};
   }
+  elements.aoMetricQueueBar={hidden:true,firstElementChild:{style:{}}};
+  elements.aoMetricPRSub={hidden:true};
   const formatNum = (n)=>String(n);
   const safeArray = (v)=>Array.isArray(v)?v:[];
   const escapeHTML = (v)=>String(v ?? "").replace(/[&<>"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
   const datum=()=> "10:00";
+  const taskFilterInput={value:"",addEventListener(){}};
   const names = {};
   const stageLabels={fix:"Correção",ci:"Testes",approve:"Aprovação"};
   const byId=(id)=>elements[id];
   const A = {workLabel:(kind)=>kind || "other"};
-  const context = {A,document,formatNum,safeArray,escapeHTML,datum,names,stageLabels,byId};
-  const block = "(() => { let selectedRepo='', lastListSignature='';" +
+  const context = {A,document,formatNum,safeArray,escapeHTML,datum,names,stageLabels,byId,taskFilterInput,
+    pct:(value)=>value, stageProgress:{fix:58,review:84},
+    taskIcon:()=>"tasks.svg", projectName:(repo)=>String(repo).split("/").at(-1),
+    prBadge:(_s,p)=>({t:p.st,tone:""}),
+    eventRowHTML:()=>""};
+  const block = "(() => { let selectedRepo='', lastListSignature='', taskFilterText='', snapshot=null;" +
     " const countTotals=(s)=>({active:s.n?.fix||0,done:s.n?.done||0}); " +
     implementation + " return {renderLists}; })()";
   const api = runInNewContext(block, context);

@@ -4,3 +4,12 @@ target/
 
 __pycache__/
 *.pyc
+
+# Local experiment artifacts — never commit temp reports, repro scripts,
+# databases, backups or private logs produced by the pilot runs.
+apollooffice-auditoria-*.md
+apollooffice-v*-*.py
+*.db
+*.db-wal
+*.db-shm
+apollo-pilot-backup-*/

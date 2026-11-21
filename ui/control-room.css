@@ -159,6 +159,39 @@ body.ao-enabled #dr { color: var(--t1); }
   border-color: #316371;
 }
 .ao-pipeline-stage.is-busy .ao-pipeline-value { color: #88ddc4; }
+.ao-staged-panel[hidden] { display: none !important; }
+.ao-staged-panel .ao-panel-heading { align-items: center; }
+.ao-staged-panel .ao-panel-heading p { max-width: 76ch; line-height: 1.5; }
+.ao-staged-status {
+  flex: none; max-width: 38%; padding: 7px 10px; border: 1px solid #394b60;
+  border-radius: 999px; color: #c3d2e2; background: #142337;
+  font-size: 10px; line-height: 1.35; text-align: center;
+}
+.ao-staged-status[data-state="approval"] { color: #ffe1a4; border-color: #76613d; background: #30291e; }
+.ao-staged-status[data-state="rejection"] { color: #ffc0b8; border-color: #774d50; background: #321f25; }
+.ao-staged-status[data-state="recovery"] { color: #a8d8ff; border-color: #3f5f7c; background: #192b3e; }
+.ao-staged-phases {
+  display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px;
+  list-style: none; margin: 0; padding: 14px 16px 8px;
+}
+.ao-staged-phase {
+  min-width: 0; min-height: 72px; display: grid; grid-template-columns: auto 1fr;
+  grid-template-rows: auto auto; align-content: center; gap: 6px 8px;
+  padding: 10px 12px; border: 1px solid #304258; border-radius: 9px; background: #142236;
+}
+.ao-staged-index { color: #7994b1; font: 600 10px/1.2 ui-monospace, monospace; }
+.ao-staged-phase strong { min-width: 0; color: #dce8f6; font-size: 11px; line-height: 1.35; font-weight: 620; }
+.ao-staged-phase small { grid-column: 1 / -1; color: #9aaec3; font-size: 10px; }
+.ao-staged-phase[data-state="active"] { background: #153544; border-color: #347384; }
+.ao-staged-phase[data-state="active"] small { color: #83e0c4; }
+.ao-staged-phase[data-state="complete"] { background: #172d2e; border-color: #38665a; }
+.ao-staged-phase[data-state="complete"] small { color: #9be1c8; }
+.ao-staged-feedback {
+  margin: 4px 16px 14px; padding: 9px 11px; overflow-wrap: anywhere;
+  border: 1px solid #4c5c70; border-radius: 8px; color: #d5e0ed;
+  background: #121f30; font-size: 11px; line-height: 1.5;
+}
+.ao-staged-feedback[hidden] { display: none !important; }
 @media (max-width:1200px) {
   .ao-pipeline { grid-template-columns: repeat(10,minmax(115px,1fr)); }
 }
@@ -317,6 +350,8 @@ body.ao-enabled #dr { color: var(--t1); }
 .ao-state-work {color:#62d8b3;}.ao-state-paused {color:#e5b678;}.ao-state-sleep {color:#859bb0;}
 .ao-operations-grid {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:15px;}
 .ao-operations-grid > .ao-panel {min-height:260px;}
+.ao-operations-grid > .ao-steward-panel {grid-column:1 / -1;}
+.ao-steward-list {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 18px;}
 .ao-list {min-width:0; padding:5px 14px 11px; max-height:285px; overflow:auto;}
 #aoTasksList {max-height:190px;}
 .ao-issues {margin:0 14px 10px;padding-top:8px;border-top:1px solid #26384d;scroll-margin-top:18px;}
@@ -422,6 +457,7 @@ body.ao-enabled #dr { color: var(--t1); }
   .ao-operations-grid > .ao-panel:last-child{grid-column:auto;}
 }
 @media (max-width:530px) {
+  .ao-steward-list {grid-template-columns:1fr;}
   .ao-topbar{align-items:flex-start;flex-direction:column;}
   .ao-top-actions{width:100%;justify-content:space-between;}
   .ao-metric{min-height:90px;padding:12px;}
@@ -681,3 +717,14 @@ body.ao-fallback-no-pixel #stage::after {
 .ao-diag-work { background: #13302a; border-color: #265046; color: #78e0bd; }
 .ao-diag-work .ao-diag-dot { background: #35d39a; animation: ao-diag-pulse 1.4s ease-in-out infinite; }
 @keyframes ao-diag-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+@media (max-width:900px) {
+  .ao-staged-phases { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width:530px) {
+  .ao-staged-panel .ao-panel-heading { align-items: flex-start; flex-direction: column; }
+  .ao-staged-status { max-width: 100%; text-align: left; }
+  .ao-staged-phases { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 12px; gap: 7px; }
+  .ao-staged-phase { min-height: 64px; padding: 9px; }
+  .ao-staged-phase strong { font-size: 10px; }
+  .ao-staged-feedback { margin-right: 12px; margin-left: 12px; }
+}

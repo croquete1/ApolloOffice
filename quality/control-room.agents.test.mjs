@@ -21,7 +21,9 @@ function harness() {
     const activity={textContent:"",title:""};
     const model={textContent:"",hidden:true};
     return [role,{
-      status,activity,model,
+      dataset:{},status,activity,model,
+      classList:{toggle(){},remove(){}},
+      setAttribute(){},
       querySelector(sel){
         return {".ao-agent-status":status,".ao-agent-activity":activity,".ao-agent-model":model}[sel];
       }
@@ -40,14 +42,14 @@ function harness() {
     }];
   }));
   const list={children:roles.map(()=>({})),querySelector:(query)=>{
-    const role=query.match(/data-agent="([^"]+)"/)?.[1];
+    const role=query.match(/data-role="([^"]+)"/)?.[1];
     return rows[role];
   }};
   const elements={aoAgentList:list,aoMetricWorkers:{textContent:""},aoAgentSummary:{textContent:""}};
   const classes=new Set();
   const app={classList:{add:(n)=>classes.add(n),contains:(n)=>classes.has(n)}};
   const env={
-    roles, stationNodes:nodes, names:Object.fromEntries(roles.map((n)=>[n,n])),
+    roles, officeRoles:roles, stationNodes:nodes, agentList:list, workVerb:{fixer:"A programar"}, names:Object.fromEntries(roles.map((n)=>[n,n])),
     colors:roles.map(()=>"#0ff"), safeArray:(v)=>Array.isArray(v)?v:[],
     formatNum:(v)=>String(v), escapeHTML:(v)=>String(v),
     byId:(id)=>elements[id], animationsOn:false,
@@ -66,7 +68,7 @@ test("active agent reflects work and the actual Ollama model",()=>{
   assert.equal(h.nodes.fixer.dataset.mode,"work");
   assert.equal(h.rows.fixer.activity.textContent,"A rever alterações");
   assert.equal(h.rows.fixer.model.textContent,"qwen3:8b · local");
-  assert.equal(h.rows.fixer.status.textContent,"A trabalhar");
+  assert.equal(h.rows.fixer.status.textContent,"A programar");
   assert.equal(h.elements.aoMetricWorkers.textContent,"1 / 10");
 });
 

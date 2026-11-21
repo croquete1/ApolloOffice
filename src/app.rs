@@ -53,12 +53,15 @@ pub struct Lv {
     pub hst: HashMap<String, Value>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Rn {
     pub h: String,
     pub dir: String,
     pub w: String,
     pub md: String,
+    /// Controller-driven staged TDD: the office owns git history, so the model
+    /// must not create/amend commits or move refs from its shell.
+    pub staged: bool,
 }
 
 pub struct App {
@@ -88,6 +91,12 @@ pub struct App {
     // Serializes new work/merge admission with the update shutdown decision.
     pub update_transition: Mutex<()>,
     pub oa: Mutex<HashMap<String, (String, String, i64)>>,
+    /// Test-only queue of scripted FIXER phase responses, so the staged state
+    /// machine can be driven without a real model. Each entry may carry `_files`
+    /// (a path->content map written to the run dir) and `_delete` (paths removed)
+    /// which are applied before the remaining JSON is returned as the model answer.
+    #[cfg(test)]
+    pub sim: Mutex<std::collections::VecDeque<Value>>,
 }
 
 pub type Ax = Arc<App>;
@@ -224,6 +233,8 @@ impl App {
             drain: std::sync::atomic::AtomicBool::new(false),
             update_transition: Mutex::new(()),
             oa: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            sim: Mutex::new(std::collections::VecDeque::new()),
         }
     }
 

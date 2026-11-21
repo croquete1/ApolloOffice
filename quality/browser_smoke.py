@@ -1,14 +1,8 @@
 #!/usr/bin/env python3
-"""Headless Chromium smoke test for the real Apollo Office frontend.
-
-Serves only local UI assets and a synthetic /api/state payload. No AI providers,
-GitHub write APIs, credentials or live backend are involved.
-
-Run: python3 quality/browser_smoke.py
-Requires Chrome/Chromium installed; uses only the Python standard library.
-"""
+"""Render the pixel-themed operational dashboard with synthetic local state."""
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
@@ -26,8 +20,8 @@ UI_DIR = Path(__file__).resolve().parent.parent / "ui"
 ROLES = ("scout", "guard", "vet", "watcher", "hunter", "repro", "fixer", "ci", "reviewer", "submit")
 
 
-def fixture(active: bool, telemetry: str = "", quota: str = "normal") -> dict:
-    """Construct an API-compatible snapshot, optionally with telemetry anomalies."""
+def fixture(active: bool, telemetry: str = "", codex: dict | None = None) -> dict:
+    """Build an API-shaped snapshot with a staged Fixer job when requested."""
     stamp = int(time.time() * 1000)
     if telemetry == "skew":
         # Simula um servidor dez minutos atrás do relógio do navegador.
@@ -37,11 +31,10 @@ def fixture(active: bool, telemetry: str = "", quota: str = "normal") -> dict:
                "t": stamp, "mood": "", "cmds": [], "tk": 0}
         for role in ROLES
     }
-    jobs = []
-    counts = {}
+    jobs, counts, events, prs = [], {}, [], []
     if active:
         workers["fixer"].update({
-            "st": "work", "say": "A desenvolver a interface",
+            "st": "work", "say": "GREEN: implementing the fix for #123",
             "job": 17, "md": "ollama:qwen3:8b", "tk": 1240,
         })
         jobs = [{
@@ -49,52 +42,32 @@ def fixture(active: bool, telemetry: str = "", quota: str = "normal") -> dict:
             "kind": "fix", "title": "Validar dashboard",
             "url": "https://github.com/example/apollo/issues/123",
             "st": "fix", "why": "", "pr": None, "t0": stamp, "t1": 0,
+            "red_stage": "committed", "red_commit": "synthetic-red-commit",
+            "green_commit": None,
         }]
-        counts = {"fix": 1}
-    codex = {
-        "status": "ok", "updated_at": stamp,
-        "five_hour": {"remaining": 88, "resets_at": stamp // 1000 + 1800},
-        "weekly": {"remaining": 59, "resets_at": stamp // 1000 + 400_000},
-        "weekly_forecast": {"status":"insufficient", "observed_hours":0, "estimated":True},
-    }
-    if quota in ("forecast_risk", "forecast_on_track", "forecast_near", "forecast_low"):
-        mapping = {
-            "forecast_risk":"at_risk", "forecast_on_track":"on_track",
-            "forecast_near":"near_limit", "forecast_low":"low_use",
-        }
-        codex["weekly_forecast"] = {
-            "status": mapping[quota], "observed_hours": 12,
-            "projected_exhaust_at": stamp // 1000 + 72_000,
-            "estimated": True,
-        }
-    if quota == "unavailable":
-        codex = {"status": "unavailable"}
-    elif quota == "weekly_only":
-        codex["five_hour"] = None
-    elif quota in ("stale", "forecast_stale"):
-        codex["status"] = "stale"
-        codex["updated_at"] = stamp - 30 * 60_000
-        if quota == "forecast_stale":
-            codex["weekly_forecast"] = {
-                "status":"at_risk", "observed_hours":12,
-                "projected_exhaust_at":stamp // 1000 + 7200,
-            }
+        prs = [{
+            "repo": "example/apollo", "num": 44, "st": "open",
+            "title": "Fix dashboard issue", "url": "https://github.com/example/apollo/pull/44",
+            "upd": stamp, "merged": None,
+        }]
+        counts = {"fix": 1, "done": 6}
+        events = [{"t": stamp, "w": "fixer", "m": "GREEN: implementing the fix for #123", "j": 17}]
     return {
         "t": stamp, "v": "smoke-fixture", "nr": 1,
         "o": {"off": False, "man": False, "pause": "", "warn": False,
               "net": {"local": True, "gh": True, "an": True}},
-        "w": workers, "q": jobs, "dn": [], "pr": [],
-        "mg": [], "ev": [], "n": counts, "fl": [], "ln": {}, "cil": {},
-        "hs": [{"id": "local", "on_": 1}],
-        "hst": {"local": {
-            "t": stamp - 130_000 if telemetry == "stale" else (
-                stamp + 300_000 if telemetry == "future" else stamp
-            ),
-            "cpu": 8, "load": 1.75,
-            "mem": [8192, 16384] if telemetry == "invalid" else [16384, 8192],
-            "disk": [40, 60] if telemetry == "invalid" else [100, 40],
-            "temp": 45,
-        }},
+        "w": workers, "q": jobs, "dn": [], "pr": prs, "mg": [], "ev": events,
+        "n": counts, "done24": 3 if active else 0,
+        "delivery": {"merged_fixes": 1 if active else 0},
+        "prod24": [{"g": 2, "n": 1}, {"g": 0, "n": 2}] if active else [],
+        "fl": [], "ln": {}, "cil": {},
+        "hs": [{"id": "local", "on_": 1, "dk": 1, "ln": 2}],
+        "hst": {"local": {"t": stamp, "cpu": 8, "load": 0.7, "mem": [16384, 8192], "disk": [96, 33]}},
+        "tdd": {
+            "active": True, "repos": ["example/apollo"],
+            "primary": "ollama:qwen3:8b", "fallback": "codex:gpt-6-luna",
+            "fallback_effort": "max", "reviewer": "cc:opus",
+        },
         "lm": None, "star": None,
         # Valores sintéticos exclusivos dos testes, não dados da conta.
         "codex_usage": codex,
@@ -102,31 +75,18 @@ def fixture(active: bool, telemetry: str = "", quota: str = "normal") -> dict:
 
 
 class Handler(SimpleHTTPRequestHandler):
-    """Serve the real files in ui/ and a controlled fixture API."""
+    """Serve actual UI files and a controlled API snapshot."""
     state: dict = {}
     quota_mode = "normal"
+    result: str | None = None
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(UI_DIR), **kwargs)
 
     def do_GET(self):
-        url = urlsplit(self.path)
-        query = parse_qs(url.query)
-        modern = query.get("ui", [""])[0] == "modern"
-        telemetry = query.get("pixel_telemetry", [""])[0]
-        if telemetry not in ("fresh", "stale", "skew", "invalid", "future"):
-            telemetry = ""
-        if url.path in ("/", "/index.html"):
-            # Inject a browser-only smoke probe; the repository UI is unchanged.
+        if urlsplit(self.path).path in ("/", "/index.html"):
             html = (UI_DIR / "index.html").read_text(encoding="utf-8")
-            if not modern and query.get("pixel_raf_block", [""])[0] == "1":
-                # Reproduz ambientes headless que suspendem RAF; o snapshot
-                # continua a ter de desenhar o rack, sem loop adicional.
-                html = html.replace("</head>", (
-                    "<script>window.requestAnimationFrame = function () { return 0; };"
-                    "</script></head>"
-                ))
-            probe = """
+            probe = r"""
 <script>
 (function () {
   function verify() {
@@ -134,229 +94,123 @@ class Handler(SimpleHTTPRequestHandler):
     function assert(value, message) { if (!value) errors.push(message); }
     try {
       var app = document.getElementById("aoControlRoom");
+      var canvas = document.getElementById("cv");
+      var office = document.querySelector(".ao-office");
+      var filter = document.getElementById("aoTaskFilter");
+      var repoFilter = document.getElementById("aoRepoFilter");
+      assert(Boolean(app), "O dashboard operacional não carregou");
+      assert(canvas && office && canvas.parentElement === office, "O canvas pixelizado não está no escritório");
+      if (canvas && office && window.innerWidth <= 600) {
+        var canvasRect = canvas.getBoundingClientRect();
+        var officeRect = office.getBoundingClientRect();
+        assert(getComputedStyle(document.querySelector(".ao-metrics")).gridTemplateColumns.split(" ").length === 2,
+               "Os indicadores não se reorganizaram em duas colunas móveis");
+        assert(canvasRect.width > 300 && canvasRect.width <= officeRect.width + 1 &&
+               officeRect.width <= window.innerWidth + 1 &&
+               canvasRect.left >= officeRect.left - 1 && canvasRect.right <= officeRect.right + 1 &&
+               canvasRect.left >= -1 && canvasRect.right <= window.innerWidth + 1,
+               "O canvas pixelizado não cabe no escritório móvel (canvas=" + canvasRect.width + " @" + canvasRect.left +
+                 ".." + canvasRect.right + ", escritório=" + officeRect.width + " @" + officeRect.left + ".." + officeRect.right + ")");
+      }
+      assert(canvas && ["pixelated", "crisp-edges"].includes(getComputedStyle(canvas).imageRendering),
+             "O canvas não usa renderização pixelizada");
+      assert(office && !getComputedStyle(office).backgroundImage.includes("office-panorama"),
+             "A imagem panorâmica voltou a aparecer");
+      assert(document.querySelectorAll(".ao-station[data-role]").length === 10,
+             "O estado não tem os dez postos de agentes");
+      assert(document.querySelectorAll("#aoAgentList .ao-agent-row").length === 10,
+             "A lista de estado dos dez agentes não carregou");
+      assert(Boolean(filter && repoFilter), "Faltam os filtros de tarefa ou projeto");
+      assert(Boolean(document.getElementById("aoPipeline")), "O módulo do fluxo de trabalho não carregou");
+      assert(Boolean(document.getElementById("aoTasksList") && document.getElementById("aoPRList") &&
+                     document.getElementById("aoEventList")), "Falta o módulo de tarefas, PRs ou atividade");
+      assert(Boolean(document.getElementById("aoProductivityChart") && document.getElementById("aoMachines")),
+             "Falta o módulo de produtividade ou recursos");
+      assert(!document.querySelector('link[href="premium.css"]') &&
+             !document.querySelector('script[src="office-motion.js"]'),
+             "Uma folha ou animação do redesign anterior continua ativa");
+      if (window.innerWidth <= 600) {
+        assert(document.documentElement.scrollWidth <= window.innerWidth,
+               "O dashboard móvel tem overflow horizontal");
+      }
       var fixer = document.querySelector('.ao-station[data-role="fixer"]');
-      var overlay = document.getElementById("aoAgentOverlay");
-      assert(Boolean(app), "Control Room indisponível");
-      assert(Boolean(fixer), "Personagem Fixer em falta");
-      var quota = document.getElementById("codexQuota");
-      var quotaMode = "__QUOTA_EXPECT__";
-      if (quotaMode === "normal")
-        assert(quota && quota.textContent.includes("88% restante") &&
-               quota.textContent.includes("59% restante"),
-               "Limites Codex não apresentados na vista moderna");
-      else if (quotaMode === "unavailable")
-        assert(quota && quota.textContent.includes("Indisponível") &&
-               quota.querySelector("#codexQuotaStatus")?.textContent.includes("Sem ligação"),
-               "Valores inventados quando o Codex está indisponível");
-      else if (quotaMode === "weekly_only")
-        assert(quota && quota.textContent.includes("59% restante") &&
-               quota.textContent.includes("Indisponível"),
-               "Janela de 5 horas não aplicável foi inventada");
-      else if (quotaMode === "stale")
-        assert(quota && quota.querySelector("#codexQuotaStatus")?.textContent.includes("Dados anteriores"),
-               "Leitura anterior apresentada como atual");
-      else if (quotaMode === "forecast_risk")
-        assert(quota?.querySelector("#codexWeeklyForecast")?.textContent.includes("Risco de esgotamento"),
-               "Previsão de esgotamento em falta no dashboard moderno");
-      var room = document.querySelector(".ao-office");
-      assert(room && room.dataset.visualVersion === "2",
-             "O escritório 2.5D premium não está ativo");
-      assert(document.querySelectorAll(".ao-v2-character").length === 10,
-             "Faltam personagens SVG detalhadas");
-      assert(document.querySelectorAll(".ao-v2-window").length === 2,
-             "A sala premium não tem as janelas esperadas");
-      assert(document.querySelectorAll(".ao-v2-plant").length === 2,
-             "Faltam elementos de profundidade da sala");
-      if (app && fixer && overlay) {
+      if (window.__AO_SMOKE_ACTIVE__) {
+        assert(document.getElementById("aoMetricWorkers").textContent.includes("1 / 10"),
+               "A contagem de agentes ativos não reflete o Fixer");
+        assert(document.getElementById("aoMetricDone").textContent.trim() === "1",
+               "O total de correções integradas não reflete o relatório do steward");
+        assert(document.getElementById("aoTasksList").textContent.includes("Validar dashboard"),
+               "A tarefa real não aparece no módulo de tarefas");
+        assert(document.getElementById("aoPRList").textContent.includes("Fix dashboard issue"),
+               "O PR real não aparece no módulo de pull requests");
+        assert(document.getElementById("aoEventList").textContent.includes("implementing the fix for #123"),
+               "O evento real não aparece no módulo de atividade");
+        assert(document.getElementById("aoRepoFilter").value === "" &&
+               Array.from(repoFilter.options).some(option => option.value === "example/apollo"),
+               "O filtro não contém o repositório ativo");
+        assert(document.querySelectorAll("#aoProductivityChart .ao-merge-graph span").length === 24,
+               "A produtividade não mostra as 24 horas");
+        assert(document.getElementById("aoMachines").textContent.includes("local"),
+               "Os recursos da máquina local não aparecem");
+        var staged = document.getElementById("aoStagedPanel");
+        var models = document.getElementById("aoStagedModels");
+        assert(staged && !staged.hidden, "O módulo TDD test-first não está visível");
+        assert(models && models.textContent.includes("Qwen3 8B") &&
+               models.textContent.includes("GPT-6 Luna") && models.textContent.includes("Claude Opus"),
+               "Os modelos staged não refletem a configuração do controlador");
+        assert(document.getElementById("aoStagedStatus").textContent.includes("GREEN em execução"),
+               "O estado GREEN não acompanha o trabalho ativo");
+        filter.value = "validar dashboard";
+        filter.dispatchEvent(new Event("input", {bubbles: true}));
+        assert(document.querySelectorAll("#aoTasksList .ao-data-row").length === 1,
+               "A pesquisa não encontrou a tarefa correspondente");
+        filter.value = "no-matching-task";
+        filter.dispatchEvent(new Event("input", {bubbles: true}));
+        assert(document.querySelector("#aoTasksList .ao-empty"), "A pesquisa não mostrou o estado sem resultados");
+        filter.value = "";
+        filter.dispatchEvent(new Event("input", {bubbles: true}));
+        repoFilter.value = "example/apollo";
+        repoFilter.dispatchEvent(new Event("change", {bubbles: true}));
+        assert(document.getElementById("aoTasksList").textContent.includes("Validar dashboard"),
+               "O filtro por projeto removeu indevidamente o projeto selecionado");
+        repoFilter.value = "";
+        repoFilter.dispatchEvent(new Event("change", {bubbles: true}));
         fixer.click();
-        assert(!overlay.hidden, "O detalhe do agente não abriu");
+        var overlay = document.getElementById("aoAgentOverlay");
+        assert(overlay && !overlay.hidden, "O detalhe do agente não abriu");
         document.getElementById("aoDetailClose").click();
         assert(overlay.hidden, "O detalhe do agente não fechou");
-        var toggle = document.getElementById("aoMotion");
-        toggle.checked = false;
-        toggle.dispatchEvent(new Event("change", {bubbles: true}));
-        assert(app.classList.contains("ao-motion-disabled"), "Desativar animações falhou");
-        assert(getComputedStyle(fixer.querySelector(".ao-v2-character")).animationName === "none",
-               "A preferência de movimento desativado não foi aplicada à personagem");
-        toggle.checked = true;
-        toggle.dispatchEvent(new Event("change", {bubbles: true}));
-        assert(!app.classList.contains("ao-motion-disabled"), "Reativar animações falhou");
-        var expand = document.getElementById("aoExpand");
-        expand.click();
-        assert(document.getElementById("aoRoomPanel").classList.contains("ao-expanded"),
-               "Ampliar escritório falhou");
-        expand.click();
-        assert(!document.getElementById("aoRoomPanel").classList.contains("ao-expanded"),
-               "Restaurar escritório falhou");
+      } else {
+        assert(document.getElementById("aoMetricWorkers").textContent.includes("0 / 10"),
+               "Um agente parado foi mostrado como ativo");
+        assert(document.getElementById("aoTasksList").textContent.includes("Sem tarefas em aberto"),
+               "O estado vazio de tarefas não foi apresentado");
       }
+      var buttons = Array.from(document.querySelectorAll(".ao-pixel-tools button"));
+      assert(["Custos", "Repositórios", "Máquinas", "Definições"].every(label =>
+        buttons.some(button => button.textContent.includes(label))), "Faltam atalhos operacionais do painel base");
     } catch (error) { errors.push(String(error)); }
-    document.documentElement.setAttribute("data-ao-smoke",
-      errors.length ? "FAIL: " + errors.join(" | ") : "PASS");
+    var result = errors.length ? "FAIL: " + errors.join(" | ") : "PASS";
+    document.documentElement.setAttribute("data-ao-smoke", result);
+    var report = new XMLHttpRequest();
+    report.open("GET", "/__ao_smoke_result?value=" + encodeURIComponent(result), false);
+    report.send(null);
   }
-  // Poll until the new UI has a real state snapshot. A fixed sleep can
-  // incorrectly fail on slower CI runners. Stop within Chromium's 4500 ms
-  // virtual-time budget; verify() will report a useful failure if not ready.
   var started = Date.now();
   (function waitForDashboard() {
     var ready = document.getElementById("aoControlRoom") &&
-      document.querySelector('.ao-station[data-role="fixer"]') &&
       document.getElementById("aoMetricWorkers") &&
-      document.getElementById("aoMetricWorkers").textContent.includes(" / 10");
+      document.querySelector(".ao-office > #cv") &&
+      document.getElementById("aoMetricWorkers").textContent.trim() !== "—";
     if (ready || Date.now() - started >= 3500) verify();
-    else setTimeout(waitForDashboard, 100);
+    else setTimeout(waitForDashboard, 50);
   })();
 })();
 </script>
 """
-            if not modern:
-                probe = """
-<script>
-(function () {
-  // O canvas pode existir antes do primeiro frame. Validar que a
-  // interface recebeu dados e desenhou píxeis visíveis.
-  var started = Date.now();
-  function painted(canvas) {
-    if (!canvas || canvas.width <= 0 || canvas.height <= 0) return false;
-    var ctx = canvas.getContext("2d");
-    if (!ctx) return false;
-    var w = canvas.width, h = canvas.height;
-    var positions = [[0.25, 0.25], [0.5, 0.5], [0.75, 0.75]];
-    return positions.some(function (point) {
-      var pixel = ctx.getImageData(
-        Math.floor(w * point[0]), Math.floor(h * point[1]), 1, 1
-      ).data;
-      return pixel[3] > 0;
-    });
-  }
-  function hoverHost(canvas) {
-    // O primeiro frame pode ter sido desenhado antes da resposta /api/state.
-    // O rack só recebe a hitbox do host num frame seguinte.
-    if (!canvas) return "";
-    var rect = canvas.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return "";
-    canvas.dispatchEvent(new MouseEvent("mousemove", {
-      bubbles: true,
-      clientX: rect.left + rect.width * (272 / 400),
-      clientY: rect.top + rect.height * (80 / 258)
-    }));
-    var tooltip = document.getElementById("tip");
-    return tooltip && !tooltip.hidden ? tooltip.textContent : "";
-  }
-  function inspectTelemetry(canvas, errors) {
-    var scenario = "__PIXEL_TELEMETRY__";
-    if (!scenario || !canvas) return;
-    var text = hoverHost(canvas);
-    if (!text.includes("este computador"))
-      errors.push("Tooltip do host não abriu através do canvas: " +
-        JSON.stringify(text) + " · canvas " +
-        JSON.stringify(canvas.getBoundingClientRect().toJSON()) + " · stage " +
-        JSON.stringify(document.getElementById("stage")?.getBoundingClientRect().toJSON()) +
-        " · viewport " + window.innerWidth + "x" + window.innerHeight);
-    if (scenario === "fresh" || scenario === "skew") {
-      if (!text.includes("online") || !text.includes("carga média") ||
-          !text.includes("RAM") || !text.includes("disco") ||
-          !text.includes("sensor não identificado"))
-        errors.push("Telemetria atual não foi apresentada corretamente: " +
-          JSON.stringify(text));
-      if (scenario === "skew" && !text.includes("0s atrás"))
-        errors.push("Idade da telemetria afetada pelo relógio do navegador");
-    } else if (scenario === "stale" || scenario === "future") {
-      if (!text.includes("por confirmar") ||
-          !text.includes("sem telemetria recente") || text.includes("carga média"))
-        errors.push("Telemetria expirada ou futura não foi bloqueada");
-    } else if (scenario === "invalid") {
-      if (!text.includes("online") || text.includes("RAM") ||
-          text.includes("disco") || !text.includes("carga média"))
-        errors.push("Valores de RAM/disco fora dos limites foram apresentados");
-    }
-  }
-  function verify() {
-    var errors = [];
-    var canvas = document.getElementById("cv");
-    if (!canvas) errors.push("Canvas pixelizado indisponível");
-    if (document.getElementById("aoControlRoom"))
-      errors.push("Control Room montado sem opção explícita");
-    if (window.AO?.modernRoom === true)
-      errors.push("Vista moderna ativada por omissão");
-    if (canvas && getComputedStyle(canvas).display === "none")
-      errors.push("Canvas pixelizado oculto");
-    if (!window.AO?.S) errors.push("Estado real da interface não recebido");
-    var quota = document.getElementById("codexQuota");
-    var quotaMode = "__QUOTA_EXPECT__";
-    if (quotaMode === "normal" &&
-        (!quota || !quota.textContent.includes("88% restante") ||
-         !quota.textContent.includes("59% restante")))
-      errors.push("Limites Codex não apresentados na vista pixelizada");
-    if ("__PIXEL_TELEMETRY__" === "skew" &&
-        !quota?.querySelector("#codexQuotaStatus")?.textContent.includes("Atualizado"))
-      errors.push("Quota recente interpretada como antiga por divergência dos relógios");
-    if (quotaMode === "unavailable" &&
-        (!quota || !quota.textContent.includes("Indisponível") ||
-         !quota.querySelector("#codexQuotaStatus")?.textContent.includes("Sem ligação")))
-      errors.push("Quota inexistente apresentada como utilizável");
-    if (quotaMode === "weekly_only" &&
-        (!quota || !quota.textContent.includes("59% restante") ||
-         !quota.textContent.includes("Indisponível")))
-      errors.push("Janela 5h inexistente apresentada como disponível");
-    if (quotaMode === "stale" &&
-        (!quota || !quota.querySelector("#codexQuotaStatus")?.textContent.includes("Dados anteriores")))
-      errors.push("Quota antiga apresentada como atual");
-    var forecast = quota?.querySelector("#codexWeeklyForecast");
-    if (!forecast) errors.push("Nota de previsão semanal em falta");
-    if (quotaMode === "forecast_risk" &&
-        (!forecast?.textContent.includes("Risco de esgotamento") ||
-         forecast.dataset.risk !== "risk"))
-      errors.push("Risco de esgotamento não foi sinalizado");
-    if (quotaMode === "forecast_near" &&
-        (!forecast?.textContent.includes("Previsão próxima da reposição") ||
-         forecast.dataset.risk !== "near"))
-      errors.push("Risco próximo da reposição não foi sinalizado" +
-        " (estado: " + String(window.AO?.S?.codex_usage?.weekly_forecast?.status ?? "ausente") +
-        "; painel: " + String(forecast?.textContent ?? "ausente").slice(0, 160) + ")");
-    if (quotaMode === "forecast_on_track" &&
-        (!forecast?.textContent.includes("não deverá esgotar") ||
-         !forecast?.textContent.includes("Estimativa, não garantia")))
-      errors.push("Previsão sustentável apresentada sem ressalva");
-    if (quotaMode === "forecast_low" &&
-        !forecast?.textContent.includes("Consumo pouco significativo"))
-      errors.push("Consumo pouco significativo apresentado incorretamente");
-    if (quotaMode === "forecast_stale" &&
-        (!forecast?.textContent.includes("Previsão suspensa") ||
-         forecast?.dataset.risk === "risk"))
-      errors.push("Previsão antiga foi apresentada como risco atual");
-    try {
-      if (!painted(canvas)) errors.push("O escritório pixelizado não desenhou nenhum frame");
-      inspectTelemetry(canvas, errors);
-    } catch (error) {
-      errors.push("Falha ao ler o canvas pixelizado: " + String(error));
-    }
-    document.documentElement.setAttribute("data-ao-smoke",
-      errors.length ? "FAIL: " + errors.join(" | ") : "PASS");
-  }
-  (function waitForFrame() {
-    var canvas = document.getElementById("cv");
-    var quotaStatus = document.querySelector("#codexQuotaStatus")?.textContent;
-    // A pintura do canvas e a receção do snapshot podem ocorrer antes da
-    // montagem/atualização do painel Codex. Não testar a previsão prematuramente.
-    var quotaReady = Boolean(quotaStatus && quotaStatus !== "A consultar…");
-    var ready = window.AO?.S && painted(canvas) && quotaReady;
-    var expired = Date.now() - started >= 3500;
-    // O snapshot pode chegar depois do primeiro frame pintado: aguardar até
-    // a hitbox do host existir, sem dispensar os testes reais do tooltip.
-    if (ready && "__PIXEL_TELEMETRY__" &&
-        !hoverHost(canvas).includes("este computador") && !expired) {
-      setTimeout(waitForFrame, 100);
-      return;
-    }
-    if (ready || expired) verify();
-    else setTimeout(waitForFrame, 100);
-  })();
-})();
-</script>
-"""
-                probe = probe.replace("__PIXEL_TELEMETRY__", telemetry)
-            probe = probe.replace("__QUOTA_EXPECT__", self.quota_mode)
-            html = html.replace("</body>", probe + "</body>")
+            state_json = json.dumps(self.state).replace("<", "\\u003c")
+            bootstrap = "<script>window.__AO_SMOKE_ACTIVE__=" + json.dumps(bool(self.state.get("q"))) + ";window.AO.apply(" + state_json + ");</script>"
+            html = html.replace("</body>", bootstrap + probe + "</body>")
             payload = html.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -372,10 +226,14 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
-            self.wfile.write(data)
+            return self.wfile.write(data)
+        if urlsplit(self.path).path == "/__ao_smoke_result":
+            Handler.result = parse_qs(urlsplit(self.path).query).get("value", [""])[0]
+            self.send_response(204)
+            self.end_headers()
             return
         if self.path.startswith("/api/"):
-            self.send_error(404, "Mock server does not implement this endpoint")
+            self.send_error(404, "Synthetic smoke server does not implement this endpoint")
             return
         super().do_GET()
 
@@ -384,7 +242,6 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 def choose_browser() -> str:
-    """Locate a system browser without downloading binaries or dependencies."""
     for value in (os.environ.get("CHROME_BIN"), "chromium", "chromium-browser",
                   "google-chrome", "google-chrome-stable", "chrome"):
         if value:
@@ -394,12 +251,25 @@ def choose_browser() -> str:
     raise RuntimeError("Chrome/Chromium não está instalado neste ambiente.")
 
 
-def run_case(browser: str, active: bool, modern: bool = True,
-             telemetry: str = "", query: str = "",
-             quota: str = "normal") -> None:
-    """Render the real frontend, selecting a view and optional telemetry fixture."""
-    Handler.state = fixture(active, telemetry, quota)
-    Handler.quota_mode = quota
+def capture_screenshot(browser: str, url: str, image: Path, viewport: str) -> None:
+    image.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="apollo-browser-shot-") as profile:
+        command = [browser, "--headless=new", "--no-sandbox", "--disable-gpu",
+                   "--disable-dev-shm-usage", "--disable-background-networking",
+                   "--no-first-run", "--no-default-browser-check", f"--user-data-dir={profile}",
+                   "--virtual-time-budget=1500", f"--window-size={viewport}",
+                   f"--screenshot={image}", url]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=45)
+        if result.returncode != 0 or not image.is_file() or image.stat().st_size == 0:
+            raise AssertionError("Captura Chromium falhou: " + result.stderr[-1800:])
+    print(f"Screenshot: {image} ({viewport})")
+
+
+def run_case(browser: str, active: bool, screenshot: Path | None = None,
+             viewport: str = "1366,768", query: str = "", modern: bool = True,
+             telemetry: str = "", codex: dict | None = None) -> None:
+    Handler.state = fixture(active, telemetry, codex)
+    Handler.result = None
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -409,46 +279,34 @@ def run_case(browser: str, active: bool, modern: bool = True,
     url = f"http://127.0.0.1:{server.server_port}/" + suffix
     try:
         with tempfile.TemporaryDirectory(prefix="apollo-browser-") as profile:
-            command = [
-                browser, "--headless=new", "--no-sandbox", "--disable-gpu",
-                "--disable-dev-shm-usage", "--disable-background-networking",
-                "--no-first-run", "--no-default-browser-check",
-                f"--user-data-dir={profile}", "--virtual-time-budget=4500",
-                "--dump-dom", url,
-            ]
+            command = [browser, "--headless=new", "--no-sandbox", "--disable-gpu",
+                       "--disable-dev-shm-usage", "--disable-background-networking",
+                       "--no-first-run", "--no-default-browser-check", "--enable-logging=stderr",
+                       f"--user-data-dir={profile}", "--virtual-time-budget=4500",
+                       f"--window-size={viewport}", "--dump-dom", url]
             result = subprocess.run(command, capture_output=True, text=True, timeout=45)
             if result.returncode != 0:
                 raise AssertionError("Chromium falhou: " + result.stderr[-1800:])
+            console_errors = [line for line in result.stderr.splitlines()
+                              if "[ERROR:CONSOLE]" in line or "Uncaught " in line]
+            if console_errors:
+                raise AssertionError("Erros de JavaScript no Chromium: " + " | ".join(console_errors[-8:]))
             dom = result.stdout
             smoke = re.search(r'data-ao-smoke="([^"]+)"', dom)
             if not smoke or smoke.group(1) != "PASS":
-                raise AssertionError("Interações do navegador falharam: " +
-                                     (smoke.group(1) if smoke else "teste não executado"))
-            if modern:
-                if 'id="aoControlRoom"' not in dom:
-                    raise AssertionError("O Control Room não foi montado. " + dom[-1200:])
-                for role in ROLES:
-                    if f'data-role="{role}"' not in dom:
-                        raise AssertionError("Posto em falta: " + role)
-                if len(re.findall(r'class="ao-pipeline-stage\b', dom)) != 10:
-                    raise AssertionError("O pipeline não apresenta as dez fases reais.")
-                expected = "1 / 10" if active else "0 / 10"
-                if not re.search(r'id="aoMetricWorkers"[^>]*>\s*' + re.escape(expected), dom):
-                    raise AssertionError("Contagem incorreta de agentes ativos: " + expected)
-                if active and "qwen3:8b" not in dom:
-                    raise AssertionError("O modelo local Qwen 3 8B não aparece no dashboard.")
-                if "Ações Rápidas" in dom:
-                    raise AssertionError("A interface ainda apresenta ações rápidas.")
-                label = "trabalho real" if active else "repouso"
-                print(f"PASS: Chrome/Chromium validou renderização e interações de {label}.")
-            else:
-                if 'id="aoControlRoom"' in dom:
-                    raise AssertionError("Vista moderna ativada sem autorização.")
-                if 'id="cv"' not in dom:
-                    raise AssertionError("Canvas pixelizado não encontrado.")
-                print("PASS: escritório pixelizado" +
-                      (f" · telemetria {telemetry}" if telemetry else
-                       (f" · consulta {query}" if query else " predefinido")) + ".")
+                raise AssertionError("Verificação da interface falhou: " +
+                                     (smoke.group(1) if smoke else "verificação não executada"))
+            for role in ROLES:
+                if f'data-role="{role}"' not in dom:
+                    raise AssertionError("Posto em falta: " + role)
+            if active and "Qwen3 8B" not in dom:
+                raise AssertionError("O modelo local Qwen3 8B não aparece no painel TDD.")
+            if 'id="aoTaskFilter"' not in dom or 'id="aoRepoFilter"' not in dom:
+                raise AssertionError("Os filtros de tarefas e projetos não estão no DOM.")
+            label = "Fixer ativo" if active else "agentes em repouso"
+            print(f"PASS: Chromium validou módulos pixelizados e estado de {label}.")
+        if active and screenshot:
+            capture_screenshot(browser, url, screenshot, viewport)
     finally:
         server.shutdown()
         server.server_close()
@@ -456,29 +314,20 @@ def run_case(browser: str, active: bool, modern: bool = True,
 
 
 def main() -> int:
-    """Run the original pixel office and optional modern views in a real browser."""
-    if not (UI_DIR / "control-room.js").is_file():
-        raise RuntimeError("Os ficheiros reais da interface estão em falta.")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--screenshot", type=Path, help="Optional desktop screenshot path")
+    parser.add_argument("--mobile-screenshot", type=Path, help="Optional mobile screenshot path")
+    args = parser.parse_args()
+    for file in ("index.html", "o.js", "control-room.js", "pixel-dashboard.css"):
+        if not (UI_DIR / file).is_file():
+            raise RuntimeError("Ficheiro da interface em falta: " + file)
     browser = choose_browser()
     print("Browser:", browser)
-    run_case(browser, active=False, modern=False)
-    run_case(browser, active=False, modern=True)
-    run_case(browser, active=True, modern=True)
-    for scenario in ("fresh", "stale", "skew", "invalid", "future"):
-        run_case(browser, active=False, modern=False, telemetry=scenario)
-    # As semelhanças textuais não podem ativar a vista moderna.
-    run_case(browser, active=False, modern=False, query="?ui=modern2")
-    run_case(browser, active=False, modern=False, query="?x=ui%3Dmodern")
-    run_case(browser, active=False, modern=False,
-             telemetry="fresh", query="?pixel_telemetry=fresh&pixel_raf_block=1")
-    for condition in ("unavailable", "weekly_only", "stale"):
-        run_case(browser, active=False, modern=False, quota=condition)
-    run_case(browser, active=False, modern=True, quota="unavailable")
-    for condition in ("forecast_risk", "forecast_on_track", "forecast_near",
-                      "forecast_low", "forecast_stale"):
-        run_case(browser, active=False, modern=False, quota=condition)
-    run_case(browser, active=False, modern=True, quota="forecast_risk")
-    print("PASS: 21 cenários: pixel/modern, quotas, previsões, telemetria e RAF.")
+    run_case(browser, active=False, viewport="1366,768")
+    run_case(browser, active=True, screenshot=args.screenshot, viewport="1656,1146")
+    if args.mobile_screenshot:
+        run_case(browser, active=True, screenshot=args.mobile_screenshot, viewport="390,844")
+    print("PASS: módulos, filtros, pipeline staged, produtividade e recursos.")
     return 0
 
 

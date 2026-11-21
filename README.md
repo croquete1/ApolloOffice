@@ -14,13 +14,15 @@
 
 <p align="center"><a href="https://office.apollonet.dev">Website</a></p>
 
-The Control Room dashboard displays real agent states, open work, pull requests,
-host health and workflow stages. Its secondary virtual office uses animated,
-non-pixelated SVG characters. Animations represent observed events, and can be
-disabled. The underlying task and review pipeline remains unchanged.
+![The pixel-art office, with worker stations, queue, pull requests and activity log](docs/images/office.png)
 
-For the implementation and verification details, see
-[Control Room documentation](docs/control-room.md).
+ApolloOffice keeps the pixel-art office alongside live agent and task metrics,
+the staged test-first pipeline, queue, pull requests, activity, 24-hour
+productivity and machine resources. The task and repository filters use live
+records, and the modules avoid rebuilding unchanged lists.
+
+For details about the pixel office and issue-to-PR workflow, see
+[the interface documentation](docs/pixel-office.md).
 
 Add any GitHub repository. ApolloOffice picks up its bug reports (or hunts for
 bugs itself), reproduces them, writes a fix with a regression test, proves the
@@ -54,6 +56,10 @@ For optional free-model authors with Codex/Claude subscription review, see
 - **Watcher** follows your open PRs: merges, change requests from maintainers
   and reviewers with write access, and merge conflicts, which it rebases on
   its own.
+- **PR Steward** reconciles open PRs and shows their next action. Review fixes,
+  rebases and rechecks are scheduled before new issue fixes; a rejected issue
+  can return to triage after its author updates it. Review routing and merges
+  of existing PRs remain explicit per-repository settings.
 - **Feature mode** (per repository, off by default): Scout and Vet also pick
   small, clearly specified feature requests. A Planner checks the feature is
   still missing, Fixer builds it test-first, and the PR closes the issue.
@@ -98,7 +104,7 @@ See [Fork security and configuration](docs/fork-security.md) for safe updates an
 
 ### Worker com Node.js 24 (FixFlow)
 
-Este fork fixa Node.js **24.22.2** na definição da imagem Docker do ApolloOffice e verifica
+Este fork fixa Node.js **24.22.3** na definição da imagem Docker do ApolloOffice e verifica
 o arquivo através dos SHA-256 oficiais. Não depende do Node 20 do Debian.
 
 **Antes de instalar a versão corrigida**, selecione **Pause office** na aplicação
@@ -121,7 +127,7 @@ do worker não for confirmada.
 
 Confirme com `docker exec apollo-office node -v` e
 `docker exec apollo-office npm -v` (adicione `sudo` se necessário):
-o contentor deve utilizar Node `v24.22.2` e o npm incluído no Node 24.
+o contentor deve utilizar Node `v24.22.3` e o npm incluído no Node 24.
 **Não reconstrua com jobs ativos.**
 
 It prints a one-time login link. Open it and follow the setup: add a machine,

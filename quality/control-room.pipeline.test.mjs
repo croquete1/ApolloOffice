@@ -44,7 +44,8 @@ function fixture() {
     }
   };
   const script = `(() => {
-    let lastPipelineSignature = "";
+    let lastPipelineSignature = "", selectedRepo = "";
+    const safeArray = (value) => Array.isArray(value) ? value : [];
     const byId = (id) => {
       if (id !== "aoPipeline") throw Error("unexpected DOM lookup");
       return __scene;
