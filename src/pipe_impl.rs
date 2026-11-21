@@ -418,7 +418,6 @@ fn pr_title(preferred: Option<&str>, f: &Value, fallback: &str) -> R<String> {
     e("cannot publish a pull request without a title")
 }
 
-#[cfg(test)]
 fn commit_subject(title: &str, feature: bool) -> R<String> {
     commit_subject_kind(title, if feature { "feat" } else { "fix" })
 }
@@ -449,7 +448,6 @@ fn optimization_commit_subject(title: &str) -> R<String> {
         .to_string())
 }
 
-#[cfg(test)]
 fn commit_subject_kind(title: &str, kind: &str) -> R<String> {
     let title = title
         .lines()
@@ -3302,7 +3300,11 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
     let ti = pr_title(j.d["pt"].as_str(), &f, &j.title)?;
     if j.kind == "fix" && !j.d["sq"].as_bool().unwrap_or(false) {
         let rf = if j.ext() { "Reported to us directly".to_string() } else if j.hunt() || j.num == 0 { format!("Found while testing {}", j.wh()) } else if j.opt() { format!("Closes #{}", j.num) } else { format!("Fixes #{}", j.num) };
-        let subject = if j.opt() { optimization_commit_subject(&ti)? } else { ti.clone() };
+        let subject = if j.opt() {
+            optimization_commit_subject(&ti)?
+        } else {
+            commit_subject(&ti, j.feat())?
+        };
         ok(a, j, &format!("git reset -q --soft {} && git commit -q -F - <<'MSG'\n{subject}\n\n{rf}\n\n{}\nMSG", j.s("base"), tr.join("\n")), 120).await?;
         j.d["sq"] = json!(true);
         a.db.jd(j);
