@@ -11,17 +11,6 @@
     pr_recheck: "revalidação de PR",
     pr_review: "revisão de PR",
     branch_update: "atualização de branch",
-  }[kind] || "tarefa");
-
-  const workLabel = (kind) => ({
-    issue_bug: "bug de issue",
-    reported_bug: "bug reportado",
-    discovered_bug: "bug descoberto",
-    optimization: "otimização",
-    feature: "funcionalidade",
-    pr_recheck: "revalidação de PR",
-    pr_review: "revisão de PR",
-    branch_update: "atualização de branch",
   }[kind] || kind || "tarefa");
 
   const get = async (p) => {
@@ -541,6 +530,9 @@
 
   const rn = (j) => (j.repo.split("/")[1] || j.repo) + (j.num ? "#" + j.num : "");
   const sel = new Set();
+  // Keep retry feedback attached to the job while live snapshots replace rows.
+  const retryStates = new Map();
+  window.AO.retryStates = retryStates;
   const stagedPhases = [
     {key:"red", label:"RED"},
     {key:"green", label:"GREEN"},
@@ -595,23 +587,61 @@
     return `<section class="queue-staged" aria-label="Pipeline test-first"><div class="queue-staged-head"><strong>Test-first</strong><span class="queue-staged-status">${esc(status)}</span></div>${jobLabel ? `<span class="queue-staged-job" title="${esc(jobLabel)}">${esc(jobLabel)}</span>` : ""}<div class="queue-staged-phases">${phaseMarkup}</div>${notice ? `<span class="queue-staged-notice" title="${esc(notice)}">${esc(notice)}</span>` : ""}</section>`;
   };
   const jrow = (j, x) => {
+    const retry = retryStates.get(j.id);
     const kind = workLabel(j.work_class || j.kind || "job");
-    const reason = j.st === "ci" && S.cil[j.id] ? S.cil[j.id] : j.why || "";
+    const reason = retry?.error || (j.st === "ci" && S.cil[j.id] ? S.cil[j.id] : j.why || "");
     const repo = rn(j);
-    return `<div class="row queue-row${j.st === "approve" ? " apr" : ""}">${j.st === "approve" && x ? `<input type="checkbox" class="bk" data-k="${j.id}" ${sel.has(j.id) ? "checked" : ""} aria-label="select">` : ""}<span class="pill ${STC[j.st] || ""}" title="${esc(kind + " · " + j.st)}">${esc(j.st)}</span><div class="ti"><a class="a" href="#" data-j="${j.id}" title="${esc(j.title)}">${esc(j.title)}</a><div class="queue-meta"><span class="queue-kind" title="${esc(kind)}">${esc(kind)}</span>${reason ? `<span class="queue-why" title="${esc(reason)}">${esc(reason)}</span>` : ""}</div></div><span class="rp"><span class="queue-repo" title="${esc(repo)}">${esc(repo)}</span>${j.st === "approve" ? ` <button class="go" data-j="${j.id}">review</button>` : ""}${x && j.st !== "approve" ? ` <button class="x" data-d="${j.id}" title="drop">✕</button>` : ""}${!x && j.st === "drop" && j.kind === "fix" ? ` <button class="x" data-rq="${j.id}" title="try again">↻</button>` : ""}</span></div>`;
+    return `<div class="row queue-row${j.st === "approve" ? " apr" : ""}">${j.st === "approve" && x ? `<input type="checkbox" class="bk" data-k="${j.id}" ${sel.has(j.id) ? "checked" : ""} aria-label="select">` : ""}<span class="pill ${STC[j.st] || ""}" title="${esc(kind + " · " + j.st)}">${esc(j.st)}</span><div class="ti"><a class="a" href="#" data-j="${j.id}" title="${esc(j.title)}">${esc(j.title)}</a><div class="queue-meta"><span class="queue-kind" title="${esc(kind)}">${esc(kind)}</span>${reason ? `<span class="queue-why${retry?.error ? " bad2" : ""}" title="${esc(reason)}">${esc(reason)}</span>` : ""}</div></div><span class="rp"><span class="queue-repo" title="${esc(repo)}">${esc(repo)}</span>${j.st === "approve" ? ` <button class="go" data-j="${j.id}">review</button>` : ""}${x && j.st !== "approve" ? ` <button class="x" data-d="${j.id}" title="drop">✕</button>` : ""}${!x && j.st === "drop" && j.kind === "fix" ? ` <button class="x" data-rq="${j.id}" title="try again" ${retry?.pending ? "disabled" : ""}>↻</button>` : ""}</span></div>`;
+  };
+
+  const renderIssueBacklog = () => {
+    if (!S) return;
+    const rows = S.issue_backlog || [];
+    const summaries = S.issue_summary || [];
+    const keys = ["open", "waiting", "reviewed", "filtered", "queued", "blocked", "pr_open", "integrated", "done"];
+    const totals = Object.fromEntries(keys.map((key) => [key, summaries.reduce((sum, item) => sum + Number(item[key] || 0), 0)]));
+    const truncated = summaries.some((item) => item.scan?.truncated);
+    const errors = summaries.filter((item) => item.scan?.error);
+    const ready = summaries.some((item) => item.scan?.at);
+    const intakeNotReady = summaries.filter((item) => !item.intake_ready);
+    const stages = [totals.waiting && `${totals.waiting} to triage`, totals.queued && `${totals.queued} in Apollo`, totals.pr_open && `${totals.pr_open} with PR`].filter(Boolean);
+    $("issueSummary").textContent = [`${totals.open}${truncated ? "+" : ""} open`, ...stages].join(" · ") || (ready ? "no open issues" : "waiting for Scout");
+    const scans = summaries.map((item) => item.scan?.at || 0).filter(Boolean);
+    const lastScan = scans.length ? new Date(Math.max(...scans)).toLocaleString() : "not scanned yet";
+    const notes = [`Last GitHub scan: ${lastScan}`, "showing up to 80 cached issues, most actionable first"];
+    if (truncated) notes.push("at least one repository reached the 200 issue scan limit");
+    if (errors.length) notes.push(`scan errors for ${errors.map((item) => item.repo).join(", ")}; showing last successful data`);
+    if (!summaries.length) notes.push("enable issue intake for a repository in Repos to start scanning");
+    else if (intakeNotReady.length) notes.push(`Scout needs a CI command configured for ${intakeNotReady.map((item) => item.repo).join(", ")}`);
+    $("issueScan").classList.toggle("bad2", errors.length > 0);
+    $("issueScan").textContent = notes.join(" · ");
+    const query = $("issueFilter").value.trim().toLocaleLowerCase();
+    const matches = rows.filter((issue) => !query || [issue.repo, issue.num, issue.title, issue.status, issue.reason, issue.author].join(" ").toLocaleLowerCase().includes(query));
+    const labels = {waiting:["to triage","wait"],reviewed:["reviewed",""],filtered:["filtered","filtered"],queued:["in Apollo","queued"],blocked:["blocked","blocked"],pr_open:["PR open","info"],integrated:["merged","ok"],done:["done","ok"]};
+    $("githubIssues").innerHTML = matches.length ? matches.map((issue) => {
+      const [label, cls] = labels[issue.status] || [issue.status || "unknown", ""];
+      const repo = issue.repo.split("/")[1] || issue.repo;
+      const detail = issue.reason || (issue.job_stage ? `Apollo · ${issue.job_stage}` : "");
+      const pr = issue.pr_url ? ` · <a href="${esc(issue.pr_url)}" target="_blank" rel="noopener">view PR</a>` : "";
+      return `<div class="issue-row"><span class="pill ${cls}" title="${esc(issue.status)}">${esc(label)}</span><div class="ti"><a class="a" href="${esc(issue.url)}" target="_blank" rel="noopener" title="${esc(issue.title)}">${esc(issue.title)}</a></div><div class="issue-meta" title="${esc([issue.repo, detail].filter(Boolean).join(" · "))}">${esc(`${repo}#${issue.num}`)}${detail ? ` · ${esc(detail)}` : ""}${pr}</div></div>`;
+    }).join("") : `<div class="empty">${query ? "no matching GitHub issues" : ready ? "no cached open issues" : intakeNotReady.length ? "Configure a CI command in Repos to enable Scout intake" : "Scout has not scanned issues yet"}</div>`;
   };
 
   const lists = () => {
     const q = S.q;
+    const dropped = new Set([...q, ...S.dn].filter((job) => job.st === "drop").map((job) => job.id));
+    for (const [id, retry] of retryStates) if (!retry.pending && !dropped.has(id)) retryStates.delete(id);
     const query = $("queueFilter").value.trim().toLocaleLowerCase();
-    const matches = (j) => !query || [j.title, j.repo, j.num, j.kind, j.work_class, j.st, j.why, S.cil[j.id]].join(" ").toLocaleLowerCase().includes(query);
+    const matches = (j) => !query || [j.title, j.repo, j.num, j.kind, j.work_class, j.st, j.why, S.cil[j.id], workLabel(j.work_class), retryStates.get(j.id)?.error].join(" ").toLocaleLowerCase().includes(query);
     const queued = q.filter(matches), recent = S.dn.filter(matches);
-    $("qn").textContent = query ? `${queued.length} of ${q.length}` : q.length ? q.length + " jobs" : "";
+    const suspended = S.ops?.blocked_hunts?.length || 0;
+    $("qn").textContent = (query ? `${queued.length} of ${q.length}` : q.length ? q.length + " jobs" : "") + (suspended ? ` · ${suspended} Hunter(s) suspended` : "");
     const aps = q.filter((j) => j.st === "approve").map((j) => j.id);
     for (const k of [...sel]) if (!aps.includes(k)) sel.delete(k);
     const bk = aps.length > 1 ? `<div class="bkb"><label class="ck"><input type="checkbox" id="bkA" ${sel.size === aps.length ? "checked" : ""}> all ${aps.length}</label><span class="sp"></span>${sel.size ? `<button class="go" id="bkS">submit ${sel.size}</button><button class="dng" id="bkD">drop ${sel.size}</button>` : `<span class="k">select pull requests to submit together</span>`}</div>` : "";
     const empty = query ? (!queued.length && !recent.length ? `<div class="empty">no matching work</div>` : "") : !q.length ? `<div class="empty">nothing waiting</div>` : "";
     $("queue").innerHTML = stagedSummary(S) + bk + (queued.length ? queued.slice(0, 16).map((j) => jrow(j, true)).join("") : "") + (recent.length ? `<div class="sub">recent${query ? ` · ${recent.length}` : ""}</div>` + recent.slice(0, 12).map((j) => jrow(j, false)).join("") : "") + empty;
+    renderIssueBacklog();
     const op = S.pr.filter((p) => p.st === "open").length, mg = S.pr.filter((p) => p.st === "merged").length;
     $("prn").textContent = `${op} open · ${mg} merged`;
     $("prs").innerHTML = S.pr.length ? S.pr.slice(0, 16).map((p) => `<div class="row"><span class="pill ${p.st === "merged" ? "ok" : p.st === "closed" ? "bad" : "info"}">${esc(p.st)}</span><div class="ti"><a class="a" href="#" data-u="${esc(p.url)}">${esc(p.title)}</a></div><span class="rp">${esc(rn({ repo: p.repo, num: p.num }))}</span></div>`).join("") : `<div class="empty">no pull requests yet</div>`;

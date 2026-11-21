@@ -882,11 +882,11 @@ mod t {
 
     #[test]
     fn worker_image_uses_verified_node24_instead_of_debian_node20() {
-        assert!(DF.contains("ARG NODE_VERSION=24.22.2"));
+        assert!(DF.contains("node-v24.22.3-linux-${node_arch}.tar.xz"));
         assert!(!DF.contains("nodejs npm"));
         assert!(DF.contains("sha256sum -c -"));
-        assert!(DF.contains("ENV PATH=\"/opt/node/bin:${PATH}\""));
-        assert!(DF.contains("ENV npm_config_cache=/root/.npm"));
+        assert!(DF.contains("tar -xJf /tmp/node.tar.xz --strip-components=1 -C /usr/local"));
+        assert!(!DF.contains("ENV npm_config_cache="));
         assert!(DF.contains("amd64) node_arch=x64"));
         assert!(DF.contains("arm64) node_arch=arm64"));
         assert!(DF.contains("ppc64el) node_arch=ppc64le"));

@@ -615,6 +615,10 @@
     show(j.st === "approve" ? "Review pull request" : "Job " + id, "job");
     const tag = (j.repo.split("/")[1] || j.repo) + (j.num ? "#" + j.num : "");
     const work = A.workLabel ? A.workLabel(j.work_class) : j.kind;
+    const failure = j.failure?.stage
+      ? `<div class="sec dz"><h4>Diagnóstico técnico</h4><div class="box"><pre>${esc([j.failure.stage, j.failure.exit_code != null ? "exit " + j.failure.exit_code : "", j.failure.message || j.failure.output || ""].filter(Boolean).join(" · "))}</pre></div></div>`
+      : "";
+    const retry = window.AO.retryStates?.get(id);
     const cs = j.cost && j.cost.n ? `<div class="msg">Cost: ${j.cost.usd != null ? usd(j.cost.usd) + " API" : ""}${j.cost.usd != null && j.cost.val != null ? " · " : ""}${j.cost.val != null ? usd(j.cost.val) + " login value" : ""}${j.cost.usd == null && j.cost.val == null ? "unknown" : ""} · ${Math.round((j.cost.ti || 0) / 1000)}k in, ${Math.round((j.cost.tou || 0) / 1000)}k out</div>` : "";
     const ev = (j.ev || []).map((e) => `<div><span class="tm">${new Date(e.t).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}</span><span>${esc(e.w)}</span><span>${esc(e.m)}</span></div>`).join("");
     if (j.st === "approve") {
@@ -637,7 +641,8 @@
       return;
     }
     B.innerHTML = `<div class="sec"><div class="box"><div class="hd2"><b>${esc(j.title)}</b><span class="pill">${esc(j.st)}</span></div><div class="msg">${esc(j.repo)} ${esc(tag)} · ${esc(work)}${j.h ? " · " + esc(j.h) : ""}\n${esc(j.why || "")}</div>${cs}
-      <div class="acts">${j.url ? `<button data-u="${esc(j.url)}">Open on GitHub</button>` : ""}${!["done", "drop"].includes(j.st) ? `<button class="dng" data-d="${id}">Drop</button>` : ""}${j.st === "drop" && j.kind === "fix" ? `<button data-rq="${id}">Try again</button>` : ""}</div></div></div>
+      <div class="acts">${j.url ? `<button data-u="${esc(j.url)}">Open on GitHub</button>` : ""}${!["done", "drop"].includes(j.st) ? `<button class="dng" data-d="${id}">Drop</button>` : ""}${j.st === "drop" && j.kind === "fix" ? `<button data-rq="${id}" ${window.AO.retryStates?.get(id)?.pending ? "disabled" : ""}>Try again</button>` : ""}</div><div class="msg ${retry?.error ? "bad2" : ""}" data-requeue-message="${id}" aria-live="polite">${esc(retry?.error || "")}</div></div></div>
+      ${failure}
       ${j.df ? `<div class="sec"><h4>Diff</h4>${dview(j.df)}</div>` : ""}
       <div class="sec"><h4>Log</h4><div class="log">${ev || `<div class="empty">nothing yet</div>`}</div></div>`;
   };

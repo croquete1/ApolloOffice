@@ -20,7 +20,7 @@ UI_DIR = Path(__file__).resolve().parent.parent / "ui"
 ROLES = ("scout", "guard", "vet", "watcher", "hunter", "repro", "fixer", "ci", "reviewer", "submit")
 
 
-def fixture(active: bool) -> dict:
+def fixture(active: bool, telemetry: str = "", codex: dict | None = None) -> dict:
     """Build an API-shaped snapshot with a staged Fixer job when requested."""
     stamp = int(time.time() * 1000)
     if telemetry == "skew":
@@ -58,6 +58,7 @@ def fixture(active: bool) -> dict:
               "net": {"local": True, "gh": True, "an": True}},
         "w": workers, "q": jobs, "dn": [], "pr": prs, "mg": [], "ev": events,
         "n": counts, "done24": 3 if active else 0,
+        "delivery": {"merged_fixes": 1 if active else 0},
         "prod24": [{"g": 2, "n": 1}, {"g": 0, "n": 2}] if active else [],
         "fl": [], "ln": {}, "cil": {},
         "hs": [{"id": "local", "on_": 1, "dk": 1, "ln": 2}],
@@ -83,7 +84,7 @@ class Handler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(UI_DIR), **kwargs)
 
     def do_GET(self):
-        if self.path in ("/", "/index.html"):
+        if urlsplit(self.path).path in ("/", "/index.html"):
             html = (UI_DIR / "index.html").read_text(encoding="utf-8")
             probe = r"""
 <script>
@@ -136,8 +137,8 @@ class Handler(SimpleHTTPRequestHandler):
       if (window.__AO_SMOKE_ACTIVE__) {
         assert(document.getElementById("aoMetricWorkers").textContent.includes("1 / 10"),
                "A contagem de agentes ativos não reflete o Fixer");
-        assert(document.getElementById("aoMetricDone").textContent.trim() === "3",
-               "O total concluído em 24 horas não reflete o snapshot");
+        assert(document.getElementById("aoMetricDone").textContent.trim() === "1",
+               "O total de correções integradas não reflete o relatório do steward");
         assert(document.getElementById("aoTasksList").textContent.includes("Validar dashboard"),
                "A tarefa real não aparece no módulo de tarefas");
         assert(document.getElementById("aoPRList").textContent.includes("Fix dashboard issue"),
@@ -265,8 +266,9 @@ def capture_screenshot(browser: str, url: str, image: Path, viewport: str) -> No
 
 
 def run_case(browser: str, active: bool, screenshot: Path | None = None,
-             viewport: str = "1366,768") -> None:
-    Handler.state = fixture(active)
+             viewport: str = "1366,768", query: str = "", modern: bool = True,
+             telemetry: str = "", codex: dict | None = None) -> None:
+    Handler.state = fixture(active, telemetry, codex)
     Handler.result = None
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)

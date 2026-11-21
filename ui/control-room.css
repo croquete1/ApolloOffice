@@ -350,6 +350,8 @@ body.ao-enabled #dr { color: var(--t1); }
 .ao-state-work {color:#62d8b3;}.ao-state-paused {color:#e5b678;}.ao-state-sleep {color:#859bb0;}
 .ao-operations-grid {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:15px;}
 .ao-operations-grid > .ao-panel {min-height:260px;}
+.ao-operations-grid > .ao-steward-panel {grid-column:1 / -1;}
+.ao-steward-list {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 18px;}
 .ao-list {min-width:0; padding:5px 14px 11px; max-height:285px; overflow:auto;}
 #aoTasksList {max-height:190px;}
 .ao-issues {margin:0 14px 10px;padding-top:8px;border-top:1px solid #26384d;scroll-margin-top:18px;}
@@ -455,6 +457,7 @@ body.ao-enabled #dr { color: var(--t1); }
   .ao-operations-grid > .ao-panel:last-child{grid-column:auto;}
 }
 @media (max-width:530px) {
+  .ao-steward-list {grid-template-columns:1fr;}
   .ao-topbar{align-items:flex-start;flex-direction:column;}
   .ao-top-actions{width:100%;justify-content:space-between;}
   .ao-metric{min-height:90px;padding:12px;}

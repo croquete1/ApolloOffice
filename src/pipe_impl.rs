@@ -4321,23 +4321,73 @@ async fn red(a: &Ax, r: &str, h: &str) -> bool {
     !(h["s"].is_string() && cr["sha"].is_string() && h["s"] != cr["sha"])
 }
 
+// Atomically reserve work against updates, cache maintenance and other lanes.
+pub(crate) fn admit(a: &Ax, repo: &str, host: &str, id: i64) -> bool {
+    let _transition = a.update_transition.lock().unwrap();
+    if a.drain.load(std::sync::atomic::Ordering::SeqCst) {
+        return false;
+    }
+    let is_hunt = a.db.jg(id).is_some_and(|job| job.kind == "hunt");
+    if is_hunt && crate::hunt_health::blocked(a, repo) {
+        return false;
+    }
+    let hunter_limit = if is_hunt { hn(a) } else { 0 };
+    if docker_cache_target(a, host)
+        .is_some_and(|target| a.cache_maintenance.lock().unwrap().contains(&target))
+    {
+        return false;
+    }
+    let mut active = a.act.lock().unwrap();
+    let mut locked = a.lk.lock().unwrap();
+    let claim = format!("{repo} {host}");
+    if active.contains(&claim) || locked.contains(&id) {
+        return false;
+    }
+    if is_hunt
+        && locked
+            .iter()
+            .filter(|other_id| a.db.jg(**other_id).is_some_and(|job| job.kind == "hunt"))
+            .count() as i64
+            >= hunter_limit
+    {
+        return false;
+    }
+    // Hunter and Fixer share a repository checkout, even across hosts.
+    let active_repo = active
+        .iter()
+        .any(|entry| entry.split_once(' ').is_some_and(|(r, _)| r == repo));
+    if active_repo
+        && (is_hunt
+            || locked.iter().any(|other_id| {
+                a.db.jg(*other_id)
+                    .is_some_and(|job| job.repo == repo && job.kind == "hunt")
+            }))
+    {
+        return false;
+    }
+    active.insert(claim);
+    locked.insert(id);
+    true
+}
+
 fn pick_rank(j: &Value) -> (i32, i32, i32, f64, i64, i64) {
     let d = &j["d"];
     let kind = j["kind"].as_str().unwrap_or("fix");
     let resumed = d["rs"].as_bool().unwrap_or(false) || d["rp"].as_bool().unwrap_or(false);
-    let pr_follow_up = matches!(kind, "review" | "rebase" | "mergecheck");
     let phase = if j["st"] == "submit" {
         0
     } else if resumed {
         1
-    } else if pr_follow_up {
+    } else if matches!(kind, "review" | "mergecheck") {
         2
     } else if kind == "fix" {
         3
-    } else if kind == "hunt" {
+    } else if kind == "rebase" {
         4
-    } else {
+    } else if kind == "hunt" {
         5
+    } else {
+        6
     };
     let follow_up_order = match kind {
         "review" => 0,
@@ -4414,18 +4464,11 @@ async fn pick(a: &Ax, h: &str) -> Option<i64> {
                 continue;
             }
         }
-        {
-            let _transition = a.update_transition.lock().unwrap();
-            if a.drain.load(std::sync::atomic::Ordering::SeqCst) {
-                return None;
-            }
-            let mut ac = a.act.lock().unwrap();
-            let mut lk = a.lk.lock().unwrap();
-            if ac.contains(&format!("{r} {h}")) || lk.contains(&id) {
-                continue;
-            }
-            ac.insert(format!("{r} {h}"));
-            lk.insert(id);
+        if admit(a, &r, h, id) {
+            return Some(id);
+        }
+        if a.drain.load(std::sync::atomic::Ordering::SeqCst) {
+            return None;
         }
     }
     None

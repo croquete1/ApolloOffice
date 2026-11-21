@@ -587,10 +587,10 @@ mod t {
         let fix = json!({"st":"ready", "kind":"fix", "prio":0, "id":2});
         let mergecheck = json!({"st":"ready", "kind":"mergecheck", "prio":0, "id":3});
         let hunt = json!({"st":"ready", "kind":"hunt", "prio":0, "id":1});
-        assert!(job_rank(&mergecheck) < job_rank(&fix));
-        assert!(job_rank(&fix) < job_rank(&hunt));
+        assert!(pick_rank(&mergecheck) < pick_rank(&fix));
+        assert!(pick_rank(&fix) < pick_rank(&hunt));
         let high_priority_number = json!({"st":"ready", "kind":"fix", "prio":100_000, "id":3});
-        assert!(job_rank(&high_priority_number) < job_rank(&hunt));
+        assert!(pick_rank(&high_priority_number) < pick_rank(&hunt));
     }
 
     #[test]
@@ -849,15 +849,14 @@ mod t {
     #[test]
     fn pr_quota_zero_means_unlimited() {
         // A missing cap does not block either new PRs or work already in flight.
-        assert!(!pr_quota_hit(0, 0));
-        assert!(!pr_quota_hit(0, 2));
-        assert!(!pr_quota_hit(0, 1_000_000));
+        assert!(!repo_limit_reached(0, 0, 0, 0));
+        assert!(!repo_limit_reached(2, 1_000_000, 0, 0));
         // Positive caps retain the existing inclusive boundary.
-        assert!(!pr_quota_hit(2, 1));
-        assert!(pr_quota_hit(2, 2));
-        assert!(pr_quota_hit(2, 3));
-        assert!(!pr_quota_hit(5, 4));
-        assert!(pr_quota_hit(5, 5));
+        assert!(!repo_limit_reached(1, 0, 2, 0));
+        assert!(repo_limit_reached(2, 0, 2, 0));
+        assert!(repo_limit_reached(3, 0, 2, 0));
+        assert!(!repo_limit_reached(0, 4, 0, 5));
+        assert!(repo_limit_reached(0, 5, 0, 5));
     }
 
     #[test]
@@ -1920,7 +1919,7 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':10,'output_tok
         };
         std::fs::write(repo.join("src/calc.cjs"), "exports.subtract = (a,b) => a+b;\n").unwrap();
         std::fs::write(repo.join("package.json"), "{\"scripts\":{\"test\":\"sh scripts/check.sh\"}}\n").unwrap();
-        std::fs::write(repo.join("scripts/check.sh"), "node --test test/calc.test.cjs\n").unwrap();
+        std::fs::write(repo.join("scripts/check.sh"), "node --test test/subtraction.test.cjs\n").unwrap();
         std::fs::write(repo.join("t_placeholder"), "x").unwrap();
         git(&["init", "-q", "-b", "work"]);
         git(&["config", "user.name", "x"]);
@@ -1937,11 +1936,11 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':10,'output_tok
         let a = std::sync::Arc::new(crate::app::App::new(db, dd.clone(), 1, "apollo-office".into()));
         let mut job = a.db.jg(id).unwrap();
         // RED: a real failing test under test/ (node assertion).
-        std::fs::write(repo.join("test/calc.test.cjs"), "const {test}=require('node:test');const assert=require('node:assert/strict');const {subtract}=require('../src/calc.cjs');\ntest('subtraction',()=>assert.equal(subtract(7,3),4));\n").unwrap();
+        std::fs::write(repo.join("test/subtraction.test.cjs"), "const {test}=require('node:test');const assert=require('node:assert/strict');const {subtract}=require('../src/calc.cjs');\ntest('subtraction',()=>assert.equal(subtract(7,3),4));\n").unwrap();
         let red = red_commit(&a, &mut job, "npm test", &["subtraction".to_string()], "cover subtraction").await.unwrap();
         assert!(red.is_none(), "RED must be accepted: {red:?}");
         let test_commit = git(&["rev-parse", "HEAD"]);
-        let red_files = vec!["test/calc.test.cjs".to_string()];
+        let red_files = vec!["test/subtraction.test.cjs".to_string()];
         // GREEN: do NOT fix src/calc.cjs; neuter the indirect runner script.
         std::fs::write(repo.join("scripts/check.sh"), "echo subtraction\n").unwrap();
         let fb = green_commit(&a, &mut job, &red_files, &test_commit, "npm test", &["subtraction".to_string()], "x").await.unwrap();

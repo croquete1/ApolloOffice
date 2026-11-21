@@ -73,7 +73,7 @@
     '        <div class="ao-metric" data-tone="cyan"><img src="/assets/icons/agents.svg" alt="" aria-hidden="true"><span><small>Agentes ativos</small><strong id="aoMetricWorkers">—</strong></span><span id="aoMetricWorkersSub" class="ao-metric-sub" hidden></span></div>',
     '        <div class="ao-metric" data-tone="blue"><img src="/assets/icons/tasks.svg" alt="" aria-hidden="true"><span><small>Tarefas em aberto · Total registado no sistema</small><strong id="aoMetricQueue">—</strong></span><span id="aoMetricQueueBar" class="ao-metric-track" hidden><i></i></span></div>',
     '        <div class="ao-metric" data-tone="violet"><img src="/assets/icons/pulls.svg" alt="" aria-hidden="true"><span><small>PRs abertos (recentes) · Até 40 PRs registados</small><strong id="aoMetricPR">—</strong></span><span id="aoMetricPRSub" class="ao-metric-sub" hidden></span></div>',
-    '        <div class="ao-metric" data-tone="green"><img src="/assets/icons/complete.svg" alt="" aria-hidden="true"><span><small>Concluídas (24h)</small><strong id="aoMetricDone">—</strong></span><span id="aoMetricDoneSpark" class="ao-metric-spark" aria-hidden="true"></span></div>',
+    '        <div class="ao-metric" data-tone="green"><img src="/assets/icons/complete.svg" alt="" aria-hidden="true"><span><small>Correções integradas</small><strong id="aoMetricDone">—</strong></span><span class="ao-metric-sub">Relatório do steward</span></div>',
     '      </section>',
     '      <section class="ao-primary-grid" aria-label="Escritório e estado dos agentes">',
     '      <section class="ao-panel ao-room-panel" id="aoRoomPanel" aria-labelledby="aoRoomTitle">',
@@ -97,6 +97,7 @@
     '        </article>',
     '        <article class="ao-panel" id="aoPulls" tabindex="-1"><div class="ao-panel-heading"><div class="ao-panel-title"><h2>Pull Requests</h2><span id="aoPRSummary" class="ao-section-count">—</span></div><button class="ao-panel-action" type="button" data-open-list="prs">Ver todas <span aria-hidden="true">→</span></button></div><div id="aoMergeChart" class="ao-pr-trend" role="img" aria-label="Integrações dos últimos 30 dias"></div><div id="aoPRList" class="ao-list"></div></article>',
     '        <article class="ao-panel" id="aoActivity" tabindex="-1"><div class="ao-panel-heading"><img class="ao-panel-icon" src="/assets/icons/activity-wave.svg" alt="" aria-hidden="true"><div class="ao-panel-title"><h2>Atividade recente</h2><span id="aoActivitySummary" class="ao-section-count">—</span></div><button class="ao-panel-action" type="button" data-open-list="activity">Ver todo o histórico <span aria-hidden="true">→</span></button></div><div id="aoEventList" class="ao-list"></div></article>',
+    '        <article class="ao-panel ao-steward-panel"><div class="ao-panel-heading"><div class="ao-panel-title"><h2>Fila de revisão de PRs</h2><span id="aoStewardSummary" class="ao-section-count">—</span></div><button class="ao-panel-action" type="button" data-open="steward">Abrir fila completa do steward <span aria-hidden="true">→</span></button></div><div id="aoIssues" class="ao-list ao-steward-list"></div></article>',
     '      </section>',
     '      <section class="ao-bottom-grid" aria-label="Métricas adicionais">',
     '        <article class="ao-panel"><div class="ao-panel-heading"><div><h2>Produtividade (24h)</h2><p>Tarefas concluídas por hora</p></div><span class="ao-data-source">Tempo real</span></div><div class="ao-trend" id="aoProductivityChart"></div></article>',
@@ -169,20 +170,22 @@
   const taskFilterInput = byId("aoTaskFilter");
   window.AOOfficeV2?.decorate(document.querySelector('.ao-office'), stations);
   const stationNodes = Object.fromEntries(officeRoles.map((role) => [role, stations.querySelector('[data-role="' + role + '"]')]));
-  // Arrow navigation follows the ten-station horizontal row; buttons remain individually tabbable.
+  // Arrow navigation follows the station grid; buttons remain individually tabbable.
   stations.addEventListener("keydown", (event) => {
     if (event.altKey || event.ctrlKey || event.metaKey) return;
     const station = event.target.closest?.("[data-role]");
     if (!station || !stations.contains(station)) return;
     const index = officeRoles.indexOf(station.dataset.role);
     if (index < 0) return;
-    const offset = {ArrowLeft: -1, ArrowRight: 1}[event.key];
+    const columns = window.matchMedia("(max-width: 600px)").matches ? 2 : 5;
+    const offset = {ArrowLeft: -1, ArrowRight: 1, ArrowUp: -columns, ArrowDown: columns}[event.key];
     if (!offset) return;
     const next = index + offset;
     if (next < 0 || next >= officeRoles.length) return;
     event.preventDefault();
     stationNodes[officeRoles[next]].focus({preventScroll:true});
   });
+  // One-shot visual reactions are cleared when their real state is no longer current.
   // Transient state highlights are cleared on stale data, hidden tabs, or reduced motion.
   /**
    * Limpa animações transitórias quando o movimento é suspenso,
@@ -198,7 +201,9 @@
   };
   for (const node of Object.values(stationNodes)) {
     node.addEventListener("animationend", (event) => {
-      if (event.animationName === "ao-event-pop" || event.animationName === "ao-celebrate" || event.animationName === "ao-command-sweep") {
+      if (event.animationName === "ao-celebrate") node.classList.remove("ao-celebrate");
+      if (event.animationName === "ao-command-sweep") node.classList.remove("ao-action-pulse");
+      if (event.animationName === "ao-event-pop") {
         node.classList.remove("ao-agent-state-change", "ao-stage-arrived");
       }
     });
@@ -409,16 +414,12 @@
     const prSub = byId("aoMetricPRSub");
     prSub.hidden = reviewPRs.length === 0;
     if (!prSub.hidden) prSub.textContent = formatNum(reviewPRs.length) + " em revisão";
-    const done24 = selectedRepo
-      ? Math.max(0, Number(safeArray(s.done24ByRepo).find((row) => row.repo === selectedRepo)?.n) || 0)
-      : Math.max(0, Number(s.done24) || 0);
-    byId("aoMetricDone").textContent = formatNum(done24);
-    renderDoneSpark(s);
+    byId("aoMetricDone").textContent = formatNum(s.delivery?.merged_fixes);
     const activeStages = ["hunt", "repro", "fix", "ci", "review", "gate", "submit"];
     const activeTasks = q.filter((job) => activeStages.includes(job.st));
     const approvals = q.filter((job) => job.st === "approve");
     const otherOpenTasks = q.filter((job) => !activeStages.includes(job.st) && !["approve", "done", "drop"].includes(job.st));
-    const signature = JSON.stringify([selectedRepo, taskFilterText, q, prs, safeArray(s.ev).slice(0, 8), s.done24, s.done24ByRepo, s.byRepo]);
+    const signature = JSON.stringify([selectedRepo, taskFilterText, q, prs, safeArray(s.ev).slice(0, 8), s.pr_steward]);
     if (signature === lastListSignature) return;
     lastListSignature = signature;
     // A backend update should not unexpectedly reset keyboard navigation.
@@ -453,6 +454,14 @@
       '<p class="ao-empty">Sem pull requests registados.</p>';
     byId("aoEventList").innerHTML = events.slice(0, 8).map(eventRowHTML).join("") ||
       '<p class="ao-empty">Sem atividade recente.</p>';
+    const stewardPRs = safeArray(s.pr_steward?.prs).filter((pr) => !selectedRepo || pr.repo === selectedRepo);
+    byId("aoStewardSummary").textContent = formatNum(stewardPRs.length) + " na fila";
+    byId("aoIssues").innerHTML = stewardPRs.slice(0, 6).map((pr) => rowHTML(
+      (pr.num ? "#" + pr.num + " · " : "") + (pr.title || "Pull request"),
+      [pr.repo, pr.next_action].filter(Boolean).join(" · "),
+      pr.state || "Pendente", "data-pr-url", pr.url,
+      {badgeTone: "ao-badge-wait"}
+    )).join("") || '<p class="ao-empty">Sem PRs na fila do steward.</p>';
     if (focusKey) {
       const parent = byId(focusKey.parent);
       const next = Array.from(parent.querySelectorAll("button[" + focusKey.attribute + "]"))
@@ -746,17 +755,6 @@
         '</div>' +
       '</div>';
   };
-  // Compact sparkline for the "Concluídas (24 h)" metric, from the same real buckets.
-  const renderDoneSpark = (s) => {
-    const el = byId("aoMetricDoneSpark");
-    if (!el) return;
-    const counts = new Map(safeArray(s.prod24).map((r) => [Number(r.g), Number(r.n) || 0]));
-    const bars = [];
-    for (let i = 11; i >= 0; i--) bars.push((counts.get(i * 2) || 0) + (counts.get(i * 2 + 1) || 0));
-    const max = Math.max(1, ...bars);
-    el.innerHTML = bars.some((b) => b > 0)
-      ? bars.map((b) => '<i style="height:' + Math.max(12, b / max * 100) + '%"></i>').join("") : "";
-  };
   /**
    * Show measured host telemetry only while its heartbeat and state are fresh.
    * Older readings are labeled as history, never as current performance.
@@ -829,6 +827,22 @@
    * Unknown or invalid snapshots do not overwrite the last valid UI.
    * @param {object} s /api/state payload.
    */
+  const renderDiagnostics = (s) => {
+    const blockedHunts = safeArray(s.ops?.blocked_hunts);
+    const target = byId("aoDiag");
+    const rows = blockedHunts.map((entry) => {
+      const health = entry.health || {};
+      const repo = String(entry.repo || "Repositório desconhecido");
+      const failures = Number(health.failures) || 0;
+      const stage = health.stage ? " em " + health.stage : "";
+      const code = health.exit_code == null ? "" : " · saída " + health.exit_code;
+      const until = Number(health.until) > Date.now() ? " · suspensão até " + datum(health.until) : "";
+      return '<div class="ao-diag-item ao-diag-warn"><span class="ao-diag-dot" aria-hidden="true"></span><span>Hunter suspenso em ' +
+        escapeHTML(repo) + ' após ' + failures + ' falhas de preparação' + escapeHTML(stage + code + until) + '</span></div>';
+    });
+    target.innerHTML = rows.join("");
+    target.hidden = rows.length === 0;
+  };
   const render = (s) => {
     if (!s || typeof s !== "object" || s.error) return;
     snapshot = s;
@@ -869,7 +883,7 @@
     pauseButton.title = pauseLabel;
     pauseButton.dataset.state = isPaused ? "paused" : "running";
     pauseButton.disabled = !s.o;
-    updateAgents(s); renderPipeline(s); renderOfficeCheck(s); renderStagedPipeline(s); renderRepos(s); renderLists(s); renderMerges(s); renderProductivity(s); renderMachines(s);
+    renderDiagnostics(s); updateAgents(s); renderPipeline(s); renderOfficeCheck(s); renderStagedPipeline(s); renderRepos(s); renderLists(s); renderMerges(s); renderProductivity(s); renderMachines(s);
     if (selected) showAgent(selected, false);
   };
   const overlay = byId("aoAgentOverlay");

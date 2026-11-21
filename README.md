@@ -104,7 +104,7 @@ See [Fork security and configuration](docs/fork-security.md) for safe updates an
 
 ### Worker com Node.js 24 (FixFlow)
 
-Este fork fixa Node.js **24.22.2** na definição da imagem Docker do ApolloOffice e verifica
+Este fork fixa Node.js **24.22.3** na definição da imagem Docker do ApolloOffice e verifica
 o arquivo através dos SHA-256 oficiais. Não depende do Node 20 do Debian.
 
 **Antes de instalar a versão corrigida**, selecione **Pause office** na aplicação
@@ -127,7 +127,7 @@ do worker não for confirmada.
 
 Confirme com `docker exec apollo-office node -v` e
 `docker exec apollo-office npm -v` (adicione `sudo` se necessário):
-o contentor deve utilizar Node `v24.22.2` e o npm incluído no Node 24.
+o contentor deve utilizar Node `v24.22.3` e o npm incluído no Node 24.
 **Não reconstrua com jobs ativos.**
 
 It prints a one-time login link. Open it and follow the setup: add a machine,

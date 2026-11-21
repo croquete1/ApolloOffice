@@ -20,7 +20,7 @@ function scene(mobile=false) {
     focus(){focused=role}
   }]));
   const window={matchMedia:()=>({matches:mobile})};
-  runInNewContext("(() => {"+implementation+"})()",{roles,stations,stationNodes,window});
+  runInNewContext("(() => {"+implementation+"})()",{roles,officeRoles:roles,stations,stationNodes,window});
   return {
     press(role,key,modifier={}){
       focused=null;prevented=false;

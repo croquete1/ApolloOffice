@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { Script } from "node:vm";
 
 const read = (name) => readFileSync(new URL(name, import.meta.url), "utf8");
-const pipe = read("../src/pipe.rs");
+const pipe = read("../src/pipe_impl.rs") + "\n" + read("../src/pipe_tests.rs");
 const web = read("../src/web.rs");
 const workers = read("../src/wk.rs");
 const health = read("../src/hunt_health.rs");
@@ -34,7 +34,7 @@ test("failure diagnostics exclude intentional drops without hiding execution fai
 });
 
 test("repeated setup failures stop new hunts without disabling fixes", () => {
-  assert.match(pipe, /crate::hunt_health::blocked\(a, r\)/);
+  assert.match(pipe, /crate::hunt_health::blocked\(a, &r\)/);
   assert.match(pipe, /j\.kind == "hunt"/);
   assert.match(health, /const LIMIT: i64 = 3/);
   assert.match(health, /const COOLDOWN_MS: i64 = 30 \* 60 \* 1000/);
@@ -57,7 +57,8 @@ test("preflight runs before cloning and existing setup remains mandatory", () =>
 });
 
 test("fix jobs outrank hunts and capacity is reserved for pending fixes", () => {
-  assert.ok(pipe.indexOf('"fix" => 1.0') < pipe.indexOf('"hunt" => 2.0'));
+  const rank = pipe.slice(pipe.indexOf("fn pick_rank("), pipe.indexOf("async fn pick(", pipe.indexOf("fn pick_rank(")));
+  assert.ok(rank.indexOf('kind == "fix"') < rank.indexOf('kind == "hunt"'));
   assert.match(pipe, /uncovered_fixes > 0/);
   assert.ok(pipe.includes("st='ready' and (num<>0 or json_extract(d,'$.ext') is not null)"));
   assert.doesNotMatch(pipe, /hf \+ i64::from\(pending_fixes > 0\)/);

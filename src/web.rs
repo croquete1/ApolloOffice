@@ -1428,9 +1428,19 @@ fn steward_report(a: &Ax, repo: &str) -> Value {
             pr["recheck"] = latest.map(|job| {
                 let expected_head = job["d"]["expected_head"].as_str().unwrap_or("");
                 let expected_base = job["d"]["expected_base"].as_str().unwrap_or("");
+                let started_at = job["t0"].as_i64().unwrap_or(at);
+                let age_ms = if matches!(job["st"].as_str(), Some("done" | "drop")) {
+                    job["t1"]
+                        .as_i64()
+                        .filter(|updated| *updated > 0)
+                        .map(|updated| updated.saturating_sub(started_at))
+                        .unwrap_or_else(|| at.saturating_sub(started_at))
+                } else {
+                    at.saturating_sub(started_at)
+                };
                 json!({
                     "id":job["id"], "state":job["st"], "started_at":job["t0"], "updated_at":job["t1"],
-                    "age_ms":at.saturating_sub(job["t0"].as_i64().unwrap_or(at)), "why":job["why"],
+                    "age_ms":age_ms, "why":job["why"],
                     "expected_head":expected_head, "expected_base":expected_base,
                     "matches_head":expected_head == pr["head_sha"].as_str().unwrap_or(""),
                     "matches_base":expected_base == pr["base_sha"].as_str().unwrap_or("")
@@ -1473,7 +1483,7 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
         ("GET", "/api/job") => {
             let id: i64 = qv("id").parse().unwrap_or(0);
             match a.db.one("select * from jobs where id=?", pa![id]) {
-                Some(j) => js(json!({"id": j["id"], "repo": j["repo"], "num": j["num"], "kind": j["kind"], "work_class": work_class(&j), "title": j["title"], "url": j["url"], "st": j["st"], "why": j["why"], "pt": j["d"]["pt"], "pb": j["d"]["pb"], "df": j["d"]["df"], "proof": j["d"]["proof"], "known": j["d"]["known"], "h": j["d"]["h"], "ext": j["d"]["ext"]["src"], "cost": a.db.one("select sum(case when sub=0 then usd end) usd, sum(case when sub=1 then usd end) val, sum(tin+tcw+tcr) ti, sum(tout) tou, count(*) n from cost where job=?", pa![id]), "ev": a.db.all("select t,w,m from ev where j=? order by id desc limit 80", pa![id])})),
+                Some(j) => js(json!({"id": j["id"], "repo": j["repo"], "num": j["num"], "kind": j["kind"], "work_class": work_class(&j), "title": j["title"], "url": j["url"], "st": j["st"], "why": j["why"], "failure": j["d"]["failure"], "pt": j["d"]["pt"], "pb": j["d"]["pb"], "df": j["d"]["df"], "proof": j["d"]["proof"], "known": j["d"]["known"], "h": j["d"]["h"], "ext": j["d"]["ext"]["src"], "cost": a.db.one("select sum(case when sub=0 then usd end) usd, sum(case when sub=1 then usd end) val, sum(tin+tcw+tcr) ti, sum(tout) tou, count(*) n from cost where job=?", pa![id]), "ev": a.db.all("select t,w,m from ev where j=? order by id desc limit 80", pa![id])})),
                 None => er(StatusCode::NOT_FOUND, "no such job"),
             }
         }
