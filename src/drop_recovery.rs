@@ -188,6 +188,7 @@ pub fn retry(a: &Ax, id: i64, automatic: bool) -> Result<bool, &'static str> {
             "ci_tree",
             "ci_evidence",
             "ci_verified_at",
+            "failure",
             "last_review",
             "last_diagnosis",
             "fx",
@@ -373,7 +374,7 @@ mod tests {
         let id = dropped(
             &a,
             "machine kept failing: timed out",
-            json!({"h":"host","last_review":{"verdict":{"ok":true}},"ci_evidence":{"exit":0},"ir":5}),
+            json!({"h":"host","last_review":{"verdict":{"ok":true}},"ci_evidence":{"exit":0},"failure":{"stage":"ci","exit_code":1},"ir":5}),
         );
         assert_eq!(retry(&a, id, true), Ok(true));
         let j = a.db.jg(id).unwrap();
@@ -381,6 +382,7 @@ mod tests {
         assert_eq!(j.d["recovery_attempts"], 1);
         assert!(j.d["last_review"].is_null());
         assert!(j.d["ci_evidence"].is_null());
+        assert!(j.d["failure"].is_null());
         assert!(j.d["ir"].is_null());
         assert_eq!(j.d["drop_history"][0]["automatic"], true);
         assert_eq!(

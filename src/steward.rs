@@ -13,6 +13,37 @@ use std::collections::BTreeSet;
 // automatic actions when the result set reaches that ceiling.
 const PAGE_LIMIT: &str = "1000";
 
+pub(crate) const STATES: [&str; 8] = [
+    "draft",
+    "conflito",
+    "duplicado_possivel",
+    "sobreposicao",
+    "ci_falhou",
+    "ci_pendente",
+    "revisao_pendente",
+    "revisao_final_necessaria",
+];
+
+/// Counts the complete scan by the same state used to prioritize individual PRs.
+pub(crate) fn state_counts(report: &[Value]) -> Value {
+    let mut counts = json!({
+        "draft": 0,
+        "conflito": 0,
+        "duplicado_possivel": 0,
+        "sobreposicao": 0,
+        "ci_falhou": 0,
+        "ci_pendente": 0,
+        "revisao_pendente": 0,
+        "revisao_final_necessaria": 0
+    });
+    for pr in report {
+        if let Some(state) = pr["state"].as_str().filter(|state| STATES.contains(state)) {
+            counts[state] = json!(counts[state].as_i64().unwrap_or(0) + 1);
+        }
+    }
+    counts
+}
+
 /// Reviews automáticas não constituem provas de testes.
 fn is_review_bot(check: &Value) -> bool {
     let name = check["name"]
@@ -255,7 +286,8 @@ pub async fn scan(a: &Ax, repo: &str) -> Result<(), String> {
         "total": report.len(),
         "draft": report.iter().filter(|p| p["state"] == "draft").count(),
         "overlap": report.iter().filter(|p| p["state"] == "sobreposicao" || p["state"] == "duplicado_possivel").count(),
-        "blocked": report.iter().filter(|p| p["state"] != "revisao_final_necessaria").count()
+        "blocked": report.iter().filter(|p| p["state"] != "revisao_final_necessaria").count(),
+        "states": state_counts(&report)
     });
     let key = format!("steward:{repo}");
     let prev = a.db.kg(&key);
@@ -272,6 +304,8 @@ pub async fn scan(a: &Ax, repo: &str) -> Result<(), String> {
             "repair_enabled": repair_enabled
         }),
     );
+    // A fresh complete scan supersedes any previously cached transient error.
+    a.db.kd(&format!("steward:error:{repo}"));
     if repair_enabled {
         crate::steward_repair::run(a, repo, list, &report).await;
     }
@@ -359,6 +393,30 @@ mod tests {
             "statusCheckRollup":[{"name":"test-suite","conclusion":"SUCCESS"}],
             "files":[{"path":path}]
         })
+    }
+
+    #[test]
+    fn state_summary_counts_every_pr_state_and_ignores_unknown_values() {
+        let rows = [
+            json!({"state":"draft"}),
+            json!({"state":"ci_falhou"}),
+            json!({"state":"ci_falhou"}),
+            json!({"state":"revisao_final_necessaria"}),
+            json!({"state":"future_state"}),
+        ];
+        assert_eq!(
+            state_counts(&rows),
+            json!({
+                "draft":1,
+                "conflito":0,
+                "duplicado_possivel":0,
+                "sobreposicao":0,
+                "ci_falhou":2,
+                "ci_pendente":0,
+                "revisao_pendente":0,
+                "revisao_final_necessaria":1
+            })
+        );
     }
 
     #[test]

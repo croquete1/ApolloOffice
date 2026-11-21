@@ -218,12 +218,19 @@ fn pr_steward_state(a: &Ax) -> Value {
     let mut overlap = 0_i64;
     let mut blocked = 0_i64;
     let mut final_check = 0_i64;
+    let mut states = crate::steward::state_counts(&[]);
     for row in repos {
         let repo = row["full"].as_str().unwrap_or("");
         let report = a.db.kg(&format!("steward:{repo}"));
         let summary = &report["summary"];
-        let report_total = summary["total"].as_i64().unwrap_or(0);
+        let report_prs = report["prs"].as_array().cloned().unwrap_or_default();
+        let report_total = summary["total"].as_i64().unwrap_or(report_prs.len() as i64);
         let report_blocked = summary["blocked"].as_i64().unwrap_or(report_total);
+        let report_states = if summary["states"].is_object() {
+            summary["states"].clone()
+        } else {
+            crate::steward::state_counts(&report_prs)
+        };
         total += report_total;
         review_requested += summary["review_requested"].as_i64().unwrap_or(0);
         ci_failed += summary["ci_failed"].as_i64().unwrap_or(0);
@@ -231,6 +238,11 @@ fn pr_steward_state(a: &Ax) -> Value {
         overlap += summary["overlap"].as_i64().unwrap_or(0);
         blocked += report_blocked;
         final_check += (report_total - report_blocked).max(0);
+        for state in crate::steward::STATES {
+            states[state] = json!(
+                states[state].as_i64().unwrap_or(0) + report_states[state].as_i64().unwrap_or(0)
+            );
+        }
         summaries.push(json!({
             "repo": repo,
             "at": report["at"],
@@ -241,20 +253,19 @@ fn pr_steward_state(a: &Ax) -> Value {
             "overlap": summary["overlap"],
             "blocked": report_blocked,
             "final_check": (report_total - report_blocked).max(0),
+            "states": report_states,
             "error": a.db.kg(&format!("steward:error:{repo}")),
         }));
-        if let Some(rows) = report["prs"].as_array() {
-            for pr in rows {
-                prs.push(json!({
-                    "repo": repo,
-                    "num": pr["number"],
-                    "title": pr["title"],
-                    "url": pr["url"],
-                    "state": pr["state"],
-                    "priority": pr["priority"],
-                    "next_action": pr["next_action"],
-                }));
-            }
+        for pr in report_prs {
+            prs.push(json!({
+                "repo": repo,
+                "num": pr["number"],
+                "title": pr["title"],
+                "url": pr["url"],
+                "state": pr["state"],
+                "priority": pr["priority"],
+                "next_action": pr["next_action"],
+            }));
         }
     }
     prs.sort_by_key(|pr| pr["priority"].as_i64().unwrap_or(9));
@@ -267,6 +278,7 @@ fn pr_steward_state(a: &Ax) -> Value {
         "overlap": overlap,
         "blocked": blocked,
         "final_check": final_check,
+        "states": states,
         "repos": summaries,
         "prs": prs,
     })
@@ -2163,6 +2175,50 @@ pub async fn h(State(a): State<Ax>, req: Request<Body>) -> Response<Body> {
 #[cfg(test)]
 mod t {
     use super::*;
+
+    #[test]
+    fn steward_state_reports_full_totals_even_when_pr_preview_is_limited() {
+        let db = crate::db::Db::mem();
+        db.run(
+            "insert into rp(full,on_) values('o/large',1),('o/legacy',1)",
+            pa![],
+        );
+        let large_prs: Vec<Value> = (1..=60)
+            .map(|number| json!({"number":number,"state":"draft","priority":8}))
+            .collect();
+        db.ks(
+            "steward:o/large",
+            &json!({
+                "summary":{
+                    "total":112,"blocked":108,"review_requested":1,"ci_failed":2,
+                    "draft":4,"overlap":3,
+                    "states":{"draft":4,"conflito":1,"duplicado_possivel":2,"sobreposicao":1,
+                        "ci_falhou":2,"ci_pendente":80,"revisao_pendente":18,"revisao_final_necessaria":4}
+                },
+                "prs":large_prs
+            }),
+        );
+        db.ks(
+            "steward:o/legacy",
+            &json!({"summary":{"total":2},"prs":[{"state":"conflito"},{"state":"draft"}]}),
+        );
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::env::temp_dir(),
+            1,
+            "x".into(),
+        ));
+
+        let state = pr_steward_state(&a);
+        assert_eq!(state["total"], 114);
+        assert_eq!(state["blocked"], 110);
+        assert_eq!(state["states"]["draft"], 5);
+        assert_eq!(state["states"]["ci_pendente"], 80);
+        assert_eq!(state["states"]["conflito"], 2);
+        assert_eq!(state["prs"].as_array().unwrap().len(), 40);
+        assert_eq!(state["repos"][0]["total"], 112);
+        assert_eq!(state["repos"][0]["states"]["revisao_pendente"], 18);
+    }
 
     #[test]
     fn state_exposes_staged_route_and_only_checkpoint_summaries() {

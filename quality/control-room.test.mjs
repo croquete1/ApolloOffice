@@ -10,6 +10,7 @@ const html = read("ui/index.html");
 const css = read("ui/control-room.css");
 const pixelCss = read("ui/pixel-dashboard.css");
 const modern = read("ui/control-room.js");
+const panels = read("ui/p.js");
 const original = read("ui/o.js");
 const handoffs = read("ui/office-motion.js");
 
@@ -55,6 +56,12 @@ test("GitHub issues are shown separately from admitted Apollo jobs", () => {
   assert.match(modern, /id="aoIssues"/);
   assert.match(modern, /Fila de revisão de PRs/);
   assert.match(modern, /Abrir fila completa do steward/);
+  assert.match(modern, /s\.pr_steward\?\.total/);
+  assert.match(modern, /s\.pr_steward\?\.blocked/);
+  assert.match(panels, /summary\?\.states/);
+  assert.match(panels, /f\.command/);
+  assert.match(panels, /f\.candidate/);
+  assert.match(read("src/steward.rs"), /a\.db\.kd\(&format!\("steward:error:\{repo\}"\)\)/);
 });
 
 test("all ten original agents have distinct live stations", () => {

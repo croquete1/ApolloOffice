@@ -133,6 +133,29 @@ mod t {
     }
 
     #[test]
+    fn dropped_ci_records_exit_command_candidate_and_redacted_output() {
+        let head = "0123456789abcdef0123456789abcdef01234567";
+        let data = json!({"ci_evidence":{
+            "command":"cargo test",
+            "exit":7,
+            "candidate":head,
+            "rerun":true,
+            "output_tail":"failed with token=secret-value"
+        }});
+        let failure = failure_details("ci", "builder-1", &data, "CI failed: authorization=Bearer hidden", 1234);
+        assert_eq!(failure["stage"], "ci");
+        assert_eq!(failure["exit_code"], 7);
+        assert_eq!(failure["command"], "cargo test");
+        assert_eq!(failure["candidate"], head);
+        assert_eq!(failure["rerun"], true);
+        assert_eq!(failure["host"], "builder-1");
+        assert!(failure["message"].as_str().unwrap().contains("[credencial ocultada]"));
+        assert!(failure["output"].as_str().unwrap().contains("[credencial ocultada]"));
+        assert!(!failure.to_string().contains("secret-value"));
+        assert!(!failure.to_string().contains("hidden"));
+    }
+
+    #[test]
     fn own_fix_ci_evidence_keeps_its_fix_commit_and_green_retry_sha() {
         let fix = "fedcba9876543210fedcba9876543210fedcba98";
         let data = json!({"expected_head":null,"proof":{"fix_commit":fix}});

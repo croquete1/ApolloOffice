@@ -615,9 +615,20 @@
     show(j.st === "approve" ? "Review pull request" : "Job " + id, "job");
     const tag = (j.repo.split("/")[1] || j.repo) + (j.num ? "#" + j.num : "");
     const work = A.workLabel ? A.workLabel(j.work_class) : j.kind;
-    const failure = j.failure?.stage
-      ? `<div class="sec dz"><h4>Diagnóstico técnico</h4><div class="box"><pre>${esc([j.failure.stage, j.failure.exit_code != null ? "exit " + j.failure.exit_code : "", j.failure.message || j.failure.output || ""].filter(Boolean).join(" · "))}</pre></div></div>`
-      : "";
+    const failure = j.failure?.stage ? (() => {
+      const f = j.failure;
+      const details = [
+        "Etapa: " + f.stage,
+        f.exit_code != null ? "exit " + f.exit_code : "",
+        f.rerun ? "segunda execução" : "",
+        f.host ? "Máquina: " + f.host : "",
+        f.command ? "Comando: " + f.command : "",
+        f.candidate ? "Candidato: " + f.candidate : ""
+      ].filter(Boolean).join(" · ");
+      const message = f.message || "";
+      const output = f.output && f.output !== message ? `<pre>${esc(f.output)}</pre>` : "";
+      return `<div class="sec dz"><h4>Diagnóstico técnico</h4><div class="box"><div class="hint">${esc(details)}</div>${message ? `<pre>${esc(message)}</pre>` : ""}${output}</div></div>`;
+    })() : "";
     const retry = window.AO.retryStates?.get(id);
     const cs = j.cost && j.cost.n ? `<div class="msg">Cost: ${j.cost.usd != null ? usd(j.cost.usd) + " API" : ""}${j.cost.usd != null && j.cost.val != null ? " · " : ""}${j.cost.val != null ? usd(j.cost.val) + " login value" : ""}${j.cost.usd == null && j.cost.val == null ? "unknown" : ""} · ${Math.round((j.cost.ti || 0) / 1000)}k in, ${Math.round((j.cost.tou || 0) / 1000)}k out</div>` : "";
     const ev = (j.ev || []).map((e) => `<div><span class="tm">${new Date(e.t).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}</span><span>${esc(e.w)}</span><span>${esc(e.m)}</span></div>`).join("");
@@ -671,6 +682,11 @@
     catch (error) { B.innerHTML = `<div class="warn">Não foi possível consultar o Steward: ${esc(error.message || error)}</div>`; return; }
     const reports = data.repos || [];
     const shortSha = (sha) => typeof sha === "string" && sha ? sha.slice(0, 10) : "n/d";
+    const stateLabels = {
+      draft:"drafts", conflito:"conflitos", duplicado_possivel:"possíveis duplicações",
+      sobreposicao:"sobreposições", ci_falhou:"CI falhou", ci_pendente:"CI pendente",
+      revisao_pendente:"revisão pendente", revisao_final_necessaria:"revalidar gates"
+    };
     const elapsed = (ms) => {
       const m = Math.max(0, Math.floor(Number(ms || 0) / 60000));
       return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`;
@@ -682,11 +698,16 @@
     </div></div>
     ${reports.map(({ repo, report, error, merge_error, repair_error, drops }) => {
       const rows = [...(report?.prs || [])].sort((a,b) => (Number(a.priority ?? 9) - Number(b.priority ?? 9)) || (Number(b.number) - Number(a.number)));
+      const stateCounts = report?.summary?.states || {};
+      const stateBreakdown = Object.entries(stateLabels)
+        .filter(([key]) => Number(stateCounts[key] || 0) > 0)
+        .map(([key, label]) => `${stateCounts[key]} ${label}`).join(" · ");
       const at = report?.at ? new Date(report.at).toLocaleString("pt-PT") : "sem leitura";
       const mode = !report?.merge_enabled ? "Apenas auditoria — integrações desativadas" : report?.local_merge_enabled ? "Integração local com provas obrigatórias" : "Integração com proteção GitHub obrigatória";
       const repairs = report?.repair_enabled ? "Encaminhamento de revisões ativo" : "Encaminhamento de revisões desativado";
       return `<div class="sec"><h4>${esc(repo)}</h4><div class="box">
-        <div class="msg">${rows.length} PRs abertas · ${esc(at)} · ${esc(mode)} · ${esc(repairs)} · Revalidações pendentes: ${esc(String(report?.queue?.pending_rechecks ?? 0))} · mais antiga: ${esc(elapsed(report?.queue?.oldest_age_ms))}${error?.error ? " · Último erro: " + esc(error.error) : ""}</div>
+        <div class="msg">${esc(String(report?.summary?.total ?? rows.length))} PRs abertas · ${esc(at)} · ${esc(mode)} · ${esc(repairs)} · Revalidações pendentes: ${esc(String(report?.queue?.pending_rechecks ?? 0))} · mais antiga: ${esc(elapsed(report?.queue?.oldest_age_ms))}${error?.error ? " · Último erro: " + esc(error.error) : ""}</div>
+        ${stateBreakdown ? `<div class="hint">Por estado: ${esc(stateBreakdown)}</div>` : ""}
         ${repair_error?.error ? `<div class="warn">Revisão não encaminhada: ${esc(repair_error.error)}</div>` : ""}
         ${merge_error?.reason ? `<div class="warn">Integração bloqueada: ${esc(merge_error.reason)}</div>` : ""}
         <div class="hint">Falhas registadas: ${esc(String(drops?.total ?? 0))} · recuperação automática: ${drops?.enabled ? "ativa" : "desativada"} · recuperáveis: ${esc(String((drops?.jobs || []).filter(j => j.safe_auto).length))}</div>

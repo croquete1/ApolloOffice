@@ -74,7 +74,7 @@ function scene() {
     " const countTotals=(s)=>({active:s.n?.fix||0,done:s.n?.done||0}); " +
     implementation + " return {renderLists}; })()";
   const api = runInNewContext(block, context);
-  const state=(q,pr=[])=>({q,pr,n:{fix:q.length,done:0},ev:[]});
+  const state=(q,pr=[],pr_steward={})=>({q,pr,n:{fix:q.length,done:0},ev:[],pr_steward});
   return {api,state,document,elements};
 }
 
@@ -112,4 +112,12 @@ test("unfocused lists do not capture focus from sidebar",()=>{
   h.api.renderLists(h.state([{id:1,title:"One",repo:"x",st:"fix"}]));
   h.api.renderLists(h.state([{id:2,title:"Two",repo:"x",st:"fix"}]));
   assert.equal(h.document.activeElement,sidebar);
+});
+
+test("steward summary reports the full backlog instead of its 40-row preview",()=>{
+  const h=scene();
+  const prs=Array.from({length:40},(_,index)=>({repo:"owner/repo",num:index+1,title:"PR",priority:index,url:"https://github.com/owner/repo/pull/"+(index+1)}));
+  h.api.renderLists(h.state([],[],{total:112,blocked:108,prs}));
+  assert.equal(h.elements.aoStewardSummary.textContent,"112 abertas · 108 por tratar");
+  assert.equal((h.elements.aoIssues.innerHTML.match(/data-pr-url=/g) || []).length,6);
 });

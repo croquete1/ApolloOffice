@@ -1412,9 +1412,36 @@ async fn ci(a: &Ax, j: &mut Job) -> R<String> {
 // A revalidation proves the exact PR head and tree, not a Fixer's commit.
 fn ci_evidence(kind: &str, data: &Value, command: &str, exit: i32, output: &str, rerun: bool) -> Value {
     let candidate = if kind == "mergecheck" { data["expected_head"].clone() } else { data["proof"]["fix_commit"].clone() };
-    let mut result = json!({"command":command,"exit":exit,"output_tail":crate::sh::last(output,4000),"candidate":candidate});
+    let safe_output = crate::hunt_health::safe_tail(output);
+    let mut result = json!({
+        "command":crate::hunt_health::safe_tail(command),
+        "exit":exit,
+        "output_tail":crate::sh::last(&safe_output, 4000),
+        "candidate":candidate
+    });
     if rerun { result["rerun"] = json!(true); }
     result
+}
+
+fn failure_details(stage: &str, host: &str, data: &Value, message: &str, at: i64) -> Value {
+    let evidence = if stage == "ci" {
+        data["ci_evidence"].clone()
+    } else {
+        Value::Null
+    };
+    json!({
+        "stage":stage,
+        "exit_code":evidence["exit"].as_i64(),
+        "command":evidence["command"],
+        "candidate":evidence["candidate"],
+        "rerun":evidence["rerun"] == true,
+        "host":host,
+        "at":at,
+        "message":crate::hunt_health::safe_tail(message),
+        "output":crate::hunt_health::safe_tail(
+            evidence["output_tail"].as_str().unwrap_or(message)
+        )
+    })
 }
 
 async fn record_ci_success(a: &Ax, j: &mut Job) -> R<()> {
@@ -4234,17 +4261,9 @@ async fn go(a: &Ax, id: i64, h: &str) {
             };
             let m = crate::hunt_health::safe_tail(&m);
             let mut jj = a.db.jg(id).unwrap_or(j.clone());
-            if jj.d["failure"].is_null() {
-                let stage = jj.st.clone();
-                let host = jj.h();
-                jj.d["failure"] = json!({
-                    "stage": stage,
-                    "exit_code": Value::Null,
-                    "host": host,
-                    "at": now(),
-                    "output": m.clone(),
-                });
-            }
+            let stage = jj.st.clone();
+            let host = jj.h();
+            jj.d["failure"] = failure_details(&stage, &host, &jj.d, &m, now());
             a.db.jset(
                 id,
                 &[
