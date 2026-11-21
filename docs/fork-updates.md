@@ -96,14 +96,16 @@ com extensão `.old` no Unix para recuperação. Se o novo binário não arranca
 mesmo depois do `exec`, a recuperação manual continua disponível: parar o
 serviço, restaurar a cópia `.old`, iniciar o serviço e investigar.
 
-## 3. Estado de validação
+## 3. Estado de publicação
 
-A versão `fork-v0.10.1` foi publicada e assinada localmente em 11/11/2026,
-com os três assets Linux x64 verificados e instalação do código da `main`
-confirmada no CachyOS. A atualização nativa pelo botão ainda necessita do
-teste end-to-end com a versão superior `0.10.2`, seguindo
-[o roteiro de validação](first-signed-upgrade-test.md).
+As releases assinadas deste fork são independentes das versões upstream. A
+última release assinada antes da preparação da versão `0.10.13` foi
+`fork-v0.10.7`, publicada em 15/11/2026. O número em `Cargo.toml` indica a
+versão do código; só a tag e os três assets da GitHub Release confirmam que uma
+versão assinada foi publicada. Consultar a release mais recente no GitHub antes
+de instalar ou anunciar uma atualização.
 
-A versão `0.10.2` só pode ser publicada depois de integrar a respetiva PR
-com validação de Rustfmt, Clippy, Rust, Node, Python, Chromium e Release.
-As atualizações automáticas permanecem desligadas até o teste terminar.
+A validação nativa inicial de `0.10.1 → 0.10.2` está documentada em
+[o roteiro de validação](first-signed-upgrade-test.md). As atualizações
+automáticas continuam desativadas por omissão e só podem ser ativadas com a URL
+e a chave pública do fork configuradas.
