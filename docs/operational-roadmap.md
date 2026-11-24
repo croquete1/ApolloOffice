@@ -20,6 +20,36 @@
 - Ainda não há evidência de execução CI no GitHub. Validação real Docker, Windows, Chromium e fornecedores reais pendentes. Nenhuma fase completa do roadmap é declarada concluída só por estes resultados.
 - Interface dos agentes inalterada; não foi ativado Qwen.
 
+## Segunda entrega — 24/11/2026
+- [x] PR #56 — perfis Manual/Económico/Equilibrado/Desempenho/Noturno, redução de novas admissões por CPU/memória/temperatura e telemetria indisponível, reserva efetiva de lane para fixes, controlos de prioridade e dependências no drawer, configuração da reserva Codex. Merge dec21d3e6c465b157f85d79a4945372fa91c4a3f. QA: 379 testes aprovados, fmt/Clippy, Chromium desktop e mobile.
+- [x] PR #57 — migrações SQLite transacionais versionadas, idempotência, rollback, preservação de permissões, leituras estritas de fila e prova de merge, pausa por falha de ledger global. Merge c08d2fcdc76f02885f8253335ed3873dc4470e8e. QA: 382 testes aprovados, fmt/Clippy.
+- [x] PR #58 — routing adaptativo opt-in apenas do Fixer normal, modelos de subscrição explicitamente definidos em Fixer/Big, disponibilidade, distinção do Reviewer, histórico de primeiras tentativas por repo (mínimo 5 amostras por modelo, diferença >=15 pontos percentuais), diagnóstico. Merge 94961fc95e75fed5545386a2fa6ab2f8320e4aef. QA: 384 testes aprovados, fmt/Clippy, Chromium desktop e mobile.
+- [x] PR #59 — aprendizagem supervisionada opt-in, proposta/evidência/proveniência, regra escrita e aprovada pelo proprietário, âmbito de repo, validade e revogação; métricas de primeira tentativa por projeto/modelo no painel Custos. Merge 739058ed84e1c21e44bbf5c6d9e59e635ad02e5a. QA: 385 testes aprovados (233 Rust unitários + 2 integração + 116 JavaScript + 34 Python; 3 Rust ignorados), fmt, Clippy -D warnings, diff check e Chromium desktop idle/active e mobile PASS. Árvore testada 5c438d66870b43d17fee60866748a9a0ab028b06 idêntica à integrada.
+- Interface dos agentes preservada; alterações UI restritas a definições, detalhes de tarefa, aprendizagem e custos. Não ativado Qwen. Perfis Manual, routing adaptativo OFF e aprendizagem supervisionada OFF mantêm comportamento preexistente até opção do proprietário. Nenhuma release nova.
+- Windows, Docker real, fornecedores reais, testes interativos específicos dos novos formulários e impacto medido das lições continuam pendentes. Smoke Chromium existente usa estado sintético, não equivale a validação de produção.
+
+## Balanço por fase
+| Fase | Estado | Falta |
+|---|---|---|
+| F01 | Parcial (#49) | Validação Docker/fnm em workers reais, logs upstream, ciclo de vida sem interrupções |
+| F02 | Parcial (#48) | Inbox durável completa, deduplicação por PR/HEAD/review, falhas e recuperação end-to-end |
+| F03 | Parcial (#48/#52) | Unificar revisão/rebase/recheck e preservar autorizações; testes concorrentes reais |
+| F04 | Parcial (#51/#57) | Converter restantes decisões críticas; SQLITE_BUSY, disco cheio, recuperação e limites por repo |
+| F05 | Parcial (#54) | Checkpoints/retoma para rede, fornecedores, CI e quotas; libertação de lanes em todas as esperas |
+| F06 | Parcial (#53/#58) | Cooldowns persistentes de todos os fornecedores, circuit breakers, fallback por papel |
+| F07 | Parcial (#53/#56) | Previsão/reserva concorrente por prioridade e otimizações; limites durante execução |
+| F08 | Parcial (#58) | Adaptar outros papéis, custo/complexidade calibrados, validação com providers reais |
+| F09 | Parcial (#51/#52) | Sync incremental, reconciliação sob mutações, restantes páginas de comentários/reviews/checks/files |
+| F10 | Parcial (#54/#56) | Aging, causa comum e agrupamento, prevenção de sobreposições, validação remota de dependências |
+| F11 | Parcial (#56) | GPU/VRAM, CI dinâmico, prioridade processos e validação sob pressão real |
+| F12 | Pendente | Isolamento reforçado por confiança, checkouts/segredos/caches executáveis; Docker/SSH real |
+| F13 | Parcial (#59) | Medir eficácia real e validar fluxos interativos e expiração após reinício |
+| F14 | Implementação base integrada (#56) | Teste de persistência/reinício, perfis em máquinas reais e limites de CI |
+| F15 | Parcial (#56/#58/#59) | Próxima tarefa elegível, diagnóstico central de todos os bloqueios, histórico de etapas |
+| F16 | Parcial (#58/#59) | Tempo por fase e custo/merge com dados completos, baseline comparável, QA real Docker/Windows/providers, release assinada |
+
+Nenhuma fase completa é declarada encerrada sem cumprir todos os critérios abaixo. A última bateria automatizada tem 385 aprovações, não a soma de execuções repetidas.
+
 ## Fases e critérios de aceitação
 ### F01 / P0 — Integração seletiva upstream
 - [ ] Validar #49: init, limites CPU daemon, stderr e contentores pausados; testes de retoma, volumes e cache npm. Sem recriar contentores com jobs ativos.
