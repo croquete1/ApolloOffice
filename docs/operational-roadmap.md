@@ -72,6 +72,11 @@ Estas PRs estão em draft e **não estão integradas**. A main funcional continu
 - Política versionada .coderabbit.yaml: revisão assertiva, pedidos manuais para controlar quota, sem revisão incremental automática, drafts elegíveis, sugestões consultivas (sem request-changes do bot) e instruções por caminho. Não substitui os gates existentes. Configuração efetiva no serviço e faturação por consumo desativada ainda por confirmar; nenhuma funcionalidade paga autorizada.
 - F17 acrescentada ao roadmap para integração de resultados de revisão externos. O Watcher atual filtra bots; não atribuir privilégios de mantenedor ao CodeRabbit, nem executar automaticamente instruções em comentários. Nenhuma alteração funcional em main ou ativação Qwen; representação dos agentes preservada.
 
+## Décima primeira entrega — evidência CodeRabbit no Steward (24/11/2026)
+- A segunda revisão CodeRabbit da #67 confirmou cobertura do HEAD 090dcdb4817ad2f8f9c500efc13b371288850131, risco mínimo de integração e arquitetura, sem defeitos impeditivos concretos. Continua pendente QA nativo/browser. A configuração da #76 foi reconhecida pelo serviço (perfil ASSERTIVE; revisão automática desativada). O serviço reporta plano Advanced, não prova faturação zero; não foram solicitadas novas revisões nesta entrega.
+- PR #77 (draft, HEAD 2ef565e20b568c9efa24e4b7a6057c041431201f): consulta explícita no painel Steward via endpoint autenticado, apenas repositórios ativos e confirmados públicos. Leitura paginada de comentários GitHub, validação da identidade numérica/login/tipo do bot e confirmação da PR/HEAD antes/depois da leitura. Estados consultivos: evidência atual, stale, não observada, desconhecida ou indisponível. Sem envio de dados a novos fornecedores, pedidos automáticos de revisão, execução de comentários, alterações de permissões ou merge.
+- QA #77: quatro cenários JavaScript isolados PASS no handler de produção com DOM simulado (estado consultivo, HEAD incompatível, estado arbitrário, pedido simultâneo/painel substituído); testes Node correspondentes e quatro testes Rust adicionados, não executados nativamente. Marcadores HTML do CodeRabbit são formato observado não contratual; eventual alteração mantém cobertura desconhecida. Persistência/deduplicação de observações, ingestão de findings com Guard e recuperação end-to-end permanecem pendentes. Sem alteração do canvas ou modelos.
+
 ## Balanço por fase
 | Fase | Estado | Falta |
 |---|---|---|
@@ -91,7 +96,7 @@ Estas PRs estão em draft e **não estão integradas**. A main funcional continu
 | F14 | Implementação base integrada (#56) | Teste de persistência/reinício, perfis em máquinas reais e limites de CI |
 | F15 | Parcial (#56/#58/#59) | Próxima tarefa elegível, diagnóstico central de todos os bloqueios, histórico de etapas |
 | F16 | Parcial (#58/#59) | Tempo por fase e custo/merge com dados completos, baseline comparável, QA real Docker/Windows/providers, release assinada |
-| F17 | Parcial (CodeRabbit confirmado no fork, #67) | Política OSS efetiva, ingestão consultiva opt-in, identidade/HEAD e integração segura |
+| F17 | Parcial (#67, #76, #77 draft) | Validar política/conta, QA consulta consultiva, persistência, ingestão de findings e integração segura |
 
 Nenhuma fase completa é declarada encerrada sem cumprir todos os critérios abaixo. A última bateria automatizada tem 395 aprovações, não a soma de execuções repetidas.
 
