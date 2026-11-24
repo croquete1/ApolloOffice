@@ -775,6 +775,7 @@
             <div class="hint">Prioridade P${esc(String(p.priority ?? 9))} · Estado: ${esc(p.state)} · CI: ${esc(p.checks)} · Revisão: ${esc(p.review || "não verificada")}</div>
             <div class="hint">HEAD ${esc(shortSha(p.head_sha))} · base ${esc(p.base || "?")} @ ${esc(shortSha(p.base_sha))} · atualizada: ${esc(p.updated_at ? new Date(p.updated_at).toLocaleString("pt-PT") : "n/d")}</div>
             <div class="hint">Próximo passo: ${esc(p.next_action || "Rever PR")}</div>
+            <div class="acts"><button type="button" data-cr-repo="${esc(repo)}" data-cr-number="${esc(p.number)}" data-cr-head="${esc(p.head_sha)}">Consultar CodeRabbit</button><span class="hint" role="status"></span></div>
             ${p.recheck ? `<div class="hint">Revalidação #${esc(String(p.recheck.id))}: ${esc(p.recheck.state)} · ${esc(elapsed(p.recheck.age_ms))} · HEAD/base: ${p.recheck.matches_head && p.recheck.matches_base ? "atuais" : "desatualizados"}${p.recheck.why ? " · " + esc(p.recheck.why) : ""}</div>` : ""}
             ${p.branch_update ? `<div class="${p.branch_update.status === "error" || p.branch_update.status === "blocked" ? "warn" : "hint"}">Atualização da branch: ${esc(p.branch_update.message || p.branch_update.error || p.branch_update.status)} · ${esc(p.branch_update.status)}</div>` : ""}
             ${p.overlaps?.length ? `<div class="hint bad2">Ficheiros em comum com: #${p.overlaps.map(Number).join(", #")}</div>` : ""}
@@ -783,6 +784,29 @@
       </div></div>`;
     }).join("") || '<div class="empty">Não existem repositórios ativos.</div>'}`;
     B.querySelector("#steRefresh").onclick = steward;
+    for (const button of B.querySelectorAll("[data-cr-repo]")) {
+      button.onclick = async () => {
+        if (button.disabled) return;
+        button.disabled = true;
+        const status = button.nextElementSibling;
+        status.textContent = "A consultar evidência no GitHub…";
+        try {
+          const head = button.dataset.crHead;
+          const result = await post({repo:button.dataset.crRepo,number:Number(button.dataset.crNumber),head}, "/api/steward/coderabbit");
+          if (!button.isConnected || cur !== "steward" || dr.hidden) return;
+          const labels = {
+            observed_current:"Evidência de revisão no HEAD indicado",
+            stale:"Evidência de revisão desatualizada",
+            not_observed:"Nenhuma evidência observada",
+            unknown:"Cobertura não confirmada",
+            unavailable:"Consulta indisponível ou PR alterada"
+          };
+          status.textContent = (result.head === head && Object.hasOwn(labels,result.state) ? labels[result.state] : labels.unavailable) + " · não equivale a aprovação";
+        } catch {
+          if (button.isConnected) status.textContent = "Consulta indisponível";
+        } finally { button.disabled = false; }
+      };
+    }
   };
   A.steward = steward;
 
