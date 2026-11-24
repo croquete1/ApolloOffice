@@ -10,7 +10,15 @@ use std::collections::BTreeSet;
 
 pub const RND: u64 = 2;
 const CIT: u64 = 150 * 60;
+const NODE_VERSION_SELECTION: &str = r#"if [ "${APOLLO_OFFICE_FNM:-}" != 1 ] || ! command -v fnm >/dev/null 2>&1; then exit 0; fi
+if [ -f .nvmrc ] || [ -f .node-version ] || { [ -f package.json ] && python3 -c 'import json,sys; e=json.load(open("package.json",encoding="utf-8")).get("engines",{}); sys.exit(0 if isinstance(e,dict) and isinstance(e.get("node"),str) and e["node"].strip() else 1)' >/dev/null 2>&1; }; then
+  fnm use --install-if-missing --resolve-engines
+fi"#;
 const ENV_PREFLIGHT: &str = r#"command -v git >/dev/null 2>&1 || { echo "git missing in build environment"; exit 1; }
+if [ "${APOLLO_OFFICE_FNM:-}" = 1 ] && command -v fnm >/dev/null 2>&1; then
+  echo "preflight ok: git present; Node version selected by managed fnm, setup may override"
+  exit 0
+fi
 if [ -f .nvmrc ]; then
   want=$(sed 's/#.*//' .nvmrc | head -n1 | tr -d ' \t\r')
   if [ -z "$want" ]; then echo "unsupported empty .nvmrc requirement"; exit 1; fi
@@ -731,6 +739,10 @@ async fn prep(a: &Ax, j: &mut Job) -> R<()> {
         )
         .await?;
         j.d["old"] = json!(ok(a, j, "git rev-parse HEAD", 60).await?);
+    }
+    let selection = x(a, j, &format!("bash -c {} 2>&1", q(NODE_VERSION_SELECTION)), 360).await;
+    if selection.c != 0 {
+        a.say("repro", &format!("[{}] optional Node selection failed; setup will continue: {}", j.h(), crate::hunt_health::safe_tail(&selection.all())), Some(j.id));
     }
     let pf = x(a, j, &format!("bash -c {} 2>&1", q(ENV_PREFLIGHT)), 120).await;
     if pf.c != 0 {
@@ -1519,8 +1531,7 @@ async fn ci0(a: &Ax, j: &mut Job) -> R<String> {
                         a,
                         &j.h(),
                         &format!(
-                            "{}cargo install {} --locked 2>&1 | tail -3",
-                            crate::sh::PRE,
+                            "cargo install {} --locked 2>&1 | tail -3",
                             q(&k)
                         ),
                         2400,
@@ -4233,16 +4244,12 @@ async fn go(a: &Ax, id: i64, h: &str) {
                 if !pin {
                     jj.d.as_object_mut().map(|o| o.remove("h"));
                 }
-                a.db.jset(
-                    id,
-                    &[
-                        (
-                            "st",
-                            json!(if jj.st == "submit" { "submit" } else { "ready" }),
-                        ),
-                        ("d", jj.d.clone()),
-                    ],
-                );
+                let delay = host_retry_delay(n);
+                let reason = crate::hunt_health::safe_tail(&m);
+                if let Err(error) = a.db.defer_host_retry(&jj, now().saturating_add(delay), &reason) {
+                    a.say("ci", &format!("{}: could not persist host retry: {error}", jj.tag()), Some(id));
+                    return;
+                }
                 a.say(
                     "ci",
                     &format!(
@@ -4349,14 +4356,22 @@ async fn red(a: &Ax, r: &str, h: &str) -> bool {
     !(h["s"].is_string() && cr["sha"].is_string() && h["s"] != cr["sha"])
 }
 
+// Existing maximum of five attempts; persist a bounded cooldown between them.
+fn host_retry_delay(attempt: i64) -> i64 {
+    30_000 * (1_i64 << (attempt.clamp(1,5)-1))
+}
+
 // Atomically reserve work against updates, cache maintenance and other lanes.
 pub(crate) fn admit(a: &Ax, repo: &str, host: &str, id: i64) -> bool {
     let _transition = a.update_transition.lock().unwrap();
     if a.drain.load(std::sync::atomic::Ordering::SeqCst) {
         return false;
     }
+    if !matches!(a.db.schedule_eligible(id, repo, now()), Ok(true)) {
+        return false;
+    }
     let is_hunt = a.db.jg(id).is_some_and(|job| job.kind == "hunt");
-    if is_hunt && crate::hunt_health::blocked(a, repo) {
+    if is_hunt && (crate::hunt_health::blocked(a, repo) || a.hunter_quota_blocked()) {
         return false;
     }
     let hunter_limit = if is_hunt { hn(a) } else { 0 };
@@ -4393,6 +4408,12 @@ pub(crate) fn admit(a: &Ax, repo: &str, host: &str, id: i64) -> bool {
     {
         return false;
     }
+    // Persist admission history for equal-priority fairness; a failed write
+    // cannot silently admit a task against an unavailable scheduling database.
+    if a.db.run("insert into job_schedule(job,admitted_at,retry_after,retry_reason) values(?,?,0,'') on conflict(job) do update set admitted_at=excluded.admitted_at,retry_after=0,retry_reason=''",
+        pa![id,now()]) < 0 {
+        return false;
+    }
     active.insert(claim);
     locked.insert(id);
     true
@@ -4423,7 +4444,7 @@ fn pick_rank(j: &Value) -> (i32, i32, i32, f64, i64, i64) {
         "mergecheck" => 2,
         _ => 0,
     };
-    let issue_priority = d["issue_priority"].as_i64().unwrap_or(2).clamp(0, 3) as i32;
+    let issue_priority = j["manual_priority"].as_i64().or_else(|| d["issue_priority"].as_i64()).unwrap_or(2).clamp(0, 3) as i32;
     (
         phase,
         follow_up_order,
@@ -4439,12 +4460,29 @@ async fn pick(a: &Ax, h: &str) -> Option<i64> {
     if a.drain.load(std::sync::atomic::Ordering::Relaxed) {
         return None;
     }
-    let mut c = a.db.all("select * from jobs where st in ('ready','submit') order by id", pa![]);
-    c.sort_by(|x, y| pick_rank(x).partial_cmp(&pick_rank(y)).unwrap_or(std::cmp::Ordering::Equal));
+    let mut c = a.db.all("select j.*,s.manual_priority,coalesce(s.retry_after,0) retry_after,
+        coalesce((select max(hist.admitted_at) from job_schedule hist join jobs previous on previous.id=hist.job where previous.repo=j.repo),0) repo_last_admitted
+        from jobs j left join job_schedule s on s.job=j.id where j.st in ('ready','submit') order by j.id", pa![]);
+    let active_repos = a.act.lock().unwrap().iter().filter_map(|entry| entry.split_once(' ').map(|(repo,_)|repo.to_string())).collect::<Vec<_>>();
+    c.sort_by(|x,y| {
+        let left=pick_rank(x); let right=pick_rank(y);
+        (left.0,left.1,left.2).cmp(&(right.0,right.1,right.2))
+            .then_with(|| {
+                // Only balance new ordinary fixes within the same priority.
+                // Resumed work, submissions and reviews keep their precedence.
+                if left.0!=3 { return std::cmp::Ordering::Equal; }
+                let count=|row:&Value| active_repos.iter().filter(|repo| Some(repo.as_str())==row["repo"].as_str()).count();
+                count(x).cmp(&count(y)).then_with(||x["repo_last_admitted"].as_i64().unwrap_or(0).cmp(&y["repo_last_admitted"].as_i64().unwrap_or(0)))
+            })
+            .then_with(||left.partial_cmp(&right).unwrap_or(std::cmp::Ordering::Equal))
+    });
     for j in c {
         let id = j["id"].as_i64().unwrap_or(0);
         let r = j["repo"].as_str().unwrap_or("").to_string();
         let d = &j["d"];
+        if !matches!(a.db.schedule_eligible(id,&r,now()),Ok(true)) {
+            continue;
+        }
         let pin = j["st"] == "submit"
             || d["rs"].as_bool().unwrap_or(false)
             || d["rp"].as_bool().unwrap_or(false);
@@ -4452,7 +4490,7 @@ async fn pick(a: &Ax, h: &str) -> Option<i64> {
         {
             continue;
         }
-        if j["kind"] == "hunt" && (a.hold("hunter") || crate::hunt_health::blocked(a, &r)) {
+        if j["kind"] == "hunt" && (a.hold("hunter") || crate::hunt_health::blocked(a, &r) || a.hunter_quota_blocked()) {
             continue;
         }
         if !pin && (j["kind"] == "rebase" || j["kind"] == "review") {
@@ -4576,6 +4614,9 @@ fn mk_hunt(a: &Ax) -> bool {
     // Coordinate creation with admission and breaker updates across lanes.
     let _transition = a.update_transition.lock().unwrap();
     if a.drain.load(std::sync::atomic::Ordering::SeqCst) {
+        return false;
+    }
+    if a.hunter_quota_blocked() {
         return false;
     }
     let on = a.db.all(

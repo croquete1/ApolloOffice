@@ -16,6 +16,9 @@ create table if not exists rp(id integer primary key, full text unique, iss int 
 create table if not exists hs(id text primary key, ssh text default '', dk int default 0, ln int default 1, ci int default 1, gb int default 50, raw int default 0, on_ int default 1, t0 int);
 create table if not exists jobs(id integer primary key, repo text, num int, kind text default 'fix', title text, url text, st text, why text default '', d text default '{}', pr int, prio real default 0, t0 int, t1 int);
 create index if not exists jobs_st on jobs(st);
+create table if not exists job_schedule(job integer primary key, manual_priority integer check(manual_priority between 0 and 3), retry_after integer not null default 0, retry_reason text not null default '', admitted_at integer not null default 0);
+create table if not exists job_dependencies(job integer not null, prerequisite integer not null, primary key(job,prerequisite), check(job<>prerequisite));
+create index if not exists job_dependencies_prerequisite on job_dependencies(prerequisite);
 create index if not exists jobs_issue_latest on jobs(repo, num, kind, id desc);
 create table if not exists ev(id integer primary key, t int, w text, m text, j int);
 create table if not exists prs(repo text, num int, st text, title text, url text, upd text, merged text, d text default '{}', t0 int, primary key(repo, num));
@@ -154,6 +157,56 @@ impl Db {
             .unwrap_or(0)
     }
 
+    /// Apply a complete issue scan atomically. A failed write cannot close unseen issues.
+    pub fn replace_issue_snapshot(
+        &self,
+        repo: &str,
+        issues: &[Value],
+        at: i64,
+    ) -> rusqlite::Result<()> {
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction()?;
+        for issue in issues {
+            let number = issue["number"]
+                .as_i64()
+                .filter(|n| *n > 0)
+                .ok_or(rusqlite::Error::InvalidQuery)?;
+            let labels: Vec<&str> = issue["labels"]
+                .as_array()
+                .ok_or(rusqlite::Error::InvalidQuery)?
+                .iter()
+                .map(|x| x["name"].as_str().ok_or(rusqlite::Error::InvalidQuery))
+                .collect::<Result<_, _>>()?;
+            let assignees: Vec<&str> = issue["assignees"]
+                .as_array()
+                .ok_or(rusqlite::Error::InvalidQuery)?
+                .iter()
+                .map(|x| x["login"].as_str().ok_or(rusqlite::Error::InvalidQuery))
+                .collect::<Result<_, _>>()?;
+            tx.execute(
+                "insert into github_issues(repo,num,title,url,author,updated,labels,assignees,seen_at,is_open,skip_reason) values(?,?,?,?,?,?,?,?,?,1,'') on conflict(repo,num) do update set title=excluded.title,url=excluded.url,author=excluded.author,labels=excluded.labels,assignees=excluded.assignees,seen_at=excluded.seen_at,is_open=1,skip_reason=case when github_issues.updated<>excluded.updated then '' else github_issues.skip_reason end,updated=excluded.updated",
+                rusqlite::params![repo, number,
+                    issue["title"].as_str().ok_or(rusqlite::Error::InvalidQuery)?,
+                    issue["url"].as_str().ok_or(rusqlite::Error::InvalidQuery)?,
+                    issue["author"]["login"].as_str().unwrap_or(""),
+                    issue["updatedAt"].as_str().ok_or(rusqlite::Error::InvalidQuery)?,
+                    json!(labels).to_string(), json!(assignees).to_string(), at],
+            )?;
+        }
+        tx.execute(
+            "update github_issues set is_open=0 where repo=? and seen_at<? and is_open=1",
+            rusqlite::params![repo, at],
+        )?;
+        let scan = json!({"at":at,"count":issues.len(),"limit":null,"truncated":false,"error":null,"error_at":null});
+        tx.execute(
+            "insert into kv(k,v) values(?,?) on conflict(k) do update set v=excluded.v",
+            rusqlite::params![format!("iscan:{repo}"), scan.to_string()],
+        )?;
+        tx.commit()?;
+        crate::app::chg();
+        Ok(())
+    }
+
     pub fn kg(&self, k: &str) -> Value {
         self.one("select v from kv where k=?", crate::pa![k.to_string()])
             .and_then(|r| r["v"].as_str().and_then(|s| serde_json::from_str(s).ok()))
@@ -183,6 +236,101 @@ impl Db {
             ),
         };
         v.and_then(|x| x["s"].as_f64()).unwrap_or(0.0)
+    }
+
+    /// Fail closed when a prerequisite has not completed and its PR has not merged.
+    /// Missing/deleted prerequisites are blocked, not silently considered satisfied.
+    pub fn schedule_eligible(&self, id: i64, repo: &str, at: i64) -> rusqlite::Result<bool> {
+        let c = self.0.lock().unwrap();
+        c.query_row(
+            "select exists(select 1 from jobs j left join job_schedule s on s.job=j.id
+             where j.id=? and j.repo=? and j.st in ('ready','submit')
+             and coalesce(s.retry_after,0)<=?
+             and not exists(select 1 from job_dependencies dep
+               where dep.job=j.id and not exists(select 1 from jobs prior join prs p
+                 on p.repo=prior.repo and p.num=prior.pr
+                 where prior.id=dep.prerequisite and prior.st='done' and p.st='merged')))",
+            rusqlite::params![id, repo, at],
+            |r| r.get(0),
+        )
+    }
+
+    /// Replace operator-defined scheduling constraints atomically. The caller
+    /// holds update_transition and verifies that the job is not assigned.
+    pub fn set_job_schedule(
+        &self,
+        id: i64,
+        priority: Option<i64>,
+        dependencies: &[i64],
+    ) -> rusqlite::Result<()> {
+        if priority.is_some_and(|p| !(0..=3).contains(&p))
+            || dependencies.len() > 100
+            || dependencies.iter().any(|d| *d <= 0 || *d == id)
+            || dependencies
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != dependencies.len()
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let editable: bool = tx.query_row(
+            "select exists(select 1 from jobs where id=? and st='ready' and kind='fix'
+            and coalesce(json_extract(d,'$.rs'),0)=0 and coalesce(json_extract(d,'$.rp'),0)=0)",
+            [id],
+            |r| r.get(0),
+        )?;
+        if !editable {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        tx.execute("delete from job_dependencies where job=?", [id])?;
+        for dependency in dependencies {
+            let exists: bool = tx.query_row("select exists(select 1 from jobs where id=? and kind in ('fix','review','rebase') and st<>'drop')",[dependency],|r|r.get(0))?;
+            let cycle: bool = tx.query_row("with recursive ancestors(id) as (
+                select ?1 union select d.prerequisite from job_dependencies d join ancestors a on d.job=a.id
+            ) select exists(select 1 from ancestors where id=?2)",rusqlite::params![dependency,id],|r|r.get(0))?;
+            if !exists || cycle {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            tx.execute(
+                "insert into job_dependencies(job,prerequisite) values(?,?)",
+                rusqlite::params![id, dependency],
+            )?;
+        }
+        tx.execute("insert into job_schedule(job,manual_priority) values(?,?) on conflict(job) do update set manual_priority=excluded.manual_priority",
+            rusqlite::params![id,priority])?;
+        tx.commit()?;
+        crate::app::chg();
+        Ok(())
+    }
+
+    /// Keep the existing host-retry policy, but persist the next eligible time
+    /// in the same transaction as the queue state (including approved submit).
+    pub fn defer_host_retry(
+        &self,
+        job: &Job,
+        retry_after: i64,
+        reason: &str,
+    ) -> rusqlite::Result<()> {
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction()?;
+        let st = if job.st == "submit" {
+            "submit"
+        } else {
+            "ready"
+        };
+        let changed = tx.execute("update jobs set st=?,d=?,t1=? where id=? and st not in ('done','drop','approve','park')",
+            rusqlite::params![st,job.d.to_string(),now(),job.id])?;
+        if changed != 1 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        tx.execute("insert into job_schedule(job,retry_after,retry_reason) values(?,?,?) on conflict(job) do update set retry_after=excluded.retry_after,retry_reason=excluded.retry_reason",
+            rusqlite::params![job.id,retry_after,reason])?;
+        tx.commit()?;
+        crate::app::chg();
+        Ok(())
     }
 
     pub fn jg(&self, id: i64) -> Option<Job> {
@@ -218,8 +366,94 @@ impl Db {
         self.jset(j.id, &[("d", j.d.clone())]);
     }
 
-    // Column order deliberately mirrors the jobs table; refactoring this API
-    // would alter numerous pipeline call sites without improving validation.
+    fn ack_comments_in_tx(
+        tx: &rusqlite::Transaction<'_>,
+        repo: &str,
+        number: i64,
+        updated: &str,
+        ids: &[String],
+    ) -> rusqlite::Result<()> {
+        for id in ids {
+            tx.execute(
+                "insert or ignore into cm(id,t) values(?,?)",
+                rusqlite::params![format!("{repo}:{id}"), now()],
+            )?;
+        }
+        let changed = tx.execute("update prs set d=json_set(d, '$.seen', json('true'), '$.comment_seen_at', ?) where repo=? and num=?", rusqlite::params![updated, repo, number])?;
+        if changed != 1 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        Ok(())
+    }
+
+    /// Atomically acknowledge a successfully processed comment batch and its PR cursor.
+    pub fn ack_pr_comments(
+        &self,
+        repo: &str,
+        number: i64,
+        updated: &str,
+        ids: &[String],
+    ) -> rusqlite::Result<()> {
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction()?;
+        Self::ack_comments_in_tx(&tx, repo, number, updated, ids)?;
+        tx.commit()?;
+        crate::app::chg();
+        Ok(())
+    }
+
+    /// Queue a review and acknowledge its source comments in the same transaction.
+    /// If another review is active, do not acknowledge the batch: retry it later.
+    pub fn queue_review_and_ack(
+        &self,
+        repo: &str,
+        number: i64,
+        updated: &str,
+        ids: &[String],
+        request: &Value,
+    ) -> rusqlite::Result<bool> {
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let active: i64 = tx.query_row(
+            "select count(*) from jobs where repo=? and pr=? and kind='review' and st not in ('done','drop')",
+            rusqlite::params![repo, number], |row| row.get(0),
+        )?;
+        if active != 0 {
+            return Ok(false);
+        }
+        let title = request["title"]
+            .as_str()
+            .ok_or(rusqlite::Error::InvalidQuery)?;
+        let url = request["url"]
+            .as_str()
+            .ok_or(rusqlite::Error::InvalidQuery)?;
+        let change = request["change"]
+            .as_str()
+            .filter(|v| !v.trim().is_empty())
+            .ok_or(rusqlite::Error::InvalidQuery)?;
+        let data = request["data"]
+            .as_object()
+            .ok_or(rusqlite::Error::InvalidQuery)?;
+        let t = now();
+        tx.execute("insert into jobs(repo,num,kind,title,url,st,why,d,pr,prio,t0,t1) values(?,?,'review',?,?,'ready',?,?,?,-1.0,?,?)",
+            rusqlite::params![repo, number, title, url, change, json!(data).to_string(), number, t, t])?;
+        Self::ack_comments_in_tx(&tx, repo, number, updated, ids)?;
+        tx.commit()?;
+        crate::app::chg();
+        Ok(true)
+    }
+
+    pub fn comment_acknowledged(&self, repo: &str, id: &str) -> rusqlite::Result<bool> {
+        let c = self.0.lock().unwrap();
+        let count: i64 = c.query_row(
+            "select count(*) from cm where id=? or id=?",
+            rusqlite::params![format!("{repo}:{id}"), id],
+            |row| row.get(0),
+        )?;
+        Ok(count != 0)
+    }
+
+    // Column order deliberately mirrors the jobs table.
     #[expect(
         clippy::too_many_arguments,
         reason = "Typed insert mirrors the existing jobs schema"
@@ -407,5 +641,160 @@ mod tests {
             .unwrap()["lang"],
             "pt-PT"
         );
+    }
+}
+
+#[cfg(test)]
+mod comment_cursor_tests {
+    use super::*;
+
+    #[test]
+    fn comment_ack_is_atomic_and_preserves_other_metadata() {
+        let db = Db::mem();
+        let ids = vec!["review-1".to_string()];
+        assert!(db.ack_pr_comments("a/b", 1, "new", &ids).is_err());
+        assert_eq!(db.n("select count(*) from cm", vec![]), 0);
+        db.run(
+            "insert into prs(repo,num,d) values(?,?,?)",
+            crate::pa![
+                "a/b".to_string(),
+                1_i64,
+                r#"{"auto_merge":true}"#.to_string()
+            ],
+        );
+        db.ack_pr_comments("a/b", 1, "new", &ids).unwrap();
+        db.ack_pr_comments("a/b", 1, "new", &ids).unwrap();
+        assert_eq!(db.n("select count(*) from cm", vec![]), 1);
+        let row = db
+            .one("select d from prs where repo='a/b' and num=1", vec![])
+            .unwrap();
+        assert_eq!(row["d"]["comment_seen_at"], "new");
+        assert_eq!(row["d"]["seen"], true);
+        assert_eq!(row["d"]["auto_merge"], true);
+    }
+    #[test]
+    fn review_admission_and_ack_share_one_transaction_and_defer_active_work() {
+        let db = Db::mem();
+        let ids = vec!["review-1".to_string()];
+        let request = json!({"title":"Fix","url":"https://github.com/a/b/pull/1","change":"Correct bug","data":{}});
+        assert!(db
+            .queue_review_and_ack("a/b", 1, "new", &ids, &request)
+            .is_err());
+        assert_eq!(db.n("select count(*) from jobs", vec![]), 0);
+        db.run(
+            "insert into prs(repo,num,d) values(?,?,?)",
+            crate::pa!["a/b".to_string(), 1_i64, "{}".to_string()],
+        );
+        assert!(db
+            .queue_review_and_ack("a/b", 1, "new", &ids, &request)
+            .unwrap());
+        assert!(db.comment_acknowledged("a/b", "review-1").unwrap());
+        let next = vec!["review-2".to_string()];
+        assert!(!db
+            .queue_review_and_ack("a/b", 1, "later", &next, &request)
+            .unwrap());
+        assert!(!db.comment_acknowledged("a/b", "review-2").unwrap());
+        assert_eq!(db.n("select count(*) from jobs", vec![]), 1);
+        db.run("update jobs set st='done'", vec![]);
+        assert!(db
+            .queue_review_and_ack("a/b", 1, "later", &next, &request)
+            .unwrap());
+        assert!(db.comment_acknowledged("a/b", "review-2").unwrap());
+    }
+}
+
+#[cfg(test)]
+mod issue_snapshot_tests {
+    use super::*;
+
+    fn issue(number: i64) -> Value {
+        json!({"number":number,"title":"Bug","url":"https://github.com/o/r/issues/1",
+            "updatedAt":"2026-01-01T00:00:00Z","labels":[],"assignees":[]})
+    }
+
+    #[test]
+    fn failed_snapshot_rolls_back_rows_closures_and_scan_metadata() {
+        let db = Db::mem();
+        db.replace_issue_snapshot("o/r", &[issue(1)], 10).unwrap();
+        assert!(db
+            .replace_issue_snapshot("o/r", &[issue(2), json!({"number":3})], 20)
+            .is_err());
+        assert_eq!(
+            db.n("select count(*) from github_issues where is_open=1", vec![]),
+            1
+        );
+        assert_eq!(
+            db.n("select num from github_issues where is_open=1", vec![]),
+            1
+        );
+        assert_eq!(db.kg("iscan:o/r")["at"], 10);
+        db.replace_issue_snapshot("o/r", &[issue(2)], 30).unwrap();
+        assert_eq!(
+            db.n("select num from github_issues where is_open=1", vec![]),
+            2
+        );
+        assert_eq!(db.kg("iscan:o/r")["at"], 30);
+    }
+}
+
+#[cfg(test)]
+mod schedule_tests {
+    use super::*;
+    fn job(db: &Db, n: i64) -> i64 {
+        db.jnew(
+            "o/r",
+            n,
+            "fix",
+            "fixture",
+            "",
+            "ready",
+            "",
+            json!({}),
+            None,
+            0.0,
+        )
+    }
+    #[test]
+    fn prerequisites_require_merged_pr_and_cycles_roll_back() {
+        let db = Db::mem();
+        let first = job(&db, 1);
+        let second = job(&db, 2);
+        db.set_job_schedule(second, Some(0), &[first]).unwrap();
+        assert!(!db.schedule_eligible(second, "o/r", now()).unwrap());
+        assert!(db.set_job_schedule(first, None, &[second]).is_err());
+        assert!(db.schedule_eligible(first, "o/r", now()).unwrap());
+        db.jset(first, &[("st", json!("done")), ("pr", json!(10))]);
+        assert!(!db.schedule_eligible(second, "o/r", now()).unwrap());
+        db.run(
+            "insert into prs(repo,num,st) values('o/r',10,'merged')",
+            vec![],
+        );
+        assert!(db.schedule_eligible(second, "o/r", now()).unwrap());
+        assert!(!db.schedule_eligible(second, "other/r", now()).unwrap());
+        assert!(db.set_job_schedule(second, Some(7), &[]).is_err());
+        assert_eq!(db.n("select count(*) from job_dependencies", vec![]), 1);
+    }
+    #[test]
+    fn host_retry_persists_deadline_without_changing_approval_or_dependencies() {
+        let db = Db::mem();
+        let id = job(&db, 1);
+        db.set_job_schedule(id, Some(1), &[]).unwrap();
+        db.jset(
+            id,
+            &[
+                ("st", json!("submit")),
+                ("d", json!({"ap":true,"h":"local","ir":1})),
+            ],
+        );
+        let j = db.jg(id).unwrap();
+        db.defer_host_retry(&j, 1000, "host unavailable").unwrap();
+        assert!(!db.schedule_eligible(id, "o/r", 999).unwrap());
+        assert!(db.schedule_eligible(id, "o/r", 1000).unwrap());
+        assert_eq!(db.jg(id).unwrap().st, "submit");
+        assert_eq!(db.jg(id).unwrap().d["ap"], true);
+        assert_eq!(db.n("select manual_priority from job_schedule", vec![]), 1);
+        db.jset(id, &[("st", json!("drop"))]);
+        assert!(db.defer_host_retry(&j, 2000, "late retry").is_err());
+        assert!(!db.schedule_eligible(id, "o/r", 3000).unwrap());
     }
 }

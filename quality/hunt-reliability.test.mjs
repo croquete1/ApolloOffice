@@ -76,11 +76,12 @@ test("fix jobs outrank hunts and capacity is reserved for pending fixes", () => 
   assert.match(modern, /s\.ops\?\.blocked_hunts/);
 });
 
-test("GitHub issue intake scans beyond the previous 200 issue cap", () => {
-  assert.match(workers, /const ISSUE_SCAN_LIMIT: usize = 500;/);
-  assert.match(workers, /"--limit",\s*&issue_limit/);
-  assert.match(workers, /let truncated = issue_scan_truncated\(is\.len\(\)\)/);
-  assert.match(workers, /"limit": ISSUE_SCAN_LIMIT/);
+test("GitHub issue intake uses full paginated listing and atomic snapshot", () => {
+  assert.match(workers, /crate::gh::open_issues\(&r\)\.await/);
+  assert.match(workers, /replace_issue_snapshot\(&r, &is, now\(\)\)/);
+  assert.doesNotMatch(workers, /const ISSUE_SCAN_LIMIT/);
+  assert.match(shell, /"--paginate"/);
+  assert.match(shell, /fn api_pages\(/);
 });
 
 test("npm cache is persistent and npm ci is never silently bypassed", () => {
