@@ -34,6 +34,7 @@ fn save_repo_settings(db: &crate::db::Db, repo: &str, b: &Value) -> rusqlite::Re
         ("auto_merge", 0),
         ("local_merge", 0),
         ("steward_repair", 0),
+        ("steward_close", 0),
         ("coderabbit_free_confirmed", 0),
         ("coderabbit_review", 0),
         ("coderabbit_repair", 0),
@@ -45,6 +46,7 @@ fn save_repo_settings(db: &crate::db::Db, repo: &str, b: &Value) -> rusqlite::Re
         ("setup", 2),
         ("rules", 2),
         ("mode", 2),
+        ("lang", 2),
         ("skl", 2),
     ] {
         let v = &b[k];
@@ -877,6 +879,7 @@ const RPF: &[&str] = &[
     "auto_merge",
     "local_merge",
     "steward_repair",
+    "steward_close",
     "coderabbit_free_confirmed",
     "coderabbit_review",
     "coderabbit_repair",
@@ -888,6 +891,7 @@ const RPF: &[&str] = &[
     "setup",
     "rules",
     "mode",
+    "lang",
     "skl",
 ];
 const HSF: &[&str] = &["id", "ssh", "dk", "ln", "ci", "gb", "raw", "no", "cpu"];
@@ -953,11 +957,11 @@ fn import(a: &Ax, b: &Value) -> Result<String, String> {
             pa![f.clone(), now(), now()],
         );
         for k in RPF {
-            // External review requests and autonomous repair must be enabled
-            // explicitly on each installation after importing a backup.
+            // External review requests, autonomous repair and automatic closing
+            // must be enabled explicitly on each installation after importing a backup.
             if matches!(
                 *k,
-                "coderabbit_free_confirmed" | "coderabbit_review" | "coderabbit_repair"
+                "coderabbit_free_confirmed" | "coderabbit_review" | "coderabbit_repair" | "steward_close"
             ) {
                 continue;
             }
@@ -2611,6 +2615,30 @@ mod t {
         assert_eq!(state["coderabbit_free_confirmed"], 0);
         assert_eq!(state["coderabbit_review"], 0);
         assert_eq!(state["coderabbit_epoch"], 9);
+    }
+
+    #[test]
+    fn repository_language_and_steward_close_are_saved() {
+        let db = crate::db::Db::mem();
+        db.run("insert into rp(full) values('o/r')", pa![]);
+        save_repo_settings(
+            &db,
+            "o/r",
+            &json!({"lang":"pt-PT","steward_close":true}),
+        )
+        .unwrap();
+        let state = db.one("select * from rp where full='o/r'", pa![]).unwrap();
+        assert_eq!(state["lang"], "pt-PT");
+        assert_eq!(state["steward_close"], 1);
+        save_repo_settings(
+            &db,
+            "o/r",
+            &json!({"lang":"invalid","steward_close":false}),
+        )
+        .unwrap();
+        let state = db.one("select * from rp where full='o/r'", pa![]).unwrap();
+        assert_eq!(state["lang"], "en");
+        assert_eq!(state["steward_close"], 0);
     }
 
     #[test]
