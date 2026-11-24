@@ -46,17 +46,32 @@ fn allowed_file(path: &str) -> bool {
     .any(|word| p.contains(word))
 }
 
-fn safe_changed_file(file:&Value)->bool{
+fn safe_changed_file(file: &Value) -> bool {
     file["filename"].as_str().is_some_and(allowed_file)
-        && if file["status"]=="renamed" || file["status"]=="copied" || !file["previous_filename"].is_null(){
+        && if file["status"] == "renamed"
+            || file["status"] == "copied"
+            || !file["previous_filename"].is_null()
+        {
             file["previous_filename"].as_str().is_some_and(allowed_file)
-        }else{true}
+        } else {
+            true
+        }
 }
 
-async fn all_checks(repo:&str,head:&str)->Result<(Value,Value),String>{
-    let checks=apip_counted(&format!("repos/{repo}/commits/{head}/check-runs?per_page=100"),"check_runs",None).await?;
-    let statuses=apip_counted(&format!("repos/{repo}/commits/{head}/status?per_page=100"),"statuses",Some(head)).await?;
-    Ok((checks,statuses))
+async fn all_checks(repo: &str, head: &str) -> Result<(Value, Value), String> {
+    let checks = apip_counted(
+        &format!("repos/{repo}/commits/{head}/check-runs?per_page=100"),
+        "check_runs",
+        None,
+    )
+    .await?;
+    let statuses = apip_counted(
+        &format!("repos/{repo}/commits/{head}/status?per_page=100"),
+        "statuses",
+        Some(head),
+    )
+    .await?;
+    Ok((checks, statuses))
 }
 
 fn candidate(listed: &Value, assessed: &Value) -> Result<(i64, String), &'static str> {
@@ -766,18 +781,15 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
     let Some(paths) = files.as_array() else {
         return Ok(false);
     };
-    if paths.len() as u64 != changed
-        || !paths
-            .iter()
-            .all(safe_changed_file)
-    {
+    if paths.len() as u64 != changed || !paths.iter().all(safe_changed_file) {
         return Ok(false);
     }
-    let (checks,statuses)=all_checks(repo,&head).await?;
+    let (checks, statuses) = all_checks(repo, &head).await?;
     if !check_gate(&checks, &statuses, mode) {
         return Ok(false);
     }
-    let reviews=json!(apip_unique(&format!("repos/{repo}/pulls/{number}/reviews?per_page=100")).await?);
+    let reviews =
+        json!(apip_unique(&format!("repos/{repo}/pulls/{number}/reviews?per_page=100")).await?);
     let expected = ExpectedMerge {
         repo,
         base,
@@ -871,9 +883,10 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
     // Ler novamente revisões, threads, checks, base e PR antes do PUT.
     // Uma resposta incompleta ou erro da API aborta o merge.
     let read: Result<FinalReads, String> = async {
-        let reviews=json!(apip_unique(&format!("repos/{repo}/pulls/{number}/reviews?per_page=100")).await?);
+        let reviews =
+            json!(apip_unique(&format!("repos/{repo}/pulls/{number}/reviews?per_page=100")).await?);
         let threads_resolved = review_threads_resolved(repo, number).await?;
-        let (checks,statuses)=all_checks(repo,&head).await?;
+        let (checks, statuses) = all_checks(repo, &head).await?;
         let branch = ghj(&["api", &format!("repos/{repo}/branches/{base}")], 40).await?;
         let pr = ghj(&["api", &format!("repos/{repo}/pulls/{number}")], 40).await?;
         Ok(FinalReads {
@@ -1598,21 +1611,27 @@ mod complete_inventory_tests {
     use super::*;
     #[test]
     fn checks_and_reviews_beyond_first_page_still_enforce_every_gate() {
-        let head="a".repeat(40);
-        let mut checks=json!({"total_count":101,"check_runs":(1..=101).map(|id|json!({"id":id,"name":"test-suite","app":{"slug":"ci-service"},"status":"completed","conclusion":"success"})).collect::<Vec<_>>()});
-        let status=json!({"statuses":[]});
-        assert!(ci_verified(&checks,&status));
-        checks["check_runs"][100]["conclusion"]=json!("failure");
-        assert!(!ci_verified(&checks,&status));
+        let head = "a".repeat(40);
+        let mut checks = json!({"total_count":101,"check_runs":(1..=101).map(|id|json!({"id":id,"name":"test-suite","app":{"slug":"ci-service"},"status":"completed","conclusion":"success"})).collect::<Vec<_>>()});
+        let status = json!({"statuses":[]});
+        assert!(ci_verified(&checks, &status));
+        checks["check_runs"][100]["conclusion"] = json!("failure");
+        assert!(!ci_verified(&checks, &status));
         let mut reviews=json!((1..=101).map(|id|json!({"id":id,"state":"APPROVED","commit_id":head,"user":{"login":"maintainer","type":"User"}})).collect::<Vec<_>>());
-        assert!(reviewed(&reviews,"author",&head));
-        reviews[100]["state"]=json!("CHANGES_REQUESTED");
-        assert!(!reviewed(&reviews,"author",&head));
+        assert!(reviewed(&reviews, "author", &head));
+        reviews[100]["state"] = json!("CHANGES_REQUESTED");
+        assert!(!reviewed(&reviews, "author", &head));
     }
     #[test]
     fn renamed_sensitive_file_still_blocks_merge() {
-        assert!(!safe_changed_file(&json!({"filename":"src/ui.ts","previous_filename":"src/auth.ts","status":"renamed"})));
-        assert!(!safe_changed_file(&json!({"filename":"src/ui.ts","status":"renamed"})));
-        assert!(safe_changed_file(&json!({"filename":"src/ui.ts","previous_filename":"src/view.ts","status":"renamed"})));
+        assert!(!safe_changed_file(
+            &json!({"filename":"src/ui.ts","previous_filename":"src/auth.ts","status":"renamed"})
+        ));
+        assert!(!safe_changed_file(
+            &json!({"filename":"src/ui.ts","status":"renamed"})
+        ));
+        assert!(safe_changed_file(
+            &json!({"filename":"src/ui.ts","previous_filename":"src/view.ts","status":"renamed"})
+        ));
     }
 }
