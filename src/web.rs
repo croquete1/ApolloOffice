@@ -584,6 +584,17 @@ fn costs(a: &Ax) -> Value {
         "stats": st,
         "fixer_metrics": fm,
         "first_pass_by_repo": a.db.try_all("select j.repo,f.model,count(*) samples,sum(f.outcome='accepted') accepted,avg(f.elapsed_ms) avg_ms from fix_attempts f join jobs j on j.id=f.job where j.kind='fix' and f.attempt=1 and f.finished is not null and f.outcome in ('accepted','rejected','failed') and f.started>=? group by j.repo,f.model order by j.repo,f.model",pa![now()-90*86_400_000]).ok(),
+        "lesson_exposure_metrics": a.db.try_all("select j.repo,f.model,
+        case json_type(k.v,'$.included') when 'true' then 'included' when 'false' then 'not_included' else 'unknown' end exposure,
+        count(*) samples,sum(f.outcome='accepted') accepted,
+        sum(f.gate='verification' and f.outcome in ('failed','rejected')) verification_failures,
+        sum(f.gate='review' and f.outcome='rejected') review_rejections
+        from fix_attempts f join jobs j on j.id=f.job
+        left join kv k on k.k=printf('lesson_exposure:%lld:%lld:%lld',f.id,f.job,f.started)
+        and json_valid(k.v)
+        where j.kind='fix' and f.attempt=1 and f.finished is not null
+        and f.outcome in ('accepted','failed','rejected') and f.started>=?
+        group by j.repo,f.model,exposure order by j.repo,f.model,exposure",pa![now()-90*86_400_000]).ok(),
         "hints": hints(&rows),
         "budday": a.set()["budday"],
         "px": a.set()["px"],
