@@ -25,7 +25,7 @@ create index if not exists github_issues_open on github_issues(repo,is_open,upda
 create table if not exists tok(day text, w text, tin int default 0, tout int default 0, primary key(day, w));
 create table if not exists seen(repo text, num int, upd text, primary key(repo, num));
 create table if not exists cm(id text primary key, t int);
-create table if not exists watcher_inbox(repo text not null,num integer not null,head text not null,comment_id text not null,snapshot text not null,state text not null check(state in ('received','done')),received_at integer not null,updated_at integer not null,primary key(repo,num,head,comment_id));
+create table if not exists watcher_inbox(repo text not null,num integer not null,head text not null,comment_id text not null,snapshot text not null,state text not null check(state in ('received','done','superseded')),received_at integer not null,updated_at integer not null,primary key(repo,num,head,comment_id));
 create index if not exists watcher_inbox_pending on watcher_inbox(repo,num,state,updated_at);
 create table if not exists watcher_outbox(id text primary key, repo text not null, num int not null, author text not null, body text not null, state text not null check(state in ('pending','uncertain','sent','cancelled')), created int not null, updated int not null);
 create index if not exists watcher_outbox_pending on watcher_outbox(state,updated);
@@ -560,6 +560,9 @@ impl Db {
             return Err(rusqlite::Error::InvalidQuery);
         }
         let at=now();
+        // Retain the evidence that a prior HEAD was observed without reusing it
+        // as permission to act on the current HEAD.
+        tx.execute("update watcher_inbox set state='superseded',updated_at=? where repo=? and num=? and head<>? and state='received'",rusqlite::params![at,repo,number,head])?;
         for id in ids {
             tx.execute("insert into watcher_inbox(repo,num,head,comment_id,snapshot,state,received_at,updated_at) values(?,?,?,?,?,'received',?,?) on conflict(repo,num,head,comment_id) do update set snapshot=excluded.snapshot,updated_at=excluded.updated_at where watcher_inbox.state='received'",rusqlite::params![repo,number,head,id,updated,at,at])?;
         }
@@ -1345,6 +1348,21 @@ mod watcher_inbox_tests {
         db.ack_pr_comments_with_reply("o/r",1,"t",HEAD,&ids,&Value::Null).unwrap();
         assert_eq!(db.n("select count(*) from watcher_inbox where state='done'",vec![]),1);
         db.receive_review_batch("o/r",1,"t",HEAD,&ids).unwrap();
+        assert_eq!(db.n("select count(*) from watcher_inbox where state='done'",vec![]),1);
+    }
+    #[test]
+    fn new_head_supersedes_only_unfinished_old_receipts(){
+        let db=Db::mem();
+        let next="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        db.run("insert into prs(repo,num,st,upd,d) values('o/r',1,'open','t',?)",crate::pa![json!({"watcher_head":HEAD}).to_string()]);
+        let ids=vec!["r2".to_string()];
+        db.receive_review_batch("o/r",1,"t",HEAD,&ids).unwrap();
+        db.run("update prs set upd='t2',d=? where repo='o/r' and num=1",crate::pa![json!({"watcher_head":next}).to_string()]);
+        db.receive_review_batch("o/r",1,"t2",next,&ids).unwrap();
+        assert_eq!(db.n("select count(*) from watcher_inbox where state='superseded'",vec![]),1);
+        assert_eq!(db.n("select count(*) from watcher_inbox where state='received'",vec![]),1);
+        assert!(db.ack_pr_comments_with_reply("o/r",1,"t",HEAD,&ids,&Value::Null).is_err());
+        db.ack_pr_comments_with_reply("o/r",1,"t2",next,&ids,&Value::Null).unwrap();
         assert_eq!(db.n("select count(*) from watcher_inbox where state='done'",vec![]),1);
     }
 }
