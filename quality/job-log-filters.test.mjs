@@ -68,3 +68,26 @@ test("refresh deduplicates in-flight requests and ignores a replaced drawer",asy
   assert.doesNotMatch(previous.innerHTML,/stale result/);
   assert.equal(nodes.jobLogRefresh.disabled,false);
 });
+
+test("log refresh opts out of global authentication reload and preserves the default for other reads",async()=>{
+  const apiSource=readFileSync(new URL("../ui/o.js",import.meta.url),"utf8");
+  const from=apiSource.indexOf("  const get = async"),to=apiSource.indexOf("  const post = async",from);
+  assert.ok(from>=0 && to>from);
+  let reloads=0;
+  const get=runInNewContext("(()=>{"+apiSource.slice(from,to)+";return get;})()",{
+    fetch:async()=>({status:401,json(){throw Error("unexpected JSON read");}}),
+    location:{reload(){reloads++;}}
+  });
+  const loaderStart=source.indexOf("    const loadEvents = async");
+  const loaderEnd=source.indexOf("    const logs = jobLogPanel",loaderStart);
+  assert.ok(loaderStart>=0 && loaderEnd>loaderStart);
+  const loadEvents=runInNewContext("(()=>{"+source.slice(loaderStart,loaderEnd)+";return loadEvents;})()",{get,id:1,dr:{hidden:false},cur:"job",jid:1});
+  const {fn,nodes}=fixture();
+  fn.bindJobLogs(events,loadEvents);
+  await nodes.jobLogRefresh.onclick();
+  assert.equal(reloads,0);
+  assert.match(nodes.jobLogStatus.textContent,/Sessão expirada/);
+  assert.equal(nodes.jobLogCount.textContent,"3 de 3 mensagens recebidas");
+  await assert.rejects(get("/api/state"),/login/);
+  assert.equal(reloads,1);
+});
