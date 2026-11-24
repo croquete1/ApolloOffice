@@ -1701,8 +1701,11 @@ mod strict_db_tests {
     fn steward_activation_persists_and_rotates_only_on_policy_changes() {
         let mut c = Connection::open_in_memory().unwrap();
         init(&mut c).unwrap();
-        c.execute("insert into rp(full,on_,steward_repair) values('o/r',1,1)", [])
-            .unwrap();
+        c.execute(
+            "insert into rp(full,on_,steward_repair) values('o/r',1,1)",
+            [],
+        )
+        .unwrap();
         fn token(c: &Connection) -> String {
             c.query_row("select steward_activation from rp", [], |r| r.get(0))
                 .unwrap()
@@ -1725,8 +1728,11 @@ mod strict_db_tests {
         let renamed = token(&c);
         assert_ne!(renamed, enabled);
         c.execute("delete from rp", []).unwrap();
-        c.execute("insert into rp(full,on_,steward_repair) values('o/r',1,1)", [])
-            .unwrap();
+        c.execute(
+            "insert into rp(full,on_,steward_repair) values('o/r',1,1)",
+            [],
+        )
+        .unwrap();
         assert_ne!(token(&c), first);
         assert_ne!(token(&c), renamed);
     }

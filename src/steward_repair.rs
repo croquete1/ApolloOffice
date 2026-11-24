@@ -163,14 +163,16 @@ async fn enqueue(
     if tracked["st"] != "open" {
         return Ok(false);
     }
-    let policy = a
-        .db
-        .try_all(
+    let policy =
+        a.db.try_all(
             "select steward_activation from rp where full=? and on_=1 and steward_repair=1",
             pa![repo.to_string()],
         )
         .map_err(|error| error.to_string())?;
-    let Some(activation) = policy.first().and_then(|row| row["steward_activation"].as_str()) else {
+    let Some(activation) = policy
+        .first()
+        .and_then(|row| row["steward_activation"].as_str())
+    else {
         return Ok(false);
     };
     let detail = ghj(&["api", &format!("repos/{repo}/pulls/{number}")], 45).await?;
@@ -389,7 +391,9 @@ mod tests {
         assert!(!admit(&body).unwrap());
         db.run("update rp set steward_repair=1", vec![]);
         assert!(!admit(&body).unwrap());
-        body["steward_activation"] = db.one("select steward_activation from rp", vec![]).unwrap()["steward_activation"].clone();
+        body["steward_activation"] = db.one("select steward_activation from rp", vec![]).unwrap()
+            ["steward_activation"]
+            .clone();
         db.0.lock().unwrap().execute_batch("create trigger fail_repair_ledger before insert on kv begin select raise(abort,'ledger failure'); end;").unwrap();
         assert!(admit(&body).is_err());
         assert_eq!(db.n("select count(*) from jobs", vec![]), 0);
