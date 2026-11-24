@@ -77,6 +77,12 @@ Estas PRs estão em draft e **não estão integradas**. A main funcional continu
 - PR #77 (draft, HEAD 2ef565e20b568c9efa24e4b7a6057c041431201f): consulta explícita no painel Steward via endpoint autenticado, apenas repositórios ativos e confirmados públicos. Leitura paginada de comentários GitHub, validação da identidade numérica/login/tipo do bot e confirmação da PR/HEAD antes/depois da leitura. Estados consultivos: evidência atual, stale, não observada, desconhecida ou indisponível. Sem envio de dados a novos fornecedores, pedidos automáticos de revisão, execução de comentários, alterações de permissões ou merge.
 - QA #77: quatro cenários JavaScript isolados PASS no handler de produção com DOM simulado (estado consultivo, HEAD incompatível, estado arbitrário, pedido simultâneo/painel substituído); testes Node correspondentes e quatro testes Rust adicionados, não executados nativamente. Marcadores HTML do CodeRabbit são formato observado não contratual; eventual alteração mantém cobertura desconhecida. Persistência/deduplicação de observações, ingestão de findings com Guard e recuperação end-to-end permanecem pendentes. Sem alteração do canvas ou modelos.
 
+## Décima segunda entrega — persistência de evidência CodeRabbit (24/11/2026)
+- PR #77 ampliada (draft, HEAD 35cf999b5d112830b9065aad42629480ddee1cda): persistência de uma observação histórica por repo/PR na tabela KV existente, sem armazenar corpos de comentários. Tickets de geração atribuídos atomicamente; resposta de consulta antiga não substitui a mais recente. Falhas conservam última observação bem-sucedida. Escritas restritas a repos ativos; consulta manual exige PR e HEAD presentes no snapshot Steward. Histórico apresentado com data e indicação de HEAD, expressamente não revalidado. Sem uso em gates, sem triggers CodeRabbit ou execução de findings.
+- Reconhecimento consultivo de revisão em processamento e revisão não executada, mesmo quando a mensagem conserva marcadores antigos de cobertura. Formato observado no serviço, não uma API contratual. CodeRabbit estava a processar a #77 durante a entrega; não há ainda confirmação de cobertura do HEAD final. A configuração Assertive da #76 é reconhecida, mas ainda não integrada na main; não foram emitidos pedidos de revisão adicionais.
+- QA: seis cenários SQLite isolados PASS usando os SQL exatos (rejeição de escrita stale, conservação do histórico em falha, persistência após reabertura, separação de repo, bloqueio de repo desativado, oito ligações concorrentes com tickets distintos). Três cenários JavaScript isolados PASS no handler (pending, skipped, current consultivo). Dois novos testes Rust e um teste Node escritos, sem execução nativa; não equivale a QA integral.
+- Limites: um registo por PR consultada, sem retenção/limpeza automática ou histórico completo de versões; observação de comentários não prova aprovação, estado de CI ou conclusão da revisão. Persistência de findings, Guard/Watcher, recuperação, revisão de concorrência e suite integral pendentes. Interface dos agentes e modelos inalterados.
+
 ## Balanço por fase
 | Fase | Estado | Falta |
 |---|---|---|
@@ -96,7 +102,7 @@ Estas PRs estão em draft e **não estão integradas**. A main funcional continu
 | F14 | Implementação base integrada (#56) | Teste de persistência/reinício, perfis em máquinas reais e limites de CI |
 | F15 | Parcial (#56/#58/#59) | Próxima tarefa elegível, diagnóstico central de todos os bloqueios, histórico de etapas |
 | F16 | Parcial (#58/#59) | Tempo por fase e custo/merge com dados completos, baseline comparável, QA real Docker/Windows/providers, release assinada |
-| F17 | Parcial (#67, #76, #77 draft) | Validar política/conta, QA consulta consultiva, persistência, ingestão de findings e integração segura |
+| F17 | Parcial (#67, #76, #77 draft) | Validar política/conta, QA consulta e persistência, ingestão de findings, Guard e integração segura |
 
 Nenhuma fase completa é declarada encerrada sem cumprir todos os critérios abaixo. A última bateria automatizada tem 395 aprovações, não a soma de execuções repetidas.
 
