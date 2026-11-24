@@ -496,9 +496,7 @@ pub(crate) async fn observe(repo: &str, number: i64, head: &str) -> Result<Value
     if !valid_repo(repo) || number <= 0 || !valid_sha(head) {
         return Err("Invalid review observation scope".into());
     }
-    let _permit = OBSERVATIONS
-        .try_acquire()
-        .map_err(|_| OBSERVATION_BUSY)?;
+    let _permit = OBSERVATIONS.try_acquire().map_err(|_| OBSERVATION_BUSY)?;
     // The only remote operations are GitHub reads. Never call CodeRabbit's API or
     // request a review, and refuse private/unknown repositories.
     let client = public_client()?;
