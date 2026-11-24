@@ -914,21 +914,6 @@ impl Db {
     }
 
     /// Atomically acknowledge a successfully processed comment batch and its PR cursor.
-    pub fn ack_pr_comments(
-        &self,
-        repo: &str,
-        number: i64,
-        updated: &str,
-        ids: &[String],
-    ) -> rusqlite::Result<()> {
-        let mut c = self.0.lock().unwrap();
-        let tx = c.transaction()?;
-        Self::ack_comments_in_tx(&tx, repo, number, updated, ids)?;
-        tx.commit()?;
-        crate::app::chg();
-        Ok(())
-    }
-
     /// Admit a Watcher rebase only against the observed open PR, and serialize
     /// admission with review and mergecheck jobs in the same SQLite transaction.
     pub fn queue_watcher_rebase(
@@ -1436,18 +1421,18 @@ mod comment_cursor_tests {
     fn comment_ack_is_atomic_and_preserves_other_metadata() {
         let db = Db::mem();
         let ids = vec!["review-1".to_string()];
-        assert!(db.ack_pr_comments("a/b", 1, "new", &ids).is_err());
+        assert!(db.ack_merged_comments("a/b", 1, "new", &ids, true).is_err());
         assert_eq!(db.n("select count(*) from cm", vec![]), 0);
         db.run(
-            "insert into prs(repo,num,d) values(?,?,?)",
+            "insert into prs(repo,num,st,upd,d) values(?,?,'merged','new',?)",
             crate::pa![
                 "a/b".to_string(),
                 1_i64,
                 r#"{"auto_merge":true}"#.to_string()
             ],
         );
-        db.ack_pr_comments("a/b", 1, "new", &ids).unwrap();
-        db.ack_pr_comments("a/b", 1, "new", &ids).unwrap();
+        db.ack_merged_comments("a/b", 1, "new", &ids, true).unwrap();
+        db.ack_merged_comments("a/b", 1, "new", &ids, true).unwrap();
         assert_eq!(db.n("select count(*) from cm", vec![]), 1);
         let row = db
             .one("select d from prs where repo='a/b' and num=1", vec![])
@@ -1506,8 +1491,15 @@ mod comment_cursor_tests {
             ],
         );
         let request = json!({"title":"Fix","url":"https://github.com/a/b/pull/1","change":"Correct bug","data":{"source_head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}});
-        db.ack_pr_comments("a/b", 1, "first", &["r1".into()])
-            .unwrap();
+        db.ack_pr_comments_with_reply(
+            "a/b",
+            1,
+            "next",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            &["r1".into()],
+            &Value::Null,
+        )
+        .unwrap();
         assert!(!db
             .queue_review_and_ack("a/b", 1, "next", &["r1".into(), "r2".into()], &request)
             .unwrap());

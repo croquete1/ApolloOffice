@@ -1919,18 +1919,17 @@ async fn watch_pr(
     }
     a.db.receive_review_batch(&r, n, &up, &source_head, &received_ids)
         .map_err(|e| X::E(e.to_string()))?;
-    if !received_ids.is_empty()
+    let pending = !received_ids.is_empty()
         || a.db
             .has_pending_review(&r, n)
-            .map_err(|e| X::E(e.to_string()))?
-    {
-        if !a
+            .map_err(|e| X::E(e.to_string()))?;
+    if pending
+        && !a
             .db
             .claim_review_attempt(&r, n, &up, &source_head, now())
             .map_err(|e| X::E(e.to_string()))?
-        {
-            return Ok(());
-        }
+    {
+        return Ok(());
     }
     let mut batch_acked = false;
     let mut outbound = Value::Null;
@@ -2609,7 +2608,7 @@ mod watcher_evidence_inventory_tests {
         let b = json!({"id":"c2","t":"Another comment","as":"OWNER","actor_id":43});
         let original = vec![a.clone(), b.clone()];
         assert!(same_comment_inventory(&original, &[b.clone(), a.clone()]));
-        assert!(!same_comment_inventory(&original, &[a.clone()]));
+        assert!(!same_comment_inventory(&original, std::slice::from_ref(&a)));
         assert!(!same_comment_inventory(&original, &[a.clone(), a.clone()]));
         let mut edited = a.clone();
         edited["t"] = json!("Edited request");

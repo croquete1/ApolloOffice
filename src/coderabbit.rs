@@ -445,13 +445,9 @@ fn findings(rows: &[Value], head: &str) -> Vec<Finding> {
             let review_id = row["pull_request_review_id"]
                 .as_i64()
                 .filter(|id| *id > 0)?;
-            if row["position"]
+            row["position"]
                 .as_i64()
-                .filter(|position| *position > 0)
-                .is_none()
-            {
-                return None;
-            }
+                .filter(|position| *position > 0)?;
             let path = row["path"].as_str()?.trim();
             if path.is_empty() || path.len() > 1000 || path.chars().any(char::is_control) {
                 return None;
@@ -832,17 +828,16 @@ pub(crate) fn set_finding_state(
     )? == 1)
 }
 
-pub(crate) fn queue_findings(
+fn queue_findings(
     db: &crate::db::Db,
-    repo: &str,
-    number: i64,
-    head: &str,
+    scope: (&str, i64, &str),
     title: &str,
     url: &str,
     branch: &str,
     test_cmd: &str,
     findings: &[Finding],
 ) -> rusqlite::Result<bool> {
+    let (repo, number, head) = scope;
     if !valid_scope(repo, number, head)
         || findings.is_empty()
         || branch.is_empty()
@@ -1503,26 +1498,21 @@ pub(crate) async fn route_findings(
         };
         let branch = fresh["head"]["ref"].as_str().unwrap_or("");
         let test_cmd = tracked["d"]["test_cmd"].as_str().unwrap_or("");
-        match queue_findings(
+        if let Ok(true) = queue_findings(
             &a.db,
-            repo,
-            number,
-            head,
+            (repo, number, head),
             fresh["title"].as_str().unwrap_or("Pull request review"),
             fresh["html_url"].as_str().unwrap_or(""),
             branch,
             test_cmd,
             &guarded,
         ) {
-            Ok(true) => {
-                a.flow("watcher", "fixer", "review");
-                a.say(
-                    "watcher",
-                    &format!("{repo}#{number}: {} finding(s) CodeRabbit validados e enviados ao Fixer; CI e Reviewer continuam obrigatórios", guarded.len()),
-                    None,
-                );
-            }
-            _ => {}
+            a.flow("watcher", "fixer", "review");
+            a.say(
+                "watcher",
+                &format!("{repo}#{number}: findings CodeRabbit validados e enviados ao Fixer; CI e Reviewer continuam obrigatórios"),
+                None,
+            );
         }
     }
 }
@@ -1958,14 +1948,12 @@ mod tests {
         );
         assert!(!queue_findings(
             &db,
-            repo,
-            67,
-            HEAD,
+            (repo, 67, HEAD),
             "Title",
             "https://github.com/croquete1/ApolloOffice/pull/67",
             "codex/change",
             "cargo test",
-            &[item.clone()]
+            std::slice::from_ref(&item)
         )
         .unwrap());
         db.0.lock().unwrap().execute_batch(&format!(
@@ -1985,14 +1973,12 @@ mod tests {
         // Missing, stale, draft or overlapping report must not authorize work.
         assert!(!queue_findings(
             &db,
-            repo,
-            67,
-            HEAD,
+            (repo, 67, HEAD),
             "Title",
             "https://github.com/croquete1/ApolloOffice/pull/67",
             "codex/change",
             "cargo test",
-            &[item.clone()]
+            std::slice::from_ref(&item)
         )
         .unwrap());
         let report_key = format!("steward:{repo}");
@@ -2000,14 +1986,12 @@ mod tests {
         db.ks(&report_key, &report);
         assert!(!queue_findings(
             &db,
-            repo,
-            67,
-            HEAD,
+            (repo, 67, HEAD),
             "Title",
             "https://github.com/croquete1/ApolloOffice/pull/67",
             "codex/change",
             "cargo test",
-            &[item.clone()]
+            std::slice::from_ref(&item)
         )
         .unwrap());
         report["prs"][0]["head_sha"] = json!(HEAD);
@@ -2015,14 +1999,12 @@ mod tests {
         db.ks(&report_key, &report);
         assert!(!queue_findings(
             &db,
-            repo,
-            67,
-            HEAD,
+            (repo, 67, HEAD),
             "Title",
             "https://github.com/croquete1/ApolloOffice/pull/67",
             "codex/change",
             "cargo test",
-            &[item.clone()]
+            std::slice::from_ref(&item)
         )
         .unwrap());
         report["prs"][0]["overlaps"] = json!([]);
@@ -2030,23 +2012,19 @@ mod tests {
         db.ks(&report_key, &report);
         assert!(!queue_findings(
             &db,
-            repo,
-            67,
-            HEAD,
+            (repo, 67, HEAD),
             "Title",
             "https://github.com/croquete1/ApolloOffice/pull/67",
             "codex/change",
             "cargo test",
-            &[item.clone()]
+            std::slice::from_ref(&item)
         )
         .unwrap());
         report["prs"][0]["state"] = json!("revisao_final_necessaria");
         db.ks(&report_key, &report);
         assert!(queue_findings(
             &db,
-            repo,
-            67,
-            HEAD,
+            (repo, 67, HEAD),
             "Title",
             "https://github.com/croquete1/ApolloOffice/pull/67",
             "codex/change",
@@ -2056,9 +2034,7 @@ mod tests {
         .unwrap());
         assert!(!queue_findings(
             &db,
-            repo,
-            67,
-            HEAD,
+            (repo, 67, HEAD),
             "Title",
             "https://github.com/croquete1/ApolloOffice/pull/67",
             "codex/change",
@@ -2115,14 +2091,12 @@ mod tests {
         );
         assert!(!queue_findings(
             &db,
-            repo,
-            67,
-            HEAD,
+            (repo, 67, HEAD),
             "Title",
             "https://github.com/croquete1/ApolloOffice/pull/67",
             "codex/change",
             "cargo test",
-            &[edited.clone()]
+            std::slice::from_ref(&edited)
         )
         .unwrap());
         let ticket = claim_finding_guard(&db, repo, 67, HEAD, &edited)
