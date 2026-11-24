@@ -303,5 +303,25 @@ Nenhuma fase completa é declarada encerrada sem cumprir todos os critérios aba
 - Aprendizagem operacional: Rust edition 2021 (não usar let chains); executar Rustfmt antes de publicar alterações Rust sempre que o toolchain estiver disponível; executar Clippy e testes focados antes do CI completo. Se o ambiente não tiver Cargo/Rustfmt, declarar a limitação, recolher a saída real do CI, aplicar apenas hunks com contexto confirmado e congelar a árvore para validação do HEAD exato. Não confundir Windows aprovado com CI integral; não repetir alterações funcionais durante um gate sem um defeito concreto. Preferir testes da operação real, incluindo recusa e rollback, a testes de contadores isolados.
 - Não houve nova revisão externa gratuita confirmada, merge ou release. Manter os requisitos de autorização, revisão independente e CI final; não ativar consumo pago.
 
+## Integrações verificadas após a PR #78
+
+Este registo atualiza os estados históricos anteriores. Os merges abaixo foram autorizados pelo proprietário após aprovação do CI integral no HEAD exato; a revisão externa independente continua sem comprovação. Não implica encerramento integral de qualquer fase, nem publicação de release.
+
+| PR | Merge na main | CI aprovado | Âmbito |
+| --- | --- | --- | --- |
+| #78 | `cee41b8342b6676a0edc7020042df4d9cd0de920` | #95 (45488030632) | Integração de #65/#66/#67/#68/#70/#76/#77 |
+| #79 | `dbba647fb127e48080d15142a327e45c3bbe93fc` | #98 (45490208042) | F04/F10: inventário Vet completo em lotes limitados |
+| #80 | `d3ed447f37c5953420b9c1d7bd4a440b7441f921` | #100 (45491138118) | F04/F16: idle falha fechado |
+| #81 | `c0ce5d49b2332bb35e975b8786bf8aba696b2ffe` | #103 (45492613016) | F04: reset atómico |
+| #82 | `98e8802c5770437d61a39d544ed99a99d59480bd` | #105 (45493594092) | F04/F10: holds e admissão |
+| #83 | `ad552bcc29c8b9af1998080a46ef9e99df6d55ee` | #108 (45496948589) | F03/F04: aprovação, cancelamento e Vet |
+| #84 | `55cbaa5f1c6914dcb255a5dabbcf133e23bc0a13` | #111 (45503369220) | F04: configuração e importação atómicas |
+| #85 | `944f65d8b4a5c12d6cf41d769b8255db6c3bb10e` | #114 (45505445658) | F04: autenticação e revogação de tokens |
+| #86 | `91b7949913f5c6f5a16146f6b98adba71ab81c27` | #116 (45506660407) | F04: links de acesso e sessões transacionais |
+
+CI #116: Rustfmt, Clippy, Rust (Ubuntu e Windows), release, JavaScript, Chromium, testes de aceitação e Docker/SSH reais em runners isolados aprovados. Não equivale a ensaio de instalação/rollback em produção, validação de hardware físico ou fornecedores reais. Sem nova confirmação autenticada da faturação CodeRabbit nem pedido de revisão paga. Interface dos agentes e modelos preservados.
+
+Aprendizagem do CI: #102, #107, #110 e #113 detetaram Rustfmt; #107 detetou também um teste estrutural JavaScript que ainda dependia da implementação antiga. Corrigir todos os hunks e verificar referências de testes estruturais antes de publicar refatorações; manter testes de comportamento e rollback, sem remover gates. O ambiente de edição atual continua sem cargo/rustfmt local. #105 e #116 passaram na primeira execução. Não confundir sucesso de uma matriz parcial com CI completo.
+
 ## Sequência
 Integrar PRs apenas após revisão e testes, uma fase de cada vez. Não ativar Qwen. Não alterar main ou instalação em produção sem evidência. Atualizar este ficheiro com PR, SHA e resultado dos testes de cada fase.

@@ -114,8 +114,38 @@ pub async fn back(a: &Ax, code: &str, st: &str) -> Result<(String, String, Strin
     Ok((mode, sub, em))
 }
 
-pub fn link(a: &Ax, sub: &str, em: &str) {
-    a.db.ks("google", &json!({"sub": sub, "email": em, "t": now()}));
+pub fn link(a: &Ax, sub: &str, em: &str) -> rusqlite::Result<()> {
+    let c = a.db.0.lock().unwrap();
+    c.execute(
+        "insert into kv(k,v) values('google',?) on conflict(k) do update set v=excluded.v",
+        [json!({"sub": sub, "email": em, "t": now()}).to_string()],
+    )?;
+    crate::app::chg();
+    Ok(())
+}
+
+// Recheck the linked identity inside the session transaction. A revoked
+// or replaced identity must not create a session based on a stale read.
+pub fn session(db: &crate::db::Db, sub: &str) -> rusqlite::Result<Option<String>> {
+    let mut c = db.0.lock().unwrap();
+    let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let allowed: bool = tx.query_row(
+        "select exists(select 1 from kv where k='google' and json_extract(v,'$.sub')=?)",
+        [sub],
+        |r| r.get(0),
+    )?;
+    if !allowed || sub.is_empty() {
+        return Ok(None);
+    }
+    let at = now();
+    let session = hex::encode(rand::random::<[u8; 32]>());
+    tx.execute("delete from ses where exp<?", [at])?;
+    tx.execute(
+        "insert into ses(id,exp) values(?,?)",
+        rusqlite::params![session, at + 30 * 86_400_000],
+    )?;
+    tx.commit()?;
+    Ok(Some(session))
 }
 
 pub fn ok(a: &Ax, sub: &str) -> bool {
@@ -124,6 +154,27 @@ pub fn ok(a: &Ax, sub: &str) -> bool {
 
 #[cfg(test)]
 mod t {
+    #[test]
+    fn google_session_rechecks_identity_and_rolls_back_on_storage_failure() {
+        let db = crate::db::Db::mem();
+        db.ks("google", &serde_json::json!({"sub":"current"}));
+        assert!(super::session(&db, "previous").unwrap().is_none());
+        db.run("insert into ses(id,exp) values('expired',0)", crate::pa![]);
+        db.0.lock().unwrap().execute_batch(
+            "create trigger fail_session before insert on ses begin select raise(abort,'injected'); end;",
+        ).unwrap();
+        assert!(super::session(&db, "current").is_err());
+        assert_eq!(db.n("select count(*) from ses", crate::pa![]), 1);
+        db.0.lock()
+            .unwrap()
+            .execute_batch("drop trigger fail_session")
+            .unwrap();
+        assert!(super::session(&db, "current").unwrap().is_some());
+        assert_eq!(db.n("select count(*) from ses", crate::pa![]), 1);
+        db.kd("google");
+        assert!(super::session(&db, "current").unwrap().is_none());
+    }
+
     #[test]
     fn enc() {
         assert_eq!(super::ue("openid email"), "openid%20email");
