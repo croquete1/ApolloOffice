@@ -10,6 +10,40 @@ use serde_json::{json, Value};
 use std::future::Future;
 use std::pin::Pin;
 
+struct TwinCandidate {
+    context: String,
+    row: Value,
+    pr: bool,
+}
+
+// Keep complete candidate envelopes, never silently truncate or skip an older
+// finding. A negative verdict is sufficient only for its own batch.
+fn twin_batches(
+    bug: &str,
+    candidates: Vec<TwinCandidate>,
+    budget: usize,
+) -> R<Vec<Vec<TwinCandidate>>> {
+    let mut batches = Vec::new();
+    let mut batch = Vec::new();
+    let mut used = bug.len();
+    for candidate in candidates {
+        let size = candidate.context.len().saturating_add(2);
+        if bug.len().saturating_add(size) > budget {
+            return Err(X::Lim("Vet: duplicate context exceeds safe batch budget".into()));
+        }
+        if used.saturating_add(size) > budget {
+            batches.push(std::mem::take(&mut batch));
+            used = bug.len();
+        }
+        used += size;
+        batch.push(candidate);
+    }
+    if !batch.is_empty() {
+        batches.push(batch);
+    }
+    Ok(batches)
+}
+
 // A model may suggest a duplicate, but cannot invent its target.
 fn valid_twin_verdict(
     verdict: &Value,
@@ -622,11 +656,13 @@ async fn vet1(a: &Ax, id: i64) -> R<()> {
             return Ok(());
         }
         let (h, ot) = crate::gh::twins(a, &j.repo, &j.wh()).await.map_err(X::E)?;
-        let of: Vec<Value> = a.db.all("select id, d from jobs where repo=? and num=0 and kind='fix' and id<>? and st not in ('drop','done') and (st<>'vet' or id<?) order by id desc limit 50", pa![j.repo.clone(), id, id]);
+        let of = a.db.try_all("select id, d from jobs where repo=? and num=0 and kind='fix' and id<>? and st not in ('drop','done') and (st<>'vet' or id<?) order by id desc", pa![j.repo.clone(), id, id])
+            .map_err(|e| X::Lim(format!("Vet: local duplicate inventory unavailable: {e}")))?;
         if !h.is_empty() || !ot.is_empty() || !of.is_empty() {
-            let mut ps = vec![wrap("bug", &format!("{}\n\n{}", j.s("title"), j.s("body")))];
-            for x in &h {
-                ps.push(wrap(
+            let bug = wrap("bug", &format!("{}\n\n{}", j.s("title"), j.s("body")));
+            let mut candidates = Vec::new();
+            for x in h {
+                let context = wrap(
                     &format!("pr{}", x["number"]),
                     &format!(
                         "PR #{}: {}\nFiles: {}\n\n{}",
@@ -642,89 +678,79 @@ async fn vet1(a: &Ax, id: i64) -> R<()> {
                             .unwrap_or_default(),
                         crate::sh::head(x["body"].as_str().unwrap_or(""), 3000)
                     ),
-                ));
+                );
+                candidates.push(TwinCandidate { context, row: x, pr: true });
             }
-            ps.push(wrap(
-                "other",
-                &format!(
-                    "Other open PRs (title and start of body):\n\n{}",
-                    ot.iter()
-                        .map(|x| format!(
-                            "#{} {}\n{}",
-                            x["number"],
-                            x["title"].as_str().unwrap_or(""),
-                            crate::sh::head(
-                                &x["body"]
-                                    .as_str()
-                                    .unwrap_or("")
-                                    .split_whitespace()
-                                    .collect::<Vec<_>>()
-                                    .join(" "),
-                                400
-                            )
-                        ))
-                        .collect::<Vec<_>>()
-                        .join("\n\n")
-                ),
-            ));
-            if !of.is_empty() {
-                ps.push(wrap(
-                    "ours",
+            for x in ot {
+                let context = wrap(
+                    &format!("pr{}", x["number"]),
                     &format!(
-                        "Our own earlier finds, fix in progress, no PR yet:\n\n{}",
-                        of.iter()
-                            .map(|x| format!(
-                                "find {}: {}\nwhere: {}\n{}",
-                                x["id"],
-                                x["d"]["title"].as_str().unwrap_or(""),
-                                x["d"]["hunt"]["where"]
-                                    .as_str()
-                                    .or(x["d"]["ext"]["where"].as_str())
-                                    .unwrap_or(""),
-                                crate::sh::head(
-                                    &x["d"]["body"]
-                                        .as_str()
-                                        .unwrap_or("")
-                                        .split_whitespace()
-                                        .collect::<Vec<_>>()
-                                        .join(" "),
-                                    600
-                                )
-                            ))
-                            .collect::<Vec<_>>()
-                            .join("\n\n")
+                        "Other open PR #{}: {}\n{}",
+                        x["number"],
+                        x["title"].as_str().unwrap_or(""),
+                        crate::sh::head(
+                            &x["body"].as_str().unwrap_or("").split_whitespace().collect::<Vec<_>>().join(" "),
+                            400
+                        )
                     ),
-                ));
+                );
+                candidates.push(TwinCandidate { context, row: x, pr: true });
             }
-            let mut o = Ask::new(
-                "vet",
-                a.md("vet"),
-                P("twin"),
-                crate::sh::head(&ps.join("\n\n"), 250_000),
-            );
-            o.job = Some(id);
-            o.ef = Some("low");
-            let (_, dj) = ask(a, o).await?;
-            if !valid_twin_verdict(&dj, &h, &ot, &of) {
-                return Err(X::E("Vet returned an invalid duplicate target".into()));
+            for x in of {
+                let context = wrap(
+                    &format!("find{}", x["id"]),
+                    &format!(
+                        "Office find {}: {}\nwhere: {}\n{}",
+                        x["id"],
+                        x["d"]["title"].as_str().unwrap_or(""),
+                        x["d"]["hunt"]["where"].as_str().or(x["d"]["ext"]["where"].as_str()).unwrap_or(""),
+                        crate::sh::head(
+                            &x["d"]["body"].as_str().unwrap_or("").split_whitespace().collect::<Vec<_>>().join(" "),
+                            600
+                        )
+                    ),
+                );
+                candidates.push(TwinCandidate { context, row: x, pr: false });
             }
-            if dj["dup"] == true {
-                let w = if dj["find"].as_i64().unwrap_or(0) > 0 {
-                    format!(
-                        "same bug as office find #{} ({})",
-                        dj["find"],
-                        dj["why"].as_str().unwrap_or("")
-                    )
-                } else {
-                    format!(
-                        "PR already exists: {}#{} ({})",
-                        j.repo,
-                        dj["pr"],
-                        dj["why"].as_str().unwrap_or("")
-                    )
-                };
-                a.db.jset(id, &[("st", json!("drop")), ("why", json!(w))]);
-                return Ok(());
+            let batches = twin_batches(&bug, candidates, 64_000)?;
+            for batch in batches {
+                let mut prompt = bug.clone();
+                let mut prs = Vec::new();
+                let mut finds = Vec::new();
+                for item in batch {
+                    prompt.push_str("\n\n");
+                    prompt.push_str(&item.context);
+                    if item.pr {
+                        prs.push(item.row);
+                    } else {
+                        finds.push(item.row);
+                    }
+                }
+                let mut o = Ask::new("vet", a.md("vet"), P("twin"), prompt);
+                o.job = Some(id);
+                o.ef = Some("low");
+                let (_, dj) = ask(a, o).await?;
+                if !valid_twin_verdict(&dj, &prs, &[], &finds) {
+                    return Err(X::E("Vet returned an invalid duplicate target".into()));
+                }
+                if dj["dup"] == true {
+                    let w = if dj["find"].as_i64().unwrap_or(0) > 0 {
+                        format!(
+                            "same bug as office find #{} ({})",
+                            dj["find"],
+                            dj["why"].as_str().unwrap_or("")
+                        )
+                    } else {
+                        format!(
+                            "PR already exists: {}#{} ({})",
+                            j.repo,
+                            dj["pr"],
+                            dj["why"].as_str().unwrap_or("")
+                        )
+                    };
+                    a.db.jset(id, &[("st", json!("drop")), ("why", json!(w))]);
+                    return Ok(());
+                }
             }
         }
         let mut d = j.d.clone();
@@ -2659,6 +2685,22 @@ mod watcher_evidence_inventory_tests {
 #[cfg(test)]
 mod twin_verdict_tests {
     use super::*;
+
+    #[test]
+    fn duplicate_batches_preserve_all_candidates_and_reject_oversize() {
+        let candidate = |n| TwinCandidate {
+            context: "12345678".into(),
+            row: json!({"id":n}),
+            pr: false,
+        };
+        let batches = twin_batches("bug", (1..=101).map(candidate).collect(), 23).unwrap();
+        assert_eq!(batches.len(), 51);
+        assert_eq!(
+            batches.iter().flatten().map(|x| x.row["id"].as_i64().unwrap()).collect::<Vec<_>>(),
+            (1..=101).collect::<Vec<_>>()
+        );
+        assert!(twin_batches("bug", vec![candidate(1)], 12).is_err());
+    }
 
     #[test]
     fn duplicate_verdict_requires_an_observed_target() {
