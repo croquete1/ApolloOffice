@@ -14,7 +14,10 @@ Base main: 878ef1a45b82319bb912ae567a6cc4956c84ffe4. Release publicada: fork-v0.
 - [ ] PR #51 — Scout sem limite rígido de 500 issues, snapshot SQLite transacional, rejeição de respostas inválidas e adiamento se falhar a consulta de PRs relacionadas. HEAD: 6a705869317bfaecd495bd15e6cd2c5764734142.
 - [ ] PR #48 atualizada: enqueue de revisão e confirmação de comentários na mesma transação; adiamento enquanto existir revisão ativa e teste de rollback. HEAD: 5e463fda574a615fa8a3a4d7f2d64e97bc79939b.
 - [ ] PR #52 — inventário completo do Steward por paginação REST e dupla confirmação de identidade; paginação GraphQL de threads de revisão. HEAD: 93cd93eb9bfa8ee09981d1f3ea3294798908df09.
-PRs #48, #49, #51 e #52 em draft, não integradas nem validadas. F02, F04 e F09 têm implementação parcial. A interface dos agentes permanece intacta. Não há alterações de configuração de modelos. O presente roadmap não representa implementação.
+- [ ] PR #49 atualizada: fnm v1.39.0 verificado por checksum, seleção de Node por projeto e Node system sem versão definida. HEAD: 8ac1d83ed6f22c2c0508c490a5f57a5a3dc9e891.
+- [ ] PR #48 atualizada: Watcher passa a observar e despertar o Steward, sem iniciar novos auto-merges próprios. HEAD: f5398f64a62ba7b910db4c5d771903ed8c4ceaee. Auditar auto-merges previamente ativados no GitHub.
+- [ ] PR #53 — pausa Claude limitada ao fornecedor em instalações mistas; reserva configurável Codex de 15% para novas tarefas Hunter. HEAD: 3cc348ff72a6a5525eb6eb575fab6b8cdeb4a9d0.
+PRs #48, #49, #51, #52 e #53 em draft, não integradas nem validadas. O GitHub ainda não apresenta execuções CI para os commits analisados; o ambiente desta sessão não tem Cargo nem resolução DNS para github.com. Nenhuma fase é considerada concluída. F02, F04 e F09 têm implementação parcial. A interface dos agentes permanece intacta. Não há alterações de configuração de modelos. O presente roadmap não representa implementação.
 
 ## Fases e critérios de aceitação
 ### F01 / P0 — Integração seletiva upstream
