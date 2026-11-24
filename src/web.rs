@@ -1920,11 +1920,14 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
             })) {
                 return er(StatusCode::CONFLICT, "refresh Steward before observing");
             }
+            let Ok(_permit) = crate::coderabbit::OBSERVATIONS.try_acquire() else {
+                return er(StatusCode::TOO_MANY_REQUESTS, "CodeRabbit observation capacity busy");
+            };
             let Ok(ticket) = crate::coderabbit::reserve(&a.db, repo, number) else {
                 return er(StatusCode::CONFLICT, "observation unavailable");
             };
             match crate::coderabbit::observe(repo, number, head).await {
-                Ok(value) => match crate::coderabbit::save(&a.db, repo, number, ticket, &value) {
+                Ok(value) => match crate::coderabbit::save(&a.db, repo, number, &ticket, &value) {
                     Ok(true) => js(value),
                     _ => js(json!({"state":"unavailable","head":head})),
                 },
