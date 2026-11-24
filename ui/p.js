@@ -688,8 +688,10 @@
         worker.value = selected;
         render();
         status.textContent = "Registo atualizado.";
-      } catch {
-        if ($("jobLogRows") === rows) status.textContent = "Não foi possível atualizar. Mantido o último registo recebido.";
+      } catch (error) {
+        if ($("jobLogRows") === rows) status.textContent = error?.message === "login"
+          ? "Sessão expirada. Mantido o último registo recebido e os campos do formulário. Guarde uma cópia das alterações antes de voltar a autenticar-se."
+          : "Não foi possível atualizar. Mantido o último registo recebido.";
       } finally { refresh.disabled = false; }
     };
     render();
@@ -729,7 +731,7 @@
     const cs = j.cost && j.cost.n ? `<div class="msg">Cost: ${j.cost.usd != null ? usd(j.cost.usd) + " API" : ""}${j.cost.usd != null && j.cost.val != null ? " · " : ""}${j.cost.val != null ? usd(j.cost.val) + " login value" : ""}${j.cost.usd == null && j.cost.val == null ? "unknown" : ""} · ${Math.round((j.cost.ti || 0) / 1000)}k in, ${Math.round((j.cost.tou || 0) / 1000)}k out</div>` : "";
     const events = normalizeJobEvents(j.ev);
     const loadEvents = async () => {
-      const next = await get("/api/job?id=" + id);
+      const next = await get("/api/job?id=" + id, { reloadOnUnauthorized: false });
       if (!next || next.error || dr.hidden || cur !== "job" || jid !== id) throw new Error("Registo indisponível");
       return next.ev;
     };
