@@ -4577,7 +4577,9 @@ fn host_retry_delay(attempt: i64) -> i64 {
 // Atomically reserve work against updates, cache maintenance and other lanes.
 pub(crate) fn admit(a: &Ax, repo: &str, host: &str, id: i64) -> bool {
     let _transition = a.update_transition.lock().unwrap();
-    if a.drain.load(std::sync::atomic::Ordering::SeqCst) {
+    if a.drain.load(std::sync::atomic::Ordering::SeqCst)
+        || crate::upd::manually_paused(a)
+    {
         return false;
     }
     if !matches!(a.db.schedule_eligible(id, repo, now()), Ok(true))
@@ -4854,7 +4856,9 @@ pub fn hy(a: &Ax, r: &str) -> f64 {
 fn mk_hunt(a: &Ax) -> bool {
     // Coordinate creation with admission and breaker updates across lanes.
     let _transition = a.update_transition.lock().unwrap();
-    if a.drain.load(std::sync::atomic::Ordering::SeqCst) {
+    if a.drain.load(std::sync::atomic::Ordering::SeqCst)
+        || crate::upd::manually_paused(a)
+    {
         return false;
     }
     if a.hunter_quota_blocked() {
