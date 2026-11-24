@@ -57,7 +57,13 @@ fn actionable_request(
     if parts.is_empty() {
         return None;
     }
-    Some((id, crate::sh::head(&parts.join("\n\n"), 6000), since))
+    let request = parts.join("\n\n");
+    // The Guard inspects at most 3500 bytes. Never authorize a prefix and
+    // forward a longer review, even when it came from a maintainer.
+    if request.len() > 3500 {
+        return None;
+    }
+    Some((id, request, since))
 }
 
 fn eligible(pr: &Value, assessed: &Value) -> bool {
@@ -68,6 +74,64 @@ fn eligible(pr: &Value, assessed: &Value) -> bool {
         && assessed["possible_duplicates"]
             .as_array()
             .is_some_and(Vec::is_empty)
+}
+
+// Admission, authorization and durable deduplication share one write transaction.
+fn admit_review(
+    db: &crate::db::Db,
+    scope: (&str, i64, &str),
+    review: (i64, i64),
+    title: &str,
+    url: &str,
+    body: &Value,
+) -> rusqlite::Result<bool> {
+    let (repo, number, head) = scope;
+    let (rid, since) = review;
+    let key = format!("steward:repair:{repo}#{number}:{head}:{rid}");
+    let mut connection = db.0.lock().unwrap();
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let eligible: bool = tx.query_row(
+        "select exists(select 1 from rp where full=?1 and on_=1 and steward_repair=1)
+         and exists(select 1 from prs where repo=?1 and num=?2 and st='open')
+         and exists(select 1 from kv,json_each(kv.v,'$.prs') p where kv.k=?3
+           and json_extract(p.value,'$.number')=?2
+           and json_extract(p.value,'$.head_sha')=?4
+           and json_extract(p.value,'$.state')='revisao_pendente'
+           and json_type(p.value,'$.overlaps')='array' and json_array_length(p.value,'$.overlaps')=0
+           and json_type(p.value,'$.possible_duplicates')='array' and json_array_length(p.value,'$.possible_duplicates')=0)
+         and not exists(select 1 from kv where k=?5)
+         and not exists(select 1 from jobs where repo=?1 and pr=?2
+           and ((kind in ('review','rebase','mergecheck') and st not in ('done','drop'))
+                or (kind='review' and t0>=?6)))",
+        rusqlite::params![repo, number, format!("steward:{repo}"), head, key, since],
+        |row| row.get(0),
+    )?;
+    if !eligible {
+        return Ok(false);
+    }
+    let at = now();
+    tx.execute(
+        "insert into jobs(repo,num,kind,title,url,st,why,d,pr,prio,t0,t1)
+         values(?,?,'review',?,?,'ready',?,?,?,-1.0,?,?)",
+        rusqlite::params![
+            repo,
+            number,
+            title,
+            url,
+            format!("Revisão humana #{rid} no HEAD atual"),
+            body.to_string(),
+            number,
+            at,
+            at
+        ],
+    )?;
+    tx.execute(
+        "insert into kv(k,v) values(?,?)",
+        rusqlite::params![key, json!({"at":at,"review_id":rid,"head":head}).to_string()],
+    )?;
+    tx.commit()?;
+    crate::app::chg();
+    Ok(true)
 }
 
 async fn enqueue(
@@ -136,17 +200,30 @@ async fn enqueue(
     if a.hold("watcher") {
         return Ok(false);
     }
-    // Confirmar HEAD e estado após as chamadas externas e o Guard.
+    // Re-read review evidence: a review can be edited or dismissed without
+    // changing the commit SHA. A previous Guard verdict is not transferable.
+    let current_reviews =
+        apip_unique(&format!("repos/{repo}/pulls/{number}/reviews?per_page=100")).await?;
+    let current_comments = apip_unique(&format!(
+        "repos/{repo}/pulls/{number}/comments?per_page=100"
+    ))
+    .await?;
+    if actionable_request(&current_reviews, &current_comments, head, me)
+        != Some((rid, request.clone(), since))
+    {
+        return Ok(false);
+    }
     let fresh = ghj(&["api", &format!("repos/{repo}/pulls/{number}")], 45).await?;
     if fresh["head"]["sha"] != head
         || fresh["state"] != "open"
         || fresh["draft"] != false
         || fresh["head"]["ref"] != branch
         || fresh["head"]["repo"]["full_name"] != repo
-        || a.db.n(
-            "select steward_repair from rp where full=? and on_=1",
-            pa![repo.to_string()],
-        ) != 1
+        || fresh["base"]["repo"]["full_name"] != repo
+        || fresh["base"]["ref"] != detail["base"]["ref"]
+        || fresh["user"]["login"].as_str() != Some(me)
+        || fresh["updated_at"] != detail["updated_at"]
+        || a.hold("watcher")
     {
         return Ok(false);
     }
@@ -163,32 +240,16 @@ async fn enqueue(
         "steward_head": head,
         "source_head": head
     });
-    // Única inserção atómica; impede corrida com o Watcher na fila ativa.
-    let inserted = a.db.ch(
-        "insert into jobs(repo,num,kind,title,url,st,why,d,pr,prio,t0,t1)
-         select ?,?,'review',?,?,'ready',?,?,?,-1.0,?,?
-         where not exists (
-           select 1 from jobs where repo=? and pr=?
-             and ((kind in ('review','rebase','mergecheck') and st not in ('done','drop'))
-                  or (kind='review' and t0 >= ?))
-         )",
-        pa![
-            repo.to_string(),
-            number,
-            title.to_string(),
-            url.to_string(),
-            format!("Revisão humana #{rid} no HEAD atual"),
-            body.to_string(),
-            number,
-            now(),
-            now(),
-            repo.to_string(),
-            number,
-            since
-        ],
-    ) == 1;
+    let inserted = admit_review(
+        &a.db,
+        (repo, number, head),
+        (rid, since),
+        title,
+        url,
+        &body,
+    )
+    .map_err(|error| error.to_string())?;
     if inserted {
-        a.db.ks(&key, &json!({"at":now(),"review_id":rid,"head":head}));
         a.say(
             "watcher",
             &format!("{repo}#{number}: revisão humana encaminhada para o Fixer"),
@@ -282,6 +343,53 @@ mod tests {
             actionable_request(&[review, newer], &[], head, "author").is_none(),
             "uma aprovação posterior torna a objeção obsoleta"
         );
+    }
+
+    #[test]
+    fn oversized_review_is_not_truncated_into_an_authorization() {
+        let head = "0123456789012345678901234567890123456789";
+        let review = json!({"id":91,"state":"CHANGES_REQUESTED","commit_id":head,
+            "submitted_at":"2026-11-09T12:00:00Z","author_association":"OWNER",
+            "user":{"login":"maintainer","type":"User"},"body":"é".repeat(1751)});
+        assert!(actionable_request(&[review], &[], head, "author").is_none());
+    }
+
+    #[test]
+    fn admission_rechecks_report_authorization_and_commits_deduplication() {
+        let db = crate::db::Db::mem();
+        let repo = "o/r";
+        let head = "0123456789012345678901234567890123456789";
+        let body = json!({"source_head":head,"steward_head":head});
+        db.run(
+            "insert into rp(full,on_,steward_repair) values('o/r',1,1)",
+            vec![],
+        );
+        db.run(
+            "insert into prs(repo,num,st,d) values('o/r',1,'open','{}')",
+            vec![],
+        );
+        let admit = || admit_review(&db, (repo, 1, head), (91, 0), "PR", "url", &body);
+        assert!(!admit().unwrap());
+        db.ks("steward:o/r", &json!({"prs":[{"number":1,"head_sha":head,"state":"revisao_pendente","overlaps":[2],"possible_duplicates":[]}]}));
+        assert!(!admit().unwrap());
+        db.ks("steward:o/r", &json!({"prs":[{"number":1,"head_sha":head,"state":"revisao_pendente","overlaps":[],"possible_duplicates":[]}]}));
+        db.run("update rp set steward_repair=0", vec![]);
+        assert!(!admit().unwrap());
+        db.run("update rp set steward_repair=1", vec![]);
+        db.0.lock().unwrap().execute_batch("create trigger fail_repair_ledger before insert on kv begin select raise(abort,'ledger failure'); end;").unwrap();
+        assert!(admit().is_err());
+        assert_eq!(db.n("select count(*) from jobs", vec![]), 0);
+        db.0.lock()
+            .unwrap()
+            .execute_batch("drop trigger fail_repair_ledger")
+            .unwrap();
+        assert!(admit().unwrap());
+        db.run("update jobs set st='done'", vec![]);
+        assert!(!admit().unwrap());
+        assert_eq!(db.n("select count(*) from jobs", vec![]), 1);
+        assert!(!db
+            .kg(&format!("steward:repair:{repo}#1:{head}:91"))
+            .is_null());
     }
 
     #[test]
