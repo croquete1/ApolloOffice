@@ -134,7 +134,11 @@ pub async fn ask(a: &Ax, o: Ask) -> R<(String, Value)> {
                 .as_str()
                 .ok_or_else(|| X::E("support route missing model".into()))?;
             a.db.ks(&format!("adaptive:support:{}", o.w), &decision);
-            a.say(o.w, &format!("adaptive support: {} -> {model}", o.md), o.job);
+            a.say(
+                o.w,
+                &format!("adaptive support: {} -> {model}", o.md),
+                o.job,
+            );
             o.md = model.to_string();
         }
         return ask1(a, o).await;
