@@ -2578,7 +2578,10 @@ pub async fn h(State(a): State<Ax>, req: Request<Body>) -> Response<Body> {
         return match crate::goog::back(&a, &qv("code"), &qv("state")).await {
             Ok((md, sub, em)) if md == "link" => {
                 if crate::goog::link(&a, &sub, &em).is_err() {
-                    return er(StatusCode::SERVICE_UNAVAILABLE, "Google account was not saved");
+                    return er(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Google account was not saved",
+                    );
                 }
                 a.say(
                     "scout",
@@ -2593,7 +2596,12 @@ pub async fn h(State(a): State<Ax>, req: Request<Body>) -> Response<Body> {
                 }
                 let s = match crate::goog::session(&a.db, &sub) {
                     Ok(Some(s)) => s,
-                    Ok(None) => return er(StatusCode::UNAUTHORIZED, "Google account is no longer linked"),
+                    Ok(None) => {
+                        return er(
+                            StatusCode::UNAUTHORIZED,
+                            "Google account is no longer linked",
+                        )
+                    }
                     Err(_) => return er(StatusCode::SERVICE_UNAVAILABLE, "session was not saved"),
                 };
                 Response::builder().status(StatusCode::OK).header("content-type", "text/html; charset=utf-8").header("cache-control", "no-store").header("set-cookie", format!("ao={s}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}", 30 * 86400)).body(Body::from(format!("{LP}<meta http-equiv=refresh content='0;url=/'><p>Signed in as {}.</p></div>", esc(&em)))).unwrap()
