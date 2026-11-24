@@ -25,6 +25,9 @@ create index if not exists github_issues_open on github_issues(repo,is_open,upda
 create table if not exists tok(day text, w text, tin int default 0, tout int default 0, primary key(day, w));
 create table if not exists seen(repo text, num int, upd text, primary key(repo, num));
 create table if not exists cm(id text primary key, t int);
+create table if not exists watcher_outbox(id text primary key, repo text not null, num int not null, author text not null, body text not null, state text not null check(state in ('pending','uncertain','sent','cancelled')), created int not null, updated int not null);
+create index if not exists watcher_outbox_pending on watcher_outbox(state,updated);
+create index if not exists watcher_outbox_pr on watcher_outbox(repo,num,created);
 create table if not exists cost(id integer primary key, t int, day text, job int, repo text default '', w text, md text, sub int default 0, tin int default 0, tcw int default 0, tcr int default 0, tout int default 0, usd real);
 create index if not exists cost_day on cost(day);
 create index if not exists cost_job on cost(job);
@@ -33,7 +36,7 @@ create index if not exists fix_attempts_started on fix_attempts(started);
 create index if not exists fix_attempts_job on fix_attempts(job, attempt);
 ";
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 // Version 0 includes legacy installations with any subset of these columns.
 // Inspect the schema rather than swallowing every ALTER TABLE error.
@@ -505,6 +508,68 @@ impl Db {
         Ok(())
     }
 
+    /// Store the authorized reply within the same transaction as its source
+    /// acknowledgements. Reserve the existing 24-hour per-PR reply budget.
+    fn queue_watcher_reply(
+        tx:&rusqlite::Transaction<'_>,repo:&str,number:i64,ids:&[String],reply:&Value
+    )->rusqlite::Result<()> {
+        if reply.is_null(){return Ok(());}
+        let author=reply["author"].as_str().filter(|s|!s.trim().is_empty()).ok_or(rusqlite::Error::InvalidQuery)?;
+        let body=reply["body"].as_str().filter(|s|!s.trim().is_empty() && s.chars().count()<=1500).ok_or(rusqlite::Error::InvalidQuery)?;
+        if ids.is_empty(){return Err(rusqlite::Error::InvalidQuery);}
+        let mut source=ids.to_vec();
+        source.sort();
+        source.dedup();
+        let key=hex::encode(<sha2::Sha256 as sha2::Digest>::digest(json!([repo,number,source]).to_string().as_bytes()));
+        let marker=format!("<!-- apollo-office-reply:{key} -->");
+        if body.contains("apollo-office-reply:"){return Err(rusqlite::Error::InvalidQuery);}
+        let body=format!("{body}\n\n{marker}");
+        let at=now();
+        let open:bool=tx.query_row("select exists(select 1 from prs where repo=? and num=? and st='open')",rusqlite::params![repo,number],|r|r.get(0))?;
+        if !open{return Err(rusqlite::Error::InvalidQuery);}
+        let previous:Option<i64>=tx.query_row("select max(created) from watcher_outbox where repo=? and num=? and state<>'cancelled'",rusqlite::params![repo,number],|r|r.get(0))?;
+        let legacy:Option<i64>=tx.query_row("select max(case when json_valid(v) then cast(v as integer) end) from kv where k=?", [format!("wr:{repo}#{number}")],|r|r.get(0))?;
+        if previous.into_iter().chain(legacy).any(|t|at.saturating_sub(t)<86_400_000){return Ok(());}
+        tx.execute("insert or ignore into watcher_outbox(id,repo,num,author,body,state,created,updated) values(?,?,?,?,?,'pending',?,?)",rusqlite::params![key,repo,number,author,body,at,at])?;
+        Ok(())
+    }
+
+    pub fn ack_pr_comments_with_reply(&self,repo:&str,number:i64,updated:&str,ids:&[String],reply:&Value)->rusqlite::Result<()>{
+        let mut c=self.0.lock().unwrap();
+        let tx=c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        // Do not create an outbound action for a replayed or partially consumed batch.
+        let mut consumed=false;
+        for id in ids{
+            let seen:bool=tx.query_row("select exists(select 1 from cm where id=? or id=?)",rusqlite::params![format!("{repo}:{id}"),id],|r|r.get(0))?;
+            consumed|=seen;
+        }
+        if consumed && !reply.is_null(){return Err(rusqlite::Error::InvalidQuery);}
+        Self::queue_watcher_reply(&tx,repo,number,ids,reply)?;
+        Self::ack_comments_in_tx(&tx,repo,number,updated,ids)?;
+        tx.commit()?;
+        crate::app::chg();
+        Ok(())
+    }
+
+    /// Persist the uncertain state BEFORE the external POST. A crash or
+    /// ambiguous response must never automatically issue a second POST.
+    pub fn claim_watcher_reply(&self,id:&str,author:&str)->rusqlite::Result<bool>{
+        let c=self.0.lock().unwrap();
+        let changed=c.execute("update watcher_outbox set state='uncertain',updated=? where id=? and author=? and state='pending'",rusqlite::params![now(),id,author])?;
+        Ok(changed==1)
+    }
+
+    pub fn finish_watcher_reply(&self,id:&str,state:&str)->rusqlite::Result<bool>{
+        let c=self.0.lock().unwrap();
+        let changed=match state{
+            "sent"=>c.execute("update watcher_outbox set state='sent',updated=? where id=? and state='uncertain'",rusqlite::params![now(),id])?,
+            "cancelled"=>c.execute("update watcher_outbox set state='cancelled',updated=? where id=? and state='pending'",rusqlite::params![now(),id])?,
+            _=>return Err(rusqlite::Error::InvalidQuery)
+        };
+        crate::app::chg();
+        Ok(changed==1)
+    }
+
     /// Atomically acknowledge a successfully processed comment batch and its PR cursor.
     pub fn ack_pr_comments(
         &self,
@@ -567,6 +632,7 @@ impl Db {
         let t = now();
         tx.execute("insert into jobs(repo,num,kind,title,url,st,why,d,pr,prio,t0,t1) values(?,?,'review',?,?,'ready',?,?,?,-1.0,?,?)",
             rusqlite::params![repo, number, title, url, change, json!(data).to_string(), number, t, t])?;
+        Self::queue_watcher_reply(&tx,repo,number,ids,&request["reply"])?;
         Self::ack_comments_in_tx(&tx, repo, number, updated, ids)?;
         tx.commit()?;
         crate::app::chg();
@@ -1122,5 +1188,45 @@ mod late_followup_tests {
             .queue_followup_and_ack("o/r", 2, "t3", &["i3".into()], &request)
             .is_err());
         assert!(!db.comment_acknowledged("o/r", "i3").unwrap());
+    }
+}
+
+#[cfg(test)]
+mod watcher_outbox_tests {
+    use super::*;
+    #[test]
+    fn reply_is_atomic_with_review_and_never_claimed_twice(){
+        let db=Db::mem();
+        db.run("insert into prs(repo,num,st,d) values('o/r',1,'open','{}')",vec![]);
+        let req=json!({"title":"Fix","url":"https://example.test","change":"Correct bug","data":{},"reply":{"author":"owner","body":"Acknowledged"}});
+        assert!(db.queue_review_and_ack("o/r",2,"t",&["r1".into()],&req).is_err());
+        assert_eq!(db.n("select count(*) from watcher_outbox",vec![]),0);
+        assert!(db.queue_review_and_ack("o/r",1,"t",&["r1".into()],&req).unwrap());
+        let row=db.one("select * from watcher_outbox",vec![]).unwrap();
+        let id=row["id"].as_str().unwrap();
+        assert!(row["body"].as_str().unwrap().contains("apollo-office-reply:"));
+        assert!(!db.claim_watcher_reply(id,"other").unwrap());
+        assert!(db.claim_watcher_reply(id,"owner").unwrap());
+        assert!(!db.claim_watcher_reply(id,"owner").unwrap());
+        assert!(!db.finish_watcher_reply(id,"cancelled").unwrap());
+        assert!(db.finish_watcher_reply(id,"sent").unwrap());
+        assert!(!db.claim_watcher_reply(id,"owner").unwrap());
+        db.run("update jobs set st='done'",vec![]);
+        assert!(db.queue_review_and_ack("o/r",1,"next",&["r2".into()],&req).unwrap());
+        assert_eq!(db.n("select count(*) from watcher_outbox",vec![]),1);
+    }
+
+    #[test]
+    fn failed_ack_rolls_back_reply_and_replay_does_not_queue(){
+        let db=Db::mem();
+        db.run("insert into prs(repo,num,st,d) values('o/r',1,'open','bad json')",vec![]);
+        let reply=json!({"author":"owner","body":"Thanks"});
+        assert!(db.ack_pr_comments_with_reply("o/r",1,"t",&["r1".into()],&reply).is_err());
+        assert_eq!(db.n("select count(*) from watcher_outbox",vec![]),0);
+        assert!(!db.comment_acknowledged("o/r","r1").unwrap());
+        db.run("update prs set d='{}'",vec![]);
+        db.ack_pr_comments_with_reply("o/r",1,"t",&["r1".into()],&reply).unwrap();
+        assert!(db.ack_pr_comments_with_reply("o/r",1,"t",&["r1".into()],&reply).is_err());
+        assert_eq!(db.n("select count(*) from watcher_outbox",vec![]),1);
     }
 }

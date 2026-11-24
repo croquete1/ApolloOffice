@@ -1552,6 +1552,7 @@ async fn watch_pr(a:&Ax,p:Value,me:&str,
         }
         let received_ids: Vec<String> = nw.iter().filter_map(|c| c["id"].as_str().map(String::from)).collect();
         let mut batch_acked = false;
+        let mut outbound=Value::Null;
         if first && !nw.is_empty() {
             let lc = ghj(&["pr", "view", &n.to_string(), "-R", &r, "--json", "commits", "--jq", ".commits[-1].committedDate"], 60).await.map_err(X::E)?;
             nw = pending_checked(nw,lc.as_str().unwrap_or(""))?;
@@ -1581,10 +1582,16 @@ async fn watch_pr(a:&Ax,p:Value,me:&str,
                 }
                 let by = okc.iter().filter_map(|c| c["by"].as_str()).collect::<Vec<_>>().join(", ");
                 let act = js["act"].as_bool().unwrap_or(false);
+                if ma {
+                    let reply=js["reply"].as_str().unwrap_or("").trim();
+                    if !reply.is_empty(){
+                        outbound=json!({"author":me,"body":crate::sh::head(reply,1500)});
+                    }
+                }
                 if act && ma {
                     let ch=js["change"].as_str().filter(|s|!s.trim().is_empty()).ok_or_else(||X::E("missing requested change".into()))?.to_string();
                     let data = json!({"change": ch, "comment": crate::sh::head(&mc.iter().map(|c| format!("{}: {}", c["by"].as_str().unwrap_or(""), c["t"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("\n\n"), 6000), "branch": hrn, "head": hd, "test_cmd": p["d"]["test_cmd"]});
-                    let request = json!({"title":v["title"],"url":v["url"],"change":ch,"data":data});
+                    let request = json!({"title":v["title"],"url":v["url"],"change":ch,"data":data,"reply":outbound});
                     if !a.db.queue_review_and_ack(&r, n, &up, &received_ids, &request).map_err(|e| X::E(e.to_string()))? {
                         a.say("watcher", &format!("{tag}: new review deferred until active review finishes"), None);
                         return Ok(());
@@ -1597,25 +1604,72 @@ async fn watch_pr(a:&Ax,p:Value,me:&str,
                     a.say("watcher", &format!("{tag}: {by} commented{}", if act && !ma { " (not a maintainer, not applied)" } else { "" }), None);
                     a.note(&format!("Comment on {tag}"), &format!("{by}: {}\n\nDraft reply:\n{}\n{}", crate::sh::head(okc.last().and_then(|c| c["t"].as_str()).unwrap_or(""), 600), js["draft"].as_str().unwrap_or("-"), v["url"].as_str().unwrap_or("")), 3);
                 }
-                let rp = js["reply"].as_str().unwrap_or("").trim().to_string();
-                let wk = format!("wr:{tag}");
-                if ma && !rp.is_empty() && a.db.kg(&wk).as_i64().map(|t| now() - t > 86_400_000).unwrap_or(true) {
-                    match gh(&["pr", "comment", &n.to_string(), "-R", &r, "--body", &crate::sh::head(&rp, 1500)], 60).await {
-                        Ok(_) => {
-                            a.db.ks(&wk, &json!(now()));
-                            a.say("watcher", &format!("{tag}: answered {by}"), None);
-                        }
-                        Err(e) => a.say("watcher", &format!("{tag}: reply failed: {e}"), None),
-                    }
-                }
+
             }
         }
         // Advance the comment cursor only after successful analysis and queue persistence.
         if !batch_acked {
-            a.db.ack_pr_comments(&r, n, &up, &received_ids).map_err(|e| X::E(e.to_string()))?;
+            a.db.ack_pr_comments_with_reply(&r,n,&up,&received_ids,&outbound).map_err(|e|X::E(e.to_string()))?;
         }
 
     a.db.ks(&format!("ws:{tag}"),&json!(now()));
+    Ok(())
+}
+
+fn reply_confirmed(rows:&[Value],author:&str,body:&str)->bool{
+    rows.iter().any(|row|row["user"]["login"].as_str()==Some(author) && row["body"].as_str()==Some(body))
+}
+
+async fn deliver_watcher_outbox(a:&Ax,me:&str)->R<()>{
+    // Pending sends first, then ambiguous sends. No uncertain row can be claimed again.
+    let rows=a.db.try_all("select * from watcher_outbox where state='pending' or (state='uncertain' and updated<=?) order by case state when 'pending' then 0 else 1 end,updated,id limit 20",pa![now()-600_000]).map_err(|e|X::E(e.to_string()))?;
+    for row in rows {
+        if a.hold("watcher"){break;}
+        let (Some(id),Some(repo),Some(number),Some(author),Some(body))=(row["id"].as_str(),row["repo"].as_str(),row["num"].as_i64(),row["author"].as_str(),row["body"].as_str()) else {continue;};
+        let tag=format!("{repo}#{number}");
+        if author!=me {
+            a.say("watcher",&format!("{tag}: pending reply belongs to a different GitHub identity"),None);
+            continue;
+        }
+        if row["state"]=="uncertain"{
+            // Positive confirmation only: absence is not evidence that a POST failed.
+            if let Ok(comments)=apip_unique(&format!("repos/{repo}/issues/{number}/comments?per_page=100")).await{
+                if reply_confirmed(&comments,author,body){
+                    a.db.finish_watcher_reply(id,"sent").map_err(|e|X::E(e.to_string()))?;
+                    a.say("watcher",&format!("{tag}: previously uncertain reply confirmed"),None);
+                }
+            }
+            // Rotate ambiguous rows rather than starve later rows.
+            a.db.run("update watcher_outbox set updated=? where id=? and state='uncertain'",pa![now(),id.to_string()]);
+            continue;
+        }
+        if now().saturating_sub(row["created"].as_i64().unwrap_or(0))>=86_400_000{
+            a.db.finish_watcher_reply(id,"cancelled").map_err(|e|X::E(e.to_string()))?;
+            a.say("watcher",&format!("{tag}: unsent reply expired; manual review required"),None);
+            continue;
+        }
+        // Recheck the remote state before publishing previously queued content.
+        let Ok(pr)=ghj(&["pr","view",&number.to_string(),"-R",repo,"--json","state"],45).await else{continue;};
+        match pr["state"].as_str(){
+            Some("OPEN")=>{},
+            Some("MERGED"|"CLOSED")=>{
+                a.db.finish_watcher_reply(id,"cancelled").map_err(|e|X::E(e.to_string()))?;
+                a.say("watcher",&format!("{tag}: unsent reply cancelled because PR is no longer open"),None);
+                continue;
+            },
+            _=>continue
+        }
+        if a.hold("watcher"){break;}
+        if !a.db.claim_watcher_reply(id,me).map_err(|e|X::E(e.to_string()))?{continue;}
+        match gh(&["pr","comment",&number.to_string(),"-R",repo,"--body",body],60).await{
+            Ok(_)=>{
+                a.db.finish_watcher_reply(id,"sent").map_err(|e|X::E(e.to_string()))?;
+                a.db.ks(&format!("wr:{tag}"),&json!(now()));
+                a.say("watcher",&format!("{tag}: queued reply delivered"),None);
+            },
+            Err(_)=>a.say("watcher",&format!("{tag}: reply delivery uncertain; automatic resend disabled"),None)
+        }
+    }
     Ok(())
 }
 
@@ -1633,6 +1687,9 @@ async fn watch1(a: &Ax) -> R<()> {
         if let Err(error)=watch_pr(a,p,&me,&mut lu,&mut default_branches).await{
             a.say("watcher",&format!("{tag}: processing deferred: {}",crate::sh::head(&errm(&error),200)),None);
         }
+    }
+    if let Err(error)=deliver_watcher_outbox(a,&me).await{
+        a.say("watcher",&format!("outbox: {}",errm(&error)),None);
     }
     a.st("watcher","idle",None,"");
     Ok(())
@@ -1691,6 +1748,15 @@ mod t {
         assert_eq!(v.len(), 1);
         assert_eq!(v[0]["at"], "2026-10-19T10:00:00Z");
         assert_eq!(pending(vec![c("2026-10-18T10:00:00Z")], "").len(), 1);
+    }
+
+    #[test]
+    fn uncertain_reply_requires_exact_body_and_author_confirmation(){
+        let body="reply\n\n<!-- apollo-office-reply:abc -->";
+        assert!(reply_confirmed(&[json!({"user":{"login":"owner"},"body":body})],"owner",body));
+        assert!(!reply_confirmed(&[json!({"user":{"login":"other"},"body":body})],"owner",body));
+        assert!(!reply_confirmed(&[json!({"user":{"login":"owner"},"body":"different"})],"owner",body));
+        assert!(!reply_confirmed(&[],"owner",body));
     }
 
     #[test]
