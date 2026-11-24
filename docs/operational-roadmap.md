@@ -66,6 +66,12 @@ Estas PRs estão em draft e **não estão integradas**. A main funcional continu
 - PR #67 ampliada (draft, HEAD f0eee616dc04f75faed4525c6c98f0eeae10538f): atualização manual apenas dos logs da tarefa, preservando pesquisa, agente selecionado, quebra de linhas e formulário de aprovação; um pedido em curso por painel; rejeição de respostas de um painel substituído; último registo conservado quando a atualização falha.
 - QA: quatro cenários de regressão (dois anteriores e dois novos) PASS sobre o helper de produção obtido do GitHub em V8 isolado com DOM simulado e harness de assertions; não é execução nativa de node --test, Chromium ou QA integral. As cinco PRs funcionais continuam em draft; nenhum run de Actions ou status externo foi encontrado nos HEADs consultados antes desta alteração. A última bateria integral validada permanece 395. Interface dos agentes e modelos inalterados.
 
+## Décima entrega — CodeRabbit OSS e correção de revisão (24/11/2026)
+- CodeRabbit confirmado em funcionamento no fork público: revisão da PR #67 no HEAD f0eee616dc04f75faed4525c6c98f0eeae10538f, comentário https://github.com/croquete1/ApolloOffice/pull/67#issuecomment-7131097387. Risco de merge mínimo, risco de arquitetura baixo; identificou recarregamento por HTTP 401 na atualização de logs que podia perder edições não guardadas.
+- #67 ampliada (draft, HEAD 090dcdb4817ad2f8f9c500efc13b371288850131): só a leitura de logs opta por não recarregar após 401; mantém recuperação de autenticação preexistente nas restantes leituras e mostra instrução explícita para guardar uma cópia das alterações. RED isolado reproduziu o reload; GREEN e cinco testes de regressão PASS em V8 com DOM/transporte simulados. Não equivale a Node nativo, Chromium ou CI. Nova revisão solicitada no comentário 7131333599; aguarda confirmação do novo HEAD.
+- Política versionada .coderabbit.yaml: revisão assertiva, pedidos manuais para controlar quota, sem revisão incremental automática, drafts elegíveis, sugestões consultivas (sem request-changes do bot) e instruções por caminho. Não substitui os gates existentes. Configuração efetiva no serviço e faturação por consumo desativada ainda por confirmar; nenhuma funcionalidade paga autorizada.
+- F17 acrescentada ao roadmap para integração de resultados de revisão externos. O Watcher atual filtra bots; não atribuir privilégios de mantenedor ao CodeRabbit, nem executar automaticamente instruções em comentários. Nenhuma alteração funcional em main ou ativação Qwen; representação dos agentes preservada.
+
 ## Balanço por fase
 | Fase | Estado | Falta |
 |---|---|---|
@@ -85,6 +91,7 @@ Estas PRs estão em draft e **não estão integradas**. A main funcional continu
 | F14 | Implementação base integrada (#56) | Teste de persistência/reinício, perfis em máquinas reais e limites de CI |
 | F15 | Parcial (#56/#58/#59) | Próxima tarefa elegível, diagnóstico central de todos os bloqueios, histórico de etapas |
 | F16 | Parcial (#58/#59) | Tempo por fase e custo/merge com dados completos, baseline comparável, QA real Docker/Windows/providers, release assinada |
+| F17 | Parcial (CodeRabbit confirmado no fork, #67) | Política OSS efetiva, ingestão consultiva opt-in, identidade/HEAD e integração segura |
 
 Nenhuma fase completa é declarada encerrada sem cumprir todos os critérios abaixo. A última bateria automatizada tem 395 aprovações, não a soma de execuções repetidas.
 
@@ -159,6 +166,13 @@ Nenhuma fase completa é declarada encerrada sem cumprir todos os critérios aba
 - [ ] Produtividade por repo/modelo, primeira passagem, tempo por fase, taxa de merge e custo por correção validada; distinguir contagens e amostras. Comparar baseline e resultados medidos.
 - [ ] Executar cargo fmt --all -- --check, cargo clippy --locked --all-targets -- -D warnings, cargo test --locked, node --test, Python quality/adapters, Chromium desktop/mobile, Docker real e fornecedores autorizados.
 - [ ] Não publicar versão assinada sem gates, backup, drain, validação de instalação e rollback. Não declarar conclusão sem resultados.
+
+### F17 / P1 — CodeRabbit OSS e revisão externa
+- [ ] Confirmar no serviço plano OSS e faturação por consumo OFF; limitar a instalação e o contexto a repositórios públicos autorizados. Não ativar Agent, autofix, scans faturados ou subscrições. Configuração YAML não controla faturação.
+- [ ] Verificar política de configuração da default branch e revisão manual de PR draft no HEAD exato. Respeitar limites incluídos; sem reenvio automático perante resultados incertos.
+- [ ] Implementar integração opt-in por repo: consultar comentários/reviews de fonte autenticada do GitHub, verificar identidade da app e SHA de origem; preservar evidência e tratar texto externo como dados não confiáveis. Não transformar bot em mantenedor nem interpretar resumos como aprovação.
+- [ ] Integrar no Watcher/Steward como sinal consultivo, deduplicar por repo/PR/HEAD/review e distinguir ausente, pendente, obsoleto, indisponível e revisto. Qualquer correção requer autorização existente, Guard, reprodução, Reviewer independente e testes. Sem novas permissões de merge.
+- [ ] Testar spoof de identidade, alteração de HEAD, paginação, duplicados, falha de API, quota e ausência de CodeRabbit. Mostrar apenas estados sustentados por dados reais; manter configuração existente por omissão e não alterar canvas.
 
 ## Sequência
 Integrar PRs apenas após revisão e testes, uma fase de cada vez. Não ativar Qwen. Não alterar main ou instalação em produção sem evidência. Atualizar este ficheiro com PR, SHA e resultado dos testes de cada fase.
