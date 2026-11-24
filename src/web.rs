@@ -961,7 +961,10 @@ fn import(a: &Ax, b: &Value) -> Result<String, String> {
             // must be enabled explicitly on each installation after importing a backup.
             if matches!(
                 *k,
-                "coderabbit_free_confirmed" | "coderabbit_review" | "coderabbit_repair" | "steward_close"
+                "coderabbit_free_confirmed"
+                    | "coderabbit_review"
+                    | "coderabbit_repair"
+                    | "steward_close"
             ) {
                 continue;
             }
@@ -2621,21 +2624,11 @@ mod t {
     fn repository_language_and_steward_close_are_saved() {
         let db = crate::db::Db::mem();
         db.run("insert into rp(full) values('o/r')", pa![]);
-        save_repo_settings(
-            &db,
-            "o/r",
-            &json!({"lang":"pt-PT","steward_close":true}),
-        )
-        .unwrap();
+        save_repo_settings(&db, "o/r", &json!({"lang":"pt-PT","steward_close":true})).unwrap();
         let state = db.one("select * from rp where full='o/r'", pa![]).unwrap();
         assert_eq!(state["lang"], "pt-PT");
         assert_eq!(state["steward_close"], 1);
-        save_repo_settings(
-            &db,
-            "o/r",
-            &json!({"lang":"invalid","steward_close":false}),
-        )
-        .unwrap();
+        save_repo_settings(&db, "o/r", &json!({"lang":"invalid","steward_close":false})).unwrap();
         let state = db.one("select * from rp where full='o/r'", pa![]).unwrap();
         assert_eq!(state["lang"], "en");
         assert_eq!(state["steward_close"], 0);
