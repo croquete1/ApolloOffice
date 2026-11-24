@@ -198,17 +198,16 @@ mod issue_listing_tests {
 
     #[test]
     fn overlap_inventory_checks_counts_duplicates_and_renames() {
-        let renamed = json!({"filename":"src/new.rs","previous_filename":"src/old.rs","status":"renamed"});
+        let renamed =
+            json!({"filename":"src/new.rs","previous_filename":"src/old.rs","status":"renamed"});
         let paths = overlap_paths(vec![renamed.clone()], 1).unwrap();
         assert_eq!(paths.len(), 2);
         assert_eq!(paths[1]["path"], "src/old.rs");
         assert!(overlap_paths(vec![renamed.clone()], 2).is_err());
         assert!(overlap_paths(vec![renamed.clone(), renamed], 2).is_err());
-        assert!(overlap_paths(
-            vec![json!({"filename":"src/new.rs","status":"renamed"})],
-            1
-        )
-        .is_err());
+        assert!(
+            overlap_paths(vec![json!({"filename":"src/new.rs","status":"renamed"})], 1).is_err()
+        );
     }
 
     #[test]
@@ -340,10 +339,7 @@ fn overlap_paths(rows: Vec<Value>, expected: u64) -> Result<Vec<Value>, String> 
             paths.insert(previous.to_string());
         }
     }
-    Ok(paths
-        .into_iter()
-        .map(|path| json!({"path":path}))
-        .collect())
+    Ok(paths.into_iter().map(|path| json!({"path":path})).collect())
 }
 
 pub async fn twins(_a: &App, r: &str, w: &str) -> Result<(Vec<Value>, Vec<Value>), String> {
