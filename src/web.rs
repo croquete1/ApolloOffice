@@ -1989,6 +1989,9 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                 Err(error) if error == crate::coderabbit::RATE_LIMITED => {
                     js(json!({"state":"rate_limited","head":head}))
                 }
+                Err(error) if error == crate::coderabbit::OBSERVATION_BUSY => {
+                    js(json!({"state":"busy","head":head}))
+                }
                 Err(_) => js(json!({"state":"unavailable","head":head})),
             }
         }
@@ -2177,6 +2180,8 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                         "prs",
                         "cost",
                         "fix_attempts",
+                        "coderabbit_requests",
+                        "coderabbit_findings",
                         "tok",
                         "seen",
                         "cm",
