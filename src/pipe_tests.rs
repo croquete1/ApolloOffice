@@ -680,6 +680,14 @@ mod t {
         assert!(a.act.lock().unwrap().is_empty());
         assert!(a.lk.lock().unwrap().is_empty());
         a.lv.lock().unwrap().o.man = false;
+        for role in ["repro", "fixer", "submit"] {
+            a.lv.lock().unwrap().w.get_mut(role).unwrap().hold = true;
+            assert!(!admit(&a, "o/r", "worker1", id));
+            a.lv.lock().unwrap().w.get_mut(role).unwrap().hold = false;
+        }
+        a.lv.lock().unwrap().w.get_mut("hunter").unwrap().hold = true;
+        assert!(!mk_hunt(&a));
+        a.lv.lock().unwrap().w.get_mut("hunter").unwrap().hold = false;
         let reservation = IdleCacheGuard::claim(&a, "worker1").unwrap();
         assert!(IdleCacheGuard::claim(&a, "worker1").is_none());
         assert!(!admit(&a, "o/r", "worker1", id));
