@@ -55,12 +55,21 @@ pub async fn meta(a: &App, r: &str) -> Result<Value, String> {
 }
 
 /// Fetch the complete open issue listing, excluding pull requests returned by REST.
+/// A second inventory detects changes that could otherwise remove a live issue.
 pub async fn open_issues(repo: &str) -> Result<Vec<Value>, String> {
-    let rows = apip(&format!(
-        "repos/{repo}/issues?state=open&sort=created&direction=asc&per_page=100"
-    ))
-    .await?;
-    normalize_open_issues(rows)
+    let endpoint = format!("repos/{repo}/issues?state=open&sort=created&direction=asc&per_page=100");
+    reconcile_open_issues(apip(&endpoint).await?, apip(&endpoint).await?)
+}
+
+fn reconcile_open_issues(before: Vec<Value>, after: Vec<Value>) -> Result<Vec<Value>, String> {
+    let mut before = normalize_open_issues(before)?;
+    let mut after = normalize_open_issues(after)?;
+    before.sort_by_key(|row| row["number"].as_i64().unwrap_or(0));
+    after.sort_by_key(|row| row["number"].as_i64().unwrap_or(0));
+    if before != after {
+        return Err("Open issue inventory changed during scan; retry before reconciliation".into());
+    }
+    Ok(after)
 }
 
 /// Complete lightweight inventory for Hunter. Do not use capped CLI lists.
@@ -149,6 +158,18 @@ mod issue_listing_tests {
         json!({"number":number,"state":"open","title":"Bug","html_url":format!("https://github.com/o/r/issues/{number}"),
             "created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z",
             "labels":[],"assignees":[],"user":{"login":"reporter"}})
+    }
+
+    #[test]
+    fn issue_reconciliation_detects_missing_and_changed_rows() {
+        let first = issue(1);
+        let second = issue(2);
+        let before = vec![first.clone(), second.clone()];
+        assert!(reconcile_open_issues(before.clone(), vec![second.clone(), first.clone()]).is_ok());
+        assert!(reconcile_open_issues(before.clone(), vec![first.clone()]).is_err());
+        let mut edited = second;
+        edited["title"] = json!("Changed during scan");
+        assert!(reconcile_open_issues(before, vec![first, edited]).is_err());
     }
 
     #[test]
