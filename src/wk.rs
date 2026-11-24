@@ -1499,6 +1499,23 @@ async fn recheck_review_evidence(
     recheck_review_snapshot(repo, number, original).await
 }
 
+// Guard's existing per-input limit is 3500 bytes. Never authorize a human
+// comment based on only its prefix, or acknowledge its deferred receipt.
+fn defer_oversized_comments(rows: &mut Vec<Value>) -> std::collections::BTreeSet<String> {
+    let mut deferred = std::collections::BTreeSet::new();
+    rows.retain(|row| {
+        if row["t"].as_str().is_none_or(|text| text.len() > 3500) {
+            if let Some(id) = row["id"].as_str() {
+                deferred.insert(id.to_string());
+            }
+            false
+        } else {
+            true
+        }
+    });
+    deferred
+}
+
 async fn watch_pr(a:&Ax,p:Value,me:&str,
     lu:&mut std::collections::HashMap<String,std::collections::HashMap<i64,String>>,
     default_branches:&mut std::collections::HashMap<String,String>)->R<()>{
@@ -1638,13 +1655,18 @@ async fn watch_pr(a:&Ax,p:Value,me:&str,
             let lc = ghj(&["pr", "view", &n.to_string(), "-R", &r, "--json", "commits", "--jq", ".commits[-1].committedDate"], 60).await.map_err(X::E)?;
             nw = pending_checked(nw,lc.as_str().unwrap_or(""))?;
         }
-        if !nw.is_empty() {
-            // Guard's existing per-input limit is 3500 bytes. Never authorize
-            // a human comment from a prefix while forwarding a longer body.
-            if nw.iter().any(|c| c["t"].as_str().is_none_or(|t| t.len() > 3500)) {
-                a.say("watcher", &format!("{tag}: comment exceeds complete Guard input limit; manual review required"), None);
-                return Err(X::E("Oversized review comment; receipts remain pending".into()));
+        // Oversized comments remain in the durable inbox without acknowledgement.
+        // Other comments can be handled independently; the existing retry
+        // window stays active while any receipt remains pending.
+        let deferred = defer_oversized_comments(&mut nw);
+        let ack_ids: Vec<String> = received_ids.iter().filter(|id| !deferred.contains(id.as_str())).cloned().collect();
+        if !deferred.is_empty() {
+            a.say("watcher", &format!("{tag}: {} comment(s) exceed complete Guard input limit; manual review required", deferred.len()), None);
+            if nw.is_empty() && ack_ids.is_empty() {
+                return Ok(());
             }
+        }
+        if !nw.is_empty() {
             a.say("watcher", &format!("{tag}: {} new comment(s)", nw.len()), None);
             let g = guard(a, nw.iter().map(|c| (c["id"].as_str().unwrap_or("").to_string(), c["t"].as_str().unwrap_or("").to_string())).collect(), "watcher", None).await?;
             for c in nw.iter().filter(|c| g[c["id"].as_str().unwrap_or("")]["inj"].as_bool().unwrap_or(false)) {
@@ -1681,7 +1703,7 @@ async fn watch_pr(a:&Ax,p:Value,me:&str,
                     let data = json!({"change": ch, "comment": crate::sh::head(&mc.iter().map(|c| format!("{}: {}", c["by"].as_str().unwrap_or(""), c["t"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("\n\n"), 6000), "branch": hrn, "head": hd, "test_cmd": p["d"]["test_cmd"],"source_head":source_head});
                     recheck_review_evidence(&r,n,me,&v,&observed_comments,&cr).await?;
                     let request = json!({"title":v["title"],"url":v["url"],"change":ch,"data":data,"reply":outbound});
-                    if !a.db.queue_review_and_ack(&r, n, &up, &received_ids, &request).map_err(|e| X::E(e.to_string()))? {
+                    if !a.db.queue_review_and_ack(&r, n, &up, &ack_ids, &request).map_err(|e| X::E(e.to_string()))? {
                         a.say("watcher", &format!("{tag}: new review deferred until active review finishes"), None);
                         return Ok(());
                     }
@@ -1699,7 +1721,7 @@ async fn watch_pr(a:&Ax,p:Value,me:&str,
         // Advance the comment cursor only after successful analysis and queue persistence.
         if !batch_acked {
             recheck_review_evidence(&r,n,me,&v,&observed_comments,&cr).await?;
-            a.db.ack_pr_comments_with_reply(&r,n,&up,&source_head,&received_ids,&outbound).map_err(|e|X::E(e.to_string()))?;
+            a.db.ack_pr_comments_with_reply(&r,n,&up,&source_head,&ack_ids,&outbound).map_err(|e|X::E(e.to_string()))?;
         }
 
     a.db.ks(&format!("ws:{tag}"),&json!(now()));
@@ -1976,6 +1998,19 @@ mod pusher_pagination_tests {
 #[cfg(test)]
 mod watcher_evidence_inventory_tests {
     use super::*;
+
+    #[test]
+    fn oversized_receipts_are_deferred_without_blocking_other_comments() {
+        let mut rows = vec![
+            json!({"id":"r1","t":"a".repeat(3500)}),
+            json!({"id":"r2","t":"a".repeat(3501)}),
+            json!({"id":"r3","t":"é".repeat(1751)}),
+            json!({"id":"r4","t":"Valid request"}),
+        ];
+        let deferred = defer_oversized_comments(&mut rows);
+        assert_eq!(deferred.into_iter().collect::<Vec<_>>(), vec!["r2".to_string(),"r3".to_string()]);
+        assert_eq!(rows.iter().map(|row|row["id"].as_str().unwrap()).collect::<Vec<_>>(), vec!["r1","r4"]);
+    }
 
     #[test]
     fn inventory_rejects_edits_removals_duplicates_and_permission_changes() {
