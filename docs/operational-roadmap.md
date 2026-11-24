@@ -52,6 +52,11 @@ Estas PRs estão em draft e **não estão integradas**. A main funcional continu
 - QA desta entrega: seis cenários SQLite executados com Python PASS (rollback, repetição de chave, identidade incorreta, oito claims concorrentes com um vencedor, reabertura de DB e confirmação sem reenvio, cancelamento). Três novos testes Rust escritos, não executados. Não equivale a validação integral da implementação, da migração em Rust ou da API remota.
 - Pendentes: interface de resolução manual, inbox persistente completa, vinculação a HEAD remoto, validação real de entrega GitHub e testes de integração das cinco PRs funcionais #65–68 e #70. Nenhum merge funcional novo; última suite integral validada continua 395. Agentes e configuração dos modelos inalterados.
 
+## Sétima entrega — diagnóstico e resolução de entregas (24/11/2026)
+- PR #70 ampliada (draft, HEAD ab858f7f7f3c9ea371cb92b9353f4f8597a83908): inventário paginado da outbox com pendentes/incertas primeiro e contadores agregados; painel de proprietário acessível a partir de Health, conteúdo escapado, cancelamento explícito apenas antes do claim e verificação de entrega incerta mediante correspondência exata de autor e corpo nos comentários remotos. API autenticada existente com proteção de origem nos POST. Registos terminais só de leitura. Não permite reenviar automaticamente, cancelar envio já reclamado nem marcar uma entrega como confirmada sem evidência.
+- QA isolado desta entrega: 2 testes Node PASS (ações permitidas por estado e escaping; hashes Git do renderer e teste correspondem ao código publicado); 3 verificações SQLite PASS (ordenação/offset, cancelamento após claim impedido, contagem por estado). Um novo teste Rust escrito, não executado. API e interação browser integral ainda não validadas.
+- Limites: offset sobre inventário mutável pode mudar entre páginas; botão atualizar permite reconciliar a visualização. Entregas incertas sem correspondência continuam incertas; não há override nem novo envio. Inbox completa, vinculação a HEAD remoto, integração com restantes PRs e QA real continuam pendentes. Cinco PRs funcionais em draft, sem novos merges funcionais; última suite integral validada continua 395. Sem alterações à representação dos agentes nem aos modelos.
+
 ## Balanço por fase
 | Fase | Estado | Falta |
 |---|---|---|
