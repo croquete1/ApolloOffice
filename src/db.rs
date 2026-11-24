@@ -38,6 +38,10 @@ create index if not exists fix_attempts_job on fix_attempts(job, attempt);
 
 const SCHEMA_VERSION: i64 = 2;
 
+pub(crate) fn valid_git_sha(sha:&str)->bool{
+    sha.len()==40 && sha.bytes().all(|b|b.is_ascii_hexdigit())
+}
+
 // Version 0 includes legacy installations with any subset of these columns.
 // Inspect the schema rather than swallowing every ALTER TABLE error.
 const LEGACY_COLUMNS: &[(&str, &str, &str)] = &[
@@ -534,9 +538,19 @@ impl Db {
         Ok(())
     }
 
-    pub fn ack_pr_comments_with_reply(&self,repo:&str,number:i64,updated:&str,ids:&[String],reply:&Value)->rusqlite::Result<()>{
+    /// Check the exact observed open PR snapshot within the same transaction
+    /// as acknowledgement. A newer local observation invalidates old analysis.
+    fn review_snapshot_matches(tx:&rusqlite::Transaction<'_>,repo:&str,number:i64,updated:&str,head:&str)->rusqlite::Result<bool>{
+        if !valid_git_sha(head){return Err(rusqlite::Error::InvalidQuery);}
+        tx.query_row("select exists(select 1 from prs where repo=? and num=? and st='open' and upd=? and json_extract(d,'$.watcher_head')=?)",rusqlite::params![repo,number,updated,head],|r|r.get(0))
+    }
+
+    pub fn ack_pr_comments_with_reply(&self,repo:&str,number:i64,updated:&str,head:&str,ids:&[String],reply:&Value)->rusqlite::Result<()>{
         let mut c=self.0.lock().unwrap();
         let tx=c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if !Self::review_snapshot_matches(&tx,repo,number,updated,head)?{
+            return Err(rusqlite::Error::InvalidQuery);
+        }
         // Do not create an outbound action for a replayed or partially consumed batch.
         let mut consumed=false;
         for id in ids{
@@ -617,7 +631,8 @@ impl Db {
     ) -> rusqlite::Result<bool> {
         let mut c = self.0.lock().unwrap();
         let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let open:bool=tx.query_row("select exists(select 1 from prs where repo=? and num=? and st='open')",rusqlite::params![repo,number],|row|row.get(0))?;
+        let head=request["data"]["source_head"].as_str().ok_or(rusqlite::Error::InvalidQuery)?;
+        let open=Self::review_snapshot_matches(&tx,repo,number,updated,head)?;
         let unique=ids.iter().collect::<std::collections::HashSet<_>>();
         if !open || ids.is_empty() || unique.len()!=ids.len() || ids.iter().any(|id|id.trim().is_empty()){
             return Err(rusqlite::Error::InvalidQuery);
@@ -648,6 +663,7 @@ impl Db {
             .cloned()
             .ok_or(rusqlite::Error::InvalidQuery)?;
         data.insert("source_comments".into(),json!(ids));
+        data.insert("source_updated_at".into(),json!(updated));
         let t = now();
         tx.execute("insert into jobs(repo,num,kind,title,url,st,why,d,pr,prio,t0,t1) values(?,?,'review',?,?,'ready',?,?,?,-1.0,?,?)",
             rusqlite::params![repo, number, title, url, change, json!(data).to_string(), number, t, t])?;
@@ -962,20 +978,21 @@ mod comment_cursor_tests {
     fn review_admission_and_ack_share_one_transaction_and_defer_active_work() {
         let db = Db::mem();
         let ids = vec!["review-1".to_string()];
-        let request = json!({"title":"Fix","url":"https://github.com/a/b/pull/1","change":"Correct bug","data":{}});
+        let request = json!({"title":"Fix","url":"https://github.com/a/b/pull/1","change":"Correct bug","data":{"source_head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}});
         assert!(db
             .queue_review_and_ack("a/b", 1, "new", &ids, &request)
             .is_err());
         assert_eq!(db.n("select count(*) from jobs", vec![]), 0);
         db.run(
-            "insert into prs(repo,num,st,d) values(?,?,'open',?)",
-            crate::pa!["a/b".to_string(), 1_i64, "{}".to_string()],
+            "insert into prs(repo,num,st,upd,d) values(?,?,'open','new',?)",
+            crate::pa!["a/b".to_string(), 1_i64, json!({"watcher_head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}).to_string()],
         );
         assert!(db
             .queue_review_and_ack("a/b", 1, "new", &ids, &request)
             .unwrap());
         assert!(db.comment_acknowledged("a/b", "review-1").unwrap());
         let next = vec!["review-2".to_string()];
+        db.run("update prs set upd='later'",vec![]);
         assert!(!db
             .queue_review_and_ack("a/b", 1, "later", &next, &request)
             .unwrap());
@@ -994,8 +1011,8 @@ mod comment_cursor_tests {
     #[test]
     fn review_rejects_partial_replay_and_other_active_pr_operations() {
         let db=Db::mem();
-        db.run("insert into prs(repo,num,st,d) values('a/b',1,'open','{}')",vec![]);
-        let request=json!({"title":"Fix","url":"https://github.com/a/b/pull/1","change":"Correct bug","data":{}});
+        db.run("insert into prs(repo,num,st,upd,d) values('a/b',1,'open','next',?)",crate::pa![json!({"watcher_head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}).to_string()]);
+        let request=json!({"title":"Fix","url":"https://github.com/a/b/pull/1","change":"Correct bug","data":{"source_head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}});
         db.ack_pr_comments("a/b",1,"first",&["r1".into()]).unwrap();
         assert!(!db.queue_review_and_ack("a/b",1,"next",&["r1".into(),"r2".into()],&request).unwrap());
         assert!(!db.comment_acknowledged("a/b","r2").unwrap());
@@ -1216,8 +1233,8 @@ mod watcher_outbox_tests {
     #[test]
     fn reply_is_atomic_with_review_and_never_claimed_twice(){
         let db=Db::mem();
-        db.run("insert into prs(repo,num,st,d) values('o/r',1,'open','{}')",vec![]);
-        let req=json!({"title":"Fix","url":"https://example.test","change":"Correct bug","data":{},"reply":{"author":"owner","body":"Acknowledged"}});
+        db.run("insert into prs(repo,num,st,upd,d) values('o/r',1,'open','t',?)",crate::pa![json!({"watcher_head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}).to_string()]);
+        let req=json!({"title":"Fix","url":"https://example.test","change":"Correct bug","data":{"source_head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"reply":{"author":"owner","body":"Acknowledged"}});
         assert!(db.queue_review_and_ack("o/r",2,"t",&["r1".into()],&req).is_err());
         assert_eq!(db.n("select count(*) from watcher_outbox",vec![]),0);
         assert!(db.queue_review_and_ack("o/r",1,"t",&["r1".into()],&req).unwrap());
@@ -1231,8 +1248,24 @@ mod watcher_outbox_tests {
         assert!(db.finish_watcher_reply(id,"sent").unwrap());
         assert!(!db.claim_watcher_reply(id,"owner").unwrap());
         db.run("update jobs set st='done'",vec![]);
+        db.run("update prs set upd='next'",vec![]);
         assert!(db.queue_review_and_ack("o/r",1,"next",&["r2".into()],&req).unwrap());
         assert_eq!(db.n("select count(*) from watcher_outbox",vec![]),1);
+    }
+
+    #[test]
+    fn stale_snapshot_cannot_acknowledge_or_enqueue_review(){
+        let db=Db::mem();
+        let head="a".repeat(40);
+        let newer="b".repeat(40);
+        db.run("insert into prs(repo,num,st,upd,d) values('o/r',1,'open','new',?)",crate::pa![json!({"watcher_head":newer}).to_string()]);
+        let request=json!({"title":"Fix","url":"https://example.test","change":"Correct bug","data":{"source_head":head},"reply":{"author":"owner","body":"Acknowledged"}});
+        let ids=vec!["r1".into()];
+        assert!(db.queue_review_and_ack("o/r",1,"new",&ids,&request).is_err());
+        assert!(db.ack_pr_comments_with_reply("o/r",1,"new",&head,&ids,&request["reply"]).is_err());
+        assert!(!db.comment_acknowledged("o/r","r1").unwrap());
+        assert_eq!(db.n("select count(*) from jobs",vec![]),0);
+        assert_eq!(db.n("select count(*) from watcher_outbox",vec![]),0);
     }
 
     #[test]
@@ -1252,14 +1285,14 @@ mod watcher_outbox_tests {
     #[test]
     fn failed_ack_rolls_back_reply_and_replay_does_not_queue(){
         let db=Db::mem();
-        db.run("insert into prs(repo,num,st,d) values('o/r',1,'open','bad json')",vec![]);
+        db.run("insert into prs(repo,num,st,upd,d) values('o/r',1,'open','t','bad json')",vec![]);
         let reply=json!({"author":"owner","body":"Thanks"});
-        assert!(db.ack_pr_comments_with_reply("o/r",1,"t",&["r1".into()],&reply).is_err());
+        assert!(db.ack_pr_comments_with_reply("o/r",1,"t","aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",&["r1".into()],&reply).is_err());
         assert_eq!(db.n("select count(*) from watcher_outbox",vec![]),0);
         assert!(!db.comment_acknowledged("o/r","r1").unwrap());
-        db.run("update prs set d='{}'",vec![]);
-        db.ack_pr_comments_with_reply("o/r",1,"t",&["r1".into()],&reply).unwrap();
-        assert!(db.ack_pr_comments_with_reply("o/r",1,"t",&["r1".into()],&reply).is_err());
+        db.run("update prs set d=?",crate::pa![json!({"watcher_head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}).to_string()]);
+        db.ack_pr_comments_with_reply("o/r",1,"t","aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",&["r1".into()],&reply).unwrap();
+        assert!(db.ack_pr_comments_with_reply("o/r",1,"t","aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",&["r1".into()],&reply).is_err());
         assert_eq!(db.n("select count(*) from watcher_outbox",vec![]),1);
     }
 }

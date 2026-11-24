@@ -3,6 +3,23 @@ mod t {
     use super::*;
 
     #[test]
+    fn review_checkout_matches_bound_head_including_steward_and_legacy(){
+        let head="a".repeat(40);
+        let other="b".repeat(40);
+        let mut j=Job::of(json!({"kind":"review","d":{"source_head":head}}));
+        assert!(check_review_checkout(&j,&head).is_ok());
+        assert!(check_review_checkout(&j,&other).is_err());
+        j.d["steward_head"]=json!(other);
+        assert!(check_review_checkout(&j,&head).is_err());
+        j.d=json!({"steward_head":head});
+        assert!(check_review_checkout(&j,&head).is_ok());
+        j.d=json!({});
+        assert!(check_review_checkout(&j,&other).is_ok());
+        j.d=json!({"source_head":"invalid"});
+        assert!(check_review_checkout(&j,&other).is_err());
+    }
+
+    #[test]
     fn zero_repo_pr_limits_mean_unlimited() {
         assert!(!repo_limit_reached(178, 20, 0, 0));
         assert!(!repo_limit_reached(178, 20, 0, 25));

@@ -560,6 +560,28 @@ fn setup_transport_error(result: &Out) -> bool {
     result.c < 0 || crate::app::hostish(&result.e) || crate::app::netish(&result.e)
 }
 
+/// Legacy queued reviews without a bound SHA retain their previous behavior.
+    /// New Watcher/Steward reviews must keep their original analysed commit.
+fn review_bound_head(j:&Job)->R<Option<&str>>{
+    if j.kind!="review"{return Ok(None);}
+    let source=&j.d["source_head"];
+    let steward=&j.d["steward_head"];
+    if source.is_null() && steward.is_null(){return Ok(None);}
+    let head=source.as_str().or_else(||steward.as_str()).filter(|s|crate::db::valid_git_sha(s))
+        .ok_or_else(||X::Drop("review source HEAD is malformed; manual review required".into()))?;
+    if (!source.is_null() && source.as_str()!=Some(head)) || (!steward.is_null() && steward.as_str()!=Some(head)){
+        return Err(X::Drop("review source HEAD evidence disagrees; manual review required".into()));
+    }
+    Ok(Some(head))
+}
+
+fn check_review_checkout(j:&Job,actual:&str)->R<()>{
+    if review_bound_head(j)?.is_some_and(|head|head!=actual){
+        return Err(X::Drop("review source HEAD changed; original request retained in job history; manual review required".into()));
+    }
+    Ok(())
+}
+
 async fn prep(a: &Ax, j: &mut Job) -> R<()> {
     crate::net::need_once(a, &[&j.h(), "gh"]).await?;
     if j.d["rp"].as_bool().unwrap_or(false) {
@@ -738,7 +760,9 @@ async fn prep(a: &Ax, j: &mut Job) -> R<()> {
             1800,
         )
         .await?;
-        j.d["old"] = json!(ok(a, j, "git rev-parse HEAD", 60).await?);
+        let actual=ok(a,j,"git rev-parse HEAD",60).await?;
+        check_review_checkout(j,&actual)?;
+        j.d["old"]=json!(actual);
     }
     let selection = x(a, j, &format!("bash -c {} 2>&1", q(NODE_VERSION_SELECTION)), 360).await;
     if selection.c != 0 {
@@ -3380,6 +3404,8 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
     a.st("submit", "work", Some(j.id), "");
     a.flow("reviewer", "submit", &j.tag());
     crate::net::need_once(a,&["gh",&j.h()]).await?;
+    // The original bound SHA must also survive checkpoint/recovery paths.
+    check_review_checkout(j,&j.s("old"))?;
     let f = j.d["f"].clone();
     let ft = stored_pr_footer(j, fo(a, j));
     let tr = trs(j);

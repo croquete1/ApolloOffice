@@ -160,15 +160,17 @@ async fn enqueue(
         "head": repo,
         "test_cmd": test_cmd,
         "steward_review_id": rid,
-        "steward_head": head
+        "steward_head": head,
+        "source_head": head
     });
     // Única inserção atómica; impede corrida com o Watcher na fila ativa.
     let inserted = a.db.ch(
         "insert into jobs(repo,num,kind,title,url,st,why,d,pr,prio,t0,t1)
          select ?,?,'review',?,?,'ready',?,?,?,-1.0,?,?
          where not exists (
-           select 1 from jobs where repo=? and pr=? and kind='review'
-             and (st not in ('done','drop') or t0 >= ?)
+           select 1 from jobs where repo=? and pr=?
+             and ((kind in ('review','rebase','mergecheck') and st not in ('done','drop'))
+                  or (kind='review' and t0 >= ?))
          )",
         pa![
             repo.to_string(),

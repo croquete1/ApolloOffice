@@ -1441,6 +1441,20 @@ fn pending_checked(cs:Vec<Value>,last:&str)->R<Vec<Value>>{
     Ok(pending(cs,last))
 }
 
+fn same_review_snapshot(original:&Value,fresh:&Value)->bool{
+    original["state"]=="OPEN" && fresh["state"]=="OPEN"
+        && original["headRefOid"].as_str().is_some_and(crate::db::valid_git_sha)
+        && ["headRefOid","updatedAt","headRefName","headRepositoryOwner","headRepository","baseRefName","reviewDecision"].iter().all(|key|original[*key]==fresh[*key])
+}
+
+async fn recheck_review_snapshot(repo:&str,number:i64,original:&Value)->R<()>{
+    let fresh=ghj(&["pr","view",&number.to_string(),"-R",repo,"--json","state,headRefOid,updatedAt,headRefName,headRepositoryOwner,headRepository,baseRefName,reviewDecision"],60).await.map_err(X::E)?;
+    if !same_review_snapshot(original,&fresh){
+        return Err(X::E("PR changed during review analysis; comments remain pending".into()));
+    }
+    Ok(())
+}
+
 async fn watch_pr(a:&Ax,p:Value,me:&str,
     lu:&mut std::collections::HashMap<String,std::collections::HashMap<i64,String>>,
     default_branches:&mut std::collections::HashMap<String,String>)->R<()>{
@@ -1480,7 +1494,7 @@ async fn watch_pr(a:&Ax,p:Value,me:&str,
         let fields = if p["d"]["auto_merge"].as_bool() == Some(true) {
             "state,mergedAt,updatedAt,title,url,mergeable,headRefName,headRepositoryOwner,headRepository,baseRefName,reviewDecision,isDraft,headRefOid,statusCheckRollup"
         } else {
-            "state,mergedAt,updatedAt,title,url,mergeable,headRefName,headRepositoryOwner,headRepository,baseRefName,reviewDecision"
+            "state,mergedAt,updatedAt,title,url,mergeable,headRefName,headRepositoryOwner,headRepository,baseRefName,reviewDecision,headRefOid"
         };
         let v = match ghj(&["pr", "view", &n.to_string(), "-R", &r, "--json", fields], 60).await {
             Ok(v) => v,
@@ -1497,7 +1511,9 @@ async fn watch_pr(a:&Ax,p:Value,me:&str,
             Some("CLOSED") if v["mergedAt"].is_null()=> "closed",
             _=>return Err(X::E("invalid PR state or merge timestamp".into())),
         };
-        if a.db.ch("update prs set st=?,title=?,upd=?,merged=?,d=json_set(d,'$.base',?,'$.default_branch',?) where repo=? and num=? and st='open' and upd is ?",pa![st.to_string(),v["title"].as_str().unwrap_or("").to_string(),up.clone(),v["mergedAt"].as_str().map(String::from),base,default_branch.clone(),r.clone(),n,p["upd"].as_str().map(String::from)])!=1 {
+        let source_head=v["headRefOid"].as_str().filter(|s|crate::db::valid_git_sha(s)).unwrap_or("").to_string();
+        if st=="open" && source_head.is_empty(){return Err(X::E("open PR HEAD unavailable".into()));}
+        if a.db.ch("update prs set st=?,title=?,upd=?,merged=?,d=json_set(d,'$.base',?,'$.default_branch',?,'$.watcher_head',?) where repo=? and num=? and st='open' and upd is ?",pa![st.to_string(),v["title"].as_str().unwrap_or("").to_string(),up.clone(),v["mergedAt"].as_str().map(String::from),base,default_branch.clone(),source_head.clone(),r.clone(),n,p["upd"].as_str().map(String::from)])!=1 {
             return Err(X::E("could not persist PR metadata".into()));
         }
         let tag = format!("{r}#{n}");
@@ -1523,7 +1539,7 @@ async fn watch_pr(a:&Ax,p:Value,me:&str,
             a.say("watcher", &format!("{tag} has a merge conflict, sent to rebase"), None);
         }
         observe_auto_merge(a, &r, n, &v, &p["d"], me)?;
-        if p["d"]["comment_seen_at"].as_str() == Some(up.as_str()) && p["d"]["seen"].as_bool().unwrap_or(false) {
+        if p["d"]["comment_seen_at"].as_str() == Some(up.as_str()) && p["d"]["watcher_head"]==source_head && p["d"]["seen"].as_bool().unwrap_or(false) {
             a.db.ks(&format!("ws:{tag}"),&json!(now()));
             return Ok(());
         }
@@ -1568,8 +1584,9 @@ async fn watch_pr(a:&Ax,p:Value,me:&str,
                 let mc: Vec<&Value> = okc.iter().filter(|c| tr(c)).cloned().collect();
                 let ma = !mc.is_empty();
                 let src: &Vec<&Value> = if ma { &mc } else { &okc };
-                let pv = ghj(&["pr", "view", &n.to_string(), "-R", &r, "--json", "body,files"], 60).await.map_err(X::E)?;
-                if !pv["files"].is_array() {
+                let pv = ghj(&["pr", "view", &n.to_string(), "-R", &r, "--json", "body,files,headRefOid,updatedAt,changedFiles"], 60).await.map_err(X::E)?;
+                if pv["headRefOid"]!=source_head || pv["updatedAt"]!=up
+                    || !pv["files"].as_array().is_some_and(|files|pv["changedFiles"].as_u64()==Some(files.len() as u64) && files.iter().all(|f|f["path"].as_str().is_some_and(|p|!p.is_empty()))) {
                     return Err(X::E("PR file list is unavailable".into()));
                 }
                 let fl = pv["files"].as_array().map(|x| x.iter().filter_map(|f| f["path"].as_str()).collect::<Vec<_>>().join("\n")).unwrap_or_default();
@@ -1590,7 +1607,8 @@ async fn watch_pr(a:&Ax,p:Value,me:&str,
                 }
                 if act && ma {
                     let ch=js["change"].as_str().filter(|s|!s.trim().is_empty()).ok_or_else(||X::E("missing requested change".into()))?.to_string();
-                    let data = json!({"change": ch, "comment": crate::sh::head(&mc.iter().map(|c| format!("{}: {}", c["by"].as_str().unwrap_or(""), c["t"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("\n\n"), 6000), "branch": hrn, "head": hd, "test_cmd": p["d"]["test_cmd"]});
+                    let data = json!({"change": ch, "comment": crate::sh::head(&mc.iter().map(|c| format!("{}: {}", c["by"].as_str().unwrap_or(""), c["t"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("\n\n"), 6000), "branch": hrn, "head": hd, "test_cmd": p["d"]["test_cmd"],"source_head":source_head});
+                    recheck_review_snapshot(&r,n,&v).await?;
                     let request = json!({"title":v["title"],"url":v["url"],"change":ch,"data":data,"reply":outbound});
                     if !a.db.queue_review_and_ack(&r, n, &up, &received_ids, &request).map_err(|e| X::E(e.to_string()))? {
                         a.say("watcher", &format!("{tag}: new review deferred until active review finishes"), None);
@@ -1609,7 +1627,8 @@ async fn watch_pr(a:&Ax,p:Value,me:&str,
         }
         // Advance the comment cursor only after successful analysis and queue persistence.
         if !batch_acked {
-            a.db.ack_pr_comments_with_reply(&r,n,&up,&received_ids,&outbound).map_err(|e|X::E(e.to_string()))?;
+            recheck_review_snapshot(&r,n,&v).await?;
+            a.db.ack_pr_comments_with_reply(&r,n,&up,&source_head,&received_ids,&outbound).map_err(|e|X::E(e.to_string()))?;
         }
 
     a.db.ks(&format!("ws:{tag}"),&json!(now()));
@@ -1753,6 +1772,19 @@ mod t {
         assert_eq!(v.len(), 1);
         assert_eq!(v[0]["at"], "2026-10-19T10:00:00Z");
         assert_eq!(pending(vec![c("2026-10-18T10:00:00Z")], "").len(), 1);
+    }
+
+    #[test]
+    fn review_snapshot_requires_same_head_and_review_state(){
+        let original=json!({"state":"OPEN","headRefOid":"a".repeat(40),"updatedAt":"2026-11-24T11:00:00Z","headRefName":"fix","headRepositoryOwner":{"login":"owner"},"headRepository":{"name":"repo"},"baseRefName":"main","reviewDecision":"CHANGES_REQUESTED"});
+        assert!(same_review_snapshot(&original,&original));
+        for (key,value) in [("headRefOid",json!("b".repeat(40))),("state",json!("CLOSED")),("reviewDecision",json!("APPROVED")),("updatedAt",json!("later")),("baseRefName",json!("next"))]{
+            let mut changed=original.clone();
+            changed[key]=value;
+            assert!(!same_review_snapshot(&original,&changed));
+        }
+        let invalid=json!({"state":"OPEN","headRefOid":"invalid"});
+        assert!(!same_review_snapshot(&invalid,&invalid));
     }
 
     #[test]
