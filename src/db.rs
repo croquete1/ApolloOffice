@@ -47,9 +47,10 @@ create table if not exists coderabbit_requests(repo text not null, number int no
 create index if not exists coderabbit_requests_recent on coderabbit_requests(requested_at,status);
 create table if not exists coderabbit_findings(repo text not null, number int not null, comment_id int not null, review_id int not null, head text not null, state text not null, severity text not null, body_hash text not null, activation int not null, job int, created_at int not null, updated_at int not null, guard_ticket text, primary key(repo,number,comment_id,head));
 create index if not exists coderabbit_findings_pr on coderabbit_findings(repo,number,head,state);
+create table if not exists coderabbit_cycles(repo text not null, number integer not null, cycles integer not null check(cycles>=0), primary key(repo,number));
 ";
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 pub(crate) fn valid_git_sha(sha: &str) -> bool {
     sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit())
@@ -222,6 +223,34 @@ fn init(c: &mut Connection) -> anyhow::Result<()> {
         when old.on_ is not new.on_ or old.steward_repair is not new.steward_repair or old.full is not new.full
         begin
           update rp set steward_activation=lower(hex(randomblob(16))) where id=new.id;
+        end;
+    ")?;
+    // Backfill recoverable history once; a cleared legacy job may only be
+    // visible through its queued findings. Keep the larger observed count.
+    if version < 4 {
+        tx.execute_batch("
+            insert into coderabbit_cycles(repo,number,cycles)
+            select repo,number,max(n) from (
+                select repo,pr as number,count(*) as n from jobs
+                  where kind='review' and pr>0 and json_valid(d)
+                    and json_extract(d,'$.coderabbit_source')='coderabbit'
+                  group by repo,pr
+                union all
+                select repo,number,count(distinct job) as n from coderabbit_findings
+                  where job is not null group by repo,number
+            ) group by repo,number
+            on conflict(repo,number) do update set cycles=max(cycles,excluded.cycles);
+        ")?;
+    }
+    // Admission and the counter share the job insertion transaction.
+    tx.execute_batch("
+        create trigger if not exists coderabbit_cycle_admission
+        after insert on jobs
+        when new.kind='review' and new.pr>0 and
+          case when json_valid(new.d) then json_extract(new.d,'$.coderabbit_source')='coderabbit' else 0 end
+        begin
+          insert into coderabbit_cycles(repo,number,cycles) values(new.repo,new.pr,1)
+          on conflict(repo,number) do update set cycles=cycles+1;
         end;
     ")?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
