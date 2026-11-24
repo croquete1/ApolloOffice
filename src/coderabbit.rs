@@ -1458,7 +1458,7 @@ pub(crate) async fn route_findings(
                 .iter()
                 .map(|(finding, _)| guard_input(repo, number, head, finding))
                 .collect::<Vec<_>>();
-            match crate::wk::guard(a, inputs.clone(), "watcher", None).await {
+            match crate::wk::guard_partial(a, inputs.clone(), "watcher", None).await {
                 Ok(verdicts) => {
                     for (finding, ticket) in to_guard {
                         let id = format!("coderabbit:{repo}#{number}:{}:{}", head, finding.id);
