@@ -440,6 +440,30 @@ pub fn hbid(a: &App, h: &str) -> String {
 
 pub const PRE: &str = "ulimit -n 10240 2>/dev/null; export PATH=\"$HOME/.cargo/bin:$HOME/.local/bin:$HOME/go/bin:/usr/local/go/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\" CARGO_TERM_COLOR=never NO_COLOR=1 CI=1 GIT_TERMINAL_PROMPT=0 CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_PROFILE_TEST_DEBUG=line-tables-only CARGO_PROFILE_RELEASE_LTO=off CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_PROFILE_BENCH_LTO=off; to() { s=$1; shift; if command -v timeout >/dev/null 2>&1 && timeout --version 2>/dev/null | head -n 1 | grep -q 'coreutils'; then timeout -k 10 \"$s\" \"$@\"; else \"$@\"; fi; }\n";
 
+// Only the inner worker shell activates fnm; the outer npm cleanup trap is independent.
+const NODE_PRE: &str = r#"if [ "${APOLLO_OFFICE_FNM:-}" = 1 ] && command -v fnm >/dev/null 2>&1; then
+  _ao_fnm_env=$(fnm env --shell bash --resolve-engines --version-file-strategy recursive) && {
+    eval "$_ao_fnm_env"
+    _ao_fnm_link=${FNM_MULTISHELL_PATH:-}
+    trap 'if [ -L "$_ao_fnm_link" ]; then rm -f -- "$_ao_fnm_link"; fi' EXIT
+    _ao_node() {
+      local d=$PWD
+      while :; do
+        if [ -f "$d/.nvmrc" ] || [ -f "$d/.node-version" ] || { [ -f "$d/package.json" ] && python3 -c 'import json,sys; e=json.load(open(sys.argv[1],encoding="utf-8")).get("engines",{}); sys.exit(0 if isinstance(e,dict) and isinstance(e.get("node"),str) and e["node"].strip() else 1)' "$d/package.json" >/dev/null 2>&1; }; then
+          fnm use --silent-if-unchanged >/dev/null 2>&1 || fnm use --silent-if-unchanged system >/dev/null 2>&1
+          break
+        fi
+        if [ "$d" = / ]; then fnm use --silent-if-unchanged system >/dev/null 2>&1; break; fi
+        d=${d%/*}; d=${d:-/}
+      done
+      hash -r
+    }
+    cd() { builtin cd "$@" || return $?; _ao_node || true; }
+    _ao_node || true
+  }
+fi
+"#;
+
 fn sshv(h: &Ho) -> Vec<String> {
     let mut v: Vec<String> = vec![
         "-o".into(),
@@ -550,7 +574,7 @@ async fn hxo(
     let boundary = format!("APOLLO_JOB_{}", hex::encode(rand::random::<[u8; 16]>()));
     let inner = if h.dk { "" } else { "exec " };
     let body = format!(
-        "if command -v timeout >/dev/null 2>&1 && timeout --version 2>/dev/null | head -n 1 | grep -q 'coreutils'; then {inner}timeout -k 5 {t}s bash -s; else {inner}bash -s; fi <<'{boundary}'\n{PRE}{s}\n{boundary}\n"
+        "if command -v timeout >/dev/null 2>&1 && timeout --version 2>/dev/null | head -n 1 | grep -q 'coreutils'; then {inner}timeout -k 5 {t}s bash -s; else {inner}bash -s; fi <<'{boundary}'\n{PRE}{NODE_PRE}{s}\n{boundary}\n"
     );
     // Separate npm exec/npx installations for each command. Only content-
     // addressed downloads are shared; the wrapper removes its private cache.
@@ -632,6 +656,20 @@ RUN set -eux; \
     test "$(node --version)" = v24.22.3; \
     npm install --global npm@12.2.0; \
     test "$(npm --version)" = 12.2.0
+# Pin and verify fnm without changing the existing pinned Node/npm toolchain.
+RUN set -eu; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) asset=fnm-linux.zip; checksum=7807664f39d39fc518da1c35ba0181e4b3267603c4b1dedeb4b5fc6ae440a224 ;; \
+      arm64) asset=fnm-arm64.zip; checksum=4eaff58b2c5bf30d0934027572dd0b5bbb60d2a1af309230b53662d4b1d45599 ;; \
+      *) echo "fnm unavailable on this architecture; retaining pinned system Node"; exit 0 ;; \
+    esac; \
+    curl --fail --location --retry 3 --silent --show-error "https://github.com/Schniz/fnm/releases/download/v1.39.0/$asset" -o /tmp/fnm.zip; \
+    echo "$checksum  /tmp/fnm.zip" | sha256sum --check --status; \
+    unzip -j /tmp/fnm.zip fnm -d /usr/local/bin; \
+    chmod 755 /usr/local/bin/fnm; \
+    rm /tmp/fnm.zip; \
+    fnm --version
+ENV FNM_DIR=/opt/apollo-fnm APOLLO_OFFICE_FNM=1
 RUN rustup component add rustfmt clippy && rustup target add wasm32-unknown-unknown && npm install -g pnpm yarn && pip3 install --break-system-packages pytest
 ENV CARGO_TERM_COLOR=never CARGO_INCREMENTAL=0 PIP_BREAK_SYSTEM_PACKAGES=1
 WORKDIR /work

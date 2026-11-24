@@ -10,7 +10,15 @@ use std::collections::BTreeSet;
 
 pub const RND: u64 = 2;
 const CIT: u64 = 150 * 60;
+const NODE_VERSION_SELECTION: &str = r#"if [ "${APOLLO_OFFICE_FNM:-}" != 1 ] || ! command -v fnm >/dev/null 2>&1; then exit 0; fi
+if [ -f .nvmrc ] || [ -f .node-version ] || { [ -f package.json ] && python3 -c 'import json,sys; e=json.load(open("package.json",encoding="utf-8")).get("engines",{}); sys.exit(0 if isinstance(e,dict) and isinstance(e.get("node"),str) and e["node"].strip() else 1)' >/dev/null 2>&1; }; then
+  fnm use --install-if-missing --resolve-engines
+fi"#;
 const ENV_PREFLIGHT: &str = r#"command -v git >/dev/null 2>&1 || { echo "git missing in build environment"; exit 1; }
+if [ "${APOLLO_OFFICE_FNM:-}" = 1 ] && command -v fnm >/dev/null 2>&1; then
+  echo "preflight ok: git present; Node version selected by managed fnm, setup may override"
+  exit 0
+fi
 if [ -f .nvmrc ]; then
   want=$(sed 's/#.*//' .nvmrc | head -n1 | tr -d ' \t\r')
   if [ -z "$want" ]; then echo "unsupported empty .nvmrc requirement"; exit 1; fi
@@ -731,6 +739,10 @@ async fn prep(a: &Ax, j: &mut Job) -> R<()> {
         )
         .await?;
         j.d["old"] = json!(ok(a, j, "git rev-parse HEAD", 60).await?);
+    }
+    let selection = x(a, j, &format!("bash -c {} 2>&1", q(NODE_VERSION_SELECTION)), 360).await;
+    if selection.c != 0 {
+        a.say("repro", &format!("[{}] optional Node selection failed; setup will continue: {}", j.h(), crate::hunt_health::safe_tail(&selection.all())), Some(j.id));
     }
     let pf = x(a, j, &format!("bash -c {} 2>&1", q(ENV_PREFLIGHT)), 120).await;
     if pf.c != 0 {
@@ -1519,8 +1531,7 @@ async fn ci0(a: &Ax, j: &mut Job) -> R<String> {
                         a,
                         &j.h(),
                         &format!(
-                            "{}cargo install {} --locked 2>&1 | tail -3",
-                            crate::sh::PRE,
+                            "cargo install {} --locked 2>&1 | tail -3",
                             q(&k)
                         ),
                         2400,
