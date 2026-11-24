@@ -13,6 +13,120 @@ use serde_json::{json, Value};
 #[folder = "ui/"]
 struct Ui;
 
+fn save_repo_settings(db: &crate::db::Db, repo: &str, b: &Value) -> rusqlite::Result<()> {
+    let mut c = db.0.lock().unwrap();
+    let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let exists: bool = tx.query_row(
+        "select exists(select 1 from rp where full=?)",
+        [repo],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
+    }
+    for (k, kind) in [
+        ("iss", 0),
+        ("hunt", 0),
+        ("feat", 0),
+        ("nm", 0),
+        ("on_", 0),
+        ("merge", 0),
+        ("auto_merge", 0),
+        ("local_merge", 0),
+        ("steward_repair", 0),
+        ("coderabbit_free_confirmed", 0),
+        ("coderabbit_review", 0),
+        ("coderabbit_repair", 0),
+        ("auto_recover_drops", 0),
+        ("maxo", 1),
+        ("maxd", 1),
+        ("bud", 3),
+        ("ci", 2),
+        ("setup", 2),
+        ("rules", 2),
+        ("mode", 2),
+        ("skl", 2),
+    ] {
+        let v = &b[k];
+        if v.is_null() {
+            continue;
+        }
+        match kind {
+            3 => {
+                let x = v.as_f64().unwrap_or(0.0).clamp(0.0, 100_000.0);
+                tx.execute(
+                    &format!("update rp set {k}=? where full=?"),
+                    rusqlite::params![x, repo],
+                )?;
+            }
+            0 => {
+                let x = v
+                    .as_bool()
+                    .map(|x| x as i64)
+                    .or(v.as_i64())
+                    .unwrap_or(0)
+                    .clamp(0, 1);
+                if k == "on_" {
+                    tx.execute(
+                        "update rp set coderabbit_epoch=coderabbit_epoch + case when on_<>? then 1 else 0 end,on_=? where full=?",
+                        rusqlite::params![x, x, repo],
+                    )?;
+                } else if k == "coderabbit_review" {
+                    let at = now();
+                    tx.execute(
+                        "update rp set coderabbit_epoch=coderabbit_epoch + case when coderabbit_review<>? then 1 else 0 end,coderabbit_review_since=case when coderabbit_review<>? and ?=1 and coderabbit_free_confirmed=1 then ? else coderabbit_review_since end,coderabbit_review=? where full=?",
+                        rusqlite::params![x, x, x, at, x, repo],
+                    )?;
+                } else if k == "coderabbit_free_confirmed" {
+                    let at = now();
+                    tx.execute(
+                        "update rp set coderabbit_epoch=coderabbit_epoch + case when coderabbit_free_confirmed<>? then 1 else 0 end,coderabbit_review_since=case when coderabbit_free_confirmed<>? and ?=1 and coderabbit_review=1 then ? else coderabbit_review_since end,coderabbit_free_confirmed=? where full=?",
+                        rusqlite::params![x, x, x, at, x, repo],
+                    )?;
+                } else if k == "coderabbit_repair" {
+                    tx.execute(
+                        "update rp set coderabbit_epoch=coderabbit_epoch + case when coderabbit_repair<>? then 1 else 0 end,coderabbit_repair=? where full=?",
+                        rusqlite::params![x, x, repo],
+                    )?;
+                } else {
+                    tx.execute(
+                        &format!("update rp set {k}=? where full=?"),
+                        rusqlite::params![x, repo],
+                    )?;
+                }
+            }
+            1 => {
+                let x = v.as_i64().unwrap_or(3).clamp(0, 10000);
+                tx.execute(
+                    &format!("update rp set {k}=? where full=?"),
+                    rusqlite::params![x, repo],
+                )?;
+            }
+            _ => {
+                let mut s = v.as_str().unwrap_or("").trim().to_string();
+                if k == "mode" && s != "auto" {
+                    s = "ask".into();
+                }
+                if k == "lang" {
+                    s = pr_lang(&s).into();
+                }
+                s = crate::sh::head(&s, 4000);
+                tx.execute(
+                    &format!("update rp set {k}=? where full=?"),
+                    rusqlite::params![s, repo],
+                )?;
+            }
+        }
+    }
+    tx.execute(
+        "delete from kv where k=? or k like ?",
+        rusqlite::params![format!("cired:{repo}"), format!("cired:{repo}@%")],
+    )?;
+    tx.commit()?;
+    crate::app::chg();
+    Ok(())
+}
+
 fn work_class(job: &Value) -> &'static str {
     match job["kind"].as_str().unwrap_or("") {
         "hunt" => "discovered_bug",
@@ -1739,104 +1853,9 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                     js(json!({"full": r, "ci": c, "setup": s, "cfg": cfg(a)}))
                 }
                 "set" => {
-                    for (k, kind) in [
-                        ("iss", 0),
-                        ("hunt", 0),
-                        ("feat", 0),
-                        ("nm", 0),
-                        ("on_", 0),
-                        ("merge", 0),
-                        ("auto_merge", 0),
-                        ("local_merge", 0),
-                        ("steward_repair", 0),
-                        ("coderabbit_free_confirmed", 0),
-                        ("coderabbit_review", 0),
-                        ("coderabbit_repair", 0),
-                        ("auto_recover_drops", 0),
-                        ("maxo", 1),
-                        ("maxd", 1),
-                        ("bud", 3),
-                        ("ci", 2),
-                        ("setup", 2),
-                        ("rules", 2),
-                        ("mode", 2),
-                        ("skl", 2),
-                    ] {
-                        let v = &b[k];
-                        if v.is_null() {
-                            continue;
-                        }
-                        match kind {
-                            3 => {
-                                let x = v.as_f64().unwrap_or(0.0).clamp(0.0, 100_000.0);
-                                a.db.run(
-                                    &format!("update rp set {k}=? where full=?"),
-                                    pa![x, r.clone()],
-                                );
-                            }
-                            0 => {
-                                let x = v
-                                    .as_bool()
-                                    .map(|x| x as i64)
-                                    .or(v.as_i64())
-                                    .unwrap_or(0)
-                                    .clamp(0, 1);
-                                if k == "on_" {
-                                    a.db.run(
-                                        "update rp set coderabbit_epoch=coderabbit_epoch + case when on_<>? then 1 else 0 end,on_=? where full=?",
-                                        pa![x, x, r.clone()],
-                                    );
-                                } else if k == "coderabbit_review" {
-                                    let at = now();
-                                    a.db.run(
-                                        "update rp set coderabbit_epoch=coderabbit_epoch + case when coderabbit_review<>? then 1 else 0 end,coderabbit_review_since=case when coderabbit_review<>? and ?=1 and coderabbit_free_confirmed=1 then ? else coderabbit_review_since end,coderabbit_review=? where full=?",
-                                        pa![x, x, x, at, x, r.clone()],
-                                    );
-                                } else if k == "coderabbit_free_confirmed" {
-                                    let at = now();
-                                    a.db.run(
-                                        "update rp set coderabbit_epoch=coderabbit_epoch + case when coderabbit_free_confirmed<>? then 1 else 0 end,coderabbit_review_since=case when coderabbit_free_confirmed<>? and ?=1 and coderabbit_review=1 then ? else coderabbit_review_since end,coderabbit_free_confirmed=? where full=?",
-                                        pa![x, x, x, at, x, r.clone()],
-                                    );
-                                } else if k == "coderabbit_repair" {
-                                    a.db.run(
-                                        "update rp set coderabbit_epoch=coderabbit_epoch + case when coderabbit_repair<>? then 1 else 0 end,coderabbit_repair=? where full=?",
-                                        pa![x, x, r.clone()],
-                                    );
-                                } else {
-                                    a.db.run(
-                                        &format!("update rp set {k}=? where full=?"),
-                                        pa![x, r.clone()],
-                                    );
-                                }
-                            }
-                            1 => {
-                                let x = v.as_i64().unwrap_or(3).clamp(0, 10000);
-                                a.db.run(
-                                    &format!("update rp set {k}=? where full=?"),
-                                    pa![x, r.clone()],
-                                );
-                            }
-                            _ => {
-                                let mut s = v.as_str().unwrap_or("").trim().to_string();
-                                if k == "mode" && s != "auto" {
-                                    s = "ask".into();
-                                }
-                                if k == "lang" {
-                                    s = pr_lang(&s).into();
-                                }
-                                s = crate::sh::head(&s, 4000);
-                                a.db.run(
-                                    &format!("update rp set {k}=? where full=?"),
-                                    pa![s, r.clone()],
-                                );
-                            }
-                        }
+                    if save_repo_settings(&a.db, &r, &b).is_err() {
+                        return er(StatusCode::CONFLICT, "repository settings were not saved");
                     }
-                    a.db.run(
-                        "delete from kv where k=? or k like ?",
-                        pa![format!("cired:{r}"), format!("cired:{r}@%")],
-                    );
                     a.sw.notify_one();
                     a.steward_wake.notify_one();
                     js(cfg(a))
@@ -2563,6 +2582,34 @@ mod t {
         assert_eq!(snapshot["byRepo"][0]["repo"], "o/r");
         assert!(!snapshot.to_string().contains("private command"));
         assert!(!snapshot.to_string().contains("private result"));
+    }
+
+    #[test]
+    fn repo_settings_rollback_preserves_activation_and_confirmation() {
+        let db = crate::db::Db::mem();
+        db.0.lock().unwrap().execute(
+            "insert into rp(full,coderabbit_review,coderabbit_free_confirmed,coderabbit_epoch,coderabbit_review_since) values('o/r',1,1,7,100)",
+            [],
+        ).unwrap();
+        db.0.lock().unwrap().execute_batch(
+            "create trigger fail_review before update of coderabbit_review on rp begin select raise(abort,'injected'); end;",
+        ).unwrap();
+        let changes = json!({"coderabbit_free_confirmed":false,"coderabbit_review":false});
+        assert!(save_repo_settings(&db, "o/r", &changes).is_err());
+        let state = db.one("select * from rp where full='o/r'", pa![]).unwrap();
+        assert_eq!(state["coderabbit_free_confirmed"], 1);
+        assert_eq!(state["coderabbit_review"], 1);
+        assert_eq!(state["coderabbit_epoch"], 7);
+        assert_eq!(state["coderabbit_review_since"], 100);
+        db.0.lock()
+            .unwrap()
+            .execute_batch("drop trigger fail_review")
+            .unwrap();
+        save_repo_settings(&db, "o/r", &changes).unwrap();
+        let state = db.one("select * from rp where full='o/r'", pa![]).unwrap();
+        assert_eq!(state["coderabbit_free_confirmed"], 0);
+        assert_eq!(state["coderabbit_review"], 0);
+        assert_eq!(state["coderabbit_epoch"], 9);
     }
 
     #[test]
