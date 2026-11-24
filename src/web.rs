@@ -637,10 +637,16 @@ fn sets(a: &Ax, b: &Value) {
     if let Some(x) = b["big"].as_bool() {
         s["big"] = json!(x);
     }
-    if let Some(x) = b["resource_profile"].as_str().filter(|p| crate::resources::PROFILES.contains(p)) {
+    if let Some(x) = b["resource_profile"]
+        .as_str()
+        .filter(|p| crate::resources::PROFILES.contains(p))
+    {
         s["resource_profile"] = json!(x);
     }
-    if let Some(x) = b["codex_hunt_reserve_percent"].as_f64().filter(|v| v.is_finite() && (0.0..=100.0).contains(v)) {
+    if let Some(x) = b["codex_hunt_reserve_percent"]
+        .as_f64()
+        .filter(|v| v.is_finite() && (0.0..=100.0).contains(v))
+    {
         s["codex_hunt_reserve_percent"] = json!(x);
     }
     if let Some(x) = b["hunters"].as_i64() {
