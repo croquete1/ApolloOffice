@@ -1,9 +1,56 @@
 //! Read-only CodeRabbit evidence. Never grants review/merge authority.
-use crate::sh::{apip_unique, ghj};
+use crate::sh::{gh, ghj};
+use std::collections::BTreeSet;
+use tokio::sync::Semaphore;
 use serde_json::{json, Value};
 
 const BOT_ID: u64 = 136622811;
 const COVERAGE: &str = "<!-- final_review_risk_coverage:";
+const PAGE_SIZE: usize = 10;
+const MAX_PAGES: usize = 20;
+const MAX_BYTES: usize = 4 * 1024 * 1024;
+pub(crate) static OBSERVATIONS: Semaphore = Semaphore::const_new(2);
+
+fn accept_page(rows: &mut Vec<Value>, ids: &mut BTreeSet<u64>, bytes: &mut usize, raw: &str) -> Result<bool, String> {
+    *bytes = bytes.checked_add(raw.len()).ok_or("comment byte counter overflow")?;
+    if *bytes > MAX_BYTES {
+        return Err("CodeRabbit comment byte budget exceeded".into());
+    }
+    let page: Vec<Value> = serde_json::from_str(raw).map_err(|_| "invalid comment page")?;
+    if page.len() > PAGE_SIZE {
+        return Err("invalid comment page size".into());
+    }
+    let complete = page.len() < PAGE_SIZE;
+    for row in page {
+        let id = row["id"].as_u64().filter(|id| *id > 0).ok_or("invalid comment ID")?;
+        if !ids.insert(id) {
+            return Err("comment inventory changed during pagination".into());
+        }
+        rows.push(row);
+    }
+    Ok(complete)
+}
+
+async fn bounded_comments(repo: &str, number: i64) -> Result<Vec<Value>, String> {
+    let mut rows = Vec::new();
+    let mut ids = BTreeSet::new();
+    let mut bytes = 0;
+    for page in 1..=MAX_PAGES {
+        let endpoint = format!("repos/{repo}/issues/{number}/comments?per_page={PAGE_SIZE}&page={page}");
+        let raw = gh(&["api", &endpoint], 15).await?;
+        if accept_page(&mut rows, &mut ids, &mut bytes, &raw)? {
+            return Ok(rows);
+        }
+    }
+    Err("CodeRabbit comment page budget exceeded".into())
+}
+
+fn public_repository(value: &Value, repo: &str) -> bool {
+    value["private"] == false
+        && value["visibility"] == "public"
+        && value["full_name"] == repo
+        && value["id"].as_u64().is_some_and(|id| id > 0)
+}
 
 fn valid_sha(s: &str) -> bool {
     s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
@@ -98,8 +145,7 @@ pub(crate) async fn observe(repo: &str, number: i64, head: &str) -> Result<Value
     // The only remote operations are GitHub reads. Never call CodeRabbit's API or
     // request a review, and refuse private/unknown repositories.
     let repository = ghj(&["api", &format!("repos/{repo}")], 45).await?;
-    if repository["private"] != false || repository["visibility"] != "public"
-        || repository["full_name"] != repo {
+    if !public_repository(&repository, repo) {
         return Err("Only verified public repositories are eligible".into());
     }
     let endpoint = format!("repos/{repo}/pulls/{number}");
@@ -107,10 +153,15 @@ pub(crate) async fn observe(repo: &str, number: i64, head: &str) -> Result<Value
     if !matches_pr(&before, repo, number, head) {
         return Err("PR scope or HEAD changed; refresh Steward".into());
     }
-    let rows = apip_unique(&format!("repos/{repo}/issues/{number}/comments?per_page=100")).await?;
+    let rows = tokio::time::timeout(std::time::Duration::from_secs(60), bounded_comments(repo, number))
+        .await.map_err(|_| "CodeRabbit comment read timed out")??;
     let after = ghj(&["api", &endpoint], 45).await?;
     if !matches_pr(&after, repo, number, head) || before["updated_at"] != after["updated_at"] {
         return Err("PR changed during observation; refresh Steward".into());
+    }
+    let final_repo = ghj(&["api", &format!("repos/{repo}")], 45).await?;
+    if !public_repository(&final_repo, repo) || final_repo["id"] != repository["id"] {
+        return Err("Repository visibility or identity changed".into());
     }
     Ok(classify(&rows, head))
 }
@@ -118,23 +169,23 @@ pub(crate) async fn observe(repo: &str, number: i64, head: &str) -> Result<Value
 // Reuse the versioned database's existing KV table; one bounded record per PR.
 // A durable ticket prevents a slower concurrent read from replacing a newer one.
 const RESERVE: &str = "insert into kv(k,v)
-    select ?1,json_object('generation',1) where exists(select 1 from rp where full=?2 and on_=1)
-    on conflict(k) do update set v=json_set(kv.v,'$.generation',json_extract(kv.v,'$.generation')+1)
-    returning json_extract(v,'$.generation')";
+    select ?1,json_object('ticket',lower(hex(randomblob(16)))) where exists(select 1 from rp where full=?2 and on_=1)
+    on conflict(k) do update set v=json_set(kv.v,'$.ticket',lower(hex(randomblob(16))))
+    returning json_extract(v,'$.ticket')";
 const SAVE: &str = "update kv set v=json_set(v,'$.observation',json(?3),'$.checked_at',?4)
-    where k=?1 and json_extract(v,'$.generation')=?2
+    where k=?1 and json_extract(v,'$.ticket')=?2
     and exists(select 1 from rp where full=?5 and on_=1)";
 
 fn observation_key(repo: &str, number: i64) -> String {
     format!("coderabbit:observation:{repo}#{number}")
 }
 
-pub(crate) fn reserve(db: &crate::db::Db, repo: &str, number: i64) -> rusqlite::Result<i64> {
+pub(crate) fn reserve(db: &crate::db::Db, repo: &str, number: i64) -> rusqlite::Result<String> {
     let c = db.0.lock().unwrap();
     c.query_row(RESERVE, rusqlite::params![observation_key(repo, number), repo], |r| r.get(0))
 }
 
-pub(crate) fn save(db: &crate::db::Db, repo: &str, number: i64, ticket: i64, value: &Value) -> rusqlite::Result<bool> {
+pub(crate) fn save(db: &crate::db::Db, repo: &str, number: i64, ticket: &str, value: &Value) -> rusqlite::Result<bool> {
     let c = db.0.lock().unwrap();
     let changed = c.execute(SAVE, rusqlite::params![
         observation_key(repo, number), ticket, value.to_string(), crate::db::now(), repo
@@ -206,17 +257,37 @@ mod tests {
         db.0.lock().unwrap().execute("insert into rp(full,on_) values(?,1)", [repo]).unwrap();
         let first = reserve(&db, repo, 67).unwrap();
         let second = reserve(&db, repo, 67).unwrap();
-        assert_eq!(second, first + 1);
+        assert_ne!(second, first);
         let value = classify(&[row(HEAD)], HEAD);
-        assert!(!save(&db, repo, 67, first, &value).unwrap());
-        assert!(save(&db, repo, 67, second, &value).unwrap());
+        assert!(!save(&db, repo, 67, &first, &value).unwrap());
+        assert!(save(&db, repo, 67, &second, &value).unwrap());
         assert_eq!(previous(&db, repo, 67)["observation"], value);
         assert!(previous(&db, repo, 68).is_null());
         let third = reserve(&db, repo, 67).unwrap();
         assert_eq!(previous(&db, repo, 67)["observation"], value);
         db.0.lock().unwrap().execute("update rp set on_=0 where full=?", [repo]).unwrap();
-        assert!(!save(&db, repo, 67, third, &value).unwrap());
+        assert!(!save(&db, repo, 67, &third, &value).unwrap());
         assert!(reserve(&db, repo, 67).is_err());
+        db.0.lock().unwrap().execute("update rp set on_=1 where full=?", [repo]).unwrap();
+        let fourth = reserve(&db, repo, 67).unwrap();
+        assert!(previous(&db, repo, 67).is_null());
+        assert!(!save(&db, repo, 67, &third, &value).unwrap());
+        assert!(save(&db, repo, 67, &fourth, &value).unwrap());
+        db.0.lock().unwrap().execute("delete from rp where full=?", [repo]).unwrap();
+        db.0.lock().unwrap().execute("insert into rp(full,on_) values(?,1)", [repo]).unwrap();
+        assert!(previous(&db, repo, 67).is_null());
+        assert!(!save(&db, repo, 67, &fourth, &value).unwrap());
+    }
+    #[test]
+    fn page_budgets_and_duplicates_fail_closed() {
+        let (mut rows, mut ids, mut bytes) = (Vec::new(), BTreeSet::new(), 0);
+        let page = json!((1..=PAGE_SIZE).map(|id| json!({"id":id})).collect::<Vec<_>>()).to_string();
+        assert!(!accept_page(&mut rows, &mut ids, &mut bytes, &page).unwrap());
+        assert!(accept_page(&mut rows, &mut ids, &mut bytes, &page).is_err());
+        let (mut rows, mut ids, mut bytes) = (Vec::new(), BTreeSet::new(), MAX_BYTES);
+        assert!(accept_page(&mut rows, &mut ids, &mut bytes, "[]").is_err());
+        let (mut rows, mut ids, mut bytes) = (Vec::new(), BTreeSet::new(), 0);
+        assert!(accept_page(&mut rows, &mut ids, &mut bytes, "[]").unwrap());
     }
     #[test]
     fn repository_and_pr_scope_are_strict() {
