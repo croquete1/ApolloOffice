@@ -47,6 +47,11 @@ Estas PRs estão em draft e **não estão integradas**. A main funcional continu
 - QA SQLite isolado com Python: cinco cenários PASS (8 ligações concorrentes, uma inserção; replay integral/parcial; bloqueio por rebase e recuperação; preservação de cursor e rejeição de snapshot stale; PR encerrada). Dois testes Rust novos e extensão de teste existente, não executados. Não constitui compilação, teste integral do Watcher ou validação da API GitHub.
 - Inbox/outbox integral, HEAD remoto na admissão, exclusão universal de operações concorrentes e testes Rust permanecem pendentes. As PRs #65–70 funcionais (#65, #66, #67, #68, #70) não foram integradas; #69 é documentação já integrada. Última bateria integral validada: 395 testes. Interface dos agentes e configuração de modelos preservadas.
 
+## Sexta entrega — outbox persistente (24/11/2026)
+- PR #70 ampliada (draft, HEAD c7f13b0267d782fa337b87efaf7b00a5e5fcbaa6): migração SQLite v2, respostas do Watcher gravadas na mesma transação que a confirmação dos comentários e, quando aplicável, a tarefa de revisão. Identificador determinístico por lote; claim atómico pending→uncertain antes de POST; reconciliação por autor e corpo exatos, sem reenvio automático perante resultado ambíguo. Identidade GitHub verificada antes do envio; expiração de 24h para respostas ainda não enviadas, cancelamento se PR encerrada, limite anterior de respostas preservado; contadores agregados em ops.watcher_outbox, sem expor conteúdo. Decisão conservadora: uma resposta incerta pode necessitar de intervenção humana, mesmo quando nunca chegou ao GitHub.
+- QA desta entrega: seis cenários SQLite executados com Python PASS (rollback, repetição de chave, identidade incorreta, oito claims concorrentes com um vencedor, reabertura de DB e confirmação sem reenvio, cancelamento). Três novos testes Rust escritos, não executados. Não equivale a validação integral da implementação, da migração em Rust ou da API remota.
+- Pendentes: interface de resolução manual, inbox persistente completa, vinculação a HEAD remoto, validação real de entrega GitHub e testes de integração das cinco PRs funcionais #65–68 e #70. Nenhum merge funcional novo; última suite integral validada continua 395. Agentes e configuração dos modelos inalterados.
+
 ## Balanço por fase
 | Fase | Estado | Falta |
 |---|---|---|
