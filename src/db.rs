@@ -656,7 +656,9 @@ impl Db {
             .ok_or(rusqlite::Error::InvalidQuery)?;
         let location = data["hunt"]["where"].as_str().map(str::trim).filter(|s| !s.is_empty())
             .ok_or(rusqlite::Error::InvalidQuery)?;
-        if !data["body"].as_str().is_some_and(|s| !s.trim().is_empty()) {
+        if !data["body"].as_str().is_some_and(|s| !s.trim().is_empty())
+            || !data["hunt"]["proof"].as_str().is_some_and(|s| !s.trim().is_empty())
+        {
             return Err(rusqlite::Error::InvalidQuery);
         }
         let display = title.chars().take(200).collect::<String>();
@@ -1127,7 +1129,7 @@ mod hunter_duplicate_tests {
     #[test]
     fn exact_hunter_duplicate_is_atomic_and_scoped_to_repo_and_location() {
         let db = Db::mem();
-        let mut data = json!({"title":"Broken parser","body":"reproduction","hunt":{"where":"src/parser.rs"}});
+        let mut data = json!({"title":"Broken parser","body":"reproduction","hunt":{"where":"src/parser.rs","proof":"test failed for expected bug"}});
         assert!(db.queue_hunter_find("o/r",&data).unwrap());
         data["title"] = json!(" broken PARSER ");
         assert!(!db.queue_hunter_find("o/r",&data).unwrap());

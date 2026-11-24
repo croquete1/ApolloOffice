@@ -3722,6 +3722,18 @@ where
     }
 }
 
+fn hunter_findings(response: &Value) -> R<&[Value]> {
+    let rows = response["finds"].as_array().ok_or_else(|| X::E("Hunter: missing findings array".into()))?;
+    if rows.len()>1 || rows.iter().any(|row| {
+        ["title","where","desc","proof"].iter().any(|field| {
+            !row[*field].as_str().is_some_and(|s| !s.trim().is_empty())
+        })
+    }) {
+        return Err(X::E("Hunter: malformed or unproven finding".into()));
+    }
+    Ok(rows)
+}
+
 async fn hunt(a: &Ax, j: &mut Job) -> R<i64> {
     a.db.jset(j.id, &[("st", json!("hunt"))]);
     a.st("hunter", "work", Some(j.id), "");
@@ -3764,14 +3776,7 @@ async fn hunt(a: &Ax, j: &mut Job) -> R<i64> {
     o.t = 90 * 60;
     let (_, js) = ask(a, o).await?;
     x(a, j, "git checkout -q -- . && git clean -fdq", 120).await;
-    let fs: Vec<Value> = js["finds"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|x| x["title"].is_string() && x["desc"].is_string() && x["where"].is_string())
-        .take(1)
-        .collect();
+    let fs = hunter_findings(&js)?;
     a.st(
         "hunter",
         "idle",

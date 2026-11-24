@@ -72,6 +72,16 @@ mod t {
     }
 
     #[test]
+    fn hunter_requires_complete_evidence_not_just_a_title() {
+        assert!(hunter_findings(&json!({"finds":[]})).unwrap().is_empty());
+        assert!(hunter_findings(&Value::Null).is_err());
+        assert!(hunter_findings(&json!({"finds":[{"title":"Bug","where":"src/x.rs","desc":"Reproduce"}]})).is_err());
+        let valid=json!({"title":"Bug","where":"src/x.rs","desc":"Reproduce","proof":"test failure"});
+        assert_eq!(hunter_findings(&json!({"finds":[valid.clone()]})).unwrap().len(),1);
+        assert!(hunter_findings(&json!({"finds":[valid.clone(),valid]})).is_err());
+    }
+
+    #[test]
     fn aging_promotes_automatic_fixes_only_and_never_crosses_critical_priority() {
         let at=1+4*86_400_000;
         let mut row=json!({"kind":"fix","st":"ready","t0":1,"d":{"issue_priority":3}});
