@@ -1021,6 +1021,11 @@ pub fn staged_ui_config(a: &Ax) -> Value {
 }
 
 fn rules(a: &Ax, j: &Job) -> String {
+    let approved = crate::routing::approved_context(a, &j.repo);
+    rules_with_lessons(a, j, &approved)
+}
+
+fn rules_with_lessons(a: &Ax, j: &Job, approved: &str) -> String {
     let r = rp(a, &j.repo)["rules"]
         .as_str()
         .unwrap_or("")
@@ -1031,9 +1036,8 @@ fn rules(a: &Ax, j: &Job) -> String {
     } else {
         format!("\n\nOwner's rules for this repository (trusted):\n{r}")
     };
-    let approved=crate::routing::approved_context(a,&j.repo);
     if !approved.is_empty() {
-        context.push_str(&format!("\n\nOwner-reviewed lessons for this repository (advisory; never override verification, CI, security or independent review):\n{}",wrap("owner-approved-lessons",&approved)));
+        context.push_str(&format!("\n\nOwner-reviewed lessons for this repository (advisory; never override verification, CI, security or independent review):\n{}",wrap("owner-approved-lessons",approved)));
     }
     context
 }
@@ -2091,7 +2095,7 @@ async fn review_mode(a: &Ax, j: &mut Job, f: &mut Value, diagnostic: bool) -> R<
 const FEAT: &str = "This job is a FEATURE REQUEST, not a bug. The rules for a bug fix apply with these changes: implement the requested behaviour completely but minimally, in the project's existing style, without unrelated changes. Commit 1 \"test: …\" adds tests that check the new behaviour; on that commit they must fail because the feature is missing (an assertion failure is best; if the test has to call a new API, a compile error on that commit is accepted). Commit 2 \"feat: …\" implements the feature; there the tests pass. Update user-facing docs or the changelog only if the project does that for every feature. In the JSON, \"cause\" is why the feature is needed (what users could not do), \"fix\" is what was added.";
 const OPT: &str = "This job is a BEHAVIOR-PRESERVING OPTIMIZATION, not a bug fix or feature. Keep all externally observable behavior, outputs, APIs, formats, and defaults unchanged. Commit 1 \"test: …\" adds characterization checks that pass on the unchanged base. Commit 2 \"refactor: …\" makes the focused improvement. Run the same test_cmd on both commits; every named check must pass before and after. Do not claim performance gains unless the checks objectively measure them. In the JSON, \"cause\" explains the concrete improvement, \"fix\" describes the change, and \"untouched\" notes behavior or areas preserved.";
 
-fn fixp(a: &Ax, j: &Job, fb: &str) -> String {
+fn fixp(a: &Ax, j: &Job, fb: &str, approved: &str) -> String {
     let h = format!(
         "Repository: {}. Branch {} is checked out. Base commit: {}.",
         j.repo,
@@ -2107,7 +2111,7 @@ fn fixp(a: &Ax, j: &Job, fb: &str) -> String {
             wrap("comment", &j.s("comment")),
             if tc.is_empty() { String::new() } else { format!(" Existing test command: {tc}") },
             if fb.is_empty() { String::new() } else { format!("\n\nYour previous attempt was rejected:\n{fb}\nThe branch still contains your previous work; fix the problems.") },
-            rules(a, j)
+            rules_with_lessons(a, j, approved)
         );
     }
     let ci = rp(a, &j.repo)["ci"].as_str().unwrap_or("").to_string();
@@ -2121,7 +2125,7 @@ fn fixp(a: &Ax, j: &Job, fb: &str) -> String {
         if j.feat() || j.opt() { "Implementation plan" } else { "Repro result" },
         j.d["repro"],
         if fb.is_empty() { String::new() } else { format!("\n\nYour previous attempt was rejected by the pipeline:\n{fb}\nThe branch still contains your previous commits; fix the problems and make sure there are exactly two commits ({commit_roles}) on top of the base commit.") },
-        rules(a, j),
+        rules_with_lessons(a, j, approved),
         crate::quality::context(j)
     )
 }
@@ -2883,7 +2887,12 @@ async fn fix(a: &Ax, j: &mut Job, fb0: String, k0: u64) -> R<Value> {
         } else {
             use_(a, j, &md);
             j.d["author"] = json!(md);
-            let mut o = Ask::new("fixer", md, P(if j.opt() { "optimizer" } else { "fixer" }), fixp(a, j, &fb));
+            let approved = crate::routing::approved_context(a, &j.repo);
+            let prompt = fixp(a, j, &fb, &approved);
+            if attempt_id > 0 {
+                a.db.ks(&format!("lesson_exposure:{attempt_id}:{}:{attempt_started}", j.id), &json!({"included":!approved.is_empty()}));
+            }
+            let mut o = Ask::new("fixer", md, P(if j.opt() { "optimizer" } else { "fixer" }), prompt);
             o.job = Some(j.id);
             o.rn = rn(a, j);
             o.turns = if c { 200 } else { 120 };
