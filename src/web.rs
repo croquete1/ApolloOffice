@@ -13,6 +13,39 @@ use serde_json::{json, Value};
 #[folder = "ui/"]
 struct Ui;
 
+// Keep the authenticated session so the owner can configure the paused office.
+fn wipe_office_data(db: &crate::db::Db) -> rusqlite::Result<()> {
+    let mut c = db.0.lock().unwrap();
+    let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    tx.execute_batch(
+        "delete from job_dependencies;
+         delete from job_schedule;
+         delete from watcher_inbox;
+         delete from watcher_retry;
+         delete from watcher_outbox;
+         delete from github_issues;
+         delete from jobs;
+         delete from ev;
+         delete from prs;
+         delete from cost;
+         delete from fix_attempts;
+         delete from coderabbit_requests;
+         delete from coderabbit_findings;
+         delete from coderabbit_cycles;
+         delete from tok;
+         delete from seen;
+         delete from cm;
+         delete from rp;
+         delete from hs;
+         delete from lnk;
+         delete from kv;
+         insert into kv(k,v) values('man','true');",
+    )?;
+    tx.commit()?;
+    crate::app::chg();
+    Ok(())
+}
+
 fn save_repo_settings(db: &crate::db::Db, repo: &str, b: &Value) -> rusqlite::Result<()> {
     let mut c = db.0.lock().unwrap();
     let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -2200,26 +2233,12 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                         return er(StatusCode::BAD_REQUEST, "type delete to confirm");
                     }
                     a.lv.lock().unwrap().o.man = true;
-                    for t in [
-                        "jobs",
-                        "ev",
-                        "prs",
-                        "cost",
-                        "fix_attempts",
-                        "coderabbit_requests",
-                        "coderabbit_findings",
-                        "coderabbit_cycles",
-                        "tok",
-                        "seen",
-                        "cm",
-                        "rp",
-                        "hs",
-                        "lnk",
-                    ] {
-                        a.db.run(&format!("delete from {t}"), pa![]);
+                    if wipe_office_data(&a.db).is_err() {
+                        return er(
+                            StatusCode::CONFLICT,
+                            "data deletion failed; office remains paused",
+                        );
                     }
-                    a.db.run("delete from kv", pa![]);
-                    a.db.ks("man", &json!(true));
                     *a.vk.lock().unwrap() = None;
                     a.say("scout", "all data deleted, the office is paused", None);
                 }
@@ -2590,6 +2609,69 @@ mod t {
         assert_eq!(snapshot["byRepo"][0]["repo"], "o/r");
         assert!(!snapshot.to_string().contains("private command"));
         assert!(!snapshot.to_string().contains("private result"));
+    }
+
+    #[test]
+    fn full_wipe_rolls_back_and_does_not_restore_old_coderabbit_history() {
+        let db = crate::db::Db::mem();
+        db.0.lock().unwrap().execute_batch(
+            "insert into rp(full) values('o/r');
+             insert into jobs(id,repo,kind,pr,d) values(7,'o/r','review',1,'{\"coderabbit_source\":\"coderabbit\"}');
+             insert into coderabbit_requests(repo,number,head,status,requested_at,activation) values('o/r',1,'old','sent',1,1);
+             insert into coderabbit_findings(repo,number,comment_id,review_id,head,state,severity,body_hash,activation,job,created_at,updated_at) values('o/r',1,1,1,'old','queued','high','hash',1,7,1,1);
+             insert into job_schedule(job) values(7);
+             insert into watcher_outbox(id,repo,num,author,body,state,created,updated) values('old','o/r',1,'owner','old','pending',1,1);
+             create trigger fail_wipe before delete on coderabbit_requests begin select raise(abort,'injected'); end;",
+        ).unwrap();
+        assert!(wipe_office_data(&db).is_err());
+        assert_eq!(db.n("select count(*) from jobs", pa![]), 1);
+        assert_eq!(db.n("select count(*) from watcher_outbox", pa![]), 1);
+        assert_eq!(db.n("select count(*) from coderabbit_cycles", pa![]), 1);
+        db.0.lock()
+            .unwrap()
+            .execute_batch("drop trigger fail_wipe")
+            .unwrap();
+        wipe_office_data(&db).unwrap();
+        db.run("insert into rp(full) values('o/r')", pa![]);
+        for table in [
+            "jobs",
+            "job_schedule",
+            "watcher_outbox",
+            "coderabbit_requests",
+            "coderabbit_findings",
+            "coderabbit_cycles",
+        ] {
+            assert_eq!(db.n(&format!("select count(*) from {table}"), pa![]), 0);
+        }
+        assert_eq!(db.kg("man"), json!(true));
+    }
+
+    #[tokio::test]
+    async fn coderabbit_route_reports_busy_without_remote_request() {
+        let db = crate::db::Db::mem();
+        db.run("insert into rp(full) values('o/r')", pa![]);
+        let head = "a".repeat(40);
+        db.ks("steward:o/r", &json!({"prs":[{"number":1,"head_sha":head}]}));
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::env::temp_dir(),
+            1,
+            "x".into(),
+        ));
+        let _permits = crate::coderabbit::OBSERVATIONS.acquire_many(2).await.unwrap();
+        let response = api(
+            &a,
+            &Method::POST,
+            "/api/steward/coderabbit",
+            "",
+            json!({"repo":"o/r","number":1,"head":head}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["state"], "busy");
+        assert_eq!(value["head"], head);
     }
 
     #[test]
