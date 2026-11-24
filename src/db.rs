@@ -16,6 +16,9 @@ create table if not exists rp(id integer primary key, full text unique, iss int 
 create table if not exists hs(id text primary key, ssh text default '', dk int default 0, ln int default 1, ci int default 1, gb int default 50, raw int default 0, on_ int default 1, t0 int);
 create table if not exists jobs(id integer primary key, repo text, num int, kind text default 'fix', title text, url text, st text, why text default '', d text default '{}', pr int, prio real default 0, t0 int, t1 int);
 create index if not exists jobs_st on jobs(st);
+create table if not exists job_schedule(job integer primary key, manual_priority integer check(manual_priority between 0 and 3), retry_after integer not null default 0, retry_reason text not null default '', admitted_at integer not null default 0);
+create table if not exists job_dependencies(job integer not null, prerequisite integer not null, primary key(job,prerequisite), check(job<>prerequisite));
+create index if not exists job_dependencies_prerequisite on job_dependencies(prerequisite);
 create index if not exists jobs_issue_latest on jobs(repo, num, kind, id desc);
 create table if not exists ev(id integer primary key, t int, w text, m text, j int);
 create table if not exists prs(repo text, num int, st text, title text, url text, upd text, merged text, d text default '{}', t0 int, primary key(repo, num));
@@ -183,6 +186,70 @@ impl Db {
             ),
         };
         v.and_then(|x| x["s"].as_f64()).unwrap_or(0.0)
+    }
+
+    /// Fail closed when a prerequisite has not completed and its PR has not merged.
+    /// Missing/deleted prerequisites are blocked, not silently considered satisfied.
+    pub fn schedule_eligible(&self, id: i64, repo: &str, at: i64) -> rusqlite::Result<bool> {
+        let c = self.0.lock().unwrap();
+        c.query_row(
+            "select exists(select 1 from jobs j left join job_schedule s on s.job=j.id
+             where j.id=? and j.repo=? and j.st in ('ready','submit')
+             and coalesce(s.retry_after,0)<=?
+             and not exists(select 1 from job_dependencies dep
+               where dep.job=j.id and not exists(select 1 from jobs prior join prs p
+                 on p.repo=prior.repo and p.num=prior.pr
+                 where prior.id=dep.prerequisite and prior.st='done' and p.st='merged')))",
+            rusqlite::params![id,repo,at], |r| r.get(0),
+        )
+    }
+
+    /// Replace operator-defined scheduling constraints atomically. The caller
+    /// holds update_transition and verifies that the job is not assigned.
+    pub fn set_job_schedule(&self, id: i64, priority: Option<i64>, dependencies: &[i64]) -> rusqlite::Result<()> {
+        if priority.is_some_and(|p| !(0..=3).contains(&p))
+            || dependencies.len()>100
+            || dependencies.iter().any(|d| *d<=0 || *d==id)
+            || dependencies.iter().collect::<std::collections::BTreeSet<_>>().len()!=dependencies.len()
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let editable: bool = tx.query_row("select exists(select 1 from jobs where id=? and st='ready' and kind='fix'
+            and coalesce(json_extract(d,'$.rs'),0)=0 and coalesce(json_extract(d,'$.rp'),0)=0)",
+            [id],|r| r.get(0))?;
+        if !editable { return Err(rusqlite::Error::InvalidQuery); }
+        tx.execute("delete from job_dependencies where job=?", [id])?;
+        for dependency in dependencies {
+            let exists: bool = tx.query_row("select exists(select 1 from jobs where id=? and kind in ('fix','review','rebase') and st<>'drop')",[dependency],|r|r.get(0))?;
+            let cycle: bool = tx.query_row("with recursive ancestors(id) as (
+                select ?1 union select d.prerequisite from job_dependencies d join ancestors a on d.job=a.id
+            ) select exists(select 1 from ancestors where id=?2)",rusqlite::params![dependency,id],|r|r.get(0))?;
+            if !exists || cycle { return Err(rusqlite::Error::InvalidQuery); }
+            tx.execute("insert into job_dependencies(job,prerequisite) values(?,?)",rusqlite::params![id,dependency])?;
+        }
+        tx.execute("insert into job_schedule(job,manual_priority) values(?,?) on conflict(job) do update set manual_priority=excluded.manual_priority",
+            rusqlite::params![id,priority])?;
+        tx.commit()?;
+        crate::app::chg();
+        Ok(())
+    }
+
+    /// Keep the existing host-retry policy, but persist the next eligible time
+    /// in the same transaction as the queue state (including approved submit).
+    pub fn defer_host_retry(&self, job: &Job, retry_after: i64, reason: &str) -> rusqlite::Result<()> {
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction()?;
+        let st = if job.st == "submit" { "submit" } else { "ready" };
+        let changed = tx.execute("update jobs set st=?,d=?,t1=? where id=? and st not in ('done','drop','approve','park')",
+            rusqlite::params![st,job.d.to_string(),now(),job.id])?;
+        if changed!=1 { return Err(rusqlite::Error::QueryReturnedNoRows); }
+        tx.execute("insert into job_schedule(job,retry_after,retry_reason) values(?,?,?) on conflict(job) do update set retry_after=excluded.retry_after,retry_reason=excluded.retry_reason",
+            rusqlite::params![job.id,retry_after,reason])?;
+        tx.commit()?;
+        crate::app::chg();
+        Ok(())
     }
 
     pub fn jg(&self, id: i64) -> Option<Job> {
@@ -407,5 +474,47 @@ mod tests {
             .unwrap()["lang"],
             "pt-PT"
         );
+    }
+}
+
+#[cfg(test)]
+mod schedule_tests {
+    use super::*;
+    fn job(db:&Db,n:i64)->i64 {
+        db.jnew("o/r",n,"fix","fixture","","ready","",json!({}),None,0.0)
+    }
+    #[test]
+    fn prerequisites_require_merged_pr_and_cycles_roll_back() {
+        let db=Db::mem();
+        let first=job(&db,1);
+        let second=job(&db,2);
+        db.set_job_schedule(second,Some(0),&[first]).unwrap();
+        assert!(!db.schedule_eligible(second,"o/r",now()).unwrap());
+        assert!(db.set_job_schedule(first,None,&[second]).is_err());
+        assert!(db.schedule_eligible(first,"o/r",now()).unwrap());
+        db.jset(first,&[("st",json!("done")),("pr",json!(10))]);
+        assert!(!db.schedule_eligible(second,"o/r",now()).unwrap());
+        db.run("insert into prs(repo,num,st) values('o/r',10,'merged')",vec![]);
+        assert!(db.schedule_eligible(second,"o/r",now()).unwrap());
+        assert!(!db.schedule_eligible(second,"other/r",now()).unwrap());
+        assert!(db.set_job_schedule(second,Some(7),&[]).is_err());
+        assert_eq!(db.n("select count(*) from job_dependencies",vec![]),1);
+    }
+    #[test]
+    fn host_retry_persists_deadline_without_changing_approval_or_dependencies() {
+        let db=Db::mem();
+        let id=job(&db,1);
+        db.set_job_schedule(id,Some(1),&[]).unwrap();
+        db.jset(id,&[("st",json!("submit")),("d",json!({"ap":true,"h":"local","ir":1}))]);
+        let j=db.jg(id).unwrap();
+        db.defer_host_retry(&j,1000,"host unavailable").unwrap();
+        assert!(!db.schedule_eligible(id,"o/r",999).unwrap());
+        assert!(db.schedule_eligible(id,"o/r",1000).unwrap());
+        assert_eq!(db.jg(id).unwrap().st,"submit");
+        assert_eq!(db.jg(id).unwrap().d["ap"],true);
+        assert_eq!(db.n("select manual_priority from job_schedule",vec![]),1);
+        db.jset(id,&[("st",json!("drop"))]);
+        assert!(db.defer_host_retry(&j,2000,"late retry").is_err());
+        assert!(!db.schedule_eligible(id,"o/r",3000).unwrap());
     }
 }

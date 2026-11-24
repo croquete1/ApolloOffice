@@ -4233,16 +4233,12 @@ async fn go(a: &Ax, id: i64, h: &str) {
                 if !pin {
                     jj.d.as_object_mut().map(|o| o.remove("h"));
                 }
-                a.db.jset(
-                    id,
-                    &[
-                        (
-                            "st",
-                            json!(if jj.st == "submit" { "submit" } else { "ready" }),
-                        ),
-                        ("d", jj.d.clone()),
-                    ],
-                );
+                let delay = host_retry_delay(n);
+                let reason = crate::hunt_health::safe_tail(&m);
+                if let Err(error) = a.db.defer_host_retry(&jj, now().saturating_add(delay), &reason) {
+                    a.say("ci", &format!("{}: could not persist host retry: {error}", jj.tag()), Some(id));
+                    return;
+                }
                 a.say(
                     "ci",
                     &format!(
@@ -4349,10 +4345,18 @@ async fn red(a: &Ax, r: &str, h: &str) -> bool {
     !(h["s"].is_string() && cr["sha"].is_string() && h["s"] != cr["sha"])
 }
 
+// Existing maximum of five attempts; persist a bounded cooldown between them.
+fn host_retry_delay(attempt: i64) -> i64 {
+    30_000 * (1_i64 << (attempt.clamp(1,5)-1))
+}
+
 // Atomically reserve work against updates, cache maintenance and other lanes.
 pub(crate) fn admit(a: &Ax, repo: &str, host: &str, id: i64) -> bool {
     let _transition = a.update_transition.lock().unwrap();
     if a.drain.load(std::sync::atomic::Ordering::SeqCst) {
+        return false;
+    }
+    if !matches!(a.db.schedule_eligible(id, repo, now()), Ok(true)) {
         return false;
     }
     let is_hunt = a.db.jg(id).is_some_and(|job| job.kind == "hunt");
@@ -4393,6 +4397,12 @@ pub(crate) fn admit(a: &Ax, repo: &str, host: &str, id: i64) -> bool {
     {
         return false;
     }
+    // Persist admission history for equal-priority fairness; a failed write
+    // cannot silently admit a task against an unavailable scheduling database.
+    if a.db.run("insert into job_schedule(job,admitted_at,retry_after,retry_reason) values(?,?,0,'') on conflict(job) do update set admitted_at=excluded.admitted_at,retry_after=0,retry_reason=''",
+        pa![id,now()]) < 0 {
+        return false;
+    }
     active.insert(claim);
     locked.insert(id);
     true
@@ -4423,7 +4433,7 @@ fn pick_rank(j: &Value) -> (i32, i32, i32, f64, i64, i64) {
         "mergecheck" => 2,
         _ => 0,
     };
-    let issue_priority = d["issue_priority"].as_i64().unwrap_or(2).clamp(0, 3) as i32;
+    let issue_priority = j["manual_priority"].as_i64().or_else(|| d["issue_priority"].as_i64()).unwrap_or(2).clamp(0, 3) as i32;
     (
         phase,
         follow_up_order,
@@ -4439,12 +4449,29 @@ async fn pick(a: &Ax, h: &str) -> Option<i64> {
     if a.drain.load(std::sync::atomic::Ordering::Relaxed) {
         return None;
     }
-    let mut c = a.db.all("select * from jobs where st in ('ready','submit') order by id", pa![]);
-    c.sort_by(|x, y| pick_rank(x).partial_cmp(&pick_rank(y)).unwrap_or(std::cmp::Ordering::Equal));
+    let mut c = a.db.all("select j.*,s.manual_priority,coalesce(s.retry_after,0) retry_after,
+        coalesce((select max(hist.admitted_at) from job_schedule hist join jobs previous on previous.id=hist.job where previous.repo=j.repo),0) repo_last_admitted
+        from jobs j left join job_schedule s on s.job=j.id where j.st in ('ready','submit') order by j.id", pa![]);
+    let active_repos = a.act.lock().unwrap().iter().filter_map(|entry| entry.split_once(' ').map(|(repo,_)|repo.to_string())).collect::<Vec<_>>();
+    c.sort_by(|x,y| {
+        let left=pick_rank(x); let right=pick_rank(y);
+        (left.0,left.1,left.2).cmp(&(right.0,right.1,right.2))
+            .then_with(|| {
+                // Only balance new ordinary fixes within the same priority.
+                // Resumed work, submissions and reviews keep their precedence.
+                if left.0!=3 { return std::cmp::Ordering::Equal; }
+                let count=|row:&Value| active_repos.iter().filter(|repo| Some(repo.as_str())==row["repo"].as_str()).count();
+                count(x).cmp(&count(y)).then_with(||x["repo_last_admitted"].as_i64().unwrap_or(0).cmp(&y["repo_last_admitted"].as_i64().unwrap_or(0)))
+            })
+            .then_with(||left.partial_cmp(&right).unwrap_or(std::cmp::Ordering::Equal))
+    });
     for j in c {
         let id = j["id"].as_i64().unwrap_or(0);
         let r = j["repo"].as_str().unwrap_or("").to_string();
         let d = &j["d"];
+        if !matches!(a.db.schedule_eligible(id,&r,now()),Ok(true)) {
+            continue;
+        }
         let pin = j["st"] == "submit"
             || d["rs"].as_bool().unwrap_or(false)
             || d["rp"].as_bool().unwrap_or(false);
