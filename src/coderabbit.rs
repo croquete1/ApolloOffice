@@ -56,7 +56,7 @@ impl RequestBudget {
 
 static REQUESTS: LazyLock<Mutex<RequestBudget>> = LazyLock::new(|| Mutex::new(RequestBudget::default()));
 
-fn reserve_request() -> Result<(), String> {
+fn reserve_public_read() -> Result<(), String> {
     if REQUESTS.lock().map_err(|_| RATE_LIMITED)?.admit(Instant::now()) {
         Ok(())
     } else {
@@ -87,7 +87,7 @@ fn public_client() -> Result<reqwest::Client, String> {
 }
 
 async fn read_public(client: &reqwest::Client, endpoint: &str, limit: usize) -> Result<String, String> {
-    reserve_request()?;
+    reserve_public_read()?;
     let response = client.get(format!("{API}/{endpoint}"))
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
@@ -684,6 +684,14 @@ pub(crate) fn queue_findings(
         rusqlite::params![repo, number],
         |r| r.get(0),
     )?;
+    // Bind admission to the most recent complete local Steward report as well
+    // as the remote HEAD recheck performed by the caller. Never use a stale
+    // report or ignore newly observed overlap/duplicate risks.
+    let snapshot_matches: bool = tx.query_row(
+        "select exists(select 1 from kv,json_each(kv.v,'$.prs') p where kv.k=? and json_extract(p.value,'$.number')=? and json_extract(p.value,'$.head_sha')=? and json_type(p.value,'$.overlaps')='array' and json_array_length(p.value,'$.overlaps')=0 and json_type(p.value,'$.possible_duplicates')='array' and json_array_length(p.value,'$.possible_duplicates')=0 and json_extract(p.value,'$.state')<>'draft')",
+        rusqlite::params![format!("steward:{repo}"), number, head],
+        |r| r.get(0),
+    )?;
     let active: i64 = tx.query_row(
         "select count(*) from jobs where repo=? and pr=? and kind in ('review','mergecheck','rebase') and st not in ('done','drop')",
         rusqlite::params![repo, number],
@@ -694,7 +702,7 @@ pub(crate) fn queue_findings(
         rusqlite::params![repo, number],
         |r| r.get(0),
     )?;
-    if tracked != 1 || active != 0 || cycles >= MAX_FIX_CYCLES_PER_PR {
+    if tracked != 1 || !snapshot_matches || active != 0 || cycles >= MAX_FIX_CYCLES_PER_PR {
         tx.commit()?;
         return Ok(false);
     }
@@ -1507,6 +1515,22 @@ mod tests {
         assert!(claim_finding_guard(&db, repo, 67, HEAD, &item).unwrap());
         assert!(set_finding_state(&db, repo, 67, HEAD, &item, "guarded").unwrap());
         assert!(!claim_finding_guard(&db, repo, 67, HEAD, &item).unwrap());
+        // Missing, stale, draft or overlapping report must not authorize work.
+        assert!(!queue_findings(&db, repo, 67, HEAD, "Title", "https://github.com/croquete1/ApolloOffice/pull/67", "codex/change", "cargo test", &[item.clone()]).unwrap());
+        let report_key=format!("steward:{repo}");
+        let mut report=json!({"prs":[{"number":67,"head_sha":OLD,"overlaps":[],"possible_duplicates":[],"state":"revisao_final_necessaria"}]});
+        db.ks(&report_key,&report);
+        assert!(!queue_findings(&db, repo, 67, HEAD, "Title", "https://github.com/croquete1/ApolloOffice/pull/67", "codex/change", "cargo test", &[item.clone()]).unwrap());
+        report["prs"][0]["head_sha"]=json!(HEAD);
+        report["prs"][0]["overlaps"]=json!([68]);
+        db.ks(&report_key,&report);
+        assert!(!queue_findings(&db, repo, 67, HEAD, "Title", "https://github.com/croquete1/ApolloOffice/pull/67", "codex/change", "cargo test", &[item.clone()]).unwrap());
+        report["prs"][0]["overlaps"]=json!([]);
+        report["prs"][0]["state"]=json!("draft");
+        db.ks(&report_key,&report);
+        assert!(!queue_findings(&db, repo, 67, HEAD, "Title", "https://github.com/croquete1/ApolloOffice/pull/67", "codex/change", "cargo test", &[item.clone()]).unwrap());
+        report["prs"][0]["state"]=json!("revisao_final_necessaria");
+        db.ks(&report_key,&report);
         assert!(queue_findings(&db, repo, 67, HEAD, "Title", "https://github.com/croquete1/ApolloOffice/pull/67", "codex/change", "cargo test", &[item]).unwrap());
         assert!(!queue_findings(&db, repo, 67, HEAD, "Title", "https://github.com/croquete1/ApolloOffice/pull/67", "codex/change", "cargo test", &[finding(81, "[P1] Check the permission before accepting this token")]).unwrap());
         let job = db.one("select id,kind,st,d from jobs where repo=? and pr=?", crate::pa![repo.to_string(), 67]).unwrap();
