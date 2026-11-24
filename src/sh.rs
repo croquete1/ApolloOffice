@@ -1282,6 +1282,60 @@ mod t {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    // Run only on an isolated, disposable Docker daemon (the hosted CI runner).
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires disposable real Docker daemon"]
+    async fn real_docker_worker_lifecycle() {
+        let name = ct();
+        assert!(name.starts_with("apollo-ci-"));
+        assert_eq!(std::env::var("APOLLO_OFFICE_REAL_DOCKER").as_deref(), Ok("1"));
+        let db = crate::db::Db::mem();
+        db.run("insert into hs(id,dk,on_,ln,ci) values('local',1,1,1,1)", pa![]);
+        let a = std::sync::Arc::new(App::new(
+            db,
+            std::env::temp_dir(),
+            1,
+            "apollo-office".into(),
+        ));
+        ensure(&a, "local").await.unwrap();
+        let host = ho(&a, "local").unwrap();
+        let first = hx(
+            &a,
+            "local",
+            "set -e; test $(node --version) = v24.22.3; test $(npm --version) = 12.2.0; test -L \"$npm_config_cache/_cacache\"; mkdir -p /work/smoke-node20 /work/smoke-default; echo alive > /work/smoke-sentinel; printf '%s' \"$npm_config_cache\"",
+            120,
+        )
+        .await;
+        assert_eq!(first.c, 0, "{}", first.all());
+        let cache = first.o.trim();
+        assert!(cache.starts_with("/tmp/apollo-npm-"));
+        let next = hx(
+            &a,
+            "local",
+            &format!("set -e; test ! -e '{}'; test -f /work/smoke-sentinel; test -L \"$npm_config_cache/_cacache\"; fnm install 20.19.0; echo 20.19.0 > /work/smoke-node20/.node-version; cd /work/smoke-node20; test $(node --version) = v20.19.0; cd /work/smoke-default; test $(node --version) = v24.22.3",cache),
+            300,
+        )
+        .await;
+        assert_eq!(next.c, 0, "{}", next.all());
+        let pause = hraw(&host, &format!("docker pause {name}"), 30).await;
+        assert_eq!(pause.c, 0, "{}", pause.all());
+        assert!(ensure(&a, "local").await.is_err());
+        let unpause = hraw(&host, &format!("docker unpause {name}"), 30).await;
+        assert_eq!(unpause.c, 0, "{}", unpause.all());
+        let stop = hraw(&host, &format!("docker stop {name}"), 60).await;
+        assert_eq!(stop.c, 0, "{}", stop.all());
+        ensure(&a, "local").await.unwrap();
+        let resumed = hx(
+            &a,
+            "local",
+            "set -e; test $(cat /work/smoke-sentinel) = alive; cd /work/smoke-default; test $(node --version) = v24.22.3",
+            60,
+        )
+        .await;
+        assert_eq!(resumed.c, 0, "{}", resumed.all());
+    }
+
     #[test]
     fn docker_cpu_cap_respects_daemon_ceiling() {
         assert_eq!(cap_docker_cpu(16, Some(12), 0), 12);
