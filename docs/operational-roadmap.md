@@ -13,7 +13,8 @@ Base main: 878ef1a45b82319bb912ae567a6cc4956c84ffe4. Release publicada: fork-v0.
 - [ ] PR #49 — melhorias upstream de Docker; validar ciclo real do worker.
 - [ ] PR #51 — Scout sem limite rígido de 500 issues, snapshot SQLite transacional, rejeição de respostas inválidas e adiamento se falhar a consulta de PRs relacionadas. HEAD: 6a705869317bfaecd495bd15e6cd2c5764734142.
 - [ ] PR #48 atualizada: enqueue de revisão e confirmação de comentários na mesma transação; adiamento enquanto existir revisão ativa e teste de rollback. HEAD: 5e463fda574a615fa8a3a4d7f2d64e97bc79939b.
-PRs #48, #49 e #51 em draft, não integradas nem validadas. F02, F04 e F09 têm implementação parcial. A interface dos agentes permanece intacta. Não há alterações de configuração de modelos. O presente roadmap não representa implementação.
+- [ ] PR #52 — inventário completo do Steward por paginação REST e dupla confirmação de identidade; paginação GraphQL de threads de revisão. HEAD: 93cd93eb9bfa8ee09981d1f3ea3294798908df09.
+PRs #48, #49, #51 e #52 em draft, não integradas nem validadas. F02, F04 e F09 têm implementação parcial. A interface dos agentes permanece intacta. Não há alterações de configuração de modelos. O presente roadmap não representa implementação.
 
 ## Fases e critérios de aceitação
 ### F01 / P0 — Integração seletiva upstream
