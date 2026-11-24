@@ -674,6 +674,12 @@ mod t {
             1,
             "apollo-office".into(),
         ));
+        a.lv.lock().unwrap().o.man = true;
+        assert!(!admit(&a, "o/r", "worker1", id));
+        assert!(!mk_hunt(&a));
+        assert!(a.act.lock().unwrap().is_empty());
+        assert!(a.lk.lock().unwrap().is_empty());
+        a.lv.lock().unwrap().o.man = false;
         let reservation = IdleCacheGuard::claim(&a, "worker1").unwrap();
         assert!(IdleCacheGuard::claim(&a, "worker1").is_none());
         assert!(!admit(&a, "o/r", "worker1", id));
