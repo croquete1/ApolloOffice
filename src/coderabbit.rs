@@ -1012,7 +1012,7 @@ pub(crate) async fn request_reviews(a: &crate::app::Ax, repo: &str, listed: &[Va
 
 async fn active_review_comment_ids(repo: &str, number: i64) -> Result<std::collections::BTreeSet<i64>, String> {
     let (owner, name) = repo.split_once('/').ok_or("invalid repository")?;
-    let query = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved comments(first:100){nodes{databaseId} pageInfo{hasNextPage}}} pageInfo{hasNextPage}}}}}";
+    let query = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){totalCount nodes{isResolved comments(first:100){totalCount nodes{databaseId} pageInfo{hasNextPage}}} pageInfo{hasNextPage}}}}}";
     let output = ghj(
         &[
             "api", "graphql", "-f", &format!("query={query}"), "-F", &format!("owner={owner}"),
@@ -1021,6 +1021,10 @@ async fn active_review_comment_ids(repo: &str, number: i64) -> Result<std::colle
         60,
     )
     .await?;
+    parse_active_review_comment_ids(&output)
+}
+
+fn parse_active_review_comment_ids(output: &Value) -> Result<BTreeSet<i64>, String> {
     if !output["errors"].is_null() {
         return Err("review-thread inventory returned GraphQL errors".into());
     }
@@ -1029,22 +1033,28 @@ async fn active_review_comment_ids(repo: &str, number: i64) -> Result<std::colle
         return Err("review-thread inventory is incomplete".into());
     }
     let nodes = threads["nodes"].as_array().ok_or("review-thread inventory is unavailable")?;
+    if threads["totalCount"].as_u64() != Some(nodes.len() as u64) {
+        return Err("review-thread count does not match inventory".into());
+    }
     let mut active = std::collections::BTreeSet::new();
     let mut seen = std::collections::BTreeSet::new();
     for thread in nodes {
+        let resolved = thread["isResolved"].as_bool()
+            .ok_or("review-thread resolution state is unavailable")?;
         let comments = &thread["comments"];
         if comments["pageInfo"]["hasNextPage"] != false {
             return Err("review-thread comment inventory is incomplete".into());
         }
-        let comments = comments["nodes"].as_array().ok_or("review-thread comments are unavailable")?;
-        for comment in comments {
+        let rows = comments["nodes"].as_array().ok_or("review-thread comments are unavailable")?;
+        if comments["totalCount"].as_u64() != Some(rows.len() as u64) {
+            return Err("review-thread comment count does not match inventory".into());
+        }
+        for comment in rows {
             let id = comment["databaseId"].as_i64().filter(|id| *id > 0)
                 .ok_or("review-thread comment has no database ID")?;
             if !seen.insert(id) {
                 return Err("duplicate review-thread comment ID".into());
             }
-            let resolved = thread["isResolved"].as_bool()
-                .ok_or("review-thread resolution state is unavailable")?;
             if !resolved {
                 active.insert(id);
             }
@@ -1628,6 +1638,25 @@ mod tests {
         assert!(fixer_finding(&short).ends_with("</untrusted-coderabbit-finding>"));
         assert!(!fixer_finding(&long).contains("<<<"));
     }
+    #[test]
+    fn review_threads_reject_partial_errors_count_mismatch_and_duplicates() {
+        let thread=|id:i64,resolved:bool|json!({"isResolved":resolved,"comments":{"totalCount":1,"nodes":[{"databaseId":id}],"pageInfo":{"hasNextPage":false}}});
+        let mut value=json!({"data":{"repository":{"pullRequest":{"reviewThreads":{"totalCount":2,"nodes":[thread(1,false),thread(2,true)],"pageInfo":{"hasNextPage":false}}}}}});
+        assert_eq!(parse_active_review_comment_ids(&value).unwrap(),BTreeSet::from([1]));
+        value["errors"]=json!([{"message":"partial error"}]);
+        assert!(parse_active_review_comment_ids(&value).is_err());
+        value.as_object_mut().unwrap().remove("errors");
+        let ptr="/data/repository/pullRequest/reviewThreads";
+        value.pointer_mut(ptr).unwrap()["totalCount"]=json!(3);
+        assert!(parse_active_review_comment_ids(&value).is_err());
+        value.pointer_mut(ptr).unwrap()["totalCount"]=json!(2);
+        value.pointer_mut(ptr).unwrap()["nodes"][1]=thread(1,true);
+        assert!(parse_active_review_comment_ids(&value).is_err());
+        value.pointer_mut(ptr).unwrap()["nodes"][1]=thread(2,true);
+        value.pointer_mut(ptr).unwrap()["nodes"][1]["comments"]["totalCount"]=json!(2);
+        assert!(parse_active_review_comment_ids(&value).is_err());
+    }
+
     #[test]
     fn repository_and_pr_scope_are_strict() {
         assert!(valid_repo("croquete1/ApolloOffice"));
