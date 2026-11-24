@@ -560,24 +560,31 @@ fn setup_transport_error(result: &Out) -> bool {
     result.c < 0 || crate::app::hostish(&result.e) || crate::app::netish(&result.e)
 }
 
-/// Legacy queued reviews without a bound SHA retain their previous behavior.
-    /// New Watcher/Steward reviews must keep their original analysed commit.
+/// Legacy jobs without a bound SHA retain their previous behavior.
+    /// New Watcher reviews/rebases and Steward reviews must preserve the original HEAD.
 fn review_bound_head(j:&Job)->R<Option<&str>>{
-    if j.kind!="review"{return Ok(None);}
-    let source=&j.d["source_head"];
-    let steward=&j.d["steward_head"];
-    if source.is_null() && steward.is_null(){return Ok(None);}
-    let head=source.as_str().or_else(||steward.as_str()).filter(|s|crate::db::valid_git_sha(s))
-        .ok_or_else(||X::Drop("review source HEAD is malformed; manual review required".into()))?;
-    if (!source.is_null() && source.as_str()!=Some(head)) || (!steward.is_null() && steward.as_str()!=Some(head)){
-        return Err(X::Drop("review source HEAD evidence disagrees; manual review required".into()));
+    let keys: &[&str] = match j.kind.as_str() {
+        "review" => &["source_head", "steward_head"],
+        "rebase" => &["watcher_observed_head"],
+        _ => return Ok(None),
+    };
+    let mut bound=None;
+    for key in keys {
+        let Some(value)=j.d.get(*key) else {continue;};
+        if value.is_null() && j.kind=="review" {continue;}
+        let head=value.as_str().filter(|s|crate::db::valid_git_sha(s))
+            .ok_or_else(||X::Drop("PR operation source HEAD is malformed; manual review required".into()))?;
+        if bound.is_some_and(|previous|previous!=head){
+            return Err(X::Drop("PR operation source HEAD evidence disagrees; manual review required".into()));
+        }
+        bound=Some(head);
     }
-    Ok(Some(head))
+    Ok(bound)
 }
 
 fn check_review_checkout(j:&Job,actual:&str)->R<()>{
     if review_bound_head(j)?.is_some_and(|head|head!=actual){
-        return Err(X::Drop("review source HEAD changed; original request retained in job history; manual review required".into()));
+        return Err(X::Drop("PR operation source HEAD changed; original request retained in job history; manual review required".into()));
     }
     Ok(())
 }
@@ -3597,11 +3604,11 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
     .await
     .unwrap_or_default());
     if let Some(source)=review_bound_head(j)?{
-        let number=j.pr.filter(|n|*n>0).ok_or_else(||X::Drop("review has no original PR number".into()))?;
+        let number=j.pr.filter(|n|*n>0).ok_or_else(||X::Drop("PR operation has no original PR number".into()))?;
         let remote=ghj(&["api",&format!("repos/{}/pulls/{number}",j.repo)],60).await.map_err(X::E)?;
         if !review_publish_target_matches(&remote,&hr,&br,source,&sha)
             || remote["head"]["sha"].as_str()!=Some(rem.as_str()){
-            return drop("review publication target changed; no push; manual review required");
+            return drop("PR operation publication target changed; no push; manual review required");
         }
     }
     if rem != sha {
