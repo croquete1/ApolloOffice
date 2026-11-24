@@ -326,6 +326,51 @@ impl Db {
         Ok(())
     }
 
+    /// Persist provider-local transient failures without storing error text or secrets.
+    /// A late response from an older request cannot shorten a newer cooldown.
+    pub fn provider_failure(&self, provider: &str, kind: &str, at: i64) -> rusqlite::Result<()> {
+        if !matches!(kind, "quota" | "network") || crate::prov::pv(provider).is_none() {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let key = format!("provider:cooldown:{provider}");
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let previous = {
+            let mut stmt=tx.prepare("select v from kv where k=?")?;
+            let mut rows=stmt.query([&key])?;
+            match rows.next()? {
+                Some(row)=>serde_json::from_str::<Value>(&row.get::<_,String>(0)?).map_err(|_|rusqlite::Error::InvalidQuery)?,
+                None=>Value::Null,
+            }
+        };
+        let last=previous["at"].as_i64().unwrap_or(0);
+        if last>at {return Ok(());}
+        let count=if last>0 && at.saturating_sub(last)<=1_800_000 && previous["kind"]==kind {
+            previous["count"].as_i64().unwrap_or(0).saturating_add(1).clamp(1,6)
+        } else {1};
+        let base=if kind=="quota"{60_000}else{30_000};
+        let delay=(base*(1_i64<<(count-1))).min(if kind=="quota"{600_000}else{300_000});
+        let until=at.saturating_add(delay).max(previous["until"].as_i64().unwrap_or(0));
+        let value=json!({"kind":kind,"at":at,"count":count,"until":until});
+        tx.execute("insert into kv(k,v) values(?,?) on conflict(k) do update set v=excluded.v",
+            rusqlite::params![key,value.to_string()])?;
+        tx.commit()?;
+        crate::app::chg();
+        Ok(())
+    }
+
+    pub fn provider_cooldown(&self, provider:&str, at:i64)->rusqlite::Result<Option<Value>> {
+        let rows=self.try_all("select v from kv where k=?",crate::pa![format!("provider:cooldown:{provider}")])?;
+        let Some(row)=rows.first() else{return Ok(None)};
+        let raw=row["v"].as_str().ok_or(rusqlite::Error::InvalidQuery)?;
+        let value:Value=serde_json::from_str(raw).map_err(|_|rusqlite::Error::InvalidQuery)?;
+        let until=value["until"].as_i64().ok_or(rusqlite::Error::InvalidQuery)?;
+        if !matches!(value["kind"].as_str(),Some("quota"|"network")) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        Ok((until>at).then_some(value))
+    }
+
     pub fn kg(&self, k: &str) -> Value {
         self.one("select v from kv where k=?", crate::pa![k.to_string()])
             .and_then(|r| r["v"].as_str().and_then(|s| serde_json::from_str(s).ok()))
@@ -1089,5 +1134,34 @@ mod late_followup_tests {
             .queue_followup_and_ack("o/r", 2, "t3", &["i3".into()], &request)
             .is_err());
         assert!(!db.comment_acknowledged("o/r", "i3").unwrap());
+    }
+}
+
+#[cfg(test)]
+mod provider_cooldown_tests {
+    use super::*;
+    #[test]
+    fn cooldown_is_persistent_isolated_and_expires_without_extending_on_read() {
+        let db=Db::mem();
+        let at=100_000;
+        db.provider_failure("codex","quota",at).unwrap();
+        assert!(db.provider_cooldown("cc",at).unwrap().is_none());
+        let first=db.provider_cooldown("codex",at).unwrap().unwrap();
+        assert_eq!(first["until"],at+60_000);
+        assert_eq!(db.provider_cooldown("codex",at+1).unwrap().unwrap(),first);
+        assert!(db.provider_cooldown("codex",at+60_000).unwrap().is_none());
+        db.provider_failure("codex","quota",at+60_001).unwrap();
+        let second=db.provider_cooldown("codex",at+60_001).unwrap().unwrap();
+        assert_eq!(second["count"],2);
+        assert_eq!(second["until"],at+180_001);
+        db.provider_failure("codex","network",at).unwrap();
+        assert_eq!(db.provider_cooldown("codex",at+60_001).unwrap().unwrap(),second);
+        assert!(db.provider_failure("unknown","quota",at).is_err());
+    }
+    #[test]
+    fn corrupt_cooldown_is_not_treated_as_available() {
+        let db=Db::mem();
+        db.ks("provider:cooldown:cc",&json!({"kind":"quota"}));
+        assert!(db.provider_cooldown("cc",1000).is_err());
     }
 }

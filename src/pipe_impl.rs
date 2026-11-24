@@ -4479,7 +4479,16 @@ pub(crate) fn admit(a: &Ax, repo: &str, host: &str, id: i64) -> bool {
         || crate::ai::rbud(a,Some(id)).is_some() {
         return false;
     }
-    let is_hunt = a.db.jg(id).is_some_and(|job| job.kind == "hunt");
+    let Some(job)=a.db.jg(id) else{return false;};
+    let is_hunt=job.kind=="hunt";
+    // Reserve Codex capacity for ordinary fixes and review. The call-level
+    // gate also covers fallback models; never block a verified review/submit.
+    if job.st=="ready" && job.opt() && job.d["rs"]!=true
+        && !crate::routing::enabled(a) && !staged(a,&job)
+        && a.set()["adaptive_routing"]!=true
+        && a.codex_low_priority_blocked(&a.md("fixer")) {
+        return false;
+    }
     if is_hunt && (crate::hunt_health::blocked(a, repo) || a.hunter_quota_blocked()) {
         return false;
     }
