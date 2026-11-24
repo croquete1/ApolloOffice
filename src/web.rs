@@ -1921,7 +1921,7 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                 return er(StatusCode::CONFLICT, "refresh Steward before observing");
             }
             let Ok(_permit) = crate::coderabbit::OBSERVATIONS.try_acquire() else {
-                return er(StatusCode::TOO_MANY_REQUESTS, "CodeRabbit observation capacity busy");
+                return js(json!({"state":"busy","head":head}));
             };
             let Ok(ticket) = crate::coderabbit::reserve(&a.db, repo, number) else {
                 return er(StatusCode::CONFLICT, "observation unavailable");
@@ -1931,6 +1931,7 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                     Ok(true) => js(value),
                     _ => js(json!({"state":"unavailable","head":head})),
                 },
+                Err(error) if error == crate::coderabbit::RATE_LIMITED => js(json!({"state":"rate_limited","head":head})),
                 Err(_) => js(json!({"state":"unavailable","head":head})),
             }
         }
