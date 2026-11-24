@@ -4,7 +4,7 @@ use crate::db::{now, Job};
 use crate::net::need;
 use crate::pa;
 use crate::pipe::{bl, qn, rp};
-use crate::sh::{apip_unique, gh, ghj};
+use crate::sh::{apip_unique, gh, gh_input, ghj};
 use regex::Regex;
 use serde_json::{json, Value};
 use std::future::Future;
@@ -2289,17 +2289,18 @@ async fn deliver_watcher_outbox(a: &Ax, me: &str) -> R<()> {
         {
             continue;
         }
-        match gh(
+        match gh_input(
             &[
                 "pr",
                 "comment",
                 &number.to_string(),
                 "-R",
                 repo,
-                "--body",
-                body,
+                "--body-file",
+                "-",
             ],
             60,
+            Some(body.to_string()),
         )
         .await
         {

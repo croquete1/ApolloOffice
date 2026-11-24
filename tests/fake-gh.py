@@ -66,9 +66,13 @@ if a[:2] == ["pr", "list"]:
         out([p for p in ld("prs.json", []) if p["head"] == opt("--head")])
     out([])
 if a[:2] == ["pr", "create"]:
+    if opt("--body-file") != "-":
+        sys.stderr.write("expected PR body on stdin")
+        sys.exit(1)
+    body = sys.stdin.buffer.read().decode("utf-8")
     ps = ld("prs.json", [])
     n = 100 + len(ps)
-    ps.append({"number": n, "url": f"https://github.com/{R}/pull/{n}", "head": opt("--head"), "base": opt("--base"), "title": opt("--title"), "body": opt("--body"), "headRepositoryOwner": {"login": "tester"}})
+    ps.append({"number": n, "url": f"https://github.com/{R}/pull/{n}", "head": opt("--head"), "base": opt("--base"), "title": opt("--title"), "body": body, "headRepositoryOwner": {"login": "tester"}})
     sv("prs.json", ps)
     print(f"https://github.com/{R}/pull/{n}")
     sys.exit(0)

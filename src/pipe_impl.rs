@@ -3,7 +3,7 @@ use crate::app::{drop, e, sl, Ax, Rn, R, X};
 use crate::db::{now, Job};
 use crate::net::need;
 use crate::pa;
-use crate::sh::{gh, ghj, hb, hbid, ho, hosts, hx, hxl, q, Out};
+use crate::sh::{gh, gh_input, ghj, hb, hbid, ho, hosts, hx, hxl, q, Out};
 use regex::Regex;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -3683,7 +3683,7 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
             p["number"].as_i64().unwrap_or(0),
         ),
         None => {
-            let o = gh(
+            let o = gh_input(
                 &[
                     "pr",
                     "create",
@@ -3695,10 +3695,11 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
                     &j.s("mn"),
                     "--title",
                     &ti,
-                    "--body",
-                    &pb,
+                    "--body-file",
+                    "-",
                 ],
                 120,
+                Some(pb.clone()),
             )
             .await
             .map_err(X::E)?;

@@ -906,11 +906,16 @@ pub async fn ensure(a: &Ax, id: &str) -> Result<(), String> {
 }
 
 pub async fn gh(a: &[&str], t: u64) -> Result<String, String> {
+    gh_input(a, t, None).await
+}
+
+pub async fn gh_input(a: &[&str], t: u64, input: Option<String>) -> Result<String, String> {
     let v: Vec<String> = a.iter().map(|x| x.to_string()).collect();
     let r = run(
         &tool("gh"),
         &v,
         Rq {
+            i: input,
             t,
             env: vec![
                 ("GH_PROMPT_DISABLED".into(), "1".into()),
