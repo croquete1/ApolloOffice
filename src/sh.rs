@@ -1346,10 +1346,7 @@ mod t {
     #[tokio::test]
     #[ignore = "requires disposable loopback SSH server"]
     async fn real_ssh_worker_transport() {
-        assert_eq!(
-            std::env::var("APOLLO_OFFICE_REAL_SSH").as_deref(),
-            Ok("1")
-        );
+        assert_eq!(std::env::var("APOLLO_OFFICE_REAL_SSH").as_deref(), Ok("1"));
         let db = crate::db::Db::mem();
         db.run(
             "insert into hs(id,ssh,dk,on_,ln,ci) values('ssh-ci','apollo-ci-ssh',0,1,1,1)",
@@ -1381,13 +1378,7 @@ mod t {
         .await;
         assert_eq!(streamed.c, 0, "{}", streamed.all());
         assert_eq!(streamed.o, "stream-ok");
-        let failed = hx(
-            &a,
-            "ssh-ci",
-            "printf '%s' fixture-error >&2; exit 23",
-            30,
-        )
-        .await;
+        let failed = hx(&a, "ssh-ci", "printf '%s' fixture-error >&2; exit 23", 30).await;
         assert_eq!(failed.c, 23, "{}", failed.all());
         assert!(failed.e.contains("fixture-error"));
     }
