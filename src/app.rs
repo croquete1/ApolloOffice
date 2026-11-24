@@ -122,7 +122,13 @@ pub enum X {
 impl std::fmt::Display for X {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            X::Drop(s) | X::Back(s) | X::Lim(s) | X::Net(s) | X::Defer(s) | X::E(s) | X::Host(_, s) => {
+            X::Drop(s)
+            | X::Back(s)
+            | X::Lim(s)
+            | X::Net(s)
+            | X::Defer(s)
+            | X::E(s)
+            | X::Host(_, s) => {
                 write!(f, "{s}")
             }
         }

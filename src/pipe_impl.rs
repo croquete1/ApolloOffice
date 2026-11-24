@@ -1415,12 +1415,16 @@ fn errs(o: &str) -> String {
 }
 
 async fn ci(a: &Ax, j: &mut Job) -> R<String> {
+    ci_with_policy(a,j,true).await
+}
+
+async fn ci_with_policy(a: &Ax, j: &mut Job, allow_defer:bool) -> R<String> {
     a.say(
         "ci",
         &format!("[{}] waiting for the build slot", j.h()),
         Some(j.id),
     );
-    if verified_checkpoint(j) || j.kind=="mergecheck" {
+    if allow_defer && (verified_checkpoint(j) || j.kind=="mergecheck") {
         // The candidate is committed and can be rechecked. Do not keep the
         // lane while another build occupies all CI slots.
         a.db.jset(j.id,&[("st",json!("ci"))]);
@@ -3219,7 +3223,9 @@ async fn gate(a: &Ax, j: &mut Job) -> R<()> {
         j.d["base"] = json!(ob);
         return drop(format!("after rebase: {}", v.lines().next().unwrap_or("")));
     }
-    let c = ci(a, j).await?;
+    // Once the gate rebases, its new base and proof may already be persisted.
+    // Never defer here and later mistake that base for an already-green gate.
+    let c = ci_with_policy(a, j, false).await?;
     if !c.is_empty() {
         return drop(rbw(j, &c));
     }
@@ -4065,11 +4071,15 @@ async fn go(a: &Ax, id: i64, h: &str) {
                 a.db.jd(&j);
             }
         } else if rs {
-            j.d.as_object_mut().unwrap().remove("rs");
-            a.db.jd(&j);
+            // Mark active before verification. A crash must not leave a ready
+            // row with the resume marker removed and silently restart prep.
+            a.db.jset(id,&[("st",json!("ci"))]);
             let mut jj = j.clone();
             resume(a, &mut jj).await?;
             j = jj;
+            j.d.as_object_mut().unwrap().remove("rs");
+            j.d.as_object_mut().unwrap().remove("deferred_checkpoint");
+            a.db.jd(&j);
             kill(a, &j)?;
             let mut jj = j.clone();
             gate(a, &mut jj).await?;

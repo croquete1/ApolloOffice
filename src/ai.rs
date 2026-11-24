@@ -158,16 +158,29 @@ pub async fn ask(a: &Ax, o: Ask) -> R<(String, Value)> {
 
 pub fn rbud(a: &Ax, j: Option<i64>) -> Option<String> {
     let r = a.db.jg(j?)?.repo;
-    let rows=match a.db.try_all("select bud from rp where full=?",crate::pa![r.clone()]) {
-        Ok(rows)=>rows,
-        Err(_)=>return Some(format!("{r}: budget configuration unavailable; waiting for database recovery")),
+    let rows = match a
+        .db
+        .try_all("select bud from rp where full=?", crate::pa![r.clone()])
+    {
+        Ok(rows) => rows,
+        Err(_) => {
+            return Some(format!(
+                "{r}: budget configuration unavailable; waiting for database recovery"
+            ))
+        }
     };
-    let b=rows.first()?["bud"].as_f64().unwrap_or(0.0);
-    if b<=0.0 { return None; }
+    let b = rows.first()?["bud"].as_f64().unwrap_or(0.0);
+    if b <= 0.0 {
+        return None;
+    }
     match a.db.try_usd(Some(&r)) {
-        Ok(used) if used<b=>return None,
-        Ok(_)=>{},
-        Err(_)=>return Some(format!("{r}: cost ledger unavailable; waiting for database recovery")),
+        Ok(used) if used < b => return None,
+        Ok(_) => {}
+        Err(_) => {
+            return Some(format!(
+                "{r}: cost ledger unavailable; waiting for database recovery"
+            ))
+        }
     }
     Some(format!(
         "{r} reached its daily budget of ${b:.2}, waiting until midnight"
