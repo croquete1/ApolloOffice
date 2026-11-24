@@ -34,6 +34,14 @@
 - [x] PR #63 — inventários paginados de check-runs, status combinado, revisões/comentários e permissões GraphQL de revisores; falha fechada perante contagem inconsistente, IDs duplicados, páginas incompletas, erro GraphQL ou cursor repetido. Bloqueio de renomeações de ficheiros sensíveis; limite conservador de tamanho de PR preservado. Merge 621d1e8372994745105777a1f8bb45f54c0c3395. QA final: 395 testes aprovados (243 Rust unitários + 2 integração + 116 JavaScript + 34 Python), 3 Rust ignorados, fmt, Clippy -D warnings e diff check aprovados. Árvore testada b17695d9fca2190058ac048a82604fbb92f6b934 idêntica à integrada. F03/F09 parciais; API real com várias páginas e sync incremental ainda por validar/implementar.
 - Interface dos agentes e configuração dos modelos inalteradas. Sem ativação Qwen e sem nova release. Browser validado na segunda entrega, não repetido nesta etapa sem alterações UI; Windows, Docker/SSH real e fornecedores reais continuam pendentes.
 
+## Quarta entrega — desenvolvimento pendente de validação (24/11/2026)
+Estas PRs estão em draft e **não estão integradas**. A main funcional continua na árvore anteriormente validada; a contagem de 395 testes refere-se à terceira entrega.
+- #65 — F06/F07: cooldowns persistentes por fornecedor e reserva Codex para otimizações; três testes Rust criados, não executados. HEAD c645240fcca01e73af63e61dcca12afa919b46b5.
+- #66 — F09/F10: inventários completos Hunter, validação de evidência, supressão atómica de duplicados exatos e aging automático até P1; quatro testes Rust criados, não executados. SQLite isolado PASS, incluindo concorrência com oito ligações. HEAD f9fef8c08ff30880d6724c7eb84d8b962b0bfd29.
+- #67 — F01/F15: filtros de logs por agente e mensagem, contagem e quebra de linhas no drawer de tarefas; dois testes JS isolados PASS, browser e suite integral pendentes. HEAD 81af93d3e64a7bb951f4014f5dcff2a59d6bb18a.
+- #68 — F11/F14/F15: capacidade de CI adaptada aos perfis e pressão observada; tarefas retomáveis podem adiar CI, mantendo um limite mínimo de uma vaga para concluir trabalho não retomável; GPU/VRAM/temperatura/utilização NVIDIA opcionais, sem drivers novos, sem dependência de Ollama ou Qwen; diagnóstico no drawer Health, dados stale omitidos. Dois testes Rust criados, não executados. Quatro cenários do probe shell com utilitário simulado e dois testes JS isolados do renderer PASS, hashes dos trechos e teste confirmados. HEAD 6777ef95eef51dabcc6e77134b087994188ca41e. Não é validação em GPU real nem suporta ainda telemetria AMD/Intel.
+- Bloqueio: limite Hobby Vercel anteriormente atingido; ambiente local sem cargo/rustc e sem resolução DNS GitHub; sem runs CI verificados. Não declarar fase encerrada ou fazer merge funcional até resolver conflitos, formatar e validar a árvore conjunta. Preservar interface dos agentes e configuração dos modelos.
+
 ## Balanço por fase
 | Fase | Estado | Falta |
 |---|---|---|
