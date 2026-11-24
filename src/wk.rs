@@ -1348,178 +1348,46 @@ fn auto_merge_blocker(pr: &Value, job: &Job, saved: &Value, me: &str) -> Option<
     None
 }
 
-fn save_auto_merge_state(
-    a: &Ax,
-    repo: &str,
-    number: i64,
-    mut data: Value,
-    status: &str,
-    reason: &str,
-    head: &str,
-) {
-    if !data.is_object() {
-        data = json!({});
+// Watcher is an observer. Only the Steward may initiate new merges.
+fn observe_auto_merge(a: &Ax, repo: &str, number: i64, pr: &Value, saved: &Value, me: &str) -> R<()> {
+    if saved["auto_merge"] != true {
+        return Ok(());
     }
-    let changed = data["merge_status"].as_str() != Some(status)
-        || data["merge_reason"].as_str() != Some(reason)
-        || data["merge_state_head"].as_str() != Some(head);
-    data["merge_status"] = json!(status);
-    data["merge_reason"] = json!(reason);
-    data["merge_state_head"] = json!(head);
-    a.db.run(
-        "update prs set d=? where repo=? and num=?",
-        pa![data.to_string(), repo.to_string(), number],
-    );
+    let head = pr["headRefOid"].as_str().unwrap_or("");
+    let repo_enabled = a.db.n(
+        "select auto_merge from rp where full=? and on_=1",
+        pa![repo.to_string()],
+    ) == 1;
+    let (status, reason) = if !repo_enabled {
+        ("blocked", "Repository automatic merge is disabled; no new merge requested.")
+    } else if saved["merge_enabled_head"].as_str() == Some(head) && !head.is_empty() {
+        ("enabled", "GitHub auto-merge was previously enabled; monitoring existing request.")
+    } else if let Some(job) = saved["job"].as_i64().and_then(|id| a.db.jg(id)) {
+        match auto_merge_blocker(pr, &job, saved, me) {
+            Some(reason) => ("waiting", reason),
+            None => ("waiting", "Local evidence observed; awaiting independent PR Steward gates."),
+        }
+    } else {
+        ("blocked", "Apollo Office job evidence is unavailable.")
+    };
+    let changed = saved["merge_status"].as_str() != Some(status)
+        || saved["merge_reason"].as_str() != Some(reason)
+        || saved["merge_state_head"].as_str() != Some(head);
     if changed {
-        a.say("watcher", &format!("{repo}#{number}: {reason}"), None);
-    }
-}
-
-async fn try_auto_merge(
-    a: &Ax,
-    repo: &str,
-    number: i64,
-    pr: &Value,
-    saved: &Value,
-    me: &str,
-) -> R<bool> {
-    if saved["auto_merge"].as_bool() != Some(true) {
-        return Ok(false);
-    }
-    let head = pr["headRefOid"].as_str().unwrap_or("").to_string();
-    let Some(job_id) = saved["job"].as_i64() else {
-        save_auto_merge_state(
-            a,
-            repo,
-            number,
-            saved.clone(),
-            "blocked",
-            "Apollo Office job evidence is missing.",
-            &head,
-        );
-        return Ok(false);
-    };
-    let Some(job) = a.db.jg(job_id) else {
-        save_auto_merge_state(
-            a,
-            repo,
-            number,
-            saved.clone(),
-            "blocked",
-            "Apollo Office job evidence is no longer available.",
-            &head,
-        );
-        return Ok(false);
-    };
-    if let Some(reason) = auto_merge_blocker(pr, &job, saved, me) {
-        save_auto_merge_state(a, repo, number, saved.clone(), "waiting", reason, &head);
-        return Ok(false);
-    }
-    if saved["merge_enabled_head"].as_str() == Some(&head) {
-        return Ok(false);
-    }
-    let recent_attempt = saved["merge_attempt_head"].as_str() == Some(&head)
-        && saved["merge_attempt_at"]
-            .as_i64()
-            .map(|t| now() - t < 30 * 60_000)
-            .unwrap_or(false);
-    if recent_attempt {
-        return Ok(false);
-    }
-
-    let mut data = saved.clone();
-    data["merge_attempt_head"] = json!(head);
-    data["merge_attempt_at"] = json!(now());
-    a.db.run(
-        "update prs set d=? where repo=? and num=?",
-        pa![data.to_string(), repo.to_string(), number],
-    );
-    match gh(
-        &[
-            "pr",
-            "merge",
-            &number.to_string(),
-            "-R",
-            repo,
-            "--auto",
-            "--squash",
-            "--match-head-commit",
-            &head,
-        ],
-        120,
-    )
-    .await
-    {
-        Ok(_) => {
-            data["merge_enabled_head"] = json!(head);
-            save_auto_merge_state(
-                a,
-                repo,
-                number,
-                data,
-                "enabled",
-                "All observed checks passed; GitHub auto-merge is enabled.",
-                &head,
-            );
-            let fresh = ghj(
-                &[
-                    "pr",
-                    "view",
-                    &number.to_string(),
-                    "-R",
-                    repo,
-                    "--json",
-                    "state,mergedAt,updatedAt,title,url",
-                ],
-                60,
-            )
-            .await
-            .map_err(X::E)?;
-            if fresh["mergedAt"].is_string() || fresh["state"] == "MERGED" {
-                let updated = fresh["updatedAt"].as_str().unwrap_or("").to_string();
-                let merged = fresh["mergedAt"].as_str().map(String::from);
-                a.db.run(
-                    "update prs set st='merged', title=?, upd=?, merged=? where repo=? and num=?",
-                    pa![
-                        fresh["title"].as_str().unwrap_or("").to_string(),
-                        updated,
-                        merged,
-                        repo.to_string(),
-                        number
-                    ],
-                );
-                a.note(
-                    "Merged",
-                    &format!(
-                        "{repo}#{number} {}\n{}",
-                        fresh["title"].as_str().unwrap_or(""),
-                        fresh["url"].as_str().unwrap_or("")
-                    ),
-                    3,
-                );
-                a.flow("watcher", "submit", "merged");
-                a.say(
-                    "watcher",
-                    &format!("{repo}#{number} merged after all GitHub checks passed"),
-                    None,
-                );
-                a.db.ks("lm", &json!({"repo": repo, "num": number, "title": fresh["title"], "url": fresh["url"], "t": now()}));
-                a.db.ks(&format!("wm:{repo}#{number}"), &json!(now()));
-                late(a, repo, number, me, &fresh).await?;
-                return Ok(true);
-            }
+        // Update only diagnostic fields, never overwrite the comment cursor or
+        // other metadata persisted by concurrent reconciliation.
+        if a.db.run(
+            "update prs set d=json_set(d,'$.merge_status',?,'$.merge_reason',?,'$.merge_state_head',?) where repo=? and num=?",
+            pa![status.to_string(),reason.to_string(),head.to_string(),repo.to_string(),number],
+        ) < 0 {
+            return Err(X::E("Could not persist Watcher merge diagnosis".into()));
         }
-        Err(error) => {
-            let reason = "GitHub did not enable auto-merge; see the watcher log.";
-            save_auto_merge_state(a, repo, number, data, "blocked", reason, &head);
-            a.say(
-                "watcher",
-                &format!("{repo}#{number}: {}", crate::sh::head(&error, 240)),
-                None,
-            );
+        a.say("watcher",&format!("{repo}#{number}: {reason}"),None);
+        if repo_enabled {
+            a.steward_wake.notify_one();
         }
     }
-    Ok(false)
+    Ok(())
 }
 
 async fn watch1(a: &Ax) -> R<()> {
@@ -1611,9 +1479,7 @@ async fn watch1(a: &Ax) -> R<()> {
             a.flow("watcher", "fixer", "rebase");
             a.say("watcher", &format!("{tag} has a merge conflict, sent to rebase"), None);
         }
-        if p["d"]["auto_merge"].as_bool() == Some(true) && try_auto_merge(a, &r, n, &v, &p["d"], &me).await? {
-            continue;
-        }
+        observe_auto_merge(a, &r, n, &v, &p["d"], &me)?;
         if p["d"]["comment_seen_at"].as_str() == Some(up.as_str()) && p["d"]["seen"].as_bool().unwrap_or(false) {
             continue;
         }
