@@ -2251,10 +2251,14 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                     );
                 }
                 "reset" => {
-                    for k in ["set", "hold", "man"] {
-                        a.db.kd(k);
-                    }
                     {
+                        let _transition = a.update_transition.lock().unwrap();
+                        if a.drain.load(std::sync::atomic::Ordering::SeqCst) {
+                            return er(StatusCode::CONFLICT, "update is in progress");
+                        }
+                        if a.db.run("delete from kv where k in ('set','hold','man')", pa![]) < 0 {
+                            return er(StatusCode::CONFLICT, "settings were not reset");
+                        }
                         let mut l = a.lv.lock().unwrap();
                         l.o.man = false;
                         for w in l.w.values_mut() {
@@ -2708,6 +2712,48 @@ mod t {
                 pa![]
             ),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn settings_reset_preserves_pause_on_failure_and_during_drain() {
+        let db = crate::db::Db::mem();
+        db.ks("man", &json!(true));
+        db.ks("hold", &json!({"fixer":true}));
+        db.ks("set", &json!({"hunters":1}));
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::env::temp_dir(),
+            1,
+            "x".into(),
+        ));
+        let request = || api(&a, &Method::POST, "/api/danger", "", json!({"op":"reset"}));
+        a.drain.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(request().await.status(), StatusCode::CONFLICT);
+        a.drain.store(false, std::sync::atomic::Ordering::SeqCst);
+        a.db.0.lock().unwrap().execute_batch(
+            "create trigger fail_reset before delete on kv when old.k='hold' begin select raise(abort,'injected'); end;",
+        ).unwrap();
+        assert_eq!(request().await.status(), StatusCode::CONFLICT);
+        assert!(a.lv.lock().unwrap().o.man);
+        assert_eq!(a.db.kg("man"), json!(true));
+        assert_eq!(a.db.kg("hold"), json!({"fixer":true}));
+        assert_eq!(a.db.kg("set"), json!({"hunters":1}));
+        a.db
+            .0
+            .lock()
+            .unwrap()
+            .execute_batch("drop trigger fail_reset")
+            .unwrap();
+        assert_eq!(request().await.status(), StatusCode::OK);
+        assert!(!a.lv.lock().unwrap().o.man);
+        assert!(!a.lv.lock().unwrap().w.values().any(|w| w.hold));
+        assert_eq!(
+            a.db.n(
+                "select count(*) from kv where k in ('set','hold','man')",
+                pa![]
+            ),
+            0
         );
     }
 
