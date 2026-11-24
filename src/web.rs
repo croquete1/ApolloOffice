@@ -1900,12 +1900,24 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                 .collect::<Vec<Value>>()
         })),
         ("GET", "/api/lessons") => match crate::routing::lessons(a) {
-            Ok(rows)=>js(json!({"lessons":rows})),
-            Err(error)=>{eprintln!("lesson inventory: {error}");er(StatusCode::INTERNAL_SERVER_ERROR,"lesson inventory unavailable")}
+            Ok(rows) => js(json!({"lessons":rows})),
+            Err(error) => {
+                eprintln!("lesson inventory: {error}");
+                er(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "lesson inventory unavailable",
+                )
+            }
         },
-        ("POST", "/api/lessons") => match crate::routing::review_lesson(a,b["key"].as_str().unwrap_or(""),b["action"].as_str().unwrap_or(""),b["note"].as_str().unwrap_or(""),b["days"].as_i64().unwrap_or(30)) {
-            Ok(())=>js(json!({"ok":true})),
-            Err(error)=>er(StatusCode::CONFLICT,&error),
+        ("POST", "/api/lessons") => match crate::routing::review_lesson(
+            a,
+            b["key"].as_str().unwrap_or(""),
+            b["action"].as_str().unwrap_or(""),
+            b["note"].as_str().unwrap_or(""),
+            b["days"].as_i64().unwrap_or(30),
+        ) {
+            Ok(()) => js(json!({"ok":true})),
+            Err(error) => er(StatusCode::CONFLICT, &error),
         },
         ("GET", "/api/cost") => js(costs(a)),
         ("GET", "/api/health") => js(health(a, qv("f") == "1").await),
