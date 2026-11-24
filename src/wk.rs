@@ -1141,6 +1141,26 @@ async fn pushers(r: &str, n: i64) -> Result<Vec<String>, String> {
     }
 }
 
+async fn recheck_merged_evidence(repo: &str, number: i64, me: &str, original: &Value, observed: &[Value]) -> R<()> {
+    let current = comments(repo, number, me).await?;
+    if !same_comment_inventory(observed, &current) {
+        return Err(X::E("Merged PR comments changed during analysis; comments remain pending".into()));
+    }
+    let fresh = ghj(&["pr","view",&number.to_string(),"-R",repo,"--json","state,mergedAt,updatedAt,baseRefName"],60).await.map_err(X::E)?;
+    if !same_merged_snapshot(original, &fresh) {
+        return Err(X::E("Merged PR snapshot changed during analysis; comments remain pending".into()));
+    }
+    Ok(())
+}
+
+fn same_merged_snapshot(before: &Value, after: &Value) -> bool {
+    before["state"] == "MERGED" && after["state"] == "MERGED"
+        && ["mergedAt", "updatedAt", "baseRefName"].iter().all(|key| {
+            before[*key].as_str().is_some_and(|value| !value.is_empty())
+                && before[*key] == after[*key]
+        })
+}
+
 async fn late(a: &Ax, r: &str, n: i64, me: &str, v: &Value) -> R<()> {
     let tag = format!("{r}#{n}");
     let updated = v["updatedAt"]
@@ -1149,7 +1169,8 @@ async fn late(a: &Ax, r: &str, n: i64, me: &str, v: &Value) -> R<()> {
         .ok_or_else(|| X::E("missing merged PR update timestamp".into()))?;
     let mut ids = Vec::new();
     let mut nw: Vec<Value> = vec![];
-    for c in comments(r, n, me).await? {
+    let observed = comments(r, n, me).await?;
+    for c in observed.iter().cloned() {
         let id = c["id"]
             .as_str()
             .filter(|s| !s.is_empty())
@@ -1165,8 +1186,15 @@ async fn late(a: &Ax, r: &str, n: i64, me: &str, v: &Value) -> R<()> {
             nw.push(c);
         }
     }
+    let deferred = defer_oversized_comments(&mut nw);
+    ids.retain(|id| !deferred.contains(id));
+    let complete = deferred.is_empty();
+    if !complete {
+        a.say("watcher", &format!("{tag}: {} post-merge comment(s) require manual review", deferred.len()), None);
+    }
     if nw.is_empty() {
-        a.db.ack_pr_comments(r, n, updated, &ids)
+        recheck_merged_evidence(r, n, me, v, &observed).await?;
+        a.db.ack_merged_comments(r, n, updated, &ids, complete)
             .map_err(|e| X::E(e.to_string()))?;
         return Ok(());
     }
@@ -1193,7 +1221,8 @@ async fn late(a: &Ax, r: &str, n: i64, me: &str, v: &Value) -> R<()> {
         })
         .collect();
     if ok.is_empty() {
-        a.db.ack_pr_comments(r, n, updated, &ids)
+        recheck_merged_evidence(r, n, me, v, &observed).await?;
+        a.db.ack_merged_comments(r, n, updated, &ids, complete)
             .map_err(|e| X::E(e.to_string()))?;
         return Ok(());
     }
@@ -1226,7 +1255,8 @@ async fn late(a: &Ax, r: &str, n: i64, me: &str, v: &Value) -> R<()> {
         .as_bool()
         .ok_or_else(|| X::E("Watcher gave no readable follow-up verdict".into()))?;
     if !act {
-        a.db.ack_pr_comments(r, n, updated, &ids)
+        recheck_merged_evidence(r, n, me, v, &observed).await?;
+        a.db.ack_merged_comments(r, n, updated, &ids, complete)
             .map_err(|e| X::E(e.to_string()))?;
         return Ok(());
     }
@@ -1238,9 +1268,10 @@ async fn late(a: &Ax, r: &str, n: i64, me: &str, v: &Value) -> R<()> {
     let ti = format!("Follow-up to #{n}: {}", v["title"].as_str().unwrap_or(""));
     let body = format!("{ch}\n\nRequested after #{n} was merged ({}). Open a new pull request from the default branch that references #{n}.\n\nMaintainer comment:\n{}", v["url"].as_str().unwrap_or(""), crate::sh::head(&ok.iter().map(|c| format!("{}: {}", c["by"].as_str().unwrap_or(""), c["t"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("\n\n"), 6000));
     let request = json!({"title":ti,"body":body,"url":v["url"],"why":format!("follow-up requested by {by} after merge")});
+    recheck_merged_evidence(r, n, me, v, &observed).await?;
     if !a
         .db
-        .queue_followup_and_ack(r, n, updated, &ids, &request)
+        .queue_followup_and_ack(r, n, updated, &ids, &request, complete)
         .map_err(|e| X::E(e.to_string()))?
     {
         a.say(
@@ -1527,7 +1558,7 @@ async fn watch_pr(a:&Ax,p:Value,me:&str,
             if a.db.kg(&wk).as_i64().map(|t| now() - t < 1_800_000).unwrap_or(false) {
                 return Ok(());
             }
-            let v = ghj(&["pr", "view", &n.to_string(), "-R", &r, "--json", "updatedAt,title,url,baseRefName"], 60).await.map_err(X::E)?;
+            let v = ghj(&["pr", "view", &n.to_string(), "-R", &r, "--json", "state,mergedAt,updatedAt,title,url,baseRefName"], 60).await.map_err(X::E)?;
             let up = valid_pr_timestamp(&v)?;
             let base = valid_pr_base(&v)?;
             if a.db.ch("update prs set upd=?, d=json_set(d,'$.base',?,'$.default_branch',?) where repo=? and num=? and st='merged' and upd is ?", pa![up.clone(), base, default_branch.clone(), r.clone(), n,p["upd"].as_str().map(String::from)]) != 1 {
@@ -1998,6 +2029,18 @@ mod pusher_pagination_tests {
 #[cfg(test)]
 mod watcher_evidence_inventory_tests {
     use super::*;
+
+    #[test]
+    fn merged_snapshot_requires_same_state_merge_time_and_update() {
+        let original = json!({"state":"MERGED","mergedAt":"m","updatedAt":"u","baseRefName":"main"});
+        assert!(same_merged_snapshot(&original,&original));
+        for (key,value) in [("state","OPEN"),("mergedAt","other"),("updatedAt","new"),("baseRefName","dev")] {
+            let mut changed=original.clone();
+            changed[key]=json!(value);
+            assert!(!same_merged_snapshot(&original,&changed));
+        }
+        assert!(!same_merged_snapshot(&json!({}),&json!({})));
+    }
 
     #[test]
     fn oversized_receipts_are_deferred_without_blocking_other_comments() {
