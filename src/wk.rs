@@ -1622,7 +1622,7 @@ fn reply_confirmed(rows:&[Value],author:&str,body:&str)->bool{
 
 async fn deliver_watcher_outbox(a:&Ax,me:&str)->R<()>{
     // Pending sends first, then ambiguous sends. No uncertain row can be claimed again.
-    let rows=a.db.try_all("select * from watcher_outbox where state='pending' or (state='uncertain' and updated<=?) order by case state when 'pending' then 0 else 1 end,updated,id limit 20",pa![now()-600_000]).map_err(|e|X::E(e.to_string()))?;
+    let rows=a.db.try_all("select * from watcher_outbox where author=? and (state='pending' or (state='uncertain' and updated<=?)) order by updated,id limit 20",pa![me.to_string(),now()-600_000]).map_err(|e|X::E(e.to_string()))?;
     for row in rows {
         if a.hold("watcher"){break;}
         let (Some(id),Some(repo),Some(number),Some(author),Some(body))=(row["id"].as_str(),row["repo"].as_str(),row["num"].as_i64(),row["author"].as_str(),row["body"].as_str()) else {continue;};
@@ -1649,6 +1649,7 @@ async fn deliver_watcher_outbox(a:&Ax,me:&str)->R<()>{
             continue;
         }
         // Recheck the remote state before publishing previously queued content.
+        a.db.run("update watcher_outbox set updated=? where id=? and state='pending'",pa![now(),id.to_string()]);
         let Ok(pr)=ghj(&["pr","view",&number.to_string(),"-R",repo,"--json","state"],45).await else{continue;};
         match pr["state"].as_str(){
             Some("OPEN")=>{},
@@ -1658,6 +1659,10 @@ async fn deliver_watcher_outbox(a:&Ax,me:&str)->R<()>{
                 continue;
             },
             _=>continue
+        }
+        let identity=ghj(&["api","user"],45).await.map_err(X::E)?;
+        if identity["login"].as_str()!=Some(author){
+            return Err(X::E("GitHub identity changed; delivery deferred".into()));
         }
         if a.hold("watcher"){break;}
         if !a.db.claim_watcher_reply(id,me).map_err(|e|X::E(e.to_string()))?{continue;}

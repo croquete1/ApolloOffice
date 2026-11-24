@@ -461,7 +461,7 @@ fn state(a: &Ax) -> Value {
             "open_fixes": a.db.n("select count(distinct p.repo || '#' || p.num) from jobs j join prs p on p.repo=j.repo and p.num=j.pr where j.kind='fix' and j.st='done' and p.st='open'", pa![]),
             "merged_fixes": a.db.n("select count(distinct p.repo || '#' || p.num) from jobs j join prs p on p.repo=j.repo and p.num=j.pr where j.kind='fix' and j.st='done' and p.st='merged' and coalesce(json_extract(p.d,'$.default_branch'),'')<>'' and json_extract(p.d,'$.base')=json_extract(p.d,'$.default_branch')", pa![])
         },
-        "ops": {"waiting": waiting, "blocked_hunts": blocked_hunts, "paused": paused, "resources": crate::resources::status(a)},
+        "ops": {"waiting": waiting, "blocked_hunts": blocked_hunts, "paused": paused, "resources": crate::resources::status(a), "watcher_outbox": a.db.watcher_outbox_counts().ok()},
         "diag": {"hosts": hosts_diag, "hunt_off": hunt_off, "iss_off": iss_off, "hunt_enabled": hunt_enabled},
         "hs": a.db.all("select id, ln, dk, on_ from hs order by id='local' desc, id", pa![]),
         "rp": a.db.all("select full repo,on_ from rp order by full", pa![]),

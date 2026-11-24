@@ -527,7 +527,7 @@ impl Db {
         let at=now();
         let open:bool=tx.query_row("select exists(select 1 from prs where repo=? and num=? and st='open')",rusqlite::params![repo,number],|r|r.get(0))?;
         if !open{return Err(rusqlite::Error::InvalidQuery);}
-        let previous:Option<i64>=tx.query_row("select max(created) from watcher_outbox where repo=? and num=? and state<>'cancelled'",rusqlite::params![repo,number],|r|r.get(0))?;
+        let previous:Option<i64>=tx.query_row("select max(case when state='sent' then updated else created end) from watcher_outbox where repo=? and num=? and state<>'cancelled'",rusqlite::params![repo,number],|r|r.get(0))?;
         let legacy:Option<i64>=tx.query_row("select max(case when json_valid(v) then cast(v as integer) end) from kv where k=?", [format!("wr:{repo}#{number}")],|r|r.get(0))?;
         if previous.into_iter().chain(legacy).any(|t|at.saturating_sub(t)<86_400_000){return Ok(());}
         tx.execute("insert or ignore into watcher_outbox(id,repo,num,author,body,state,created,updated) values(?,?,?,?,?,'pending',?,?)",rusqlite::params![key,repo,number,author,body,at,at])?;
@@ -549,6 +549,18 @@ impl Db {
         tx.commit()?;
         crate::app::chg();
         Ok(())
+    }
+
+    /// Public diagnostics expose only aggregate states, never reply content.
+    pub fn watcher_outbox_counts(&self)->rusqlite::Result<Value>{
+        let rows=self.try_all("select state,count(*) n from watcher_outbox group by state",vec![])?;
+        let mut result=json!({"pending":0,"uncertain":0,"sent":0,"cancelled":0});
+        for row in rows {
+            let state=row["state"].as_str().ok_or(rusqlite::Error::InvalidQuery)?;
+            if !matches!(state,"pending"|"uncertain"|"sent"|"cancelled"){return Err(rusqlite::Error::InvalidQuery);}
+            result[state]=row["n"].clone();
+        }
+        Ok(result)
     }
 
     /// Persist the uncertain state BEFORE the external POST. A crash or
