@@ -127,7 +127,10 @@ fn admit_review(
     )?;
     tx.execute(
         "insert into kv(k,v) values(?,?)",
-        rusqlite::params![key, json!({"at":at,"review_id":rid,"head":head}).to_string()],
+        rusqlite::params![
+            key,
+            json!({"at":at,"review_id":rid,"head":head}).to_string()
+        ],
     )?;
     tx.commit()?;
     crate::app::chg();
@@ -240,15 +243,8 @@ async fn enqueue(
         "steward_head": head,
         "source_head": head
     });
-    let inserted = admit_review(
-        &a.db,
-        (repo, number, head),
-        (rid, since),
-        title,
-        url,
-        &body,
-    )
-    .map_err(|error| error.to_string())?;
+    let inserted = admit_review(&a.db, (repo, number, head), (rid, since), title, url, &body)
+        .map_err(|error| error.to_string())?;
     if inserted {
         a.say(
             "watcher",
