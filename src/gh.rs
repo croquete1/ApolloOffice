@@ -105,11 +105,15 @@ fn normalize_open_issues(rows: Vec<Value>) -> Result<Vec<Value>, String> {
         if !seen.insert(number) {
             return Err("GitHub issue listing changed during pagination (duplicate number)".into());
         }
-        if row.get("pull_request").is_some_and(|v| v.is_object()) {
+        if let Some(marker) = row.get("pull_request") {
+            if !marker.is_object() {
+                return Err(format!("GitHub issue #{number} has invalid PR metadata"));
+            }
             continue;
         }
         if row["state"] != "open"
             || !row["title"].is_string()
+            || !(row["body"].is_null() || row["body"].is_string())
             || !row["html_url"].as_str().is_some_and(|v| !v.is_empty())
             || !row["updated_at"]
                 .as_str()
@@ -165,6 +169,19 @@ mod issue_listing_tests {
         assert!(normalize_open_pr_summaries(vec![row(1), row(1)]).is_err());
         assert!(normalize_open_pr_summaries(vec![json!({"number":1})]).is_err());
         assert!(normalize_open_pr_summaries(vec![]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn rejects_malformed_issue_body_and_pull_request_marker() {
+        let mut row = issue(1);
+        row["body"] = json!({"unexpected":true});
+        assert!(normalize_open_issues(vec![row]).is_err());
+        let mut row = issue(2);
+        row["pull_request"] = json!(false);
+        assert!(normalize_open_issues(vec![row]).is_err());
+        let mut row = issue(3);
+        row["body"] = json!("valid description");
+        assert_eq!(normalize_open_issues(vec![row]).unwrap().len(), 1);
     }
 
     #[test]
