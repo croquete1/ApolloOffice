@@ -1415,7 +1415,7 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':10,'output_tok
         );
         assert!(feedback.contains("negative_addition"), "{feedback}");
         assert_eq!(job.d["acceptance_proof"]["ok"], false);
-        assert!(fixp(&a, &job, &feedback).contains("Independent acceptance rejected"));
+        assert!(fixp(&a, &job, &feedback, "").contains("Independent acceptance rejected"));
         assert_eq!(
             job.d["acceptance_proof"]["run"]["script_sha256"],
             json!(hex::encode(Sha256::digest(script.as_bytes())))
