@@ -228,7 +228,8 @@ fn init(c: &mut Connection) -> anyhow::Result<()> {
     // Backfill recoverable history once; a cleared legacy job may only be
     // visible through its queued findings. Keep the larger observed count.
     if version < 4 {
-        tx.execute_batch("
+        tx.execute_batch(
+            "
             insert into coderabbit_cycles(repo,number,cycles)
             select repo,number,max(n) from (
                 select repo,pr as number,count(*) as n from jobs
@@ -240,7 +241,8 @@ fn init(c: &mut Connection) -> anyhow::Result<()> {
                   where job is not null group by repo,number
             ) group by repo,number
             on conflict(repo,number) do update set cycles=max(cycles,excluded.cycles);
-        ")?;
+        ",
+        )?;
     }
     // Admission and the counter share the job insertion transaction.
     tx.execute_batch("
