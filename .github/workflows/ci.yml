@@ -61,3 +61,75 @@ jobs:
           }
           trap cleanup EXIT
           cargo test --locked real_docker_worker_lifecycle -- --ignored --nocapture
+
+      - name: Real SSH worker transport (isolated loopback)
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          fixture=$(mktemp -d "$RUNNER_TEMP/apollo-ssh.XXXXXX")
+          mkdir -p "$fixture/.ssh" "$HOME/.ssh"
+          chmod 700 "$fixture" "$fixture/.ssh" "$HOME/.ssh"
+          config="$HOME/.ssh/config"
+          if [ -f "$config" ]; then cp -p "$config" "$fixture/original-config"; fi
+          cleanup() {
+            ssh -o "ControlPath=$fixture/.ssh/cm-ao-%r@%h:%p" -O exit apollo-ci-ssh >/dev/null 2>&1 || true
+            if [ -f "$fixture/sshd.pid" ]; then sudo kill "$(cat "$fixture/sshd.pid")" || true; fi
+            if [ -n "${SSH_AGENT_PID:-}" ]; then ssh-agent -k >/dev/null 2>&1 || true; fi
+            if [ -f "$fixture/original-config" ]; then
+              cp -p "$fixture/original-config" "$config"
+            else
+              rm -f "$config"
+            fi
+            rm -rf -- "$fixture"
+          }
+          trap cleanup EXIT
+          if [ ! -x /usr/sbin/sshd ]; then
+            sudo apt-get update
+            sudo apt-get install -y openssh-server
+          fi
+          ssh-keygen -q -t ed25519 -N '' -f "$fixture/host"
+          ssh-keygen -q -t ed25519 -N '' -f "$fixture/client"
+          cp "$fixture/client.pub" "$fixture/authorized_keys"
+          chmod 600 "$fixture/authorized_keys"
+          printf '[127.0.0.1]:22222 %s\n' "$(cat "$fixture/host.pub")" > "$fixture/known_hosts"
+          cat > "$fixture/sshd_config" <<EOF
+          Port 22222
+          ListenAddress 127.0.0.1
+          HostKey $fixture/host
+          PidFile $fixture/sshd.pid
+          AuthorizedKeysFile $fixture/authorized_keys
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+          PubkeyAuthentication yes
+          AuthenticationMethods publickey
+          PermitRootLogin no
+          AllowUsers $(id -un)
+          UsePAM yes
+          AllowAgentForwarding yes
+          AcceptEnv APOLLO_FIXTURE_API_KEY
+          EOF
+          cat > "$config" <<EOF
+          Host apollo-ci-ssh
+            HostName 127.0.0.1
+            Port 22222
+            User $(id -un)
+            IdentityFile $fixture/client
+            IdentitiesOnly yes
+            UserKnownHostsFile $fixture/known_hosts
+            StrictHostKeyChecking yes
+            ForwardAgent yes
+            SendEnv APOLLO_FIXTURE_API_KEY
+          EOF
+          chmod 600 "$config"
+          sudo mkdir -p /run/sshd
+          sudo /usr/sbin/sshd -f "$fixture/sshd_config" -E "$fixture/sshd.log"
+          eval "$(ssh-agent -s)"
+          ssh-add "$fixture/client"
+          export APOLLO_FIXTURE_API_KEY=synthetic-ci-fixture
+          # Positive control: verify the test server can receive the synthetic
+          # variable and agent socket before testing Apollo's restrictions.
+          ssh -o BatchMode=yes apollo-ci-ssh 'test -n "$SSH_AUTH_SOCK" && test "$APOLLO_FIXTURE_API_KEY" = synthetic-ci-fixture'
+          export APOLLO_OFFICE_REAL_SSH=1
+          export APOLLO_OFFICE_SSH_CONTROL_DIR="$fixture"
+          cargo test --locked real_ssh_worker_transport -- --ignored --nocapture
