@@ -1021,12 +1021,16 @@ async fn active_review_comment_ids(repo: &str, number: i64) -> Result<std::colle
         60,
     )
     .await?;
+    if !output["errors"].is_null() {
+        return Err("review-thread inventory returned GraphQL errors".into());
+    }
     let threads = &output["data"]["repository"]["pullRequest"]["reviewThreads"];
     if threads["pageInfo"]["hasNextPage"] != false {
         return Err("review-thread inventory is incomplete".into());
     }
     let nodes = threads["nodes"].as_array().ok_or("review-thread inventory is unavailable")?;
     let mut active = std::collections::BTreeSet::new();
+    let mut seen = std::collections::BTreeSet::new();
     for thread in nodes {
         let comments = &thread["comments"];
         if comments["pageInfo"]["hasNextPage"] != false {
@@ -1036,6 +1040,9 @@ async fn active_review_comment_ids(repo: &str, number: i64) -> Result<std::colle
         for comment in comments {
             let id = comment["databaseId"].as_i64().filter(|id| *id > 0)
                 .ok_or("review-thread comment has no database ID")?;
+            if !seen.insert(id) {
+                return Err("duplicate review-thread comment ID".into());
+            }
             let resolved = thread["isResolved"].as_bool()
                 .ok_or("review-thread resolution state is unavailable")?;
             if !resolved {
@@ -1067,7 +1074,7 @@ pub(crate) async fn route_findings(
         Ok(value) if public_repository(&value, repo) => value,
         _ => return,
     };
-    let _ = repository;
+    let repository_id = repository["id"].clone();
     let me = crate::gh::login(a).await;
     if me.is_empty() {
         return;
@@ -1206,6 +1213,14 @@ pub(crate) async fn route_findings(
             Ok(value) if own_public_pr(&value, repo, number, head, &me) => value,
             _ => continue,
         };
+        // A repository can be renamed, replaced or made private while Guard runs.
+        match ghj(&["api", &format!("repos/{repo}")], 45).await {
+            Ok(value) if public_repository(&value, repo) && value["id"] == repository_id => {},
+            _ => continue,
+        }
+        if a.hold("watcher") {
+            continue;
+        }
         let tracked = a.db.one(
             "select d from prs where repo=? and num=? and st='open'",
             crate::pa![repo.to_string(), number],
