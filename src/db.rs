@@ -533,8 +533,17 @@ impl Db {
     ) -> rusqlite::Result<bool> {
         let mut c = self.0.lock().unwrap();
         let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let open:bool=tx.query_row("select exists(select 1 from prs where repo=? and num=? and st='open')",rusqlite::params![repo,number],|row|row.get(0))?;
+        let unique=ids.iter().collect::<std::collections::HashSet<_>>();
+        if !open || ids.is_empty() || unique.len()!=ids.len() || ids.iter().any(|id|id.trim().is_empty()){
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        for id in ids {
+            let acknowledged:bool=tx.query_row("select exists(select 1 from cm where id=? or id=?)",rusqlite::params![format!("{repo}:{id}"),id],|row|row.get(0))?;
+            if acknowledged {return Ok(false);}
+        }
         let active: i64 = tx.query_row(
-            "select count(*) from jobs where repo=? and pr=? and kind='review' and st not in ('done','drop')",
+            "select count(*) from jobs where repo=? and pr=? and kind in ('review','rebase','mergecheck') and st not in ('done','drop')",
             rusqlite::params![repo, number], |row| row.get(0),
         )?;
         if active != 0 {
@@ -550,9 +559,11 @@ impl Db {
             .as_str()
             .filter(|v| !v.trim().is_empty())
             .ok_or(rusqlite::Error::InvalidQuery)?;
-        let data = request["data"]
+        let mut data = request["data"]
             .as_object()
+            .cloned()
             .ok_or(rusqlite::Error::InvalidQuery)?;
+        data.insert("source_comments".into(),json!(ids));
         let t = now();
         tx.execute("insert into jobs(repo,num,kind,title,url,st,why,d,pr,prio,t0,t1) values(?,?,'review',?,?,'ready',?,?,?,-1.0,?,?)",
             rusqlite::params![repo, number, title, url, change, json!(data).to_string(), number, t, t])?;
@@ -872,7 +883,7 @@ mod comment_cursor_tests {
             .is_err());
         assert_eq!(db.n("select count(*) from jobs", vec![]), 0);
         db.run(
-            "insert into prs(repo,num,d) values(?,?,?)",
+            "insert into prs(repo,num,st,d) values(?,?,'open',?)",
             crate::pa!["a/b".to_string(), 1_i64, "{}".to_string()],
         );
         assert!(db
@@ -890,6 +901,28 @@ mod comment_cursor_tests {
             .queue_review_and_ack("a/b", 1, "later", &next, &request)
             .unwrap());
         assert!(db.comment_acknowledged("a/b", "review-2").unwrap());
+        db.run("update jobs set st='done'",vec![]);
+        assert!(!db.queue_review_and_ack("a/b",1,"later",&next,&request).unwrap());
+        assert_eq!(db.n("select count(*) from jobs",vec![]),2);
+    }
+
+    #[test]
+    fn review_rejects_partial_replay_and_other_active_pr_operations() {
+        let db=Db::mem();
+        db.run("insert into prs(repo,num,st,d) values('a/b',1,'open','{}')",vec![]);
+        let request=json!({"title":"Fix","url":"https://github.com/a/b/pull/1","change":"Correct bug","data":{}});
+        db.ack_pr_comments("a/b",1,"first",&["r1".into()]).unwrap();
+        assert!(!db.queue_review_and_ack("a/b",1,"next",&["r1".into(),"r2".into()],&request).unwrap());
+        assert!(!db.comment_acknowledged("a/b","r2").unwrap());
+        db.run("insert into jobs(repo,num,pr,kind,st,d) values('a/b',1,1,'rebase','ready','{}')",vec![]);
+        assert!(!db.queue_review_and_ack("a/b",1,"next",&["r2".into()],&request).unwrap());
+        db.run("update jobs set st='done'",vec![]);
+        assert!(db.queue_review_and_ack("a/b",1,"next",&["r2".into()],&request).unwrap());
+        let job=db.one("select d from jobs where kind='review'",vec![]).unwrap();
+        assert_eq!(job["d"]["source_comments"],json!(["r2"]));
+        db.run("update prs set st='closed'",vec![]);
+        assert!(db.queue_review_and_ack("a/b",1,"last",&["r3".into()],&request).is_err());
+        assert!(!db.comment_acknowledged("a/b","r3").unwrap());
     }
 }
 
