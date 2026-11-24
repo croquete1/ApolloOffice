@@ -40,6 +40,8 @@ if a[0] == "api":
         sys.exit(0)
     if p == f"repos/{R}":
         out({"full_name": R, "default_branch": "main", "private": os.environ.get("FAKE_GH_PRIVATE") == "1", "fork": False, "archived": False, "permissions": {"push": True}})
+    if p.startswith(f"repos/{R}/pulls?state=open&"):
+        out([])
     if "/timeline" in p or "/comments" in p or "/reviews" in p:
         out([[]] if "--slurp" in a else [])
     if "/contents/" in p:

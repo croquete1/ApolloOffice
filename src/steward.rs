@@ -6,12 +6,102 @@ use crate::db::now;
 use crate::pa;
 use crate::sh::ghj;
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-// The GitHub CLI cap caused a busy repository with 200+ open PRs to fail
-// closed forever. Scan up to the CLI's 1000-item ceiling and still refuse
-// automatic actions when the result set reaches that ceiling.
-const PAGE_LIMIT: &str = "1000";
+// Use the paginated REST inventory as the completeness authority. The CLI
+// batch is only an enrichment optimization, never proof that all PRs were read.
+const DETAIL_FIELDS: &str = "number,title,body,url,isDraft,headRefOid,baseRefName,baseRefOid,createdAt,updatedAt,mergeStateStatus,reviewDecision,statusCheckRollup,files";
+const DETAIL_BATCH: usize = 1000;
+type Inventory = BTreeMap<i64, (String, String, String)>;
+
+fn inventory_row(row: &Value) -> Result<(i64, (String, String, String)), String> {
+    let number = row["number"].as_i64().filter(|n| *n > 0).ok_or("PR without a valid number")?;
+    if row["state"] != "open" {
+        return Err(format!("PR #{number} changed state during inventory"));
+    }
+    let sha = |v: &Value| -> Result<String, String> {
+        v.as_str().filter(|s| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+            .map(String::from).ok_or_else(|| format!("PR #{number} missing valid SHA"))
+    };
+    let updated = row["updated_at"].as_str()
+        .filter(|s| chrono::DateTime::parse_from_rfc3339(s).is_ok())
+        .ok_or("PR without valid updated_at")?;
+    Ok((number, (sha(&row["head"]["sha"])?, sha(&row["base"]["sha"])?, updated.to_string())))
+}
+
+fn append_inventory(inventory: &mut Inventory, rows: &[Value]) -> Result<(), String> {
+    for row in rows {
+        let (number, identity) = inventory_row(row)?;
+        if inventory.insert(number, identity).is_some() {
+            return Err(format!("Duplicate PR #{number} in paginated inventory"));
+        }
+    }
+    Ok(())
+}
+
+async fn inventory(repo: &str) -> Result<Inventory, String> {
+    let mut all = Inventory::new();
+    let mut page = 1_u64;
+    loop {
+        let endpoint = format!("repos/{repo}/pulls?state=open&sort=created&direction=asc&per_page=100&page={page}");
+        let data = ghj(&["api", &endpoint], 90).await?;
+        let rows = data.as_array().ok_or("Invalid paginated PR inventory")?;
+        if rows.len() > 100 {
+            return Err("Invalid PR page size".into());
+        }
+        append_inventory(&mut all, rows)?;
+        if rows.len() < 100 {
+            return Ok(all);
+        }
+        page = page.checked_add(1).ok_or("PR page counter overflow")?;
+    }
+}
+
+fn detail_matches(row: &Value, number: i64, identity: &(String, String, String)) -> bool {
+    row["number"] == number
+        && row["headRefOid"] == identity.0
+        && row["baseRefOid"] == identity.1
+        && row["updatedAt"] == identity.2
+        && row["title"].is_string()
+        && row["url"].is_string()
+        && row["isDraft"].is_boolean()
+        && row["baseRefName"].is_string()
+        && row["statusCheckRollup"].is_array()
+        && row["files"].is_array()
+}
+
+async fn complete_open_prs(repo: &str) -> Result<Vec<Value>, String> {
+    let before = inventory(repo).await?;
+    let mut details = BTreeMap::new();
+    if !before.is_empty() {
+        let limit = before.len().min(DETAIL_BATCH).to_string();
+        let batch = ghj(&["pr","list","-R",repo,"--state","open","--limit",&limit,"--json",DETAIL_FIELDS], 120).await?;
+        let rows = batch.as_array().ok_or("Invalid PR details batch")?;
+        for row in rows {
+            let number = row["number"].as_i64().ok_or("PR details missing number")?;
+            let identity = before.get(&number).ok_or("PR inventory changed during enrichment")?;
+            if !detail_matches(row, number, identity) || details.insert(number, row.clone()).is_some() {
+                return Err(format!("PR #{number} has inconsistent or duplicate details"));
+            }
+        }
+        // Beyond the batch limit, obtain the remaining details individually.
+        // Any failure aborts the entire scan; no automatic actions use a partial set.
+        for (number, identity) in &before {
+            if details.contains_key(number) {
+                continue;
+            }
+            let row = ghj(&["pr","view",&number.to_string(),"-R",repo,"--json",DETAIL_FIELDS], 60).await?;
+            if !detail_matches(&row, *number, identity) {
+                return Err(format!("PR #{number} changed or has incomplete details"));
+            }
+            details.insert(*number, row);
+        }
+    }
+    if inventory(repo).await? != before {
+        return Err("PR inventory changed while scanning; retry before taking actions".into());
+    }
+    Ok(details.into_values().collect())
+}
 
 pub(crate) const STATES: [&str; 8] = [
     "draft",
@@ -241,30 +331,8 @@ pub fn assess(prs: &[Value]) -> Vec<Value> {
 }
 
 pub async fn scan(a: &Ax, repo: &str) -> Result<(), String> {
-    let data = ghj(
-        &[
-            "pr",
-            "list",
-            "-R",
-            repo,
-            "--state",
-            "open",
-            "--limit",
-            PAGE_LIMIT,
-            "--json",
-            "number,title,body,url,isDraft,headRefOid,baseRefName,baseRefOid,createdAt,updatedAt,mergeStateStatus,reviewDecision,statusCheckRollup,files",
-        ],
-        90,
-    )
-    .await?;
-    let list = data.as_array().ok_or("Resposta de PRs inválida")?;
-    if list.len() >= PAGE_LIMIT.parse::<usize>().unwrap() {
-        a.db.ks(
-            &format!("steward:{repo}"),
-            &json!({"at":now(),"error":"Limite de resultados atingido; análise incompleta e sem ações permitidas.","prs":[]}),
-        );
-        return Err(format!("{repo}: lista de PRs truncada"));
-    }
+    let data = complete_open_prs(repo).await?;
+    let list = data.as_slice();
     let report = assess(list);
     // Só recuperar falhas transitórias depois de obter PRs atuais do GitHub.
     crate::drop_recovery::scan(a, repo, list).await;
@@ -393,6 +461,33 @@ mod tests {
             "statusCheckRollup":[{"name":"test-suite","conclusion":"SUCCESS"}],
             "files":[{"path":path}]
         })
+    }
+
+    #[test]
+    fn inventory_accepts_more_than_one_thousand_prs_and_rejects_duplicates() {
+        let rows: Vec<Value> = (1..=1001).map(|n| json!({
+            "number":n,"state":"open","head":{"sha":"a".repeat(40)},
+            "base":{"sha":"b".repeat(40)},"updated_at":"2026-01-01T00:00:00Z"
+        })).collect();
+        let mut map = Inventory::new();
+        for page in rows.chunks(100) {
+            append_inventory(&mut map,page).unwrap();
+        }
+        assert_eq!(map.len(),1001);
+        assert!(append_inventory(&mut map,&rows[..1]).is_err());
+        assert!(inventory_row(&json!({"number":2,"state":"open"})).is_err());
+    }
+
+    #[test]
+    fn enrichment_must_match_inventory_head_base_and_timestamp() {
+        let identity = ("a".repeat(40),"b".repeat(40),"2026-01-01T00:00:00Z".to_string());
+        let mut row = sample(1,"src/a.rs","1");
+        row["headRefOid"] = json!(identity.0);
+        row["baseRefOid"] = json!(identity.1);
+        row["updatedAt"] = json!(identity.2);
+        assert!(detail_matches(&row,1,&identity));
+        row["baseRefOid"] = json!("c".repeat(40));
+        assert!(!detail_matches(&row,1,&identity));
     }
 
     #[test]
