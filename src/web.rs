@@ -641,6 +641,9 @@ fn sets(a: &Ax, b: &Value) {
     if let Some(x) = b["adaptive_routing"].as_bool() {
         s["adaptive_routing"] = json!(x);
     }
+    if let Some(x) = b["adaptive_support_routing"].as_bool() {
+        s["adaptive_support_routing"] = json!(x);
+    }
     if let Some(x) = b["big"].as_bool() {
         s["big"] = json!(x);
     }
