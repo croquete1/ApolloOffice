@@ -687,7 +687,8 @@ mod adaptive_tests {
             "apollo-office".into(),
         ));
         a.db.ks("set", &json!({"md":{"guard":"cc:haiku","fixer":"codex:"}}));
-        a.db.provider_failure("cc", "network", crate::db::now()).unwrap();
+        a.db.provider_failure("cc", "network", crate::db::now())
+            .unwrap();
         assert!(adaptive_support(&a, "guard", "cc:haiku").unwrap().is_none());
         a.db.ks("set",&json!({"adaptive_support_routing":true,"md":{"guard":"cc:haiku","fixer":"codex:","big":"ollama:qwen3:8b"}}));
         assert_eq!(
@@ -703,7 +704,9 @@ mod adaptive_tests {
             adaptive_support(&a, "hunter", "cc:sonnet"),
             Err(X::Lim(_))
         ));
-        assert!(adaptive_support(&a, "watcher", "cc:haiku").unwrap().is_some());
+        assert!(adaptive_support(&a, "watcher", "cc:haiku")
+            .unwrap()
+            .is_some());
         a.db.ks("set",&json!({"adaptive_support_routing":true,"md":{"guard":"cc:haiku","fixer":"openai:gpt-6","big":"ollama:qwen3:8b","reviewer":"codex:"}}));
         assert!(matches!(
             adaptive_support(&a, "guard", "cc:haiku"),
