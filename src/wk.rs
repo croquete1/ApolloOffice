@@ -1573,6 +1573,13 @@ async fn watch_pr(a:&Ax,p:Value,me:&str,
             }
         }
         let received_ids: Vec<String> = nw.iter().filter_map(|c| c["id"].as_str().map(String::from)).collect();
+        if has_pending {
+            recheck_review_snapshot(&r,n,&v).await?;
+            let retired=a.db.reconcile_review_receipts(&r,n,&up,&source_head,&received_ids).map_err(|e|X::E(e.to_string()))?;
+            if retired>0 {
+                a.say("watcher",&format!("{tag}: {retired} receipt(s) no longer in observed pending inventory; no acknowledgement or action"),None);
+            }
+        }
         a.db.receive_review_batch(&r,n,&up,&source_head,&received_ids).map_err(|e|X::E(e.to_string()))?;
         if !received_ids.is_empty() || a.db.has_pending_review(&r,n).map_err(|e|X::E(e.to_string()))? {
             if !a.db.claim_review_attempt(&r,n,&up,&source_head,now()).map_err(|e|X::E(e.to_string()))? {
