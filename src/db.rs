@@ -44,24 +44,67 @@ const LEGACY_COLUMNS: &[(&str, &str, &str)] = &[
     ("rp", "bud", "alter table rp add column bud real default 0"),
     ("rp", "feat", "alter table rp add column feat int default 0"),
     ("rp", "skl", "alter table rp add column skl text default ''"),
-    ("rp", "tests", "alter table rp add column tests text default ''"),
-    ("rp", "tcmd", "alter table rp add column tcmd text default ''"),
-    ("rp", "green", "alter table rp add column green text default ''"),
-    ("rp", "lang", "alter table rp add column lang text default 'en'"),
+    (
+        "rp",
+        "tests",
+        "alter table rp add column tests text default ''",
+    ),
+    (
+        "rp",
+        "tcmd",
+        "alter table rp add column tcmd text default ''",
+    ),
+    (
+        "rp",
+        "green",
+        "alter table rp add column green text default ''",
+    ),
+    (
+        "rp",
+        "lang",
+        "alter table rp add column lang text default 'en'",
+    ),
     // Keep all existing opt-in permissions. Missing columns default to OFF.
-    ("rp", "auto_merge", "alter table rp add column auto_merge int default 0"),
-    ("rp", "steward_repair", "alter table rp add column steward_repair int default 0"),
-    ("rp", "local_merge", "alter table rp add column local_merge int default 0"),
-    ("rp", "steward_close", "alter table rp add column steward_close int default 0"),
-    ("rp", "auto_recover_drops", "alter table rp add column auto_recover_drops int default 0"),
-    ("seen", "why", "alter table seen add column why text default ''"),
+    (
+        "rp",
+        "auto_merge",
+        "alter table rp add column auto_merge int default 0",
+    ),
+    (
+        "rp",
+        "steward_repair",
+        "alter table rp add column steward_repair int default 0",
+    ),
+    (
+        "rp",
+        "local_merge",
+        "alter table rp add column local_merge int default 0",
+    ),
+    (
+        "rp",
+        "steward_close",
+        "alter table rp add column steward_close int default 0",
+    ),
+    (
+        "rp",
+        "auto_recover_drops",
+        "alter table rp add column auto_recover_drops int default 0",
+    ),
+    (
+        "seen",
+        "why",
+        "alter table seen add column why text default ''",
+    ),
 ];
 
 fn init(c: &mut Connection) -> anyhow::Result<()> {
     c.execute_batch("pragma journal_mode=wal; pragma busy_timeout=5000;")?;
     let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    anyhow::ensure!(version <= SCHEMA_VERSION, "database schema {version} is newer than supported {SCHEMA_VERSION}");
+    anyhow::ensure!(
+        version <= SCHEMA_VERSION,
+        "database schema {version} is newer than supported {SCHEMA_VERSION}"
+    );
     tx.execute_batch(SCH)?;
     for &(table, column, sql) in LEGACY_COLUMNS {
         let exists: bool = tx.query_row(
@@ -114,17 +157,29 @@ impl Db {
     pub fn try_all(&self, s: &str, p: P) -> rusqlite::Result<Vec<Value>> {
         let c = self.0.lock().unwrap();
         let mut st = c.prepare_cached(s)?;
-        let names = st.column_names().iter().map(|v| v.to_string()).collect::<Vec<_>>();
+        let names = st
+            .column_names()
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>();
         let rows = st.query_map(params_from_iter(p.iter().map(|x| x.as_ref())), |r| {
             let mut row = Map::new();
             for (i, key) in names.iter().enumerate() {
                 let raw = r.get_ref(i)?;
                 let value = if key == "d" {
                     let ValueRef::Text(bytes) = raw else {
-                        return Err(rusqlite::Error::InvalidColumnType(i, key.clone(), raw.data_type()));
+                        return Err(rusqlite::Error::InvalidColumnType(
+                            i,
+                            key.clone(),
+                            raw.data_type(),
+                        ));
                     };
                     serde_json::from_slice::<Value>(bytes).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(i, rusqlite::types::Type::Text, Box::new(error))
+                        rusqlite::Error::FromSqlConversionFailure(
+                            i,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
                     })?
                 } else {
                     cv(raw)
@@ -138,14 +193,24 @@ impl Db {
 
     pub fn try_n(&self, s: &str, p: P) -> rusqlite::Result<i64> {
         let c = self.0.lock().unwrap();
-        c.query_row(s, params_from_iter(p.iter().map(|x| x.as_ref())), |r| r.get(0))
+        c.query_row(s, params_from_iter(p.iter().map(|x| x.as_ref())), |r| {
+            r.get(0)
+        })
     }
 
     pub fn try_usd(&self, r: Option<&str>) -> rusqlite::Result<f64> {
         let c = self.0.lock().unwrap();
         match r {
-            Some(repo) => c.query_row("select coalesce(sum(usd),0.0) from cost where day=? and sub=0 and repo=?",rusqlite::params![day(),repo],|r|r.get(0)),
-            None => c.query_row("select coalesce(sum(usd),0.0) from cost where day=? and sub=0",[day()],|r|r.get(0)),
+            Some(repo) => c.query_row(
+                "select coalesce(sum(usd),0.0) from cost where day=? and sub=0 and repo=?",
+                rusqlite::params![day(), repo],
+                |r| r.get(0),
+            ),
+            None => c.query_row(
+                "select coalesce(sum(usd),0.0) from cost where day=? and sub=0",
+                [day()],
+                |r| r.get(0),
+            ),
         }
     }
 
@@ -862,36 +927,59 @@ mod strict_db_tests {
         c.execute_batch("create table rp(id integer primary key, full text, auto_merge int default 0); insert into rp(full,auto_merge) values('o/r',1)").unwrap();
         init(&mut c).unwrap();
         init(&mut c).unwrap();
-        let values: (i64,i64,i64) = c.query_row("select auto_merge,steward_repair,local_merge from rp where full='o/r'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
-        assert_eq!(values,(1,0,0));
-        let version:i64=c.pragma_query_value(None,"user_version",|r|r.get(0)).unwrap();
-        assert_eq!(version,SCHEMA_VERSION);
+        let values: (i64, i64, i64) = c
+            .query_row(
+                "select auto_merge,steward_repair,local_merge from rp where full='o/r'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(values, (1, 0, 0));
+        let version: i64 = c
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
     }
 
     #[test]
     fn migration_rolls_back_on_non_duplicate_failure_and_refuses_future_schema() {
         let mut c = Connection::open_in_memory().unwrap();
-        c.execute_batch("create table rp(id integer primary key, full text); create view seen as select 1 x").unwrap();
+        c.execute_batch(
+            "create table rp(id integer primary key, full text); create view seen as select 1 x",
+        )
+        .unwrap();
         assert!(init(&mut c).is_err());
-        let count:i64=c.query_row("select count(*) from pragma_table_info('rp') where name='nm'",[],|r|r.get(0)).unwrap();
-        assert_eq!(count,0);
-        let version:i64=c.pragma_query_value(None,"user_version",|r|r.get(0)).unwrap();
-        assert_eq!(version,0);
-        c.pragma_update(None,"user_version",SCHEMA_VERSION+1).unwrap();
+        let count: i64 = c
+            .query_row(
+                "select count(*) from pragma_table_info('rp') where name='nm'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+        let version: i64 = c
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 0);
+        c.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+            .unwrap();
         assert!(init(&mut c).is_err());
     }
 
     #[test]
     fn strict_reads_distinguish_zero_empty_and_failed_queries() {
-        let db=Db::mem();
-        assert_eq!(db.try_n("select count(*) from jobs",vec![]).unwrap(),0);
-        assert!(db.try_all("select * from jobs",vec![]).unwrap().is_empty());
-        assert!(db.try_n("select count(*) from absent",vec![]).is_err());
-        assert!(db.try_all("select * from absent",vec![]).is_err());
-        db.run("insert into jobs(repo,st,d) values('o/r','ready','not json')",vec![]);
-        assert!(db.try_all("select * from jobs",vec![]).is_err());
-        assert_eq!(db.try_usd(None).unwrap(),0.0);
-        db.run("drop table cost",vec![]);
+        let db = Db::mem();
+        assert_eq!(db.try_n("select count(*) from jobs", vec![]).unwrap(), 0);
+        assert!(db.try_all("select * from jobs", vec![]).unwrap().is_empty());
+        assert!(db.try_n("select count(*) from absent", vec![]).is_err());
+        assert!(db.try_all("select * from absent", vec![]).is_err());
+        db.run(
+            "insert into jobs(repo,st,d) values('o/r','ready','not json')",
+            vec![],
+        );
+        assert!(db.try_all("select * from jobs", vec![]).is_err());
+        assert_eq!(db.try_usd(None).unwrap(), 0.0);
+        db.run("drop table cost", vec![]);
         assert!(db.try_usd(None).is_err());
     }
 }

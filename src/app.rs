@@ -382,16 +382,22 @@ impl App {
         let n = now();
         let td = self.set()["tokday"].as_i64().unwrap_or(0);
         let used = if td > 0 {
-            self.db.try_n(
-                "select coalesce(sum(tin+tout),0) from tok where day=?",
-                pa![crate::db::day()],
-            ).ok()
+            self.db
+                .try_n(
+                    "select coalesce(sum(tin+tout),0) from tok where day=?",
+                    pa![crate::db::day()],
+                )
+                .ok()
         } else {
             Some(0)
         };
         let wh = off_hours(&self.set()["wh"]);
         let bd = self.set()["budday"].as_f64().unwrap_or(0.0);
-        let bu = if bd > 0.0 { self.db.try_usd(None).ok() } else { Some(0.0) };
+        let bu = if bd > 0.0 {
+            self.db.try_usd(None).ok()
+        } else {
+            Some(0.0)
+        };
         let free_first = crate::routing::enabled(self);
         let settings = self.set();
         // Only a Claude-only configuration needs the legacy global pause.
