@@ -860,8 +860,13 @@ pub fn hints(rows: &[Value]) -> Vec<String> {
     o
 }
 
-fn sets(a: &Ax, b: &Value) {
-    let mut s = a.db.kg("set");
+fn save_settings(tx: &rusqlite::Transaction<'_>, b: &Value) -> rusqlite::Result<()> {
+    let raw: String = tx.query_row(
+        "select coalesce((select v from kv where k='set'),'{}')",
+        [],
+        |r| r.get(0),
+    )?;
+    let mut s: Value = serde_json::from_str(&raw).map_err(|_| rusqlite::Error::InvalidQuery)?;
     if !s.is_object() {
         s = json!({});
     }
@@ -957,8 +962,6 @@ fn sets(a: &Ax, b: &Value) {
             }
         }
     }
-    a.db.ks("set", &s);
-    a.tick();
     if let Some(w) = b["wh"].as_object() {
         let re = regex::Regex::new(r"^([01]\d|2[0-3]):[0-5]\d$").unwrap();
         let (f, t) = (
@@ -966,12 +969,30 @@ fn sets(a: &Ax, b: &Value) {
             w.get("to").and_then(|x| x.as_str()).unwrap_or(""),
         );
         if re.is_match(f) && re.is_match(t) {
-            let mut s = a.db.kg("set");
             s["wh"] = json!({"on": w.get("on").and_then(|x| x.as_bool()).unwrap_or(false), "from": f, "to": t});
-            a.db.ks("set", &s);
-            a.tick();
         }
     }
+    tx.execute(
+        "insert into kv(k,v) values('set',?) on conflict(k) do update set v=excluded.v",
+        [s.to_string()],
+    )?;
+    Ok(())
+}
+
+fn sets(a: &Ax, b: &Value) -> rusqlite::Result<()> {
+    {
+        let _transition = a.update_transition.lock().unwrap();
+        if a.drain.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let mut c = a.db.0.lock().unwrap();
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        save_settings(&tx, b)?;
+        tx.commit()?;
+    }
+    crate::app::chg();
+    a.tick();
+    Ok(())
 }
 
 fn pr_lang(value: &str) -> &'static str {
@@ -1047,7 +1068,22 @@ fn import(a: &Ax, b: &Value) -> Result<String, String> {
     if let Some(v) = s["prov"]["cc"]["kc"].as_str() {
         x["cckc"] = json!(v);
     }
-    sets(a, &x);
+    let (nr, nh) = import_config(a, b, &x)
+        .map_err(|e| format!("configuration import failed; no changes saved: {e}"))?;
+    crate::app::chg();
+    a.tick();
+    a.sw.notify_one();
+    Ok(format!("Imported settings, {nr} new repositories and {nh} new machines. Machines come in switched off: check them under Machines, then switch them on."))
+}
+
+fn import_config(a: &Ax, b: &Value, x: &Value) -> rusqlite::Result<(usize, usize)> {
+    let _transition = a.update_transition.lock().unwrap();
+    if a.drain.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let mut c = a.db.0.lock().unwrap();
+    let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    save_settings(&tx, x)?;
     let mut nr = 0;
     for r in b["repos"]
         .as_array()
@@ -1059,16 +1095,16 @@ fn import(a: &Ax, b: &Value) -> Result<String, String> {
         let Some(f) = rid(r["full"].as_str().unwrap_or("")) else {
             continue;
         };
-        if a.db
-            .n("select count(*) from rp where full=?", pa![f.clone()])
-            > 0
+        if tx.query_row("select count(*) from rp where full=?", [&f], |row| {
+            row.get::<_, i64>(0)
+        })? > 0
         {
             continue;
         }
-        a.db.run(
+        tx.execute(
             "insert into rp(full,t0,coderabbit_epoch) values(?,?,?)",
-            pa![f.clone(), now(), now()],
-        );
+            rusqlite::params![f, now(), now()],
+        )?;
         for k in RPF {
             // External review requests, autonomous repair and automatic closing
             // must be enabled explicitly on each installation after importing a backup.
@@ -1088,16 +1124,16 @@ fn import(a: &Ax, b: &Value) -> Result<String, String> {
             }
             match v {
                 Value::Number(n) if n.is_i64() && *k != "bud" => {
-                    a.db.run(
+                    tx.execute(
                         &format!("update rp set {k}=? where full=?"),
-                        pa![n.as_i64().unwrap().clamp(0, 10000), f.clone()],
-                    );
+                        rusqlite::params![n.as_i64().unwrap().clamp(0, 10000), f],
+                    )?;
                 }
                 Value::Number(n) => {
-                    a.db.run(
+                    tx.execute(
                         &format!("update rp set {k}=? where full=?"),
-                        pa![n.as_f64().unwrap_or(0.0).clamp(0.0, 100_000.0), f.clone()],
-                    );
+                        rusqlite::params![n.as_f64().unwrap_or(0.0).clamp(0.0, 100_000.0), f],
+                    )?;
                 }
                 Value::String(t) if ["ci", "setup", "rules", "mode", "lang"].contains(k) => {
                     let t = if *k == "mode" && t != "auto" {
@@ -1107,10 +1143,10 @@ fn import(a: &Ax, b: &Value) -> Result<String, String> {
                     } else {
                         crate::sh::head(t.trim(), 4000)
                     };
-                    a.db.run(
+                    tx.execute(
                         &format!("update rp set {k}=? where full=?"),
-                        pa![t, f.clone()],
-                    );
+                        rusqlite::params![t, f],
+                    )?;
                 }
                 _ => {}
             }
@@ -1135,16 +1171,16 @@ fn import(a: &Ax, b: &Value) -> Result<String, String> {
         };
         if !idr.is_match(id)
             || !shr.is_match(ssh)
-            || a.db
-                .n("select count(*) from hs where id=?", pa![id.to_string()])
-                > 0
+            || tx.query_row("select count(*) from hs where id=?", [id], |row| {
+                row.get::<_, i64>(0)
+            })? > 0
         {
             continue;
         }
         let i = |k: &str, d: i64, lo: i64, hi: i64| h[k].as_i64().unwrap_or(d).clamp(lo, hi);
-        a.db.run(
+        tx.execute(
             "insert into hs(id,ssh,dk,ln,ci,gb,raw,on_,t0,no,cpu) values(?,?,?,?,?,?,?,0,?,?,?)",
-            pa![
+            rusqlite::params![
                 id.to_string(),
                 ssh.to_string(),
                 i("dk", 0, 0, 1),
@@ -1156,11 +1192,11 @@ fn import(a: &Ax, b: &Value) -> Result<String, String> {
                 crate::sh::head(h["no"].as_str().unwrap_or(""), 2000),
                 i("cpu", 0, 0, 256)
             ],
-        );
+        )?;
         nh += 1;
     }
-    a.sw.notify_one();
-    Ok(format!("Imported settings, {nr} new repositories and {nh} new machines. Machines come in switched off: check them under Machines, then switch them on."))
+    tx.commit()?;
+    Ok((nr, nh))
 }
 
 async fn health(a: &Ax, f: bool) -> Value {
@@ -2061,7 +2097,9 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
             }
         }
         ("POST", "/api/set") => {
-            sets(a, &b);
+            if sets(a, &b).is_err() {
+                return er(StatusCode::CONFLICT, "settings were not saved");
+            }
             if b["test"].as_bool().unwrap_or(false) {
                 crate::ntf::send(a, "ApolloOffice", "Test notification", 3).await;
             }
@@ -3299,6 +3337,44 @@ mod t {
         )
         .unwrap();
         assert_ne!(x["id"], z["id"]);
+    }
+
+    #[test]
+    fn configuration_import_rolls_back_settings_repositories_and_hosts() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            47302,
+            "apollo-office".into(),
+        ));
+        a.db.ks("set", &json!({"hunters":1}));
+        a.db.0.lock().unwrap().execute_batch(
+            "create trigger fail_import before insert on hs begin select raise(abort,'injected'); end;",
+        ).unwrap();
+        let backup = json!({
+            "apollo_office": "0.10.0",
+            "set": {"hunters":4,"wh":{"on":true,"from":"08:00","to":"18:00"}},
+            "repos": [{"full":"owner/repo","coderabbit_review":1,"coderabbit_free_confirmed":1}],
+            "hosts": [{"id":"worker1"}]
+        });
+        assert!(import(&a, &backup).is_err());
+        assert_eq!(a.db.kg("set"), json!({"hunters":1}));
+        assert_eq!(a.db.n("select count(*) from rp", pa![]), 0);
+        assert_eq!(a.db.n("select count(*) from hs", pa![]), 0);
+        a.db.0
+            .lock()
+            .unwrap()
+            .execute_batch("drop trigger fail_import")
+            .unwrap();
+        import(&a, &backup).unwrap();
+        assert_eq!(a.db.kg("set")["hunters"], 4);
+        assert_eq!(a.db.kg("set")["wh"]["from"], "08:00");
+        assert_eq!(a.db.n("select count(*) from rp", pa![]), 1);
+        assert_eq!(a.db.n("select count(*) from hs where on_=0", pa![]), 1);
+        assert_eq!(
+            a.db.n("select coderabbit_review + coderabbit_free_confirmed from rp", pa![]),
+            0
+        );
     }
 
     #[test]
