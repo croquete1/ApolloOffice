@@ -2880,7 +2880,18 @@ mod t {
             (3, "failed", "verification"),
             (4, "accepted", ""),
         ] {
-            let job = db.jnew("o/r", id, "fix", "test", "", "done", "", json!({}), None, 0.0);
+            let job = db.jnew(
+                "o/r",
+                id,
+                "fix",
+                "test",
+                "",
+                "done",
+                "",
+                json!({}),
+                None,
+                0.0,
+            );
             db.run(
                 "insert into fix_attempts(id,job,attempt,model,started,finished,outcome,gate) values(?,?,?,?,?,?,?,?)",
                 pa![id,job,if id==4 {2} else {1}, "cc:sonnet".to_string(),at,at+1,outcome.to_string(),gate.to_string()],
