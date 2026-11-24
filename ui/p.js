@@ -627,6 +627,33 @@
     };
   };
 
+  // Operational diagnostics only: use server-reported capacity, not predictions.
+  const resourceDiagnostics = (state, at = Date.now()) => {
+    const fresh = Number.isFinite(state?.t) && state.t <= at && at-state.t <= 180000;
+    const resource = state?.ops?.resources;
+    if (!fresh || !resource || !Array.isArray(resource.hosts)) {
+      return '<div class="empty">Diagnóstico de recursos indisponível ou desatualizado.</div>';
+    }
+    const value = v => Number.isFinite(v) && v >= 0 ? String(v) : "—";
+    const reason = r => ({
+      manual:"Manual",profile:"Dentro dos limites do perfil",
+      telemetry_unavailable:"Telemetria indisponível",telemetry_incomplete:"Telemetria incompleta",
+      critical_pressure:"Pressão crítica",memory_or_temperature:"Memória ou temperatura",
+      cpu_load:"Carga do processador"
+    })[r] || "Motivo desconhecido";
+    return `<div class="hint">Perfil: ${esc(resource.profile || "—")} · Tarefas em espera: ${value(state.ops.waiting)}. Capacidade observada, não garantia de admissão.</div>
+      ${resource.hosts.map(h => {
+        const gpu = h.telemetry_fresh === true && Array.isArray(h.gpu) ? h.gpu : [];
+        return `<div class="box"><b>${esc(h.id)} · ${h.enabled === true ? "Ativa" : h.enabled === false ? "Inativa" : "Estado desconhecido"}</b>
+          <div class="hint">Lanes: ${value(h.active)} em uso · ${value(h.effective_lanes)}/${value(h.configured_lanes)} permitidas</div>
+          <div class="hint">CI: ${value(h.active_ci)} em uso · ${value(h.effective_ci)}/${value(h.configured_ci)} permitidos para trabalho retomável</div>
+          ${Number.isFinite(h.completion_ci_floor) && h.completion_ci_floor > h.effective_ci ? '<div class="hint">Uma vaga reservada à conclusão de trabalho não retomável.</div>' : ""}
+          <div class="hint">${esc(reason(h.reason))}</div>
+          ${gpu.length ? gpu.map(g=>`<div class="hint">GPU ${value(g.index)} · VRAM ${value(g.vram_used_mib)}/${value(g.vram_total_mib)} MiB · ${value(g.temperature_c)} °C · utilização ${value(g.utilization_percent)}%</div>`).join("") : '<div class="hint">GPU/VRAM: sem leitura disponível.</div>'}
+        </div>`;
+      }).join("") || '<div class="empty">Sem máquinas configuradas.</div>'}`;
+  };
+
   const health = async (f) => {
     show("Health", "health");
     if (!A.H || f) { B.innerHTML = `<div class="empty">checking…</div>`; await A.hlt(f); }
@@ -635,6 +662,7 @@
     const sec = (t, x) => `<div class="sec"><h4>${t}</h4><div class="box">${x}</div></div>`;
     const ls = (v) => (Array.isArray(v.m) ? v.m.map((y) => row(y.ok, y.k, y.m)).join("") : row(v.ok, "", v.m));
     B.innerHTML = H.gh ? sec("GitHub", row(H.gh.ok, "", H.gh.m)) + sec("AI providers in use", ls(H.ai)) + sec("Docker", row(H.docker.ok, "", H.docker.m)) + sec("Machines", ls(H.hosts)) + `<div class="msg">Checked ${new Date(H.t).toLocaleTimeString()}. The office checks again every 5 minutes.</div><div class="acts"><button id="hr">Check now</button></div>` : `<div class="empty">Could not check.</div><div class="acts"><button id="hr">Check now</button></div>`;
+    B.insertAdjacentHTML("beforeend", `<div class="sec"><h4>Recursos e capacidade de CI</h4>${resourceDiagnostics(A.S)}</div>`);
     $("hr").onclick = () => health(true);
   };
   A.health = health;
