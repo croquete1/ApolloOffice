@@ -175,11 +175,26 @@ fn worker_secret(name: &str) -> bool {
             | "DOCKER_AUTH_CONFIG"
             | "DATABASE_URL"
             | "SUPABASE_SERVICE_ROLE_KEY"
+            | "GIT_SSH_COMMAND"
+            | "GIT_SSH"
+            | "GIT_CONFIG"
+            | "GIT_CONFIG_GLOBAL"
+            | "GIT_CONFIG_SYSTEM"
+            | "AWS_SECURITY_TOKEN"
+            | "AZURE_STORAGE_CONNECTION_STRING"
+            | "GOOGLE_CREDENTIALS"
+            | "CLOUDSDK_AUTH_ACCESS_TOKEN"
+            | "DOCKER_CONFIG"
+            | "KUBECONFIG"
     ) || name.starts_with("GIT_CONFIG_")
+        || name.starts_with("CARGO_REGISTRIES_") && name.ends_with("_TOKEN")
+        || name.starts_with("MIGRATION_PROVIDER_")
         || name.ends_with("_API_KEY")
         || name.ends_with("_ACCESS_TOKEN")
         || name.ends_with("_AUTH_TOKEN")
         || name.ends_with("_CLIENT_SECRET")
+        || name.ends_with("_SECRET_KEY")
+        || name.ends_with("_PRIVATE_KEY")
 }
 
 pub async fn run(p: &str, a: &[String], r: Rq<'_>) -> Out {
@@ -215,7 +230,9 @@ pub async fn run(p: &str, a: &[String], r: Rq<'_>) -> Out {
         c.env_remove(k);
     }
     for (k, v) in &r.env {
-        c.env(k, v);
+        if !r.strip_worker_secrets || !worker_secret(k) {
+            c.env(k, v);
+        }
     }
     if let Some(d) = &r.cwd {
         c.current_dir(d);
@@ -1387,6 +1404,50 @@ mod t {
         assert_eq!(cli.o, "controlled-fixture-value");
         assert_eq!(worker.c, 0);
         assert_eq!(worker.o, "");
+    }
+
+    #[test]
+    fn worker_secret_filter_covers_ci_and_registry_credentials() {
+        for key in [
+            "github_token",
+            "CARGO_REGISTRIES_PRIVATE_TOKEN",
+            "AWS_SECURITY_TOKEN",
+            "GOOGLE_CREDENTIALS",
+            "KUBECONFIG",
+            "DOCKER_CONFIG",
+            "GIT_SSH_COMMAND",
+            "EXAMPLE_PRIVATE_KEY",
+            "MIGRATION_PROVIDER_FIXTURE",
+        ] {
+            assert!(worker_secret(key), "{key}");
+        }
+        for key in ["PATH", "HOME", "CARGO_BUILD_JOBS", "RUST_TEST_THREADS"] {
+            assert!(!worker_secret(key), "{key}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn explicit_worker_environment_cannot_restore_filtered_credentials() {
+        let args = vec![
+            "-c".into(),
+            "printf '%s:%s' \"$APOLLO_FIXTURE_PRIVATE_KEY\" \"$APOLLO_FIXTURE_MODE\"".into(),
+        ];
+        let result = run(
+            &bash(),
+            &args,
+            Rq {
+                strip_worker_secrets: true,
+                env: vec![
+                    ("APOLLO_FIXTURE_PRIVATE_KEY".into(), "fixture".into()),
+                    ("APOLLO_FIXTURE_MODE".into(), "allowed".into()),
+                ],
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(result.c, 0);
+        assert_eq!(result.o, ":allowed");
     }
 
     #[test]
