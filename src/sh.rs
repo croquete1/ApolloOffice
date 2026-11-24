@@ -865,6 +865,9 @@ pub async fn apip(p: &str) -> Result<Vec<Value>, String> {
 }
 
 fn api_pages(output: &str) -> Result<Vec<Value>, String> {
+    if output.trim().is_empty() {
+        return Err("gh paginated response is empty".into());
+    }
     let mut rows = Vec::new();
     for page in serde_json::Deserializer::from_str(output).into_iter::<Value>() {
         let page = page.map_err(|e| format!("gh paginated json: {e}"))?;
@@ -1167,6 +1170,8 @@ mod t {
             vec![serde_json::json!({"id":1}), serde_json::json!({"id":2})]
         );
         assert!(api_pages("[]").unwrap().is_empty());
+        assert!(api_pages("").is_err());
+        assert!(api_pages("  ").is_err());
         assert!(api_pages("[{\"id\":1}]\n[{broken").is_err());
         assert!(api_pages("[]\n{\"message\":\"error\"}").is_err());
     }

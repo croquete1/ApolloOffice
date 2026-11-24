@@ -154,6 +154,36 @@ impl Db {
             .unwrap_or(0)
     }
 
+    /// Apply a complete issue scan atomically. A failed write cannot close unseen issues.
+    pub fn replace_issue_snapshot(&self, repo: &str, issues: &[Value], at: i64) -> rusqlite::Result<()> {
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction()?;
+        for issue in issues {
+            let number = issue["number"].as_i64().filter(|n| *n > 0)
+                .ok_or(rusqlite::Error::InvalidQuery)?;
+            let labels: Vec<&str> = issue["labels"].as_array().ok_or(rusqlite::Error::InvalidQuery)?
+                .iter().map(|x| x["name"].as_str().ok_or(rusqlite::Error::InvalidQuery)).collect::<Result<_, _>>()?;
+            let assignees: Vec<&str> = issue["assignees"].as_array().ok_or(rusqlite::Error::InvalidQuery)?
+                .iter().map(|x| x["login"].as_str().ok_or(rusqlite::Error::InvalidQuery)).collect::<Result<_, _>>()?;
+            tx.execute(
+                "insert into github_issues(repo,num,title,url,author,updated,labels,assignees,seen_at,is_open,skip_reason) values(?,?,?,?,?,?,?,?,?,1,'') on conflict(repo,num) do update set title=excluded.title,url=excluded.url,author=excluded.author,labels=excluded.labels,assignees=excluded.assignees,seen_at=excluded.seen_at,is_open=1,skip_reason=case when github_issues.updated<>excluded.updated then '' else github_issues.skip_reason end,updated=excluded.updated",
+                rusqlite::params![repo, number,
+                    issue["title"].as_str().ok_or(rusqlite::Error::InvalidQuery)?,
+                    issue["url"].as_str().ok_or(rusqlite::Error::InvalidQuery)?,
+                    issue["author"]["login"].as_str().unwrap_or(""),
+                    issue["updatedAt"].as_str().ok_or(rusqlite::Error::InvalidQuery)?,
+                    json!(labels).to_string(), json!(assignees).to_string(), at],
+            )?;
+        }
+        tx.execute("update github_issues set is_open=0 where repo=? and seen_at<? and is_open=1", rusqlite::params![repo, at])?;
+        let scan = json!({"at":at,"count":issues.len(),"limit":null,"truncated":false,"error":null,"error_at":null});
+        tx.execute("insert into kv(k,v) values(?,?) on conflict(k) do update set v=excluded.v",
+            rusqlite::params![format!("iscan:{repo}"),scan.to_string()])?;
+        tx.commit()?;
+        crate::app::chg();
+        Ok(())
+    }
+
     pub fn kg(&self, k: &str) -> Value {
         self.one("select v from kv where k=?", crate::pa![k.to_string()])
             .and_then(|r| r["v"].as_str().and_then(|s| serde_json::from_str(s).ok()))
@@ -407,5 +437,28 @@ mod tests {
             .unwrap()["lang"],
             "pt-PT"
         );
+    }
+}
+
+#[cfg(test)]
+mod issue_snapshot_tests {
+    use super::*;
+
+    fn issue(number: i64) -> Value {
+        json!({"number":number,"title":"Bug","url":"https://github.com/o/r/issues/1",
+            "updatedAt":"2026-01-01T00:00:00Z","labels":[],"assignees":[]})
+    }
+
+    #[test]
+    fn failed_snapshot_rolls_back_rows_closures_and_scan_metadata() {
+        let db = Db::mem();
+        db.replace_issue_snapshot("o/r", &[issue(1)], 10).unwrap();
+        assert!(db.replace_issue_snapshot("o/r", &[issue(2), json!({"number":3})], 20).is_err());
+        assert_eq!(db.n("select count(*) from github_issues where is_open=1", vec![]), 1);
+        assert_eq!(db.n("select num from github_issues where is_open=1", vec![]), 1);
+        assert_eq!(db.kg("iscan:o/r")["at"], 10);
+        db.replace_issue_snapshot("o/r", &[issue(2)], 30).unwrap();
+        assert_eq!(db.n("select num from github_issues where is_open=1", vec![]), 2);
+        assert_eq!(db.kg("iscan:o/r")["at"], 30);
     }
 }

@@ -54,6 +54,72 @@ pub async fn meta(a: &App, r: &str) -> Result<Value, String> {
     Ok(o)
 }
 
+/// Fetch the complete open issue listing, excluding pull requests returned by REST.
+pub async fn open_issues(repo: &str) -> Result<Vec<Value>, String> {
+    let rows = apip(&format!(
+        "repos/{repo}/issues?state=open&sort=created&direction=asc&per_page=100"
+    )).await?;
+    normalize_open_issues(rows)
+}
+
+fn normalize_open_issues(rows: Vec<Value>) -> Result<Vec<Value>, String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut issues = Vec::new();
+    for row in rows {
+        let number = row["number"].as_i64().filter(|n| *n > 0)
+            .ok_or("GitHub issue listing contains an invalid number")?;
+        if !seen.insert(number) {
+            return Err("GitHub issue listing changed during pagination (duplicate number)".into());
+        }
+        if row.get("pull_request").is_some_and(|v| v.is_object()) {
+            continue;
+        }
+        if row["state"] != "open" || !row["title"].is_string()
+            || !row["html_url"].as_str().is_some_and(|v| !v.is_empty())
+            || !row["updated_at"].as_str().is_some_and(|v| chrono::DateTime::parse_from_rfc3339(v).is_ok())
+            || !row["created_at"].as_str().is_some_and(|v| chrono::DateTime::parse_from_rfc3339(v).is_ok())
+            || !row["labels"].as_array().is_some_and(|v| v.iter().all(|x| x["name"].is_string()))
+            || !row["assignees"].as_array().is_some_and(|v| v.iter().all(|x| x["login"].is_string()))
+        {
+            return Err(format!("GitHub issue #{number} has incomplete or invalid metadata"));
+        }
+        issues.push(json!({
+            "number":number,"title":row["title"],"body":row["body"],
+            "author":row["user"],"createdAt":row["created_at"],"updatedAt":row["updated_at"],
+            "labels":row["labels"],"assignees":row["assignees"],"url":row["html_url"]
+        }));
+    }
+    Ok(issues)
+}
+
+#[cfg(test)]
+mod issue_listing_tests {
+    use super::*;
+
+    fn issue(number: i64) -> Value {
+        json!({"number":number,"state":"open","title":"Bug","html_url":format!("https://github.com/o/r/issues/{number}"),
+            "created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z",
+            "labels":[],"assignees":[],"user":{"login":"reporter"}})
+    }
+
+    #[test]
+    fn accepts_large_listing_and_excludes_pull_requests() {
+        let mut rows: Vec<Value> = (1..=501).map(issue).collect();
+        rows.push(json!({"number":502,"pull_request":{}}));
+        let result = normalize_open_issues(rows).unwrap();
+        assert_eq!(result.len(), 501);
+        assert_eq!(result[500]["number"], 501);
+        assert_eq!(result[0]["author"]["login"], "reporter");
+    }
+
+    #[test]
+    fn rejects_duplicate_and_incomplete_listing() {
+        assert!(normalize_open_issues(vec![issue(1), issue(1)]).is_err());
+        assert!(normalize_open_issues(vec![issue(1), json!({"number":2})]).is_err());
+        assert!(normalize_open_issues(vec![]).unwrap().is_empty());
+    }
+}
+
 pub struct Rf {
     pub n: i64,
     pub rp: String,

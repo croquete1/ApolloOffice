@@ -78,13 +78,6 @@ pub fn errm(e: &X) -> String {
     }
 }
 
-// Bound intake while recording whether the GitHub listing was truncated.
-const ISSUE_SCAN_LIMIT: usize = 500;
-
-fn issue_scan_truncated(count: usize) -> bool {
-    count >= ISSUE_SCAN_LIMIT
-}
-
 fn issue_priority(issue: &Value) -> i64 {
     issue["labels"]
         .as_array()
@@ -161,114 +154,22 @@ async fn scout1(a: &Ax) -> R<()> {
         let capacity = b > 0 && qn(a, &r, "'vet','ready'") < 4 * b;
         a.held("scout").await;
         a.st("scout", "work", None, "");
-        let issue_limit = ISSUE_SCAN_LIMIT.to_string();
-        let is = ghj(
-            &[
-                "issue",
-                "list",
-                "-R",
-                &r,
-                "--state",
-                "open",
-                "--limit",
-                &issue_limit,
-                "--json",
-                "number,title,body,author,createdAt,updatedAt,labels,assignees,url",
-            ],
-            120,
-        )
-        .await;
-        let is = match is {
-            Ok(value) => match value.as_array() {
-                Some(items) => items.clone(),
-                None => {
-                    let previous = a.db.kg(&format!("iscan:{r}"));
-                    a.db.ks(
-                        &format!("iscan:{r}"),
-                        &json!({
-                            "at": previous["at"],
-                            "count": previous["count"],
-                            "limit": ISSUE_SCAN_LIMIT,
-                            "truncated": previous["truncated"].as_bool().unwrap_or(false),
-                            "error": "GitHub devolveu uma lista de issues inválida",
-                            "error_at": now(),
-                        }),
-                    );
-                    continue;
-                }
-            },
+        let is = match crate::gh::open_issues(&r).await {
+            Ok(items) => items,
             Err(error) => {
                 let previous = a.db.kg(&format!("iscan:{r}"));
-                a.db.ks(
-                    &format!("iscan:{r}"),
-                    &json!({
-                        "at": previous["at"],
-                        "count": previous["count"],
-                        "limit": ISSUE_SCAN_LIMIT,
-                        "truncated": previous["truncated"].as_bool().unwrap_or(false),
-                        "error": crate::sh::head(&error, 300),
-                        "error_at": now(),
-                    }),
-                );
-                a.say(
-                    "scout",
-                    &format!("{r}: não foi possível atualizar os issues do GitHub"),
-                    None,
-                );
+                a.db.ks(&format!("iscan:{r}"), &json!({
+                    "at":previous["at"],"count":previous["count"],"limit":previous["limit"],
+                    "truncated":previous["truncated"],"error":crate::sh::head(&error,300),"error_at":now()
+                }));
+                a.say("scout", &format!("{r}: não foi possível atualizar os issues do GitHub"), None);
                 continue;
             }
         };
-        let scan_at = now();
-        let truncated = issue_scan_truncated(is.len());
-        for issue in &is {
-            let number = issue["number"].as_i64().unwrap_or(0);
-            if number <= 0 {
-                continue;
-            }
-            let labels: Vec<String> = issue["labels"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|label| label["name"].as_str().map(String::from))
-                .collect();
-            let assignees: Vec<String> = issue["assignees"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|assignee| assignee["login"].as_str().map(String::from))
-                .collect();
-            a.db.run(
-                "insert into github_issues(repo,num,title,url,author,updated,labels,assignees,seen_at,is_open,skip_reason) values(?,?,?,?,?,?,?,?,?,1,'') on conflict(repo,num) do update set title=excluded.title,url=excluded.url,author=excluded.author,labels=excluded.labels,assignees=excluded.assignees,seen_at=excluded.seen_at,is_open=1,skip_reason=case when github_issues.updated<>excluded.updated then '' else github_issues.skip_reason end,updated=excluded.updated",
-                pa![
-                    r.clone(),
-                    number,
-                    issue["title"].as_str().unwrap_or("").to_string(),
-                    issue["url"].as_str().unwrap_or("").to_string(),
-                    issue["author"]["login"].as_str().unwrap_or("").to_string(),
-                    issue["updatedAt"].as_str().unwrap_or("").to_string(),
-                    json!(labels).to_string(),
-                    json!(assignees).to_string(),
-                    scan_at,
-                ],
-            );
+        if let Err(error) = a.db.replace_issue_snapshot(&r, &is, now()) {
+            a.say("scout", &format!("{r}: falha ao guardar snapshot de issues: {error}"), None);
+            continue;
         }
-        if !truncated {
-            a.db.run(
-                "update github_issues set is_open=0 where repo=? and seen_at<? and is_open=1",
-                pa![r.clone(), scan_at],
-            );
-        }
-        a.db.ks(
-            &format!("iscan:{r}"),
-            &json!({
-                "at": scan_at,
-                "count": is.len(),
-                "limit": ISSUE_SCAN_LIMIT,
-                "truncated": truncated,
-                "error": null,
-                "error_at": null,
-            }),
-        );
         if !capacity || cooling_down {
             continue;
         }
@@ -304,10 +205,8 @@ async fn scout1(a: &Ax) -> R<()> {
                 if previous["st"] != "drop" {
                     continue;
                 }
-                let data = previous["d"]
-                    .as_str()
-                    .and_then(|value| serde_json::from_str::<Value>(value).ok())
-                    .unwrap_or_else(|| json!({}));
+                // Db::all already decodes the job's JSON column.
+                let data = previous["d"].clone();
                 if !changed_since_drop(&up, previous["t0"].as_i64().unwrap_or(0), &data) {
                     continue;
                 }
@@ -354,11 +253,14 @@ async fn scout1(a: &Ax) -> R<()> {
         let mut nk = vec![];
         for i in nw {
             let n = i["number"].as_i64().unwrap_or(0);
-            if crate::gh::refs(&r, n)
-                .await
-                .map(|x| !crate::gh::live(x).is_empty())
-                .unwrap_or(false)
-            {
+            let related = match crate::gh::refs(&r, n).await {
+                Ok(refs) => !crate::gh::live(refs).is_empty(),
+                Err(error) => {
+                    a.say("scout", &format!("{r}#{n}: falha ao verificar PRs relacionadas: {}", crate::sh::head(&error, 180)), None);
+                    continue;
+                }
+            };
+            if related {
                 let reason = "Já existe um pull request relacionado com este issue";
                 a.db.run(
                     "insert into seen(repo,num,upd,why) values(?,?,?,?) on conflict do update set upd=excluded.upd,why=excluded.why",
@@ -1714,14 +1616,6 @@ mod t {
         vet_classification(&mut feature, false);
         assert_eq!(feature["opt"], false);
         assert_eq!(feature["feat"], true);
-    }
-
-    #[test]
-    fn issue_scan_covers_backlog_and_reports_the_limit_boundary() {
-        assert_eq!(ISSUE_SCAN_LIMIT, 500);
-        assert!(!issue_scan_truncated(280));
-        assert!(!issue_scan_truncated(ISSUE_SCAN_LIMIT - 1));
-        assert!(issue_scan_truncated(ISSUE_SCAN_LIMIT));
     }
 
     #[test]
