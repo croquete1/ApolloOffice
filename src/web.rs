@@ -1827,8 +1827,14 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                 }
                 "pause" => {
                     let on = b["on"].as_bool().unwrap_or(false);
+                    let _transition = a.update_transition.lock().unwrap();
+                    if a.db.run(
+                        "insert into kv(k,v) values('man',?) on conflict(k) do update set v=excluded.v",
+                        pa![json!(on).to_string()],
+                    ) < 0 {
+                        return er(StatusCode::CONFLICT, "office pause was not saved");
+                    }
                     a.lv.lock().unwrap().o.man = on;
-                    a.db.ks("man", &json!(on));
                     a.say(
                         "scout",
                         if on {
