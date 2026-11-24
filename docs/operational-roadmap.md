@@ -319,6 +319,11 @@ Este registo atualiza os estados históricos anteriores. Os merges abaixo foram 
 | #85 | `944f65d8b4a5c12d6cf41d769b8255db6c3bb10e` | #114 (45505445658) | F04: autenticação e revogação de tokens |
 | #86 | `91b7949913f5c6f5a16146f6b98adba71ab81c27` | #116 (45506660407) | F04: links de acesso e sessões transacionais |
 | #87 | `c536f982bcec5cdd1ef6c77fd63fde2026972efa` | #119 (45508555167) | F04/F16: sessões Google e registo de evidência |
+| #88 | `a213b92f7a81ba6e15fcf55c55e3c023a7946577` | #122 (45510012042) | F04/F05: recuperação inicial transacional |
+
+CI #122 validou integralmente o HEAD `763d220327309533c06e3442da2754f626217be9` em Ubuntu/Windows, incluindo Docker e SSH reais em runners isolados. F04/F05 continuam parciais.
+
+F04/F10 — lote seguinte: distinguir tarefas reservadas de tarefas livres no cancelamento do proprietário; persistir pedido de cancelamento sem sobrescrever estado de uma tarefa atribuída; verificar cancelamento antes de iniciar trabalho e tratar leitura inválida ou indisponível como adiamento. Testes acrescentados para reserva, aprovação, cancelamento e falhas de leitura. CI #124 (45510963376), HEAD `46ed3fc543f2e8d6c565994f2f9698732decaddc`: 306 unitários Rust passaram em Windows, mas ambos os testes de integração falharam ao aprovar uma tarefa ainda reservada durante a limpeza do checkout. Ubuntu falhou em Rustfmt. Correção: publicar preview e estado de aprovação juntos sob o bloqueio de transição, permitir aprovação/cancelamento no estado approve mesmo durante limpeza, verificar cancelamento antes da publicação; manter ambos os testes e acrescentar regressão. Validação do novo HEAD pendente. Cancelamento cooperativo não interrompe uma operação remota já em curso.
 
 CI #118: Windows 304 Rust unitários, 2 integração e 133 JS aprovados; Ubuntu Rustfmt falhou em dois hunks. Correção `272c463e6f74fe33479e42fe20705646e985b9d3`; CI #119 integralmente aprovado. OAuth real, revisão externa e faturação autenticada permanecem não verificados.
 

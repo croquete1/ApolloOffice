@@ -549,11 +549,19 @@ fn automated_review_authorized(db: &crate::db::Db, j: &Job) -> R<()> {
     Ok(())
 }
 
+fn cancellation_requested(db: &crate::db::Db, id: i64) -> rusqlite::Result<bool> {
+    let c = db.0.lock().unwrap();
+    let raw: String = c.query_row(
+        "select coalesce((select v from kv where k=?),'false')",
+        [format!("kill:{id}")],
+        |row| row.get(0),
+    )?;
+    serde_json::from_str(&raw).map_err(|_| rusqlite::Error::InvalidQuery)
+}
+
 fn kill(a: &Ax, j: &Job) -> R<()> {
-    if a.db
-        .kg(&format!("kill:{}", j.id))
-        .as_bool()
-        .unwrap_or(false)
+    if cancellation_requested(&a.db, j.id)
+        .map_err(|_| X::Defer("job cancellation state unavailable".into()))?
     {
         return drop("dropped by the owner");
     }
@@ -3466,22 +3474,26 @@ fn needs_owner_approval(a:&Ax,j:&Job)->bool {
         && j.d["ap"]!=true
 }
 
+// Publish the completed preview and approval state together. Once visible,
+// the owner may act even while the lane is only cleaning its checkout.
+fn publish_approval(a: &Ax, j: &Job, reason: &str) -> R<()> {
+    let _transition = a.update_transition.lock().unwrap();
+    kill(a, j)?;
+    if a.db.ch(
+        "update jobs set st='approve',why=?,d=?,t1=? where id=? and st not in ('done','drop')",
+        pa![reason.to_string(), j.d.to_string(), now(), j.id],
+    ) != 1 {
+        return Err(X::Defer("could not persist approval preview".into()));
+    }
+    Ok(())
+}
+
 async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
     kill(a, j)?;
     // Every path, including recovery/resume, must pass this boundary before any
     // squash, push or GitHub request. A resumed job is not an approval grant.
     if needs_owner_approval(a,j) {
-        // Persist the hold before any fallible worker/preview operation.
-        a.db.jset(
-            j.id,
-            &[
-                ("st", json!("approve")),
-                (
-                    "why",
-                    json!("waiting for explicit owner approval, including resumed jobs"),
-                ),
-            ],
-        );
+        // Do not expose approval until the preview is complete.
         let f = j.d["f"].clone();
         let ci = rp(a, &j.repo)["ci"].as_str().unwrap_or("").to_string();
         let title = pr_title(j.d["pt"].as_str(), &f, &j.title)?;
@@ -3500,7 +3512,7 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
                 .await
                 .unwrap_or_default()
         );
-        a.db.jd(j);
+        publish_approval(a, j, "waiting for explicit owner approval, including resumed jobs")?;
         a.say(
             "submit",
             "submission held: resumed work does not grant owner approval",
@@ -4141,6 +4153,9 @@ async fn mergecheck(a: &Ax, j: &mut Job) -> R<()> {
 
 async fn go(a: &Ax, id: i64, h: &str) {
     let Some(mut j) = a.db.jg(id) else { return };
+    if !matches!(j.st.as_str(), "ready" | "submit") {
+        return;
+    }
     let rs = j.d["rs"].as_bool().unwrap_or(false);
     let rpp = j.d["rp"].as_bool().unwrap_or(false);
     let initial_submit=j.st=="submit";
@@ -4150,6 +4165,7 @@ async fn go(a: &Ax, id: i64, h: &str) {
     }
     a.say("repro", &format!("[{h}] takes {}", j.tag()), Some(id));
     let r: R<()> = async {
+        kill(a, &j)?;
         if j.kind == "mergecheck" {
             mergecheck(a, &mut j).await?;
             return Ok(());
@@ -4295,13 +4311,7 @@ async fn go(a: &Ax, id: i64, h: &str) {
             let auto = !crate::routing::enabled(a)
                 && (rp(a, &j.repo)["mode"].as_str() == Some("auto") || j.kind != "fix");
             if !auto && !j.d["ap"].as_bool().unwrap_or(false) {
-                a.db.jset(
-                    id,
-                    &[
-                        ("st", json!("approve")),
-                        ("why", json!("waiting for your approval")),
-                    ],
-                );
+                publish_approval(a, &j, "waiting for your approval")?;
                 a.st("submit", "idle", None, "ok");
                 a.say(
                     "submit",

@@ -71,6 +71,7 @@ fn owner_job_transition(
     db: &crate::db::Db,
     id: i64,
     approve: bool,
+    assigned: bool,
     b: &Value,
 ) -> rusqlite::Result<()> {
     let mut c = db.0.lock().unwrap();
@@ -97,7 +98,7 @@ fn owner_job_transition(
             "update jobs set st='submit',why='approved, submitting',d=?,t1=? where id=?",
             rusqlite::params![d.to_string(), now(), id],
         )?;
-    } else if matches!(st.as_str(), "ready" | "vet" | "approve" | "park") {
+    } else if st == "approve" || (!assigned && matches!(st.as_str(), "ready" | "vet" | "park")) {
         tx.execute(
             "update jobs set st='drop',why='dropped by the owner',t1=? where id=?",
             rusqlite::params![now(), id],
@@ -1990,7 +1991,8 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                     if a.vtk.lock().unwrap().contains(&id) {
                         return er(StatusCode::CONFLICT, "Vet is processing this job");
                     }
-                    if owner_job_transition(&a.db, id, approve, &b).is_err() {
+                    let assigned = a.lk.lock().unwrap().contains(&id);
+                    if owner_job_transition(&a.db, id, approve, assigned, &b).is_err() {
                         return er(StatusCode::CONFLICT, "job transition was not saved");
                     }
                     a.sw.notify_one();
@@ -2848,26 +2850,39 @@ mod t {
             "insert into jobs(id,st,d) values(1,'approve','{\"h\":\"local\"}'),(2,'park','{}'),(3,'fix','{}');
              create trigger fail_owner before update on jobs begin select raise(abort,'injected'); end;",
         ).unwrap();
-        assert!(owner_job_transition(&db, 1, true, &json!({"pt":"title"})).is_err());
+        assert!(owner_job_transition(&db, 1, true, false, &json!({"pt":"title"})).is_err());
         assert_eq!(db.jg(1).unwrap().st, "approve");
-        assert!(owner_job_transition(&db, 2, false, &json!({})).is_err());
+        assert!(owner_job_transition(&db, 2, false, false, &json!({})).is_err());
         assert_eq!(db.jg(2).unwrap().st, "park");
         db.0.lock()
             .unwrap()
             .execute_batch("drop trigger fail_owner")
             .unwrap();
-        owner_job_transition(&db, 1, true, &json!({"pt":"title"})).unwrap();
+        owner_job_transition(&db, 1, true, false, &json!({"pt":"title"})).unwrap();
         let j = db.jg(1).unwrap();
         assert_eq!(j.st, "submit");
         assert_eq!(j.d["h"], "local");
         assert_eq!(j.d["pt"], "title");
         assert_eq!(j.d["ap"], true);
-        assert!(owner_job_transition(&db, 1, true, &json!({})).is_err());
-        owner_job_transition(&db, 2, false, &json!({})).unwrap();
+        assert!(owner_job_transition(&db, 1, true, false, &json!({})).is_err());
+        owner_job_transition(&db, 2, false, false, &json!({})).unwrap();
         assert_eq!(db.jg(2).unwrap().st, "drop");
-        owner_job_transition(&db, 3, false, &json!({})).unwrap();
+        owner_job_transition(&db, 3, false, false, &json!({})).unwrap();
         assert_eq!(db.kg("kill:3"), json!(true));
-        assert!(owner_job_transition(&db, 999, false, &json!({})).is_err());
+        assert!(owner_job_transition(&db, 999, false, false, &json!({})).is_err());
+        db.run(
+            "insert into jobs(id,st) values(4,'ready'),(5,'approve'),(6,'approve')",
+            pa![],
+        );
+        owner_job_transition(&db, 4, false, true, &json!({})).unwrap();
+        assert_eq!(db.jg(4).unwrap().st, "ready");
+        assert_eq!(db.kg("kill:4"), true);
+        // A worker may still be cleaning the checkout after publishing approval.
+        owner_job_transition(&db, 5, true, true, &json!({"pt":"owner title"})).unwrap();
+        assert_eq!(db.jg(5).unwrap().st, "submit");
+        assert_eq!(db.jg(5).unwrap().d["pt"], "owner title");
+        owner_job_transition(&db, 6, false, true, &json!({})).unwrap();
+        assert_eq!(db.jg(6).unwrap().st, "drop");
     }
 
     #[tokio::test]
