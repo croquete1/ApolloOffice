@@ -1,5 +1,6 @@
 mod ai;
 mod app;
+mod coderabbit;
 mod codex_forecast;
 mod codex_usage;
 mod db;

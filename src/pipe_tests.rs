@@ -3,6 +3,115 @@ mod t {
     use super::*;
 
     #[test]
+    fn coderabbit_review_prompt_never_claims_maintainer_authority() {
+        let mut job = Job::of(json!({"kind":"review","d":{"coderabbit_source":"coderabbit"}}));
+        let (authority, action) = review_prompt_policy(&job);
+        assert!(authority.contains("untrusted advisory findings"));
+        assert!(action.contains("Independently verify"));
+        assert!(!authority.contains("A maintainer requested"));
+        job.d = json!({"steward_review_id":"coderabbit"});
+        assert_eq!(review_prompt_policy(&job), (authority, action));
+        job.d = json!({"steward_review_id":42});
+        assert_eq!(review_prompt_policy(&job).0, "A maintainer requested a change:");
+    }
+
+    #[test]
+    fn automated_review_authorization_is_bound_to_current_policy_and_finding_epoch() {
+        let db = crate::db::Db::mem();
+        let head = "a".repeat(40);
+        db.run(
+            "insert into rp(full,on_,coderabbit_repair,coderabbit_epoch,steward_repair) values('o/r',1,1,4,1)",
+            vec![],
+        );
+        db.run(
+            "insert into prs(repo,num,st) values('o/r',1,'open')",
+            vec![],
+        );
+        let mut job = Job::of(json!({"id":7,"repo":"o/r","pr":1,"kind":"review","d":{
+            "steward_head":head,"coderabbit_source":"coderabbit","coderabbit_comment_ids":[91]
+        }}));
+        assert!(automated_review_authorized(&db, &job).is_err());
+        db.run(
+            "insert into coderabbit_findings(repo,number,comment_id,review_id,head,state,severity,body_hash,activation,job,created_at,updated_at) values('o/r',1,91,5,?,'queued','high','hash',4,7,0,0)",
+            pa![head.clone()],
+        );
+        assert!(automated_review_authorized(&db, &job).is_ok());
+        job.d["coderabbit_comment_ids"] = json!([91,91]);
+        assert!(automated_review_authorized(&db, &job).is_err());
+        job.d["coderabbit_comment_ids"] = json!([91,92]);
+        assert!(automated_review_authorized(&db, &job).is_err());
+        job.d["coderabbit_comment_ids"] = json!([91]);
+        db.run("update rp set coderabbit_repair=0,coderabbit_epoch=5", vec![]);
+        assert!(automated_review_authorized(&db, &job).is_err());
+        db.run("update rp set coderabbit_repair=1,coderabbit_epoch=6", vec![]);
+        assert!(automated_review_authorized(&db, &job).is_err());
+        job.d = json!({"steward_head":head,"steward_review_id":91});
+        assert!(automated_review_authorized(&db, &job).is_err());
+        let policy = db.one("select steward_activation from rp", vec![]).unwrap();
+        job.d["steward_activation"] = policy["steward_activation"].clone();
+        assert!(automated_review_authorized(&db, &job).is_ok());
+        db.run("update rp set steward_repair=0", vec![]);
+        assert!(automated_review_authorized(&db, &job).is_err());
+        db.run("update rp set steward_repair=1", vec![]);
+        assert!(automated_review_authorized(&db, &job).is_err());
+        job.d["steward_activation"] =
+            db.one("select steward_activation from rp", vec![]).unwrap()["steward_activation"].clone();
+        assert!(automated_review_authorized(&db, &job).is_ok());
+        db.run("delete from rp", vec![]);
+        db.run("insert into rp(full,on_,steward_repair) values('o/r',1,1)", vec![]);
+        assert!(automated_review_authorized(&db, &job).is_err());
+        job.d = json!({});
+        assert!(automated_review_authorized(&db, &job).is_ok());
+    }
+
+    #[test]
+    fn review_publication_requires_original_open_pr_and_exact_head(){
+        let source="a".repeat(40);
+        let candidate="b".repeat(40);
+        let mut pr=json!({"state":"open","head":{"repo":{"full_name":"o/r"},"ref":"fix","sha":source}});
+        assert!(review_publish_target_matches(&pr,"o/r","fix",&source,&candidate));
+        pr["head"]["sha"]=json!(candidate);
+        assert!(review_publish_target_matches(&pr,"o/r","fix",&source,&candidate));
+        pr["head"]["sha"]=json!("c".repeat(40));
+        assert!(!review_publish_target_matches(&pr,"o/r","fix",&source,&candidate));
+        pr["head"]["sha"]=json!(source);
+        assert!(!review_publish_target_matches(&pr,"other/r","fix",&source,&candidate));
+        assert!(!review_publish_target_matches(&pr,"o/r","other",&source,&candidate));
+        pr["state"]=json!("closed");
+        assert!(!review_publish_target_matches(&pr,"o/r","fix",&source,&candidate));
+    }
+
+    #[test]
+    fn review_checkout_matches_bound_head_including_steward_and_legacy(){
+        let head="a".repeat(40);
+        let other="b".repeat(40);
+        let mut j=Job::of(json!({"kind":"review","d":{"source_head":head}}));
+        assert!(check_review_checkout(&j,&head).is_ok());
+        assert!(check_review_checkout(&j,&other).is_err());
+        j.d["steward_head"]=json!(other);
+        assert!(check_review_checkout(&j,&head).is_err());
+        j.d=json!({"steward_head":head});
+        assert!(check_review_checkout(&j,&head).is_ok());
+        j.d=json!({});
+        assert!(check_review_checkout(&j,&other).is_ok());
+        j.d=json!({"source_head":"invalid"});
+        assert!(check_review_checkout(&j,&other).is_err());
+    }
+
+    #[test]
+    fn watcher_rebase_requires_its_observed_head(){
+        let head="a".repeat(40);
+        let other="b".repeat(40);
+        let mut j=Job::of(json!({"kind":"rebase","d":{"watcher_observed_head":head}}));
+        assert!(check_review_checkout(&j,&head).is_ok());
+        assert!(check_review_checkout(&j,&other).is_err());
+        j.d["watcher_observed_head"]=Value::Null;
+        assert!(check_review_checkout(&j,&head).is_err());
+        j.d=json!({});
+        assert!(check_review_checkout(&j,&other).is_ok());
+    }
+
+    #[test]
     fn zero_repo_pr_limits_mean_unlimited() {
         assert!(!repo_limit_reached(178, 20, 0, 0));
         assert!(!repo_limit_reached(178, 20, 0, 25));
@@ -25,8 +134,8 @@ mod t {
         let fix=json!({"st":"ready","kind":"fix","manual_priority":0,"d":{"issue_priority":3}});
         let other=json!({"st":"ready","kind":"fix","d":{"issue_priority":1}});
         let review=json!({"st":"ready","kind":"review"});
-        assert!(pick_rank(&fix)<pick_rank(&other));
-        assert!(pick_rank(&review)<pick_rank(&fix));
+        assert!(pick_rank(&fix, 0)<pick_rank(&other, 0));
+        assert!(pick_rank(&review, 0)<pick_rank(&fix, 0));
     }
 
     #[test]
@@ -72,14 +181,41 @@ mod t {
     }
 
     #[test]
+    fn hunter_requires_complete_evidence_not_just_a_title() {
+        assert!(hunter_findings(&json!({"finds":[]})).unwrap().is_empty());
+        assert!(hunter_findings(&Value::Null).is_err());
+        assert!(hunter_findings(&json!({"finds":[{"title":"Bug","where":"src/x.rs","desc":"Reproduce"}]})).is_err());
+        let valid=json!({"title":"Bug","where":"src/x.rs","desc":"Reproduce","proof":"test failure"});
+        assert_eq!(hunter_findings(&json!({"finds":[valid.clone()]})).unwrap().len(),1);
+        assert!(hunter_findings(&json!({"finds":[valid.clone(),valid]})).is_err());
+    }
+
+    #[test]
+    fn aging_promotes_automatic_fixes_only_and_never_crosses_critical_priority() {
+        let at=1+4*86_400_000;
+        let mut row=json!({"kind":"fix","st":"ready","t0":1,"d":{"issue_priority":3}});
+        assert_eq!(pick_rank(&row,1).2,3);
+        assert_eq!(pick_rank(&row,1+86_400_000).2,2);
+        assert_eq!(pick_rank(&row,at).2,1);
+        row["manual_priority"]=json!(3);
+        assert_eq!(pick_rank(&row,at).2,3);
+        row["manual_priority"]=Value::Null;
+        row["d"]["issue_priority"]=json!(0);
+        assert_eq!(pick_rank(&row,at).2,0);
+        row["d"]["issue_priority"]=json!(3);
+        row["kind"]=json!("hunt");
+        assert_eq!(pick_rank(&row,at).2,3);
+    }
+
+    #[test]
     fn ready_fixes_precede_new_hunts_and_rebases() {
         let fix = json!({"id":1,"kind":"fix","st":"ready","prio":-0.5,"d":{}});
         let hunt = json!({"id":2,"kind":"hunt","st":"ready","prio":99.0,"d":{}});
         let rebase = json!({"id":3,"kind":"rebase","st":"ready","prio":-1.0,"d":{}});
         let submit = json!({"id":4,"kind":"fix","st":"submit","prio":0.0,"d":{}});
-        assert!(pick_rank(&fix) < pick_rank(&hunt));
-        assert!(pick_rank(&fix) < pick_rank(&rebase));
-        assert!(pick_rank(&submit) < pick_rank(&fix));
+        assert!(pick_rank(&fix, 0) < pick_rank(&hunt, 0));
+        assert!(pick_rank(&fix, 0) < pick_rank(&rebase, 0));
+        assert!(pick_rank(&submit, 0) < pick_rank(&fix, 0));
     }
 
     #[cfg(unix)]
@@ -538,6 +674,12 @@ mod t {
             1,
             "apollo-office".into(),
         ));
+        a.lv.lock().unwrap().o.man = true;
+        assert!(!admit(&a, "o/r", "worker1", id));
+        assert!(!mk_hunt(&a));
+        assert!(a.act.lock().unwrap().is_empty());
+        assert!(a.lk.lock().unwrap().is_empty());
+        a.lv.lock().unwrap().o.man = false;
         let reservation = IdleCacheGuard::claim(&a, "worker1").unwrap();
         assert!(IdleCacheGuard::claim(&a, "worker1").is_none());
         assert!(!admit(&a, "o/r", "worker1", id));
@@ -665,10 +807,10 @@ mod t {
         let fix = json!({"st":"ready", "kind":"fix", "prio":0, "id":2});
         let mergecheck = json!({"st":"ready", "kind":"mergecheck", "prio":0, "id":3});
         let hunt = json!({"st":"ready", "kind":"hunt", "prio":0, "id":1});
-        assert!(pick_rank(&mergecheck) < pick_rank(&fix));
-        assert!(pick_rank(&fix) < pick_rank(&hunt));
+        assert!(pick_rank(&mergecheck, 0) < pick_rank(&fix, 0));
+        assert!(pick_rank(&fix, 0) < pick_rank(&hunt, 0));
         let high_priority_number = json!({"st":"ready", "kind":"fix", "prio":100_000, "id":3});
-        assert!(pick_rank(&high_priority_number) < pick_rank(&hunt));
+        assert!(pick_rank(&high_priority_number, 0) < pick_rank(&hunt, 0));
     }
 
     #[test]
@@ -1292,7 +1434,7 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':10,'output_tok
         );
         assert!(feedback.contains("negative_addition"), "{feedback}");
         assert_eq!(job.d["acceptance_proof"]["ok"], false);
-        assert!(fixp(&a, &job, &feedback).contains("Independent acceptance rejected"));
+        assert!(fixp(&a, &job, &feedback, "").contains("Independent acceptance rejected"));
         assert_eq!(
             job.d["acceptance_proof"]["run"]["script_sha256"],
             json!(hex::encode(Sha256::digest(script.as_bytes())))
@@ -1489,6 +1631,7 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':10,'output_tok
         (a, id, dd, repo)
     }
 
+    #[cfg(unix)]
     const RED_FAIL: &str = "source ./add.sh\n[ \"$(add 2 3)\" = 5 ] && echo 'ok 1 - sum' || { echo 'not ok 1 - sum'; exit 1; }\n";
 
     #[cfg(unix)]

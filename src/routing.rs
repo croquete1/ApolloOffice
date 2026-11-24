@@ -249,6 +249,58 @@ pub fn adaptive_fixer(
     ))
 }
 
+const SUPPORT_ROLES: &[&str] = &["scout", "guard", "vet", "watcher", "hunter"];
+
+fn support_subscription(model: &str) -> bool {
+    model.starts_with("codex:")
+        || model.starts_with("cc:")
+        || model.starts_with("claude-")
+        || matches!(model, "sonnet" | "opus" | "haiku")
+}
+
+/// Separately opted-in preflight fallback for support agents. Do not replay
+/// an already started call or change a pipeline author/reviewer decision.
+pub fn adaptive_support(a: &Ax, role: &str, preferred: &str) -> R<Option<Value>> {
+    let settings = a.set();
+    if enabled(a)
+        || settings["adaptive_support_routing"] != true
+        || !SUPPORT_ROLES.contains(&role)
+        || !support_subscription(preferred)
+    {
+        return Ok(None);
+    }
+    let available = |model: &str| {
+        support_subscription(model)
+            && subscription_available(a, model)
+            && (role != "hunter" || !a.codex_low_priority_blocked(model))
+    };
+    if available(preferred) {
+        return Ok(None);
+    }
+    let raw = a.db.kg("set");
+    let mut roles = SUPPORT_ROLES.to_vec();
+    roles.push("fixer");
+    if settings["big"] == true {
+        roles.push("big");
+    }
+    let preferred_provider = crate::prov::parse(preferred).0;
+    for configured_role in roles {
+        let Some(model) = raw["md"][configured_role].as_str() else {
+            continue;
+        };
+        if crate::prov::parse(model).0 != preferred_provider && available(model) {
+            return Ok(Some(json!({
+                "role":role,"preferred":preferred,"model":model,
+                "reason":"configured_provider_unavailable_or_reserved",
+                "at":crate::db::now()
+            })));
+        }
+    }
+    Err(X::Lim(format!(
+        "{role}: no eligible explicitly configured alternative subscription provider"
+    )))
+}
+
 // Independent records avoid overwriting a pipeline Job snapshot during async work.
 pub fn event(a: &Ax, job: Option<i64>, role: &str, attempt: usize, md: &str, feedback: &str) {
     if !enabled(a) {
@@ -624,6 +676,42 @@ mod adaptive_tests {
         assert!(!independent_model("cc:sonnet", "claude-sonnet-5-5"));
         assert!(!independent_model("codex:", "codex:gpt-6"));
         assert!(independent_model("codex:", "cc:sonnet"));
+    }
+
+    #[test]
+    fn support_fallback_is_explicit_and_preserves_review_and_quota_policy() {
+        let a = std::sync::Arc::new(App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            1,
+            "apollo-office".into(),
+        ));
+        a.db.ks("set", &json!({"md":{"guard":"cc:haiku","fixer":"codex:"}}));
+        a.db.provider_failure("cc", "network", crate::db::now())
+            .unwrap();
+        assert!(adaptive_support(&a, "guard", "cc:haiku").unwrap().is_none());
+        a.db.ks("set",&json!({"adaptive_support_routing":true,"md":{"guard":"cc:haiku","fixer":"codex:","big":"ollama:qwen3:8b"}}));
+        assert_eq!(
+            adaptive_support(&a, "guard", "cc:haiku").unwrap().unwrap()["model"],
+            "codex:"
+        );
+        for role in ["reviewer", "fixer", "repro"] {
+            assert!(adaptive_support(&a, role, "cc:haiku").unwrap().is_none());
+        }
+        let t = crate::db::now();
+        *a.codex_usage.lock().unwrap() = json!({"status":"ok","updated_at":t,"five_hour":{"remaining":10,"resets_at":t/1000+3600}});
+        assert!(matches!(
+            adaptive_support(&a, "hunter", "cc:sonnet"),
+            Err(X::Lim(_))
+        ));
+        assert!(adaptive_support(&a, "watcher", "cc:haiku")
+            .unwrap()
+            .is_some());
+        a.db.ks("set",&json!({"adaptive_support_routing":true,"md":{"guard":"cc:haiku","fixer":"openai:gpt-6","big":"ollama:qwen3:8b","reviewer":"codex:"}}));
+        assert!(matches!(
+            adaptive_support(&a, "guard", "cc:haiku"),
+            Err(X::Lim(_))
+        ));
     }
 
     #[test]

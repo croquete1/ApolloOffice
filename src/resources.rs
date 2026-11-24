@@ -16,7 +16,7 @@ fn profile(a: &App) -> String {
 fn capacity(profile: &str, configured: i64, telemetry: &Value, at: i64) -> (i64, &'static str) {
     let configured = configured.max(0);
     let nominal = match profile {
-        "economic" => (configured + 1) / 2,
+        "economic" => configured / 2 + configured % 2,
         "night" => configured.min(1),
         _ => configured,
     };
@@ -57,6 +57,15 @@ fn capacity(profile: &str, configured: i64, telemetry: &Value, at: i64) -> (i64,
     if memory.is_none() || cpu.is_none() || load.is_none() {
         return (nominal.min(1), "telemetry_incomplete");
     }
+    // Balanced leaves headroom for interactive work before hard pressure.
+    // Performance may use the configured ceiling until the shared hard limits.
+    if profile == "balanced"
+        && (cpu.zip(load).is_some_and(|(c, l)| l >= c * 0.8)
+            || memory.is_some_and(|(t, f)| f < t * 0.25)
+            || temp.is_some_and(|v| v >= 78.0))
+    {
+        return (nominal / 2 + nominal % 2, "balanced_headroom");
+    }
     (nominal, "profile")
 }
 
@@ -72,6 +81,18 @@ pub fn host_capacity(a: &App, host: &str, configured: i64) -> (i64, &'static str
     capacity(&p, configured, &telemetry, crate::db::now())
 }
 
+/// Restartable CI may defer under critical pressure. Existing non-restartable
+/// work must retain one slot to finish safely without deadlocking its lane.
+pub fn ci_capacity(a: &App, host: &str, configured: i64, restartable: bool) -> i64 {
+    let configured = configured.clamp(1, 8);
+    let (cap, _) = host_capacity(a, host, configured);
+    if restartable {
+        cap
+    } else {
+        cap.max(1)
+    }
+}
+
 pub fn hunter_cap(a: &App, configured: i64) -> i64 {
     match profile(a).as_str() {
         "night" => 0,
@@ -84,6 +105,7 @@ pub fn hunter_cap(a: &App, configured: i64) -> i64 {
 pub fn status(a: &App) -> Value {
     let p = profile(a);
     let active = a.act.lock().unwrap().clone();
+    let ci_active = a.sem.lock().unwrap().clone();
     let hosts = crate::sh::hosts(a)
         .into_iter()
         .map(|h| {
@@ -92,8 +114,24 @@ pub fn status(a: &App) -> Value {
                 .iter()
                 .filter(|s| s.split_once(' ').is_some_and(|(_, host)| host == h.id))
                 .count();
+            let telemetry =
+                a.lv.lock()
+                    .unwrap()
+                    .hst
+                    .get(&h.id)
+                    .cloned()
+                    .unwrap_or(Value::Null);
+            let at = crate::db::now();
+            let fresh = telemetry["t"]
+                .as_i64()
+                .is_some_and(|t| t > 0 && t <= at && at.saturating_sub(t) <= 180_000);
             json!({"id":h.id,"enabled":h.on,"configured_lanes":h.ln,
-            "effective_lanes":if h.on {cap} else {0},"active":running,"reason":reason})
+            "effective_lanes":if h.on {cap} else {0},"active":running,"reason":reason,
+            "configured_ci":h.ci,"effective_ci":if h.on {ci_capacity(a,&h.id,h.ci,true)} else {0},
+            "completion_ci_floor":if h.on {ci_capacity(a,&h.id,h.ci,false)} else {0},
+            "active_ci":ci_active.get(&h.id).copied().unwrap_or(0),
+            "gpu":if fresh {telemetry["gpu"].clone()} else {Value::Null},
+            "telemetry_fresh":fresh})
         })
         .collect::<Vec<_>>();
     json!({"profile":p,"hosts":hosts,"hunter_cap":hunter_cap(a,a.set()["hunters"].as_i64().unwrap_or(2).clamp(0,12))})
@@ -165,6 +203,25 @@ mod tests {
     }
 
     #[test]
+    fn ci_slots_follow_profile_without_blocking_nonrestartable_completion() {
+        let db = crate::db::Db::mem();
+        db.run("insert into hs(id,ln,ci,on_) values('local',4,4,1)", vec![]);
+        let a = App::new(db, std::env::temp_dir(), 1, "apollo-office".into());
+        a.db.ks("set", &json!({"resource_profile":"night"}));
+        assert_eq!(ci_capacity(&a, "local", 4, true), 1);
+        a.db.ks("set", &json!({"resource_profile":"performance"}));
+        assert_eq!(ci_capacity(&a, "local", 4, true), 1);
+        a.lv.lock().unwrap().hst.insert("local".into(),json!({"t":crate::db::now(),"cpu":8,"load":1,"mem":[16000,8000],"temp":96,"gpu":[{"index":0}]}));
+        assert_eq!(ci_capacity(&a, "local", 4, true), 0);
+        assert_eq!(ci_capacity(&a, "local", 4, false), 1);
+        assert_eq!(status(&a)["hosts"][0]["effective_ci"], 0);
+        a.db.ks("set", &json!({"resource_profile":"manual"}));
+        assert_eq!(ci_capacity(&a, "local", 4, true), 4);
+        a.lv.lock().unwrap().hst.get_mut("local").unwrap()["t"] = json!(1);
+        assert!(status(&a)["hosts"][0]["gpu"].is_null());
+    }
+
+    #[test]
     fn profiles_respect_limits_and_unknown_telemetry() {
         let at = 1_000_000;
         let mut hw = json!({"t":at,"cpu":8,"load":2.0,"mem":[16000,8000],"temp":60});
@@ -182,5 +239,24 @@ mod tests {
         hw["temp"] = json!(96);
         assert_eq!(capacity("performance", 5, &hw, at).0, 0);
         assert_eq!(capacity("manual", 5, &hw, at).0, 5);
+    }
+
+    #[test]
+    fn balanced_preserves_headroom_without_relaxing_hard_limits() {
+        let at = 1_000_000;
+        let mut hw = json!({"t":at,"cpu":8,"load":7,"mem":[16000,8000],"temp":60});
+        assert_eq!(capacity("balanced", 5, &hw, at), (3, "balanced_headroom"));
+        assert_eq!(capacity("performance", 5, &hw, at).0, 5);
+        hw["load"] = json!(2);
+        hw["mem"][1] = json!(3500);
+        assert_eq!(capacity("balanced", 5, &hw, at).0, 3);
+        hw["mem"][1] = json!(8000);
+        hw["temp"] = json!(79);
+        assert_eq!(capacity("balanced", 5, &hw, at).0, 3);
+        assert_eq!(capacity("performance", 5, &hw, at).0, 5);
+        hw["temp"] = json!(96);
+        assert_eq!(capacity("balanced", 5, &hw, at).0, 0);
+        assert_eq!(capacity("performance", 5, &hw, at).0, 0);
+        assert_eq!(capacity("economic", i64::MAX, &hw, at).0, 0);
     }
 }

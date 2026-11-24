@@ -297,6 +297,13 @@ async fn full_run(pv: bool) {
     assert_eq!(ps.as_array().unwrap().len(), 1);
     assert_eq!(ps[0]["base"], "main");
     assert_eq!(ps[0]["title"], "Make add sum its arguments");
+    let submitted_body = ps[0]["body"].as_str().unwrap();
+    assert!(submitted_body.starts_with("Fixes #1"), "{submitted_body}");
+    assert!(submitted_body.contains("\n\n"), "{submitted_body}");
+    assert!(
+        submitted_body.contains("`bash t/run.sh` passes."),
+        "{submitted_body}"
+    );
     let br = ps[0]["head"].as_str().unwrap().to_string();
     assert!(br.starts_with("fix/1-"), "{br}");
     let o = Command::new("git")

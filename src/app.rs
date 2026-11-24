@@ -80,6 +80,7 @@ pub struct App {
     pub runs: Mutex<HashMap<String, Rn>>,
     pub cache: Mutex<HashMap<String, (i64, Value)>>,
     pub codex_usage: Mutex<Value>,
+    codex_background: tokio::sync::Semaphore,
     pub vtk: Mutex<HashSet<i64>>,
     pub sw: tokio::sync::Notify,
     pub steward_wake: tokio::sync::Notify,
@@ -190,6 +191,7 @@ pub fn dset() -> Value {
         "codex_hunt_reserve_percent": 15,
         "resource_profile": "manual",
         "adaptive_routing": false,
+        "adaptive_support_routing": false,
         "supervised_lessons": false,
         "ntfy": "",
         "discord": "",
@@ -235,6 +237,7 @@ impl App {
             runs: Mutex::new(HashMap::new()),
             cache: Mutex::new(HashMap::new()),
             codex_usage: Mutex::new(json!({"status":"loading"})),
+            codex_background: tokio::sync::Semaphore::new(1),
             vtk: Mutex::new(HashSet::new()),
             sw: tokio::sync::Notify::new(),
             steward_wake: tokio::sync::Notify::new(),
@@ -470,31 +473,87 @@ impl App {
     }
 
     pub fn provider_limit(&self, model: &str) -> Option<String> {
-        if crate::prov::parse(model).0 != "cc" {
-            return None;
+        let provider = crate::prov::parse(model).0;
+        let at = now();
+        if provider == "cc" {
+            let l = self.lv.lock().unwrap();
+            if l.o.rl != "allowed" && l.o.rl != "allowed_warning" && l.o.rst > at {
+                return Some(
+                    "Claude usage limit is active; try another configured provider".into(),
+                );
+            }
         }
-        let l = self.lv.lock().unwrap();
-        if l.o.rl != "allowed" && l.o.rl != "allowed_warning" && l.o.rst > now() {
-            Some("Claude usage limit is active; try another configured provider".into())
-        } else {
-            None
+        if provider == "codex" {
+            let usage = self.codex_usage.lock().unwrap_or_else(|e| e.into_inner());
+            if crate::codex_usage::hunt_reserve_reached(&usage, at, 0.0) {
+                return Some("Codex quota exhausted in a current observed window".into());
+            }
+        }
+        match self.db.provider_cooldown(provider, at) {
+            Ok(Some(v)) => Some(format!(
+                "{provider} cooldown ({}) until {}",
+                v["kind"].as_str().unwrap_or("unavailable"),
+                chrono::DateTime::from_timestamp_millis(v["until"].as_i64().unwrap_or(at))
+                    .map(|d| d
+                        .with_timezone(&chrono::Local)
+                        .format("%H:%M:%S")
+                        .to_string())
+                    .unwrap_or_default()
+            )),
+            Ok(None) => None,
+            Err(_) => Some(format!("{provider} cooldown ledger unavailable")),
         }
     }
 
-    /// Preserve subscription capacity for fixes and independent reviews.
-    /// Unknown/stale telemetry does not claim a quota limit.
-    pub fn hunter_quota_blocked(&self) -> bool {
-        let settings = self.set();
-        // Free-first hunters have a separate explicitly authorized plan.
-        if crate::routing::enabled(self) || crate::prov::parse(&self.md("hunter")).0 != "codex" {
+    /// Reserve observed capacity for high-priority fixes and independent reviews.
+    /// No prediction or stale measurement is treated as actual remaining quota.
+    pub fn codex_low_priority_blocked(&self, model: &str) -> bool {
+        if crate::prov::parse(model).0 != "codex" {
             return false;
         }
-        let reserve = settings["codex_hunt_reserve_percent"]
+        let reserve = self.set()["codex_hunt_reserve_percent"]
             .as_f64()
             .unwrap_or(15.0)
             .clamp(0.0, 100.0);
         let usage = self.codex_usage.lock().unwrap_or_else(|e| e.into_inner());
         crate::codex_usage::hunt_reserve_reached(&usage, now(), reserve)
+    }
+
+    /// Bound concurrent low-priority calls without pretending to predict tokens.
+    /// Foreground fixes and independent reviews never acquire this permit.
+    pub fn reserve_codex_background(
+        &self,
+        model: &str,
+        low_priority: bool,
+    ) -> R<Option<tokio::sync::SemaphorePermit<'_>>> {
+        if !low_priority || crate::prov::parse(model).0 != "codex" {
+            return Ok(None);
+        }
+        let permit = self.codex_background.try_acquire().map_err(|_| {
+            X::Lim("Codex background slot occupied; capacity reserved for priority work".into())
+        })?;
+        if self.codex_low_priority_blocked(model) {
+            return Err(X::Lim(
+                "Codex quota reserved for fixes and independent reviews".into(),
+            ));
+        }
+        Ok(Some(permit))
+    }
+
+    pub fn hunter_quota_blocked(self: &Arc<Self>) -> bool {
+        if crate::routing::enabled(self) {
+            return false;
+        }
+        let preferred = self.md("hunter");
+        if !self.codex_low_priority_blocked(&preferred) {
+            return false;
+        }
+        // Admission must agree with the opted-in call-level route selection.
+        // The actual call still rechecks quota and provider availability.
+        !matches!(
+            crate::routing::adaptive_support(self, "hunter", &preferred),
+            Ok(Some(_))
+        )
     }
 
     pub fn net(&self, k: &str) -> bool {
@@ -590,5 +649,74 @@ mod provider_limit_tests {
         assert_eq!(a.md("fixer"), "codex:");
         a.lv.lock().unwrap().o.man = true;
         assert!(a.hold("fixer"));
+    }
+}
+
+#[cfg(test)]
+mod quota_reservation_tests {
+    use super::*;
+    #[test]
+    fn codex_background_slot_preserves_foreground_and_other_providers() {
+        let a = App::new(Db::mem(), std::env::temp_dir(), 1, "x".into());
+        let t = now();
+        *a.codex_usage.lock().unwrap() = json!({"status":"ok","updated_at":t,"five_hour":{"remaining":80,"resets_at":t/1000+3600}});
+        let permit = a.reserve_codex_background("codex:", true).unwrap();
+        assert!(permit.is_some());
+        assert!(a.reserve_codex_background("codex:", true).is_err());
+        assert!(a
+            .reserve_codex_background("codex:", false)
+            .unwrap()
+            .is_none());
+        assert!(a
+            .reserve_codex_background("cc:sonnet", true)
+            .unwrap()
+            .is_none());
+        std::mem::drop(permit);
+        a.codex_usage.lock().unwrap()["five_hour"]["remaining"] = json!(10);
+        assert!(a.reserve_codex_background("codex:", true).is_err());
+        a.codex_usage.lock().unwrap()["five_hour"]["remaining"] = json!(80);
+        assert!(a
+            .reserve_codex_background("codex:", true)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn hunter_admission_respects_explicit_support_fallback() {
+        let a = Arc::new(App::new(Db::mem(), std::env::temp_dir(), 1, "x".into()));
+        let t = now();
+        *a.codex_usage.lock().unwrap() = json!({"status":"ok","updated_at":t,"five_hour":{"remaining":10,"resets_at":t/1000+3600}});
+        a.db.ks(
+            "set",
+            &json!({"md":{"hunter":"codex:","fixer":"cc:sonnet"}}),
+        );
+        assert!(a.hunter_quota_blocked());
+        a.db.ks(
+            "set",
+            &json!({"adaptive_support_routing":true,"md":{"hunter":"codex:","fixer":"cc:sonnet"}}),
+        );
+        assert!(!a.hunter_quota_blocked());
+        a.db.provider_failure("cc", "network", t).unwrap();
+        assert!(a.hunter_quota_blocked());
+        a.db.ks("set",&json!({"adaptive_support_routing":true,"md":{"hunter":"codex:","fixer":"ollama:local","reviewer":"cc:sonnet"}}));
+        assert!(a.hunter_quota_blocked());
+    }
+
+    #[test]
+    fn codex_reserve_and_exhaustion_distinguish_priority_and_staleness() {
+        let a = App::new(Db::mem(), std::env::temp_dir(), 1, "x".into());
+        let t = now();
+        *a.codex_usage.lock().unwrap() = json!({"status":"ok","updated_at":t,"five_hour":{"remaining":10,"resets_at":t/1000+3600}});
+        assert!(a.codex_low_priority_blocked("codex:"));
+        assert!(!a.codex_low_priority_blocked("cc:sonnet"));
+        assert!(a.provider_limit("codex:").is_none());
+        a.codex_usage.lock().unwrap()["five_hour"]["remaining"] = json!(0);
+        assert!(a.provider_limit("codex:").is_some());
+        a.codex_usage.lock().unwrap()["status"] = json!("stale");
+        assert!(a.provider_limit("codex:").is_none());
+        assert!(!a.codex_low_priority_blocked("codex:"));
+        a.db.provider_failure("cc", "network", t).unwrap();
+        assert!(a.provider_limit("cc:sonnet").is_some());
+        assert!(a.provider_limit("codex:").is_none());
     }
 }

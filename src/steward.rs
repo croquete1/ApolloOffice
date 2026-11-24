@@ -392,6 +392,14 @@ pub async fn scan(a: &Ax, repo: &str) -> Result<(), String> {
         "select steward_repair from rp where full=? and on_=1",
         pa![repo.to_string()],
     ) == 1;
+    let coderabbit_request_enabled = a.db.n(
+        "select coderabbit_review from rp where full=? and on_=1",
+        pa![repo.to_string()],
+    ) == 1;
+    let coderabbit_repair_enabled = a.db.n(
+        "select coderabbit_repair from rp where full=? and on_=1",
+        pa![repo.to_string()],
+    ) == 1;
     let local_merge_enabled = a.db.n(
         "select local_merge from rp where full=? and on_=1 and auto_merge=1",
         pa![repo.to_string()],
@@ -417,13 +425,21 @@ pub async fn scan(a: &Ax, repo: &str) -> Result<(), String> {
             "read_only": !merge_enabled,
             "merge_enabled": merge_enabled,
             "local_merge_enabled": local_merge_enabled,
-            "repair_enabled": repair_enabled
+            "repair_enabled": repair_enabled,
+            "coderabbit_request_enabled": coderabbit_request_enabled,
+            "coderabbit_repair_enabled": coderabbit_repair_enabled
         }),
     );
     // A fresh complete scan supersedes any previously cached transient error.
     a.db.kd(&format!("steward:error:{repo}"));
     if repair_enabled {
         crate::steward_repair::run(a, repo, list, &report).await;
+    }
+    if coderabbit_request_enabled {
+        crate::coderabbit::request_reviews(a, repo, list).await;
+    }
+    if coderabbit_repair_enabled {
+        crate::coderabbit::route_findings(a, repo, list, &report).await;
     }
     if merge_enabled {
         crate::steward_merge::run(a, repo, list, &report).await;

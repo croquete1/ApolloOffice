@@ -55,12 +55,53 @@ pub async fn meta(a: &App, r: &str) -> Result<Value, String> {
 }
 
 /// Fetch the complete open issue listing, excluding pull requests returned by REST.
+/// A second inventory detects changes that could otherwise remove a live issue.
 pub async fn open_issues(repo: &str) -> Result<Vec<Value>, String> {
+    let endpoint =
+        format!("repos/{repo}/issues?state=open&sort=created&direction=asc&per_page=100");
+    reconcile_open_issues(apip(&endpoint).await?, apip(&endpoint).await?)
+}
+
+fn reconcile_open_issues(before: Vec<Value>, after: Vec<Value>) -> Result<Vec<Value>, String> {
+    let mut before = normalize_open_issues(before)?;
+    let mut after = normalize_open_issues(after)?;
+    before.sort_by_key(|row| row["number"].as_i64().unwrap_or(0));
+    after.sort_by_key(|row| row["number"].as_i64().unwrap_or(0));
+    if before != after {
+        return Err("Open issue inventory changed during scan; retry before reconciliation".into());
+    }
+    Ok(after)
+}
+
+/// Complete lightweight inventory for Hunter. Do not use capped CLI lists.
+pub async fn open_pr_summaries(repo: &str) -> Result<Vec<Value>, String> {
     let rows = apip(&format!(
-        "repos/{repo}/issues?state=open&sort=created&direction=asc&per_page=100"
+        "repos/{repo}/pulls?state=open&sort=created&direction=asc&per_page=100"
     ))
     .await?;
-    normalize_open_issues(rows)
+    normalize_open_pr_summaries(rows)
+}
+
+fn normalize_open_pr_summaries(rows: Vec<Value>) -> Result<Vec<Value>, String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut summaries = Vec::new();
+    for row in rows {
+        let number = row["number"]
+            .as_i64()
+            .filter(|n| *n > 0)
+            .ok_or("PR inventory contains an invalid number")?;
+        if !seen.insert(number)
+            || row["state"] != "open"
+            || !row["title"].is_string()
+            || !(row["body"].is_null() || row["body"].is_string())
+        {
+            return Err(format!(
+                "PR #{number} has duplicate or incomplete inventory metadata"
+            ));
+        }
+        summaries.push(json!({"number":number,"title":row["title"],"body":row["body"]}));
+    }
+    Ok(summaries)
 }
 
 fn normalize_open_issues(rows: Vec<Value>) -> Result<Vec<Value>, String> {
@@ -74,11 +115,15 @@ fn normalize_open_issues(rows: Vec<Value>) -> Result<Vec<Value>, String> {
         if !seen.insert(number) {
             return Err("GitHub issue listing changed during pagination (duplicate number)".into());
         }
-        if row.get("pull_request").is_some_and(|v| v.is_object()) {
+        if let Some(marker) = row.get("pull_request") {
+            if !marker.is_object() {
+                return Err(format!("GitHub issue #{number} has invalid PR metadata"));
+            }
             continue;
         }
         if row["state"] != "open"
             || !row["title"].is_string()
+            || !(row["body"].is_null() || row["body"].is_string())
             || !row["html_url"].as_str().is_some_and(|v| !v.is_empty())
             || !row["updated_at"]
                 .as_str()
@@ -117,6 +162,18 @@ mod issue_listing_tests {
     }
 
     #[test]
+    fn issue_reconciliation_detects_missing_and_changed_rows() {
+        let first = issue(1);
+        let second = issue(2);
+        let before = vec![first.clone(), second.clone()];
+        assert!(reconcile_open_issues(before.clone(), vec![second.clone(), first.clone()]).is_ok());
+        assert!(reconcile_open_issues(before.clone(), vec![first.clone()]).is_err());
+        let mut edited = second;
+        edited["title"] = json!("Changed during scan");
+        assert!(reconcile_open_issues(before, vec![first, edited]).is_err());
+    }
+
+    #[test]
     fn accepts_large_listing_and_excludes_pull_requests() {
         let mut rows: Vec<Value> = (1..=501).map(issue).collect();
         rows.push(json!({"number":502,"pull_request":{}}));
@@ -124,6 +181,70 @@ mod issue_listing_tests {
         assert_eq!(result.len(), 501);
         assert_eq!(result[500]["number"], 501);
         assert_eq!(result[0]["author"]["login"], "reporter");
+    }
+
+    #[test]
+    fn pr_summaries_do_not_cap_or_accept_duplicate_and_incomplete_rows() {
+        let row = |n| json!({"number":n,"state":"open","title":"Fix","body":null});
+        let rows = (1..=1001).map(row).collect();
+        assert_eq!(normalize_open_pr_summaries(rows).unwrap().len(), 1001);
+        assert!(normalize_open_pr_summaries(vec![row(1), row(1)]).is_err());
+        assert!(normalize_open_pr_summaries(vec![json!({"number":1})]).is_err());
+        assert!(normalize_open_pr_summaries(vec![]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn rejects_malformed_issue_body_and_pull_request_marker() {
+        let mut row = issue(1);
+        row["body"] = json!({"unexpected":true});
+        assert!(normalize_open_issues(vec![row]).is_err());
+        let mut row = issue(2);
+        row["pull_request"] = json!(false);
+        assert!(normalize_open_issues(vec![row]).is_err());
+        let mut row = issue(3);
+        row["body"] = json!("valid description");
+        assert_eq!(normalize_open_issues(vec![row]).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn overlap_snapshot_detects_head_changes_and_duplicate_prs() {
+        let row = json!({"number":1,"state":"open","title":"Fix","body":null,
+            "head":{"sha":"a".repeat(40)},"base":{"sha":"b".repeat(40)},
+            "updated_at":"2026-01-01T00:00:00Z"});
+        let before = overlap_snapshot(vec![row.clone()]).unwrap();
+        let mut changed = row.clone();
+        changed["head"]["sha"] = json!("c".repeat(40));
+        assert_ne!(before, overlap_snapshot(vec![changed]).unwrap());
+        assert!(overlap_snapshot(vec![row.clone(), row]).is_err());
+    }
+
+    #[test]
+    fn overlap_cache_requires_exact_identity_and_original_freshness() {
+        let identity = json!({"number":1,"head":"a","base":"b"});
+        let entry = json!({"identity":identity,"verified_at":100,
+            "paths":[{"path":"src/a.rs"}]});
+        assert!(cached_overlap_paths(&entry, &identity, 100).is_some());
+        assert!(cached_overlap_paths(&entry, &identity, 99).is_none());
+        assert!(cached_overlap_paths(&entry, &identity, 100 + OVERLAP_CACHE_MS).is_none());
+        let changed = json!({"number":1,"head":"a","base":"c"});
+        assert!(cached_overlap_paths(&entry, &changed, 100).is_none());
+        let mut invalid = entry.clone();
+        invalid["paths"] = json!([{"path":"src/a.rs"},{"path":"src/a.rs"}]);
+        assert!(cached_overlap_paths(&invalid, &identity, 100).is_none());
+    }
+
+    #[test]
+    fn overlap_inventory_checks_counts_duplicates_and_renames() {
+        let renamed =
+            json!({"filename":"src/new.rs","previous_filename":"src/old.rs","status":"renamed"});
+        let paths = overlap_paths(vec![renamed.clone()], 1).unwrap();
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[1]["path"], "src/old.rs");
+        assert!(overlap_paths(vec![renamed.clone()], 2).is_err());
+        assert!(overlap_paths(vec![renamed.clone(), renamed], 2).is_err());
+        assert!(
+            overlap_paths(vec![json!({"filename":"src/new.rs","status":"renamed"})], 1).is_err()
+        );
     }
 
     #[test]
@@ -201,55 +322,163 @@ pub fn live(x: Vec<Rf>) -> Vec<Rf> {
         .collect()
 }
 
+fn overlap_snapshot(rows: Vec<Value>) -> Result<std::collections::BTreeMap<i64, Value>, String> {
+    let mut result = std::collections::BTreeMap::new();
+    for row in rows {
+        let number = row["number"]
+            .as_i64()
+            .filter(|n| *n > 0)
+            .ok_or("Invalid PR number")?;
+        let sha = |v: &Value| {
+            v.as_str()
+                .is_some_and(|s| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+        };
+        if row["state"] != "open"
+            || !row["title"].is_string()
+            || !(row["body"].is_null() || row["body"].is_string())
+            || !sha(&row["head"]["sha"])
+            || !sha(&row["base"]["sha"])
+            || !row["updated_at"]
+                .as_str()
+                .is_some_and(|s| chrono::DateTime::parse_from_rfc3339(s).is_ok())
+        {
+            return Err("Incomplete overlap inventory metadata".into());
+        }
+        let entry = json!({"number":number,"title":row["title"],"body":row["body"],
+            "head":row["head"]["sha"],"base":row["base"]["sha"],"updated_at":row["updated_at"]});
+        if result.insert(number, entry).is_some() {
+            return Err("Duplicate PR in overlap inventory".into());
+        }
+    }
+    Ok(result)
+}
+
+fn overlap_paths(rows: Vec<Value>, expected: u64) -> Result<Vec<Value>, String> {
+    if rows.len() as u64 != expected {
+        return Err("Incomplete PR file inventory".into());
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut paths = std::collections::BTreeSet::new();
+    for row in rows {
+        let path = row["filename"]
+            .as_str()
+            .filter(|p| !p.is_empty())
+            .ok_or("Missing PR filename")?;
+        if !seen.insert(path.to_string()) {
+            return Err("Duplicate PR filename".into());
+        }
+        paths.insert(path.to_string());
+        if row["status"] == "renamed" || row["status"] == "copied" {
+            let previous = row["previous_filename"]
+                .as_str()
+                .filter(|p| !p.is_empty())
+                .ok_or("Missing previous PR filename")?;
+            paths.insert(previous.to_string());
+        }
+    }
+    Ok(paths.into_iter().map(|path| json!({"path":path})).collect())
+}
+
+const OVERLAP_CACHE_MS: i64 = 900_000;
+
+fn cached_overlap_paths(entry: &Value, identity: &Value, at: i64) -> Option<Vec<Value>> {
+    let verified = entry["verified_at"].as_i64()?;
+    let age = at.checked_sub(verified)?;
+    if !(0..OVERLAP_CACHE_MS).contains(&age) || entry["identity"] != *identity {
+        return None;
+    }
+    let paths = entry["paths"].as_array()?;
+    let mut seen = std::collections::BTreeSet::new();
+    if !paths.iter().all(|row| {
+        row["path"]
+            .as_str()
+            .is_some_and(|p| !p.is_empty() && seen.insert(p))
+    }) {
+        return None;
+    }
+    Some(paths.clone())
+}
+
+async fn fetch_overlap_paths(r: &str, p: &Value) -> Result<Vec<Value>, String> {
+    let number = p["number"].as_i64().ok_or("Invalid PR number")?;
+    let endpoint = format!("repos/{r}/pulls/{number}");
+    let detail = ghj(&["api", &endpoint], 60).await?;
+    let count = detail["changed_files"]
+        .as_u64()
+        .ok_or("Missing PR file count")?;
+    let head = detail["head"]["sha"]
+        .as_str()
+        .filter(|s| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or("Missing PR HEAD")?;
+    if detail["number"] != number
+        || detail["state"] != "open"
+        || detail["title"] != p["title"]
+        || detail["body"] != p["body"]
+        || detail["head"]["sha"] != p["head"]
+        || detail["base"]["sha"] != p["base"]
+        || detail["updated_at"] != p["updated_at"]
+    {
+        return Err("PR changed before overlap scan".into());
+    }
+    let rows = apip(&format!("{endpoint}/files?per_page=100")).await?;
+    let paths = overlap_paths(rows, count)?;
+    let after = ghj(&["api", &endpoint], 60).await?;
+    if after["number"] != number
+        || after["state"] != "open"
+        || after["head"]["sha"] != head
+        || after["base"]["sha"] != detail["base"]["sha"]
+        || after["updated_at"] != detail["updated_at"]
+        || after["changed_files"] != count
+        || after["title"] != p["title"]
+        || after["body"] != p["body"]
+    {
+        return Err("PR changed during overlap scan".into());
+    }
+    Ok(paths)
+}
+
 pub async fn twins(a: &App, r: &str, w: &str) -> Result<(Vec<Value>, Vec<Value>), String> {
     let re = regex::Regex::new(r"[\w./-]+\.\w+").unwrap();
-    let fs: Vec<String> = re
-        .find_iter(w)
-        .map(|m| m.as_str().split(':').next().unwrap_or("").to_string())
-        .collect();
-    let k = format!("prs:{r}");
-    let l = match cg(a, &k, 900_000) {
-        Some(v) => v,
-        None => {
-            let v = ghj(
-                &[
-                    "pr",
-                    "list",
-                    "-R",
-                    r,
-                    "--state",
-                    "open",
-                    "--limit",
-                    "1000",
-                    "--json",
-                    "number,title,body,files",
-                ],
-                240,
-            )
-            .await?;
-            cs(a, &k, &v);
-            v
-        }
-    };
-    let (mut h, mut o) = (vec![], vec![]);
-    for p in l.as_array().cloned().unwrap_or_default() {
-        let hit = p["files"]
-            .as_array()
-            .map(|f| {
-                f.iter().any(|x| {
-                    fs.iter().any(|y| {
-                        x["path"].as_str() == Some(y.as_str())
-                            || y.ends_with(x["path"].as_str().unwrap_or("\u{0}"))
-                    })
-                })
+    let fs: Vec<String> = re.find_iter(w).map(|m| m.as_str().to_string()).collect();
+    let endpoint = format!("repos/{r}/pulls?state=open&sort=created&direction=asc&per_page=100");
+    let before = overlap_snapshot(apip(&endpoint).await?)?;
+    let key = format!("overlap_inventory:{r}");
+    let prior = cg(a, &key, OVERLAP_CACHE_MS).unwrap_or(Value::Null);
+    let mut next = serde_json::Map::new();
+    let mut h = Vec::new();
+    let mut o = Vec::new();
+    for (number, identity) in &before {
+        let id = number.to_string();
+        let (paths, verified_at) = match cached_overlap_paths(&prior[&id], identity, now()) {
+            Some(paths) => (paths, prior[&id]["verified_at"].as_i64().unwrap_or(0)),
+            None => (fetch_overlap_paths(r, identity).await?, now()),
+        };
+        next.insert(
+            id,
+            json!({"identity":identity,"paths":paths,"verified_at":verified_at}),
+        );
+        let hit = paths.iter().any(|x| {
+            let path = x["path"].as_str().unwrap_or("");
+            fs.iter().any(|y| {
+                y == path
+                    || y.strip_suffix(path)
+                        .is_some_and(|prefix| prefix.ends_with('/'))
             })
-            .unwrap_or(false);
+        });
+        let mut p = identity.clone();
+        p["files"] = json!(paths);
         if hit {
             h.push(p);
         } else {
             o.push(p);
         }
     }
+    if overlap_snapshot(apip(&endpoint).await?)? != before {
+        return Err("Open PR inventory changed during overlap scan".into());
+    }
+    // Publish only a complete, revalidated inventory. Cache hits do not renew
+    // the original file verification time; removed PRs disappear from the cache.
+    cs(a, &key, &Value::Object(next));
     Ok((h, o))
 }
 

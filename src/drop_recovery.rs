@@ -214,29 +214,68 @@ pub fn retry(a: &Ax, id: i64, automatic: bool) -> Result<bool, &'static str> {
     } else {
         "Recolocado na fila pelo proprietário".to_string()
     };
-    let changed = a.db.ch(
-        "update jobs set st=?,why=?,d=?,t1=?
-         where id=? and st='drop' and pr is null
-         and (jobs.num<=0 or not exists (
+    // Lock the policy and the exact dropped job snapshot together. A newer
+    // cancellation, proof, retry or repository change cannot reuse this decision.
+    let changed = commit_retry(a, &j, updated, automatic, next_state, &message, &data)
+        .map_err(|_| "Falha ao guardar recuperação na base de dados")?;
+    if !changed {
+        return Ok(false);
+    }
+    a.say("watcher", &format!("{}: {message}", j.tag()), Some(id));
+    a.sw.notify_one();
+    Ok(true)
+}
+
+fn commit_retry(
+    a: &Ax,
+    job: &Job,
+    updated: i64,
+    automatic: bool,
+    next_state: &str,
+    message: &str,
+    data: &Value,
+) -> rusqlite::Result<bool> {
+    let mut connection = a.db.0.lock().unwrap();
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let changed = tx.execute(
+        "update jobs set st=?1,why=?2,d=?3,t1=?4
+         where id=?5 and st='drop' and kind='fix' and pr is null
+           and t1=?6 and why=?7
+           and not exists(select fullkey,type,atom from json_tree(jobs.d)
+             except select fullkey,type,atom from json_tree(?8))
+           and not exists(select fullkey,type,atom from json_tree(?8)
+             except select fullkey,type,atom from json_tree(jobs.d))
+           and exists(select 1 from rp where full=jobs.repo and on_=1
+             and trim(ci)<>'' and (?9=0 or auto_recover_drops=1))
+           and (?9=0 or not exists(select 1 from kv where k=?10 and v<>'false'))
+           and (jobs.num<=0 or not exists (
              select 1 from jobs as other
              where other.repo=jobs.repo and other.num=jobs.num
                and other.kind='fix' and other.id<>jobs.id
                and (other.st<>'drop' or other.pr is not null)
-         ))",
-        pa![
-            next_state.to_string(),
-            message.clone(),
+           ))",
+        rusqlite::params![
+            next_state,
+            message,
             data.to_string(),
             now(),
-            id
+            job.id,
+            updated,
+            job.why,
+            job.d.to_string(),
+            automatic,
+            format!("kill:{}", job.id)
         ],
-    );
+    )?;
     if changed != 1 {
         return Ok(false);
     }
-    a.db.kd(&format!("kill:{id}"));
-    a.say("watcher", &format!("{}: {message}", j.tag()), Some(id));
-    a.sw.notify_one();
+    // Only an explicit manual retry can clear a previous owner cancellation.
+    if !automatic {
+        tx.execute("delete from kv where k=?", [format!("kill:{}", job.id)])?;
+    }
+    tx.commit()?;
+    crate::app::chg();
     Ok(true)
 }
 
@@ -490,6 +529,30 @@ mod tests {
         let pr = json!({"body":"Fixes #42","number":123});
         assert!(has_related_pr(&[pr], 42));
         assert!(!has_related_pr(&[json!({"body":"Fixes #99"})], 42));
+    }
+
+    #[test]
+    fn retry_commit_fences_policy_cancellation_and_newer_proof() {
+        let a = setup();
+        let id = dropped(&a, "machine kept failing: timed out", json!({}));
+        let job = a.db.jg(id).unwrap();
+        let updated = a.db.one("select t1 from jobs where id=?", pa![id]).unwrap()["t1"]
+            .as_i64()
+            .unwrap();
+        let commit = || commit_retry(&a, &job, updated, true, "ready", "retry", &json!({}));
+        a.db.run("update rp set auto_recover_drops=0", vec![]);
+        assert!(!commit().unwrap());
+        a.db.run("update rp set auto_recover_drops=1", vec![]);
+        a.db.ks(&format!("kill:{id}"), &json!(true));
+        assert!(!commit().unwrap());
+        assert_eq!(a.db.kg(&format!("kill:{id}")), true);
+        a.db.kd(&format!("kill:{id}"));
+        a.db.run("update jobs set d=json_set(d,'$.ap',1) where id=?", pa![id]);
+        assert!(!commit().unwrap());
+        assert_eq!(a.db.jg(id).unwrap().st, "drop");
+        a.db.run("update jobs set d='{}' where id=?", pa![id]);
+        assert!(commit().unwrap());
+        assert!(!commit().unwrap());
     }
 
     #[test]

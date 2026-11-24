@@ -124,20 +124,18 @@
         <div class="hint">Runs from the repository root. A fix is only submitted when this passes.</div>
         <label>Automatic merge</label>${tg("merge", r.merge ?? 1, "merge bug-fix PRs when GitHub checks pass")}
         <div class="hint">Only new Apollo Office bug-fix PRs qualify. Features and existing PRs stay untouched. Missing, pending or failed checks leave the PR open; GitHub branch rules and merge queues still apply.</div>
-        <label>PR Steward · merges</label>${tg("auto_merge", r.auto_merge, "revalidate and merge eligible existing PRs")}
-        <div class="hint">Disabled by default. Rechecks the current PR head with the repository CI command and independent Reviewer before merging. Requires a clean branch, resolved review threads, safe file paths and current GitHub status checks.</div>
-        <label>Local merge mode</label>${tg("local_merge", r.local_merge, "allow proof-based merge when GitHub branch protection is absent")}
-        <div class="warn">Requires PR Steward merges above. Uses stored ApolloOffice CI and Reviewer proofs for the same commit and tree. This does not provide GitHub branch protection. Disabled by default.</div>
-        <label>PR review routing</label>${tg("steward_repair", r.steward_repair, "send validated human change requests to the Fixer")}
-        <div class="hint">Disabled by default. Only handles current-head requests from repository collaborators on ApolloOffice PRs; normal Guard, CI and review gates still apply.</div>
-        <label>Temporary failure recovery</label>${tg("auto_recover_drops", r.auto_recover_drops, "retry only safe temporary failures")}
-        <div class="hint">Disabled by default. Only retries eligible failures from before publication and sends each retry through the normal gates.</div>
         <label>Setup command</label><input type="text" name="setup" value="${esc(r.setup)}" placeholder="optional, e.g. npm ci">
         <div class="hint">Runs before every job, after checkout.</div>
         <label>PR language</label><select name="lang" aria-label="Idioma das Pull Requests"><option value="en" ${r.lang !== "pt-PT" ? "selected" : ""}>English</option><option value="pt-PT" ${r.lang === "pt-PT" ? "selected" : ""}>Português de Portugal (PT-PT)</option></select>
         <label>Pull requests</label><select name="mode"><option value="ask" ${r.mode !== "auto" ? "selected" : ""}>wait for my approval</option><option value="auto" ${r.mode === "auto" ? "selected" : ""}>submit automatically</option></select>
         <label>Encaminhar revisões para correção</label>${tg("steward_repair", r.steward_repair, "Criar trabalhos de revisão apenas para PRs próprias com pedidos humanos validados")}
         <div class="hint">Desligado por defeito. Requer pedido CHANGES_REQUESTED no HEAD atual, autor com permissões, Guard aprovado, ausência de duplicações e de trabalho de revisão pendente. Encaminha para o Fixer e os gates habituais; não faz merge.</div>
+        <label>Elegibilidade CodeRabbit OSS gratuita confirmada</label>${tg("coderabbit_free_confirmed", r.coderabbit_free_confirmed, "confirmar o plano Free OSS e pay-as-you-go desligado")}
+        <div class="hint">Desligado por defeito. É uma confirmação explícita do proprietário; o Apollo Office não verifica a faturação nem a quota global da conta CodeRabbit. Ative apenas quando a conta mostrar elegibilidade Free OSS e os produtos pagos estiverem desligados.</div>
+        <label>Pedidos de revisão CodeRabbit OSS</label>${tg("coderabbit_review", r.coderabbit_review, "pedir revisão CodeRabbit OSS em PRs públicas elegíveis")}
+        <div class="hint">Desligado por defeito e bloqueado até a confirmação Free OSS acima estar ativa. Usa apenas o comando GitHub @coderabbitai review em PRs públicas, com limite local Apollo Office de 3 pedidos por hora e 2 por PR. Outros pedidos CodeRabbit ficam fora deste limite local. Nunca chama Agent, scans on-demand pagos ou autofix.</div>
+        <label>Encaminhar findings CodeRabbit para o Fixer</label>${tg("coderabbit_repair", r.coderabbit_repair, "enviar findings atuais e validados do CodeRabbit para o Fixer")}
+        <div class="hint">Desligado por defeito. Exige identidade exata do bot, comentário inline no HEAD atual e aprovação do Guard; mantém Fixer, testes/CI e Reviewer independente. Limita a dois ciclos por PR e nunca faz merge. O Fixer pode consumir a quota/custo do modelo configurado.</div>
         <label>Fechar PRs substituídas</label>${tg("steward_close", r.steward_close, "Fechar automaticamente PRs próprias já substituídas")}
         <div class="hint">Desligado por defeito. Só fecha uma PR sua quando outra PR sua, para a branch principal, já foi integrada e fechou a mesma issue. Confirma o estado atual no GitHub e deixa um comentário com a PR que a substituiu.</div>
         <label>Integração automática (restrita)</label>${tg("auto_merge", r.auto_merge, "Integrar PRs elegíveis após verificar os requisitos")}
@@ -390,6 +388,7 @@
       <div data-tab="gen" class="sec"><h4>Work</h4><div class="box"><div class="fm" style="margin:0">
         <label>Aprendizagem supervisionada</label>${tg("supervised_lessons", s.supervised_lessons, "Recolher e usar lições revistas pelo proprietário")}<div class="acts"><button type="button" id="reviewLessons">Rever lições</button></div><div class="hint">Só regras escritas e aprovadas por si, com evidência, âmbito de repositório e validade, entram no contexto. Nunca são promovidas automaticamente.</div>
         <label>Encaminhamento adaptativo</label>${tg("adaptive_routing", s.adaptive_routing, "Selecionar Fixer por disponibilidade e histórico")}<div class="hint">Opcional: apenas modelos de subscrição explicitamente definidos em Fixer e Big, distintos do Reviewer. Sem modelos locais nem novas rotas pagas. Mantém o modo staged e free-first.</div>
+        ${tg("adaptive_support_routing", s.adaptive_support_routing, "Alternativa de subscrição para agentes de apoio")}<div class="hint">Scout, Guard, Vet, Watcher e Hunter podem escolher outro fornecedor de subscrição já definido nos agentes de apoio, Fixer ou Big ativo, apenas antes da chamada. Não altera o Reviewer, nem ativa APIs pagas ou modelos locais. O Hunter respeita a reserva Codex.</div>
         <label>Perfil de recursos</label><select name="resource_profile">${[["manual","Manual"],["economic","Económico"],["balanced","Equilibrado"],["performance","Desempenho"],["night","Noturno"]].map(([id,label])=>`<option value="${id}" ${(s.resource_profile || "manual")===id?"selected":""}>${label}</option>`).join("")}</select><div class="hint">Os perfis limitam apenas novas tarefas; nunca interrompem trabalho ativo. Manual mantém os limites existentes. Noturno limita a uma lane por máquina e desativa novas pesquisas.</div>
         <label>Reserva de quota Codex (%)</label><input type="number" name="codex_hunt_reserve_percent" min="0" max="100" step="1" value="${Number.isFinite(s.codex_hunt_reserve_percent)?s.codex_hunt_reserve_percent:15}"><div class="hint">Abaixo deste valor, novas pesquisas Codex aguardam. Não afeta tarefas em execução.</div>
         <label>Hunters</label><input type="number" name="hunters" min="0" max="12" value="${s.hunters}"><div class="hint">How many bug hunts may run at once (only in repos with hunting on).</div>
@@ -505,7 +504,7 @@
         const r = await post({ id: e.dataset.key, key: e.value.trim() }, "/api/prov");
         if (r.error) { $("sbar").hidden = false; $("sm").className = "bad2"; $("sm").textContent = r.error; return; }
       }
-      const r = await post({ wh: { on: v.whon, from: v.whf, to: v.wht }, hunters: v.hunters, supervised_lessons: v.supervised_lessons, adaptive_routing: v.adaptive_routing, resource_profile: v.resource_profile, codex_hunt_reserve_percent: v.codex_hunt_reserve_percent, tokday: v.tokday, ntfy: v.ntfy, discord: v.discord, auto: v.auto, updates: v.updates, ollama: v.ollama, octx: v.octx, cckc: v.cckc, test }, "/api/set");
+      const r = await post({ wh: { on: v.whon, from: v.whf, to: v.wht }, hunters: v.hunters, supervised_lessons: v.supervised_lessons, adaptive_routing: v.adaptive_routing, adaptive_support_routing: v.adaptive_support_routing, resource_profile: v.resource_profile, codex_hunt_reserve_percent: v.codex_hunt_reserve_percent, tokday: v.tokday, ntfy: v.ntfy, discord: v.discord, auto: v.auto, updates: v.updates, ollama: v.ollama, octx: v.octx, cckc: v.cckc, test }, "/api/set");
       if (r.error) { $("sbar").hidden = false; $("sm").className = "bad2"; $("sm").textContent = r.error; return; }
       await settings();
       const sb = $("sbar");
@@ -611,6 +610,7 @@
       <div class="sec"><h4>Repositories, 30 days</h4>${c.repos.length ? tb([["Repository"], ["Jobs", "n"], ["API", "n"], ["Login value", "n"]], c.repos.map((r) => `<tr><td>${esc(r.repo)}</td><td class="n">${r.jobs}</td><td class="n">${usd(r.usd)}</td><td class="n">${usd(r.val)}</td></tr>`)) : `<div class="empty">Nothing yet.</div>`}</div>
       <div class="sec"><h4>Fixer model attempts, 90 days</h4>${c.fixer_metrics?.length ? tb([["Model"], ["Attempts", "n"], ["Accepted", "n"], ["First pass", "n"], ["Escalated jobs", "n"], ["Verification fails", "n"], ["CI fails", "n"], ["Review rejected", "n"], ["Average time", "n"]], c.fixer_metrics.map((r) => `<tr><td>${esc(r.nm || r.model)}</td><td class="n">${r.attempts}</td><td class="n">${r.accepted || 0}</td><td class="n">${r.first_pass || 0}</td><td class="n">${r.escalated || 0}</td><td class="n">${r.verification_failures || 0}</td><td class="n">${r.ci_failures || 0}</td><td class="n">${r.review_rejections || 0}</td><td class="n">${r.avg_ms == null ? "–" : Math.round(r.avg_ms / 1000) + " s"}</td></tr>`)) : `<div class="empty">No fixer attempts recorded yet.</div>`}<div class="hint" style="margin-top:6px">First pass means the first candidate passed verification, CI and independent review. Escalated jobs count first attempts followed by a different model. Average time runs through that attempt's gate decision, including checks and review. Apollo stores model, gate and duration, not issue text.</div></div>
       <div class="sec"><h4>Primeira tentativa por projeto e modelo · 90 dias</h4>${c.first_pass_by_repo===null?'<div class="warn">Métricas indisponíveis.</div>':c.first_pass_by_repo?.length?tb([["Projeto"],["Modelo"],["Amostras","n"],["Aprovadas","n"],["Taxa","n"],["Duração média","n"]],c.first_pass_by_repo.map(r=>`<tr><td>${esc(r.repo)}</td><td>${esc(r.model)}</td><td class="n">${esc(r.samples)}</td><td class="n">${esc(r.accepted)}</td><td class="n">${rate(r.accepted,r.samples)}</td><td class="n">${r.avg_ms==null?"–":Math.round(r.avg_ms/1000)+" s"}</td></tr>`)):'<div class="empty">Sem amostras concluídas.</div>'}<div class="hint">Exclui tentativas interrompidas e bloqueadas; aprovação da primeira tentativa não significa merge.</div></div>
+      <div class="sec"><h4>Lições aprovadas · resultados observados em 90 dias</h4>${c.lesson_exposure_metrics===null?'<div class="warn">Métricas indisponíveis.</div>':c.lesson_exposure_metrics?.length?tb([["Projeto"],["Modelo"],["Contexto"],["Amostras","n"],["Aprovadas","n"],["Taxa","n"],["Falhas de verificação","n"],["Rejeições de revisão","n"]],c.lesson_exposure_metrics.map(r=>`<tr><td>${esc(r.repo)}</td><td>${esc(r.model)}</td><td>${esc(({included:"Com lições",not_included:"Sem lições",unknown:"Desconhecido"})[r.exposure]||"Desconhecido")}</td><td class="n">${esc(r.samples)}</td><td class="n">${esc(r.accepted)}</td><td class="n">${rate(r.accepted,r.samples)}</td><td class="n">${esc(r.verification_failures)}</td><td class="n">${esc(r.review_rejections)}</td></tr>`)):'<div class="empty">Sem amostras concluídas.</div>'}<div class="hint">Contexto preparado para o Fixer na primeira tentativa; não comprova entrega ao modelo, uso efetivo das lições nem causalidade. Tentativas antigas ou sem registo são desconhecidas.</div></div>
       <div class="sec"><h4>Models per worker, 90 days</h4>${c.stats.length ? tb([["Repository"], ["Worker"], ["Model"], ["Jobs", "n"], ["PRs", "n"], ["Merged", "n"], ["Rejected", "n"], ["Per job", "n"], ["Per merge", "n"]], c.stats.map((r) => `<tr><td>${esc(r.repo)}</td><td>${esc(A.NM?.[r.w] || r.w)}</td><td>${esc(r.nm)}${r.sub ? " (login)" : ""}</td><td class="n">${r.jobs}</td><td class="n">${r.prs}</td><td class="n">${r.mg} · ${rate(r.mg, r.prs)}</td><td class="n">${r.cl}</td><td class="n">${usd(r.usd == null ? null : r.usd / r.jobs)}</td><td class="n">${r.mg && r.usd != null ? usd(r.usd / r.mg) : "–"}</td></tr>`)) : `<div class="empty">Nothing yet.</div>`}<div class="hint" style="margin-top:6px">A job counts for every worker that worked on it. Hints show up once two models did at least 5 jobs each for the same worker. The Fixer can escalate from Ollama to its configured complex-job model when enabled.</div></div>
       <div class="sec"><h4>Prices</h4><div class="box"><textarea id="px" placeholder="model input output, e.g. gpt-5.5 5 30" style="min-height:70px">${esc(Object.entries(px).map(([k, v]) => k + " " + v.join(" ")).join("\n"))}</textarea><div class="hint" style="margin-top:6px">USD per million tokens, one model per line: <code>model input output</code> or <code>model input cache-write cache-read output</code>. Overrides the built-in prices. Claude Code reports its own cost.</div><div class="acts"><button id="pb">Save prices</button></div><div class="msg" id="pm"></div></div></div>`;
     $("fb").onsubmit = (e) => e.preventDefault();
@@ -627,6 +627,81 @@
     };
   };
 
+  // Operational diagnostics only: use server-reported capacity, not predictions.
+  const resourceDiagnostics = (state, at = Date.now()) => {
+    const fresh = Number.isFinite(state?.t) && state.t <= at && at-state.t <= 180000;
+    const resource = state?.ops?.resources;
+    if (!fresh || !resource || !Array.isArray(resource.hosts)) {
+      return '<div class="empty">Diagnóstico de recursos indisponível ou desatualizado.</div>';
+    }
+    const value = v => Number.isFinite(v) && v >= 0 ? String(v) : "—";
+    const reason = r => ({
+      manual:"Manual",profile:"Dentro dos limites do perfil",
+      telemetry_unavailable:"Telemetria indisponível",telemetry_incomplete:"Telemetria incompleta",
+      critical_pressure:"Pressão crítica",memory_or_temperature:"Memória ou temperatura",
+      cpu_load:"Carga do processador"
+    })[r] || "Motivo desconhecido";
+    return `<div class="hint">Perfil: ${esc(resource.profile || "—")} · Tarefas em espera: ${value(state.ops.waiting)}. Capacidade observada, não garantia de admissão.</div>
+      ${resource.hosts.map(h => {
+        const gpu = h.telemetry_fresh === true && Array.isArray(h.gpu) ? h.gpu : [];
+        return `<div class="box"><b>${esc(h.id)} · ${h.enabled === true ? "Ativa" : h.enabled === false ? "Inativa" : "Estado desconhecido"}</b>
+          <div class="hint">Lanes: ${value(h.active)} em uso · ${value(h.effective_lanes)}/${value(h.configured_lanes)} permitidas</div>
+          <div class="hint">CI: ${value(h.active_ci)} em uso · ${value(h.effective_ci)}/${value(h.configured_ci)} permitidos para trabalho retomável</div>
+          ${Number.isFinite(h.completion_ci_floor) && h.completion_ci_floor > h.effective_ci ? '<div class="hint">Uma vaga reservada à conclusão de trabalho não retomável.</div>' : ""}
+          <div class="hint">${esc(reason(h.reason))}</div>
+          ${gpu.length ? gpu.map(g=>`<div class="hint">GPU ${value(g.index)} · VRAM ${value(g.vram_used_mib)}/${value(g.vram_total_mib)} MiB · ${value(g.temperature_c)} °C · utilização ${value(g.utilization_percent)}%</div>`).join("") : '<div class="hint">GPU/VRAM: sem leitura disponível.</div>'}
+        </div>`;
+      }).join("") || '<div class="empty">Sem máquinas configuradas.</div>'}`;
+  };
+
+  // Owner diagnostics: text is escaped, uncertainty never exposes a resend action.
+  const outboxRows = (rows) => rows.map((r,i)=>{
+    const labels={pending:"Pendente",uncertain:"Entrega incerta",sent:"Enviada",cancelled:"Cancelada"};
+    const date=Number.isFinite(r.created)?new Date(r.created).toLocaleString("pt-PT"):"—";
+    const action=r.state==="pending"?["cancel","Cancelar envio"]:r.state==="uncertain"?["verify","Verificar no GitHub"]:null;
+    return `<div class="sec"><div class="box"><div class="hd2"><b>${esc(r.repo || "—")} · PR #${esc(r.num)}</b><span class="pill">${esc(labels[r.state] || "Desconhecido")}</span></div>
+      <div class="hint">Conta: ${esc(r.author || "—")} · ${esc(date)}</div>
+      <details><summary>Resposta guardada</summary><pre>${esc(r.body || "")}</pre></details>
+      ${action?`<div class="acts"><button type="button" data-outbox-index="${i}" data-outbox-action="${action[0]}">${action[1]}</button></div><div class="msg" data-outbox-msg="${i}" aria-live="polite"></div>`:""}</div></div>`;
+  }).join("");
+  let outboxRequest=0;
+  const outbox = async (offset=0) => {
+    show("Respostas do Watcher","outbox");
+    const request=++outboxRequest;
+    B.innerHTML='<div class="empty">A consultar respostas…</div>';
+    try{
+      const data=await get("/api/watcher-outbox?offset="+offset);
+      if(cur!=="outbox" || request!==outboxRequest)return;
+      if(data.error)throw Error(data.error);
+      if(!Array.isArray(data.rows) || !data.counts)throw Error("Resposta inválida");
+      const rows=data.rows,c=data.counts;
+      B.innerHTML=`<div class="sec"><div class="box"><b>Entregas persistentes</b><div class="hint">Pendentes: ${esc(c.pending)} · Incertas: ${esc(c.uncertain)} · Enviadas: ${esc(c.sent)} · Canceladas: ${esc(c.cancelled)}</div><div class="hint">Verificar consulta os comentários do GitHub. Se não encontrar a resposta exata, mantém a entrega incerta. Nunca reenvia automaticamente.</div><div class="acts"><button id="outboxBack">Diagnóstico</button><button id="outboxRefresh">Atualizar</button></div></div></div>${outboxRows(rows)||'<div class="empty">Sem respostas guardadas.</div>'}<div class="acts">${offset>0?'<button id="outboxPrev">Anterior</button>':""}${data.more?'<button id="outboxNext">Seguinte</button>':""}</div>`;
+      $("outboxBack").onclick=()=>health(false);
+      $("outboxRefresh").onclick=()=>outbox(offset);
+      if(offset>0)$("outboxPrev").onclick=()=>outbox(Math.max(0,offset-50));
+      if(data.more)$("outboxNext").onclick=()=>outbox(offset+50);
+      for(const button of B.querySelectorAll("button[data-outbox-index]")){
+        button.onclick=async()=>{
+          const i=Number(button.dataset.outboxIndex),row=rows[i],action=button.dataset.outboxAction,msg=B.querySelector(`[data-outbox-msg="${i}"]`);
+          if(!row || !["cancel","verify"].includes(action))return;
+          if(action==="cancel" && !confirm("Cancelar esta resposta ainda não enviada?"))return;
+          button.disabled=true;
+          try{
+            const result=await post({id:row.id,action},"/api/watcher-outbox");
+            if(cur!=="outbox" || request!==outboxRequest)return;
+            if(result.error)throw Error(result.error);
+            if(result.state==="uncertain"){msg.textContent="Entrega não confirmada. Não foi efetuado qualquer reenvio.";return;}
+            await outbox(offset);
+          }catch(error){msg.textContent=String(error.message||error);}
+          finally{button.disabled=false;}
+        };
+      }
+    }catch(error){
+      if(cur==="outbox" && request===outboxRequest)B.innerHTML=`<div class="warn">${esc(error.message||error)}</div><div class="acts"><button id="outboxBack">Diagnóstico</button><button id="outboxRefresh">Tentar novamente</button></div>`;
+      if(cur==="outbox" && request===outboxRequest){$("outboxBack").onclick=()=>health(false);$("outboxRefresh").onclick=()=>outbox(offset);}
+    }
+  };
+
   const health = async (f) => {
     show("Health", "health");
     if (!A.H || f) { B.innerHTML = `<div class="empty">checking…</div>`; await A.hlt(f); }
@@ -635,9 +710,70 @@
     const sec = (t, x) => `<div class="sec"><h4>${t}</h4><div class="box">${x}</div></div>`;
     const ls = (v) => (Array.isArray(v.m) ? v.m.map((y) => row(y.ok, y.k, y.m)).join("") : row(v.ok, "", v.m));
     B.innerHTML = H.gh ? sec("GitHub", row(H.gh.ok, "", H.gh.m)) + sec("AI providers in use", ls(H.ai)) + sec("Docker", row(H.docker.ok, "", H.docker.m)) + sec("Machines", ls(H.hosts)) + `<div class="msg">Checked ${new Date(H.t).toLocaleTimeString()}. The office checks again every 5 minutes.</div><div class="acts"><button id="hr">Check now</button></div>` : `<div class="empty">Could not check.</div><div class="acts"><button id="hr">Check now</button></div>`;
+    B.insertAdjacentHTML("beforeend", `<div class="sec"><h4>Recursos e capacidade de CI</h4>${resourceDiagnostics(A.S)}</div>`);
+    B.insertAdjacentHTML("beforeend",'<div class="sec"><h4>Respostas do Watcher</h4><div class="box"><div class="hint">Consulte respostas pendentes e confirme entregas incertas, sem reenvio automático.</div><div class="acts"><button id="openOutbox">Consultar respostas</button></div></div></div>');
+    $("openOutbox").onclick=()=>outbox();
     $("hr").onclick = () => health(true);
   };
   A.health = health;
+
+  // Task drawer logs only: no changes to the agent canvas or its activity feed.
+  const filterJobLogs = (events, worker, query) => {
+    const needle = String(query || "").trim().toLowerCase();
+    return events.filter(e => (!worker || e.w === worker) &&
+      (!needle || String(e.m ?? "").toLowerCase().includes(needle)));
+  };
+  const logRows = (events) => events.map(e =>
+    `<div><span class="tm">${esc(new Date(e.t).toLocaleTimeString("en-GB", {hour:"2-digit",minute:"2-digit"}))}</span><span>${esc(e.w)}</span><span>${esc(e.m)}</span></div>`
+  ).join("");
+  const normalizeJobEvents = (value) => Array.isArray(value) ? value.filter(e => e && typeof e === "object") : [];
+  const jobLogWorkerOptions = (events, selected = "") => {
+    const workers = [...new Set([...events.map(e => e.w), selected].filter(w => typeof w === "string" && w))].sort();
+    return '<option value="">Todos</option>' + workers.map(w => `<option value="${esc(w)}">${esc(w)}</option>`).join("");
+  };
+  const jobLogPanel = (events) => {
+    return `<div class="sec"><h4>Registo de atividade</h4><div class="fm">
+      <label for="jobLogWorker">Agente</label><select id="jobLogWorker">${jobLogWorkerOptions(events)}</select>
+      <label for="jobLogSearch">Pesquisar mensagens</label><input type="search" id="jobLogSearch" placeholder="Pesquisar no registo">
+      <label class="ck"><input type="checkbox" id="jobLogWrap" checked> Quebrar linhas</label>
+      <div class="acts"><button type="button" id="jobLogRefresh">Atualizar registo</button></div>
+      <div class="hint" id="jobLogStatus" role="status"></div>
+      <div class="hint" id="jobLogCount" aria-live="polite"></div></div>
+      <div class="log" id="jobLogRows"></div></div>`;
+  };
+  const bindJobLogs = (events, loadEvents) => {
+    const worker = $("jobLogWorker"), search = $("jobLogSearch"), wrap = $("jobLogWrap");
+    const rows = $("jobLogRows"), count = $("jobLogCount");
+    const refresh = $("jobLogRefresh"), status = $("jobLogStatus");
+    const render = () => {
+      const matching = filterJobLogs(events, worker.value, search.value);
+      rows.innerHTML = logRows(matching) || '<div class="empty">Sem mensagens correspondentes.</div>';
+      rows.classList.toggle("job-log-nowrap", !wrap.checked);
+      count.textContent = matching.length + " de " + events.length + " mensagens recebidas";
+    };
+    worker.onchange = render; search.oninput = render; wrap.onchange = render;
+    refresh.onclick = async () => {
+      if (refresh.disabled) return;
+      refresh.disabled = true;
+      status.textContent = "A atualizar…";
+      try {
+        const next = await loadEvents();
+        if ($("jobLogRows") !== rows) return;
+        if (!Array.isArray(next)) throw new Error("Registo indisponível");
+        events = normalizeJobEvents(next);
+        const selected = worker.value;
+        worker.innerHTML = jobLogWorkerOptions(events, selected);
+        worker.value = selected;
+        render();
+        status.textContent = "Registo atualizado.";
+      } catch (error) {
+        if ($("jobLogRows") === rows) status.textContent = error?.message === "login"
+          ? "Sessão expirada. Mantido o último registo recebido e os campos do formulário. Guarde uma cópia das alterações antes de voltar a autenticar-se."
+          : "Não foi possível atualizar. Mantido o último registo recebido.";
+      } finally { refresh.disabled = false; }
+    };
+    render();
+  };
 
   const job = async (id) => {
     const j = await get("/api/job?id=" + id);
@@ -671,14 +807,21 @@
       </div></div>`;
     const retry = window.AO.retryStates?.get(id);
     const cs = j.cost && j.cost.n ? `<div class="msg">Cost: ${j.cost.usd != null ? usd(j.cost.usd) + " API" : ""}${j.cost.usd != null && j.cost.val != null ? " · " : ""}${j.cost.val != null ? usd(j.cost.val) + " login value" : ""}${j.cost.usd == null && j.cost.val == null ? "unknown" : ""} · ${Math.round((j.cost.ti || 0) / 1000)}k in, ${Math.round((j.cost.tou || 0) / 1000)}k out</div>` : "";
-    const ev = (j.ev || []).map((e) => `<div><span class="tm">${new Date(e.t).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}</span><span>${esc(e.w)}</span><span>${esc(e.m)}</span></div>`).join("");
+    const events = normalizeJobEvents(j.ev);
+    const loadEvents = async () => {
+      const next = await get("/api/job?id=" + id, { reloadOnUnauthorized: false });
+      if (!next || next.error || dr.hidden || cur !== "job" || jid !== id) throw new Error("Registo indisponível");
+      return next.ev;
+    };
+    const logs = jobLogPanel(events);
     if (j.st === "approve") {
       B.innerHTML = `<div class="sec"><div class="box"><div class="hd2"><b>${esc(j.repo)}${j.num ? " #" + j.num : j.ext ? " (reported by " + esc(j.ext) + ")" : " (found by Hunter)"}</b>${j.url ? `<a class="a" href="#" data-u="${esc(j.url)}">${j.num ? "open issue" : "open repository"}</a>` : ""}</div><div class="msg">Tipo: ${esc(work)} · Built and tested on ${esc(j.h || "")}. Nothing is on GitHub yet.</div>${cs}</div></div>
       <div class="sec"><h4>Pull request</h4><input type="text" id="pt" value="${esc(j.pt || j.title)}"><textarea id="pb" style="min-height:220px;margin-top:8px">${esc(j.pb || "")}</textarea></div>
       ${j.proof ? `<div class="sec"><h4>Proof</h4><pre class="df">${esc((j.proof.a || "") + "\n\n" + (j.proof.b || ""))}</pre></div>` : ""}
       <div class="sec"><h4>Diff</h4>${dview(j.df)}</div>
       <div class="acts"><button class="pri" id="ba">Submit pull request</button><button class="dng" id="bd">Drop</button></div><div class="msg" id="jm"></div>
-      <div class="sec" style="margin-top:20px"><h4>Log</h4><div class="log">${ev}</div></div>`;
+      ${logs}`;
+      bindJobLogs(events, loadEvents);
       $("ba").onclick = async () => {
         busy($("ba"), true, "Submitting…");
         const r = await post({ a: "approve", id, pt: $("pt").value, pb: $("pb").value });
@@ -697,7 +840,8 @@
       ${adaptiveRoute}
       ${failure}
       ${j.df ? `<div class="sec"><h4>Diff</h4>${dview(j.df)}</div>` : ""}
-      <div class="sec"><h4>Log</h4><div class="log">${ev || `<div class="empty">nothing yet</div>`}</div></div>`;
+      ${logs}`;
+    bindJobLogs(events, loadEvents);
     const scheduling = $("jobSchedule");
     if (scheduling) scheduling.onsubmit = async (event) => {
       event.preventDefault();
@@ -775,6 +919,10 @@
             <div class="hint">Prioridade P${esc(String(p.priority ?? 9))} · Estado: ${esc(p.state)} · CI: ${esc(p.checks)} · Revisão: ${esc(p.review || "não verificada")}</div>
             <div class="hint">HEAD ${esc(shortSha(p.head_sha))} · base ${esc(p.base || "?")} @ ${esc(shortSha(p.base_sha))} · atualizada: ${esc(p.updated_at ? new Date(p.updated_at).toLocaleString("pt-PT") : "n/d")}</div>
             <div class="hint">Próximo passo: ${esc(p.next_action || "Rever PR")}</div>
+            ${p.coderabbit_previous?.observation ? `<div class="hint">Última consulta CodeRabbit (histórico, não validada agora): ${esc(new Date(p.coderabbit_previous.checked_at).toLocaleString("pt-PT"))} · HEAD ${esc(shortSha(p.coderabbit_previous.observation.head))} · ${p.coderabbit_previous.observation.head === p.head_sha ? "mesmo HEAD" : "HEAD anterior"}</div>` : ""}
+            ${p.coderabbit_request?.latest ? `<div class="hint">Pedido CodeRabbit OSS: ${esc(({sent:"enviado",sending:"em curso",uncertain:"incerto — verifique o GitHub",cancelled:"cancelado"})[p.coderabbit_request.latest.status] || "estado desconhecido")} · HEAD ${esc(shortSha(p.coderabbit_request.latest.head))} · não equivale a aprovação</div>` : ""}
+            ${p.coderabbit_findings?.summary?.length ? `<div class="hint">Findings CodeRabbit (histórico de todos os HEADs): ${p.coderabbit_findings.summary.map((item) => `${esc(String(item.n))} ${esc(item.severity)} · ${esc(item.state)}${item.job_state ? `/${esc(item.job_state)}` : ""}`).join("; ")} · sugestão consultiva</div>` : ""}
+            <div class="acts"><button type="button" data-cr-repo="${esc(repo)}" data-cr-number="${esc(p.number)}" data-cr-head="${esc(p.head_sha)}">Consultar CodeRabbit</button><span class="hint" role="status"></span></div>
             ${p.recheck ? `<div class="hint">Revalidação #${esc(String(p.recheck.id))}: ${esc(p.recheck.state)} · ${esc(elapsed(p.recheck.age_ms))} · HEAD/base: ${p.recheck.matches_head && p.recheck.matches_base ? "atuais" : "desatualizados"}${p.recheck.why ? " · " + esc(p.recheck.why) : ""}</div>` : ""}
             ${p.branch_update ? `<div class="${p.branch_update.status === "error" || p.branch_update.status === "blocked" ? "warn" : "hint"}">Atualização da branch: ${esc(p.branch_update.message || p.branch_update.error || p.branch_update.status)} · ${esc(p.branch_update.status)}</div>` : ""}
             ${p.overlaps?.length ? `<div class="hint bad2">Ficheiros em comum com: #${p.overlaps.map(Number).join(", #")}</div>` : ""}
@@ -783,6 +931,33 @@
       </div></div>`;
     }).join("") || '<div class="empty">Não existem repositórios ativos.</div>'}`;
     B.querySelector("#steRefresh").onclick = steward;
+    for (const button of B.querySelectorAll("[data-cr-repo]")) {
+      button.onclick = async () => {
+        if (button.disabled) return;
+        button.disabled = true;
+        const status = button.nextElementSibling;
+        status.textContent = "A consultar evidência no GitHub…";
+        try {
+          const head = button.dataset.crHead;
+          const result = await post({repo:button.dataset.crRepo,number:Number(button.dataset.crNumber),head}, "/api/steward/coderabbit");
+          if (!button.isConnected || cur !== "steward" || dr.hidden) return;
+          const labels = {
+            observed_current:"Evidência de revisão no HEAD indicado",
+            stale:"Evidência de revisão desatualizada",
+            not_observed:"Nenhuma evidência observada",
+            unknown:"Cobertura não confirmada",
+            pending:"Revisão em processamento",
+            skipped:"Revisão não executada",
+            rate_limited:"Limite de consultas GitHub atingido; tente mais tarde",
+            busy:"Capacidade de consulta ocupada; tente mais tarde",
+            unavailable:"Consulta indisponível ou PR alterada"
+          };
+          status.textContent = (result.head === head && Object.hasOwn(labels,result.state) ? labels[result.state] : labels.unavailable) + " · não equivale a aprovação";
+        } catch {
+          if (button.isConnected) status.textContent = "Consulta indisponível";
+        } finally { button.disabled = false; }
+      };
+    }
   };
   A.steward = steward;
 

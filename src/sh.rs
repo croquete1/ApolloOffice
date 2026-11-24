@@ -93,14 +93,9 @@ pub fn bash() -> String {
 }
 
 pub fn cmd(p: &str, a: &[String]) -> tokio::process::Command {
-    let lw = p.to_lowercase();
-    let mut c = if cfg!(windows) && (lw.ends_with(".cmd") || lw.ends_with(".bat")) {
-        let mut c = tokio::process::Command::new("cmd");
-        c.arg("/C").arg(p);
-        c
-    } else {
-        tokio::process::Command::new(p)
-    };
+    // Invoke batch files directly too. Rust's Windows Command implementation
+    // escapes batch arguments; manually calling cmd /C bypasses that handling.
+    let mut c = tokio::process::Command::new(p);
     c.args(a);
     #[cfg(windows)]
     {
@@ -180,11 +175,26 @@ fn worker_secret(name: &str) -> bool {
             | "DOCKER_AUTH_CONFIG"
             | "DATABASE_URL"
             | "SUPABASE_SERVICE_ROLE_KEY"
+            | "GIT_SSH_COMMAND"
+            | "GIT_SSH"
+            | "GIT_CONFIG"
+            | "GIT_CONFIG_GLOBAL"
+            | "GIT_CONFIG_SYSTEM"
+            | "AWS_SECURITY_TOKEN"
+            | "AZURE_STORAGE_CONNECTION_STRING"
+            | "GOOGLE_CREDENTIALS"
+            | "CLOUDSDK_AUTH_ACCESS_TOKEN"
+            | "DOCKER_CONFIG"
+            | "KUBECONFIG"
     ) || name.starts_with("GIT_CONFIG_")
+        || name.starts_with("CARGO_REGISTRIES_") && name.ends_with("_TOKEN")
+        || name.starts_with("MIGRATION_PROVIDER_")
         || name.ends_with("_API_KEY")
         || name.ends_with("_ACCESS_TOKEN")
         || name.ends_with("_AUTH_TOKEN")
         || name.ends_with("_CLIENT_SECRET")
+        || name.ends_with("_SECRET_KEY")
+        || name.ends_with("_PRIVATE_KEY")
 }
 
 pub async fn run(p: &str, a: &[String], r: Rq<'_>) -> Out {
@@ -220,7 +230,9 @@ pub async fn run(p: &str, a: &[String], r: Rq<'_>) -> Out {
         c.env_remove(k);
     }
     for (k, v) in &r.env {
-        c.env(k, v);
+        if !r.strip_worker_secrets || !worker_secret(k) {
+            c.env(k, v);
+        }
     }
     if let Some(d) = &r.cwd {
         c.current_dir(d);
@@ -826,7 +838,7 @@ r=$(docker inspect -f '{{{{.State.Running}}}}' {ct} 2>/dev/null)
 m=$(( $(docker info --format '{{{{.MemTotal}}}}' 2>/dev/null || echo 0) / 1048576 - 3072 ))
 [ "$m" -lt 2048 ] && m=2048
 if [ -z "$r" ]; then out=$(docker run -d --init --name {ct} --restart unless-stopped --cpus {cpu} --cpu-shares 128 --memory "$m"m --memory-swap "$m"m -v {work}:/work -v {cargo}:/usr/local/cargo/registry -v {npm}:/var/cache/apollo-npm {im} sleep infinity 2>&1) || [ "$(docker inspect -f '{{{{.State.Running}}}}' {ct} 2>/dev/null)" = true ] || docker start {ct} >/dev/null 2>&1 || {{ printf '%s\n' "$out" >&2; exit 3; }}; elif [ "$r" != true ]; then docker start {ct} >/dev/null || exit 3; fi
-docker update --cpus {cpu} --cpu-shares 128 --memory "$m"m --memory-swap "$m"m {ct} >/dev/null 2>&1
+docker update --cpus {cpu} --cpu-shares 128 --memory "$m"m --memory-swap "$m"m {ct} >/dev/null || {{ echo 'cannot apply worker resource limits' >&2; exit 7; }}
 docker images apollo-office-build --format '{{{{.Repository}}}}:{{{{.Tag}}}}' | grep -vx {im} | xargs -r docker rmi >/dev/null 2>&1
 echo ok {}"#,
         h.id,
@@ -911,11 +923,16 @@ pub async fn ensure(a: &Ax, id: &str) -> Result<(), String> {
 }
 
 pub async fn gh(a: &[&str], t: u64) -> Result<String, String> {
+    gh_input(a, t, None).await
+}
+
+pub async fn gh_input(a: &[&str], t: u64, input: Option<String>) -> Result<String, String> {
     let v: Vec<String> = a.iter().map(|x| x.to_string()).collect();
     let r = run(
         &tool("gh"),
         &v,
         Rq {
+            i: input,
             t,
             env: vec![
                 ("GH_PROMPT_DISABLED".into(), "1".into()),
@@ -1077,6 +1094,25 @@ fn api_pages(output: &str) -> Result<Vec<Value>, String> {
 #[cfg(test)]
 mod t {
     use super::*;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn batch_wrapper_preserves_rest_query_arguments() {
+        let script =
+            std::env::temp_dir().join(format!("apollo-batch-query-{}.cmd", rand::random::<u64>()));
+        std::fs::write(&script, "@echo off\r\necho %1\r\n").unwrap();
+        let endpoint = "repos/o/r/issues?state=open&sort=created&per_page=100";
+        let output = cmd(script.to_str().unwrap(), &[endpoint.to_string()])
+            .output()
+            .await;
+        let _ = std::fs::remove_file(script);
+        let output = output.unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(endpoint),
+            "{output:?}"
+        );
+    }
 
     #[test]
     fn worker_image_uses_verified_node24_instead_of_debian_node20() {
@@ -1246,6 +1282,107 @@ mod t {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    // Run only on an isolated, disposable Docker daemon (the hosted CI runner).
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires disposable real Docker daemon"]
+    async fn real_docker_worker_lifecycle() {
+        let name = ct();
+        assert!(name.starts_with("apollo-ci-"));
+        assert_eq!(
+            std::env::var("APOLLO_OFFICE_REAL_DOCKER").as_deref(),
+            Ok("1")
+        );
+        let db = crate::db::Db::mem();
+        db.run(
+            "insert into hs(id,dk,on_,ln,ci) values('local',1,1,1,1)",
+            pa![],
+        );
+        let a = std::sync::Arc::new(App::new(
+            db,
+            std::env::temp_dir(),
+            1,
+            "apollo-office".into(),
+        ));
+        ensure(&a, "local").await.unwrap();
+        let host = ho(&a, "local").unwrap();
+        let first = hx(
+            &a,
+            "local",
+            "set -e; test $(node --version) = v24.22.3; test $(npm --version) = 12.2.0; test -L \"$npm_config_cache/_cacache\"; mkdir -p /work/smoke-node20 /work/smoke-default; echo alive > /work/smoke-sentinel; printf '%s' \"$npm_config_cache\"",
+            120,
+        )
+        .await;
+        assert_eq!(first.c, 0, "{}", first.all());
+        let cache = first.o.trim();
+        assert!(cache.starts_with("/tmp/apollo-npm-"));
+        let next = hx(
+            &a,
+            "local",
+            &format!("set -e; test ! -e '{}'; test -f /work/smoke-sentinel; test -L \"$npm_config_cache/_cacache\"; fnm install 20.19.0; echo 20.19.0 > /work/smoke-node20/.node-version; cd /work/smoke-node20; test $(node --version) = v20.19.0; cd /work/smoke-default; test $(node --version) = v24.22.3",cache),
+            300,
+        )
+        .await;
+        assert_eq!(next.c, 0, "{}", next.all());
+        let pause = hraw(&host, &format!("docker pause {name}"), 30).await;
+        assert_eq!(pause.c, 0, "{}", pause.all());
+        assert!(ensure(&a, "local").await.is_err());
+        let unpause = hraw(&host, &format!("docker unpause {name}"), 30).await;
+        assert_eq!(unpause.c, 0, "{}", unpause.all());
+        let stop = hraw(&host, &format!("docker stop {name}"), 60).await;
+        assert_eq!(stop.c, 0, "{}", stop.all());
+        ensure(&a, "local").await.unwrap();
+        let resumed = hx(
+            &a,
+            "local",
+            "set -e; test $(cat /work/smoke-sentinel) = alive; cd /work/smoke-default; test $(node --version) = v24.22.3",
+            60,
+        )
+        .await;
+        assert_eq!(resumed.c, 0, "{}", resumed.all());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires disposable loopback SSH server"]
+    async fn real_ssh_worker_transport() {
+        assert_eq!(std::env::var("APOLLO_OFFICE_REAL_SSH").as_deref(), Ok("1"));
+        let db = crate::db::Db::mem();
+        db.run(
+            "insert into hs(id,ssh,dk,on_,ln,ci) values('ssh-ci','apollo-ci-ssh',0,1,1,1)",
+            pa![],
+        );
+        let a = std::sync::Arc::new(App::new(
+            db,
+            std::env::temp_dir(),
+            1,
+            "apollo-office".into(),
+        ));
+        let host = ho(&a, "ssh-ci").unwrap();
+        assert!(std::env::var_os("SSH_AUTH_SOCK").is_some());
+        assert!(std::env::var_os("APOLLO_FIXTURE_API_KEY").is_some());
+        let probe = hraw(
+            &host,
+            "set -e; test -z \"$SSH_AUTH_SOCK\"; test -z \"$APOLLO_FIXTURE_API_KEY\"; printf '%s' ssh-ok",
+            30,
+        )
+        .await;
+        assert_eq!(probe.c, 0, "{}", probe.all());
+        assert_eq!(probe.o, "ssh-ok");
+        let streamed = hx(
+            &a,
+            "ssh-ci",
+            &format!(": '{}'\nprintf '%s' stream-ok", "a".repeat(200_000)),
+            60,
+        )
+        .await;
+        assert_eq!(streamed.c, 0, "{}", streamed.all());
+        assert_eq!(streamed.o, "stream-ok");
+        let failed = hx(&a, "ssh-ci", "printf '%s' fixture-error >&2; exit 23", 30).await;
+        assert_eq!(failed.c, 23, "{}", failed.all());
+        assert!(failed.e.contains("fixture-error"));
+    }
+
     #[test]
     fn docker_cpu_cap_respects_daemon_ceiling() {
         assert_eq!(cap_docker_cpu(16, Some(12), 0), 12);
@@ -1281,6 +1418,7 @@ mod t {
         assert!(script.contains("docker run -d --init"));
         assert!(script.contains("worker container is paused"));
         assert!(script.contains("HostConfig.Init"));
+        assert!(script.contains("cannot apply worker resource limits"));
         assert!(script.contains("-v apollo-office-npm-downloads:/var/cache/apollo-npm"));
         assert!(!script.contains("-v apollo-office-npm:/root/.npm"));
         assert!(!script.contains("-v apollo-office-npm-downloads:/root/.npm"));
@@ -1344,6 +1482,54 @@ mod t {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn failed_docker_limit_update_is_not_reported_as_success() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "apollo-docker-limits-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let docker = dir.join("docker");
+        std::fs::write(
+            &docker,
+            "#!/bin/sh\ncase \"$1\" in\n  info) echo 8589934592 ;;\n  inspect) case \"$3\" in\n    '{{.State.Paused}}') echo false ;;\n    '{{.State.Running}}'|'{{.HostConfig.Init}}') echo true ;;\n  esac ;;\n  update) exit 17 ;;\n  *) exit 0 ;;\nesac\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let host = Ho {
+            id: "local".into(),
+            ssh: String::new(),
+            dk: true,
+            ln: 1,
+            ci: 1,
+            gb: 5,
+            on: true,
+            no: vec![],
+            cpu: 0,
+        };
+        let mut paths = vec![dir.clone()];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(dkup(&host, 1))
+            .env("PATH", std::env::join_paths(paths).unwrap())
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(output.status.code(), Some(7), "{output:?}");
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("ok local"));
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("cannot apply worker resource limits")
+        );
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn credentials_stay_available_to_cli_but_are_removed_from_workers() {
         let _lock = crate::ai::CLI_TEST_LOCK.lock().await;
@@ -1368,6 +1554,50 @@ mod t {
         assert_eq!(cli.o, "controlled-fixture-value");
         assert_eq!(worker.c, 0);
         assert_eq!(worker.o, "");
+    }
+
+    #[test]
+    fn worker_secret_filter_covers_ci_and_registry_credentials() {
+        for key in [
+            "github_token",
+            "CARGO_REGISTRIES_PRIVATE_TOKEN",
+            "AWS_SECURITY_TOKEN",
+            "GOOGLE_CREDENTIALS",
+            "KUBECONFIG",
+            "DOCKER_CONFIG",
+            "GIT_SSH_COMMAND",
+            "EXAMPLE_PRIVATE_KEY",
+            "MIGRATION_PROVIDER_FIXTURE",
+        ] {
+            assert!(worker_secret(key), "{key}");
+        }
+        for key in ["PATH", "HOME", "CARGO_BUILD_JOBS", "RUST_TEST_THREADS"] {
+            assert!(!worker_secret(key), "{key}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn explicit_worker_environment_cannot_restore_filtered_credentials() {
+        let args = vec![
+            "-c".into(),
+            "printf '%s:%s' \"$APOLLO_FIXTURE_PRIVATE_KEY\" \"$APOLLO_FIXTURE_MODE\"".into(),
+        ];
+        let result = run(
+            &bash(),
+            &args,
+            Rq {
+                strip_worker_secrets: true,
+                env: vec![
+                    ("APOLLO_FIXTURE_PRIVATE_KEY".into(), "fixture".into()),
+                    ("APOLLO_FIXTURE_MODE".into(), "allowed".into()),
+                ],
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(result.c, 0);
+        assert_eq!(result.o, ":allowed");
     }
 
     #[test]

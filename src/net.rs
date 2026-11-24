@@ -7,12 +7,26 @@ const HW: &str = r#"o=$(uname -s); echo "os $o"
 if [ "$o" = Darwin ]; then echo "cpu $(sysctl -n hw.ncpu)"; echo "load $(sysctl -n vm.loadavg | awk '{print $2}')"; p=$(pagesize); echo "mem $(($(sysctl -n hw.memsize)/1048576)) $(vm_stat | awk -v p=$p '/Pages (free|inactive|speculative)/{gsub(/[.]/,"",$NF);s+=$NF} END{print int(s*p/1048576)}')"
 else echo "cpu $(nproc)"; echo "load $(cut -d' ' -f1 /proc/loadavg)"; echo "mem $(awk '/MemTotal/{t=$2}/MemAvailable/{a=$2}END{print int(t/1024), int(a/1024)}' /proc/meminfo)"; t=$(cat /sys/class/thermal/thermal_zone*/temp | sort -n | tail -1); [ -n "$t" ] && echo "temp $((t/1000))"; fi
 echo "disk $(df -Pk "$HOME" | awk 'NR==2{print int($2/1048576), int($4/1048576)}')"
-echo "up $(uptime | sed 's/.*up *//; s/, *[0-9]* user.*//')""#;
+echo "up $(uptime | sed 's/.*up *//; s/, *[0-9]* user.*//')"
+# Optional, read-only NVIDIA telemetry. Never install a driver or require a GPU.
+if command -v nvidia-smi >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+    timeout 5s nvidia-smi --query-gpu=index,memory.total,memory.used,temperature.gpu,utilization.gpu --format=csv,noheader,nounits 2>/dev/null | awk 'NR<=16 {print "gpu " $0}'
+fi"#;
 
 fn hw(o: &str) -> serde_json::Value {
     let mut v = serde_json::json!({"t": now()});
+    let mut gpus = Vec::new();
+    let mut gpu_ids = std::collections::HashSet::new();
     for l in o.lines() {
         let (k, x) = l.split_once(' ').unwrap_or((l, ""));
+        if k == "gpu" {
+            if let Some(gpu) = gpu_sample(x) {
+                if gpu_ids.insert(gpu["index"].as_u64().unwrap_or(u64::MAX)) {
+                    gpus.push(gpu);
+                }
+            }
+            continue;
+        }
         let ns: Vec<f64> = x
             .split_whitespace()
             .filter_map(|n| n.parse().ok())
@@ -24,7 +38,39 @@ fn hw(o: &str) -> serde_json::Value {
             _ => {}
         }
     }
+    if !gpus.is_empty() {
+        v["gpu"] = serde_json::json!(gpus);
+    }
     v
+}
+
+fn gpu_sample(line: &str) -> Option<serde_json::Value> {
+    let fields = line.split(',').map(str::trim).collect::<Vec<_>>();
+    if fields.len() != 5 {
+        return None;
+    }
+    let index = fields[0].parse::<u64>().ok()?;
+    if index > 255 {
+        return None;
+    }
+    let total = fields[1].parse::<u64>().ok().filter(|v| *v > 0);
+    let used = fields[2].parse::<u64>().ok();
+    let memory = total.zip(used).filter(|(t, u)| u <= t);
+    let temp = fields[3]
+        .parse::<f64>()
+        .ok()
+        .filter(|v| (0.0..=130.0).contains(v));
+    let util = fields[4]
+        .parse::<f64>()
+        .ok()
+        .filter(|v| (0.0..=100.0).contains(v));
+    if memory.is_none() && temp.is_none() && util.is_none() {
+        return None;
+    }
+    Some(
+        serde_json::json!({"index":index,"vram_total_mib":memory.map(|(t,_)|t),
+        "vram_used_mib":memory.map(|(_,u)|u),"temperature_c":temp,"utilization_percent":util}),
+    )
 }
 
 static LAST: AtomicI64 = AtomicI64::new(0);
@@ -164,5 +210,24 @@ pub async fn watch(a: Ax) {
     loop {
         all(&a).await;
         sl(60_000).await;
+    }
+}
+
+#[cfg(test)]
+mod gpu_telemetry_tests {
+    use super::*;
+
+    #[test]
+    fn gpu_metrics_are_optional_bounded_and_per_device() {
+        let v = hw("cpu 8\ngpu 0,8192,1024,55,23\ngpu 1,16384,8192,N/A,99\ngpu 0,8192,4096,70,100");
+        let gpu = v["gpu"].as_array().unwrap();
+        assert_eq!(gpu.len(), 2);
+        assert_eq!(gpu[0]["vram_used_mib"], 1024);
+        assert_eq!(gpu[1]["temperature_c"], serde_json::Value::Null);
+        assert_eq!(gpu[1]["vram_total_mib"], 16384);
+        assert!(hw("cpu 8\ngpu 0,N/A,N/A,N/A,N/A")["gpu"].is_null());
+        let invalid = gpu_sample("0,1024,2048,999,101");
+        assert!(invalid.is_none());
+        assert!(gpu_sample("no GPU").is_none());
     }
 }

@@ -183,6 +183,8 @@ canvas { display: block; image-rendering: pixelated; image-rendering: crisp-edge
 .log { font: 12px/1.45 var(--m); color: var(--t2); }
 .log div { display: grid; grid-template-columns: 42px 68px minmax(0, 1fr); gap: 7px; align-items: start; padding: 2px 0; }
 .log div span:last-child { min-width: 0; overflow-wrap: anywhere; }
+#jobLogRows.job-log-nowrap div span:last-child { white-space: pre; overflow-x: auto; overflow-wrap: normal; }
+#jobLogRows:not(.job-log-nowrap) div span:last-child { white-space: pre-wrap; }
 .log .tm { color: var(--t2); }
 .row.apr .a { color: var(--ok); }
 #prs .row { grid-template-columns: 72px minmax(0, 1fr); align-items: start; gap: 5px 9px; padding: 9px 0; }
