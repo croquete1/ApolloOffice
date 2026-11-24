@@ -25,8 +25,8 @@ mod t {
         let fix=json!({"st":"ready","kind":"fix","manual_priority":0,"d":{"issue_priority":3}});
         let other=json!({"st":"ready","kind":"fix","d":{"issue_priority":1}});
         let review=json!({"st":"ready","kind":"review"});
-        assert!(pick_rank(&fix)<pick_rank(&other));
-        assert!(pick_rank(&review)<pick_rank(&fix));
+        assert!(pick_rank(&fix, 0)<pick_rank(&other, 0));
+        assert!(pick_rank(&review, 0)<pick_rank(&fix, 0));
     }
 
     #[test]
@@ -72,14 +72,31 @@ mod t {
     }
 
     #[test]
+    fn aging_promotes_automatic_fixes_only_and_never_crosses_critical_priority() {
+        let at=1+4*86_400_000;
+        let mut row=json!({"kind":"fix","st":"ready","t0":1,"d":{"issue_priority":3}});
+        assert_eq!(pick_rank(&row,1).2,3);
+        assert_eq!(pick_rank(&row,1+86_400_000).2,2);
+        assert_eq!(pick_rank(&row,at).2,1);
+        row["manual_priority"]=json!(3);
+        assert_eq!(pick_rank(&row,at).2,3);
+        row["manual_priority"]=Value::Null;
+        row["d"]["issue_priority"]=json!(0);
+        assert_eq!(pick_rank(&row,at).2,0);
+        row["d"]["issue_priority"]=json!(3);
+        row["kind"]=json!("hunt");
+        assert_eq!(pick_rank(&row,at).2,3);
+    }
+
+    #[test]
     fn ready_fixes_precede_new_hunts_and_rebases() {
         let fix = json!({"id":1,"kind":"fix","st":"ready","prio":-0.5,"d":{}});
         let hunt = json!({"id":2,"kind":"hunt","st":"ready","prio":99.0,"d":{}});
         let rebase = json!({"id":3,"kind":"rebase","st":"ready","prio":-1.0,"d":{}});
         let submit = json!({"id":4,"kind":"fix","st":"submit","prio":0.0,"d":{}});
-        assert!(pick_rank(&fix) < pick_rank(&hunt));
-        assert!(pick_rank(&fix) < pick_rank(&rebase));
-        assert!(pick_rank(&submit) < pick_rank(&fix));
+        assert!(pick_rank(&fix, 0) < pick_rank(&hunt, 0));
+        assert!(pick_rank(&fix, 0) < pick_rank(&rebase, 0));
+        assert!(pick_rank(&submit, 0) < pick_rank(&fix, 0));
     }
 
     #[cfg(unix)]
@@ -665,10 +682,10 @@ mod t {
         let fix = json!({"st":"ready", "kind":"fix", "prio":0, "id":2});
         let mergecheck = json!({"st":"ready", "kind":"mergecheck", "prio":0, "id":3});
         let hunt = json!({"st":"ready", "kind":"hunt", "prio":0, "id":1});
-        assert!(pick_rank(&mergecheck) < pick_rank(&fix));
-        assert!(pick_rank(&fix) < pick_rank(&hunt));
+        assert!(pick_rank(&mergecheck, 0) < pick_rank(&fix, 0));
+        assert!(pick_rank(&fix, 0) < pick_rank(&hunt, 0));
         let high_priority_number = json!({"st":"ready", "kind":"fix", "prio":100_000, "id":3});
-        assert!(pick_rank(&high_priority_number) < pick_rank(&hunt));
+        assert!(pick_rank(&high_priority_number, 0) < pick_rank(&hunt, 0));
     }
 
     #[test]

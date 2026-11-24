@@ -648,6 +648,35 @@ impl Db {
         clippy::too_many_arguments,
         reason = "Typed insert mirrors the existing jobs schema"
     )]
+    /// Admit an exact internal Hunter duplicate at most once while the prior
+    /// candidate is active. Different locations and subsequent regressions
+    /// after a completed/dropped candidate remain eligible for human triage.
+    pub fn queue_hunter_find(&self, repo: &str, data: &Value) -> rusqlite::Result<bool> {
+        let title = data["title"].as_str().map(str::trim).filter(|s| !s.is_empty())
+            .ok_or(rusqlite::Error::InvalidQuery)?;
+        let location = data["hunt"]["where"].as_str().map(str::trim).filter(|s| !s.is_empty())
+            .ok_or(rusqlite::Error::InvalidQuery)?;
+        if !data["body"].as_str().is_some_and(|s| !s.trim().is_empty()) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let display = title.chars().take(200).collect::<String>();
+        let t = now();
+        let c = self.0.lock().unwrap();
+        let changed = c.execute(
+            "insert into jobs(repo,num,kind,title,url,st,why,d,prio,t0,t1)
+             select ?,0,'fix',?,?,'vet','found by Hunter',?,0,?,?
+             where not exists(select 1 from jobs where repo=? and num=0 and kind='fix'
+               and st not in ('done','drop')
+               and lower(trim(json_extract(d,'$.title')))=lower(?)
+               and trim(json_extract(d,'$.hunt.where'))=?)",
+            rusqlite::params![repo,display,format!("https://github.com/{repo}"),data.to_string(),t,t,repo,title,location],
+        )?;
+        if changed != 0 {
+            crate::app::chg();
+        }
+        Ok(changed == 1)
+    }
+
     pub fn jnew(
         &self,
         repo: &str,
@@ -1089,5 +1118,26 @@ mod late_followup_tests {
             .queue_followup_and_ack("o/r", 2, "t3", &["i3".into()], &request)
             .is_err());
         assert!(!db.comment_acknowledged("o/r", "i3").unwrap());
+    }
+}
+
+#[cfg(test)]
+mod hunter_duplicate_tests {
+    use super::*;
+    #[test]
+    fn exact_hunter_duplicate_is_atomic_and_scoped_to_repo_and_location() {
+        let db = Db::mem();
+        let mut data = json!({"title":"Broken parser","body":"reproduction","hunt":{"where":"src/parser.rs"}});
+        assert!(db.queue_hunter_find("o/r",&data).unwrap());
+        data["title"] = json!(" broken PARSER ");
+        assert!(!db.queue_hunter_find("o/r",&data).unwrap());
+        assert!(db.queue_hunter_find("o/s",&data).unwrap());
+        data["hunt"]["where"] = json!("src/other.rs");
+        assert!(db.queue_hunter_find("o/r",&data).unwrap());
+        db.run("update jobs set st='done' where repo='o/r'",vec![]);
+        assert!(db.queue_hunter_find("o/r",&data).unwrap());
+        data["hunt"]["where"] = json!("");
+        assert!(db.queue_hunter_find("o/r",&data).is_err());
+        assert_eq!(db.n("select count(*) from jobs",vec![]),4);
     }
 }

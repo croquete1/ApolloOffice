@@ -63,6 +63,35 @@ pub async fn open_issues(repo: &str) -> Result<Vec<Value>, String> {
     normalize_open_issues(rows)
 }
 
+/// Complete lightweight inventory for Hunter. Do not use capped CLI lists.
+pub async fn open_pr_summaries(repo: &str) -> Result<Vec<Value>, String> {
+    let rows = apip(&format!(
+        "repos/{repo}/pulls?state=open&sort=created&direction=asc&per_page=100"
+    ))
+    .await?;
+    normalize_open_pr_summaries(rows)
+}
+
+fn normalize_open_pr_summaries(rows: Vec<Value>) -> Result<Vec<Value>, String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut summaries = Vec::new();
+    for row in rows {
+        let number = row["number"]
+            .as_i64()
+            .filter(|n| *n > 0)
+            .ok_or("PR inventory contains an invalid number")?;
+        if !seen.insert(number)
+            || row["state"] != "open"
+            || !row["title"].is_string()
+            || !(row["body"].is_null() || row["body"].is_string())
+        {
+            return Err(format!("PR #{number} has duplicate or incomplete inventory metadata"));
+        }
+        summaries.push(json!({"number":number,"title":row["title"],"body":row["body"]}));
+    }
+    Ok(summaries)
+}
+
 fn normalize_open_issues(rows: Vec<Value>) -> Result<Vec<Value>, String> {
     let mut seen = std::collections::HashSet::new();
     let mut issues = Vec::new();
@@ -124,6 +153,16 @@ mod issue_listing_tests {
         assert_eq!(result.len(), 501);
         assert_eq!(result[500]["number"], 501);
         assert_eq!(result[0]["author"]["login"], "reporter");
+    }
+
+    #[test]
+    fn pr_summaries_do_not_cap_or_accept_duplicate_and_incomplete_rows() {
+        let row = |n| json!({"number":n,"state":"open","title":"Fix","body":null});
+        let rows = (1..=1001).map(row).collect();
+        assert_eq!(normalize_open_pr_summaries(rows).unwrap().len(), 1001);
+        assert!(normalize_open_pr_summaries(vec![row(1),row(1)]).is_err());
+        assert!(normalize_open_pr_summaries(vec![json!({"number":1})]).is_err());
+        assert!(normalize_open_pr_summaries(vec![]).unwrap().is_empty());
     }
 
     #[test]

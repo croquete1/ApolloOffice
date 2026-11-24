@@ -3730,69 +3730,21 @@ async fn hunt(a: &Ax, j: &mut Job) -> R<i64> {
         &format!("[{}] hunting bugs in {}", j.h(), j.repo),
         Some(j.id),
     );
-    let mut ti: Vec<String> = a.db.all("select id, json_extract(d,'$.title') t, coalesce(json_extract(d,'$.hunt.where'),json_extract(d,'$.ext.where'),'') w from jobs where repo=? and num=0 and kind='fix' and st not in ('drop') order by id desc limit 200", pa![j.repo.clone()]).iter().map(|x| format!("office find #{}: {}\n  where: {}", x["id"], x["t"].as_str().unwrap_or(""), x["w"].as_str().unwrap_or(""))).collect();
-    for x in ghj(
-        &[
-            "pr",
-            "list",
-            "-R",
-            &j.repo,
-            "--state",
-            "open",
-            "--limit",
-            "1000",
-            "--json",
-            "number,title,body",
-        ],
-        240,
-    )
-    .await
-    .unwrap_or_default()
-    .as_array()
-    .cloned()
-    .unwrap_or_default()
-    {
-        ti.push(format!(
-            "pr #{}: {}\n  {}",
-            x["number"],
-            x["title"].as_str().unwrap_or(""),
-            crate::sh::head(
-                &x["body"]
-                    .as_str()
-                    .unwrap_or("")
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" "),
-                250
-            )
-        ));
+    let mut ti: Vec<String> = a.db.try_all("select id, json_extract(d,'$.title') t, coalesce(json_extract(d,'$.hunt.where'),json_extract(d,'$.ext.where'),'') w from jobs where repo=? and num=0 and kind='fix' and st not in ('drop') order by id desc", pa![j.repo.clone()])
+        .map_err(|_| X::Defer("Hunter: local finding inventory unavailable".into()))?
+        .iter().map(|x| format!("office find #{}: {}\n  where: {}", x["id"], x["t"].as_str().unwrap_or(""), x["w"].as_str().unwrap_or(""))).collect();
+    let (prs,issues)=tokio::join!(crate::gh::open_pr_summaries(&j.repo),crate::gh::open_issues(&j.repo));
+    for x in prs.map_err(|_|X::Defer("Hunter: complete PR inventory unavailable".into()))? {
+        ti.push(format!("pr #{}: {}\n  {}",x["number"],x["title"].as_str().unwrap_or(""),
+            crate::sh::head(&x["body"].as_str().unwrap_or("").split_whitespace().collect::<Vec<_>>().join(" "),250)));
     }
-    for x in ghj(
-        &[
-            "issue",
-            "list",
-            "-R",
-            &j.repo,
-            "--state",
-            "open",
-            "--limit",
-            "1000",
-            "--json",
-            "number,title",
-        ],
-        240,
-    )
-    .await
-    .unwrap_or_default()
-    .as_array()
-    .cloned()
-    .unwrap_or_default()
-    {
-        ti.push(format!(
-            "issue #{}: {}",
-            x["number"],
-            x["title"].as_str().unwrap_or("")
-        ));
+    for x in issues.map_err(|_|X::Defer("Hunter: complete issue inventory unavailable".into()))? {
+        ti.push(format!("issue #{}: {}",x["number"],x["title"].as_str().unwrap_or("")));
+    }
+    let known=ti.join("\n");
+    // Never silently discard the tail of the deduplication inventory.
+    if known.chars().count()>200_000 {
+        return Err(X::Defer("Hunter: inventory exceeds safe context capacity; manual triage required".into()));
     }
     let md = a.md("hunter");
     let mut o = Ask::new(
@@ -3802,7 +3754,7 @@ async fn hunt(a: &Ax, j: &mut Job) -> R<i64> {
         format!(
             "Repository: {}.\n\nAlready reported or in progress (do not report these again):\n{}{}",
             j.repo,
-            wrap("known", &crate::sh::head(&ti.join("\n"), 200_000)),
+            wrap("known", &known),
             rules(a, j)
         ),
     );
@@ -3853,7 +3805,10 @@ async fn hunt(a: &Ax, j: &mut Job) -> R<i64> {
     .await?;
     let mut n = 0;
     for (k, x) in fs.iter().enumerate() {
-        if g[&format!("h{k}")]["inj"].as_bool().unwrap_or(false) {
+        let Some(injection)=g[&format!("h{k}")]["inj"].as_bool() else {
+            return Err(X::Defer("Hunter: Guard verdict unavailable".into()));
+        };
+        if injection {
             a.say(
                 "guard",
                 &format!(
@@ -3864,15 +3819,16 @@ async fn hunt(a: &Ax, j: &mut Job) -> R<i64> {
             );
             continue;
         }
-        let t = x["title"]
-            .as_str()
-            .unwrap_or("")
-            .chars()
-            .take(200)
-            .collect::<String>();
-        a.db.jnew(&j.repo, 0, "fix", &t, &format!("https://github.com/{}", j.repo), "vet", "found by Hunter", json!({"ms": [md], "hunt": {"title": x["title"], "where": x["where"], "proof": x["proof"]}, "title": x["title"], "body": format!("{}\n\nWhere: {}\nProof: {}", x["desc"].as_str().unwrap_or(""), x["where"].as_str().unwrap_or(""), x["proof"].as_str().unwrap_or("-"))}), None, 0.0);
-        a.flow("hunter", "guard", &j.repo);
-        n += 1;
+        let data=json!({"ms":[md],"hunt":{"title":x["title"],"where":x["where"],"proof":x["proof"]},
+            "title":x["title"],"body":format!("{}\n\nWhere: {}\nProof: {}",x["desc"].as_str().unwrap_or(""),x["where"].as_str().unwrap_or(""),x["proof"].as_str().unwrap_or("-"))});
+        match a.db.queue_hunter_find(&j.repo,&data) {
+            Ok(true)=>{
+                a.flow("hunter","guard",&j.repo);
+                n+=1;
+            }
+            Ok(false)=>a.say("hunter","Exact active finding already queued; no duplicate task",Some(j.id)),
+            Err(_)=>return Err(X::Defer("Hunter: could not persist finding".into())),
+        }
     }
     a.say(
         "hunter",
@@ -4533,7 +4489,7 @@ pub(crate) fn admit(a: &Ax, repo: &str, host: &str, id: i64) -> bool {
     true
 }
 
-fn pick_rank(j: &Value) -> (i32, i32, i32, f64, i64, i64) {
+fn pick_rank(j: &Value, at: i64) -> (i32, i32, i32, f64, i64, i64) {
     let d = &j["d"];
     let kind = j["kind"].as_str().unwrap_or("fix");
     let resumed = d["rs"].as_bool().unwrap_or(false) || d["rp"].as_bool().unwrap_or(false);
@@ -4558,7 +4514,15 @@ fn pick_rank(j: &Value) -> (i32, i32, i32, f64, i64, i64) {
         "mergecheck" => 2,
         _ => 0,
     };
-    let issue_priority = j["manual_priority"].as_i64().or_else(|| d["issue_priority"].as_i64()).unwrap_or(2).clamp(0, 3) as i32;
+    let issue_priority = if let Some(p)=j["manual_priority"].as_i64() {
+        p.clamp(0,3)
+    } else {
+        let base=d["issue_priority"].as_i64().unwrap_or(2).clamp(0,3);
+        let age=j["t0"].as_i64().filter(|t|*t>0 && *t<=at).map(|t|at.saturating_sub(t)).unwrap_or(0);
+        // Only ordinary automatic fixes age; never outrank explicit P0,
+        // change manually selected priority or cross pipeline-phase boundaries.
+        if phase==3 && base>1 {(base-age/86_400_000).max(1)} else {base}
+    } as i32;
     (
         phase,
         follow_up_order,
@@ -4581,8 +4545,9 @@ async fn pick(a: &Ax, h: &str, allow_hunt: bool) -> Option<i64> {
         Err(error)=>{ eprintln!("scheduler inventory unavailable: {error}"); return None; }
     };
     let active_repos = a.act.lock().unwrap().iter().filter_map(|entry| entry.split_once(' ').map(|(repo,_)|repo.to_string())).collect::<Vec<_>>();
+    let at=now();
     c.sort_by(|x,y| {
-        let left=pick_rank(x); let right=pick_rank(y);
+        let left=pick_rank(x,at); let right=pick_rank(y,at);
         (left.0,left.1,left.2).cmp(&(right.0,right.1,right.2))
             .then_with(|| {
                 // Only balance new ordinary fixes within the same priority.
