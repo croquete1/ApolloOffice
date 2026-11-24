@@ -1292,14 +1292,19 @@ fn tok_ok(a: &Ax, h: &HeaderMap) -> bool {
         .unwrap_or("")
         .trim()
         .to_string();
-    let k = a.db.kg("api");
-    if t.len() < 20 || k["h"].as_str() != Some(&th(&t)) {
+    if t.len() < 20 {
         return false;
     }
-    let mut k = k;
-    k["last"] = json!(now());
-    a.db.ks("api", &k);
-    true
+    // Match and update the current token in a single statement. An old
+    // request must never recreate a revoked token or overwrite a rotation.
+    let c = a.db.0.lock().unwrap();
+    matches!(
+        c.execute(
+            "update kv set v=json_set(v,'$.last',?) where k='api' and json_extract(v,'$.h')=?",
+            rusqlite::params![now(), th(&t)],
+        ),
+        Ok(1)
+    )
 }
 
 fn cut(s: &str, n: usize) -> String {
@@ -2307,7 +2312,9 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
             let op = b["op"].as_str().unwrap_or("");
             match op {
                 "logout" => {
-                    a.db.run("delete from ses", pa![]);
+                    if a.db.run("delete from ses", pa![]) < 0 {
+                        return er(StatusCode::CONFLICT, "sessions were not revoked");
+                    }
                     a.say("scout", "signed out everywhere", None);
                 }
                 "history" => {
@@ -2372,12 +2379,19 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
         ("POST", "/api/hooktok") => match b["op"].as_str().unwrap_or("") {
             "new" => {
                 let t = hex::encode(rand::random::<[u8; 24]>());
-                a.db.ks("hook", &json!({"h": th(&t), "t0": now()}));
+                if a.db.run(
+                    "insert into kv(k,v) values('hook',?) on conflict(k) do update set v=excluded.v",
+                    pa![json!({"h": th(&t), "t0": now()}).to_string()],
+                ) < 0 {
+                    return er(StatusCode::CONFLICT, "token was not saved");
+                }
                 a.say("scout", "new error tracker link created", None);
                 js(json!({"ok": true, "tok": t}))
             }
             "off" => {
-                a.db.kd("hook");
+                if a.db.run("delete from kv where k='hook'", pa![]) < 0 {
+                    return er(StatusCode::CONFLICT, "token was not revoked");
+                }
                 a.say("scout", "error tracker link revoked", None);
                 js(json!({"ok": true}))
             }
@@ -2386,12 +2400,20 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
         ("POST", "/api/apitok") => match b["op"].as_str().unwrap_or("") {
             "new" => {
                 let t = format!("ao_{}", hex::encode(rand::random::<[u8; 24]>()));
-                a.db.ks("api", &json!({"h": th(&t), "t0": now()}));
+                if a.db.run(
+                    "insert into kv(k,v) values('api',?) on conflict(k) do update set v=excluded.v",
+                    pa![json!({"h": th(&t), "t0": now()}).to_string()],
+                ) < 0
+                {
+                    return er(StatusCode::CONFLICT, "token was not saved");
+                }
                 a.say("scout", "new API token created", None);
                 js(json!({"ok": true, "tok": t}))
             }
             "off" => {
-                a.db.kd("api");
+                if a.db.run("delete from kv where k='api'", pa![]) < 0 {
+                    return er(StatusCode::CONFLICT, "token was not revoked");
+                }
                 a.say("scout", "API token revoked", None);
                 js(json!({"ok": true}))
             }
@@ -3503,6 +3525,59 @@ mod t {
         assert_eq!(observed["delivery"]["published_fixes"], 3);
         assert_eq!(observed["delivery"]["open_fixes"], 1);
         assert_eq!(observed["delivery"]["merged_fixes"], 1);
+    }
+
+    #[tokio::test]
+    async fn token_rotation_and_revocation_fail_closed() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            47302,
+            "apollo-office".into(),
+        ));
+        let old = "ao_old_fixture_token_for_regression";
+        let new = "ao_new_fixture_token_for_regression";
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", format!("Bearer {old}").parse().unwrap());
+        a.db.ks("api", &json!({"h":th(old),"t0":1}));
+        assert!(tok_ok(&a, &headers));
+        assert!(a.db.kg("api")["last"].is_i64());
+        a.db.ks("api", &json!({"h":th(new),"t0":2}));
+        assert!(!tok_ok(&a, &headers));
+        assert_eq!(a.db.kg("api")["h"], th(new));
+        headers.insert("authorization", format!("Bearer {new}").parse().unwrap());
+        a.db.0.lock().unwrap().execute_batch(
+            "create trigger fail_token_update before update on kv when old.k='api' begin select raise(abort,'injected'); end;
+             create trigger fail_token_delete before delete on kv when old.k='api' begin select raise(abort,'injected'); end;",
+        ).unwrap();
+        assert!(!tok_ok(&a, &headers));
+        assert_eq!(
+            api(&a, &Method::POST, "/api/apitok", "", json!({"op":"new"}))
+                .await
+                .status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            api(&a, &Method::POST, "/api/apitok", "", json!({"op":"off"}))
+                .await
+                .status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(a.db.kg("api")["h"], th(new));
+        a.db.0
+            .lock()
+            .unwrap()
+            .execute_batch("drop trigger fail_token_update; drop trigger fail_token_delete;")
+            .unwrap();
+        assert!(tok_ok(&a, &headers));
+        assert_eq!(
+            api(&a, &Method::POST, "/api/apitok", "", json!({"op":"off"}))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert!(!tok_ok(&a, &headers));
+        assert!(a.db.kg("api").is_null());
     }
 
     #[test]
