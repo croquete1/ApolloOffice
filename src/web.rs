@@ -2201,6 +2201,7 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                         "fix_attempts",
                         "coderabbit_requests",
                         "coderabbit_findings",
+                        "coderabbit_cycles",
                         "tok",
                         "seen",
                         "cm",
