@@ -838,7 +838,7 @@ r=$(docker inspect -f '{{{{.State.Running}}}}' {ct} 2>/dev/null)
 m=$(( $(docker info --format '{{{{.MemTotal}}}}' 2>/dev/null || echo 0) / 1048576 - 3072 ))
 [ "$m" -lt 2048 ] && m=2048
 if [ -z "$r" ]; then out=$(docker run -d --init --name {ct} --restart unless-stopped --cpus {cpu} --cpu-shares 128 --memory "$m"m --memory-swap "$m"m -v {work}:/work -v {cargo}:/usr/local/cargo/registry -v {npm}:/var/cache/apollo-npm {im} sleep infinity 2>&1) || [ "$(docker inspect -f '{{{{.State.Running}}}}' {ct} 2>/dev/null)" = true ] || docker start {ct} >/dev/null 2>&1 || {{ printf '%s\n' "$out" >&2; exit 3; }}; elif [ "$r" != true ]; then docker start {ct} >/dev/null || exit 3; fi
-docker update --cpus {cpu} --cpu-shares 128 --memory "$m"m --memory-swap "$m"m {ct} >/dev/null 2>&1
+docker update --cpus {cpu} --cpu-shares 128 --memory "$m"m --memory-swap "$m"m {ct} >/dev/null || {{ echo 'cannot apply worker resource limits' >&2; exit 7; }}
 docker images apollo-office-build --format '{{{{.Repository}}}}:{{{{.Tag}}}}' | grep -vx {im} | xargs -r docker rmi >/dev/null 2>&1
 echo ok {}"#,
         h.id,
@@ -1377,6 +1377,7 @@ mod t {
         assert!(script.contains("docker run -d --init"));
         assert!(script.contains("worker container is paused"));
         assert!(script.contains("HostConfig.Init"));
+        assert!(script.contains("cannot apply worker resource limits"));
         assert!(script.contains("-v apollo-office-npm-downloads:/var/cache/apollo-npm"));
         assert!(!script.contains("-v apollo-office-npm:/root/.npm"));
         assert!(!script.contains("-v apollo-office-npm-downloads:/root/.npm"));
@@ -1437,6 +1438,54 @@ mod t {
         );
         assert!(calls.lines().any(|line| line == "build"));
         assert!(!calls.lines().any(|line| line == "rm"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_docker_limit_update_is_not_reported_as_success() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "apollo-docker-limits-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let docker = dir.join("docker");
+        std::fs::write(
+            &docker,
+            "#!/bin/sh\ncase \"$1\" in\n  info) echo 8589934592 ;;\n  inspect) case \"$3\" in\n    '{{.State.Paused}}') echo false ;;\n    '{{.State.Running}}'|'{{.HostConfig.Init}}') echo true ;;\n  esac ;;\n  update) exit 17 ;;\n  *) exit 0 ;;\nesac\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let host = Ho {
+            id: "local".into(),
+            ssh: String::new(),
+            dk: true,
+            ln: 1,
+            ci: 1,
+            gb: 5,
+            on: true,
+            no: vec![],
+            cpu: 0,
+        };
+        let mut paths = vec![dir.clone()];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(dkup(&host, 1))
+            .env("PATH", std::env::join_paths(paths).unwrap())
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(output.status.code(), Some(7), "{output:?}");
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("ok local"));
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("cannot apply worker resource limits")
+        );
     }
 
     #[cfg(unix)]
