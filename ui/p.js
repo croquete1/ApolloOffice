@@ -800,6 +800,8 @@
             stale:"Evidência de revisão desatualizada",
             not_observed:"Nenhuma evidência observada",
             unknown:"Cobertura não confirmada",
+            pending:"Revisão em processamento",
+            skipped:"Revisão não executada",
             unavailable:"Consulta indisponível ou PR alterada"
           };
           status.textContent = (result.head === head && Object.hasOwn(labels,result.state) ? labels[result.state] : labels.unavailable) + " · não equivale a aprovação";
