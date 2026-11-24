@@ -562,6 +562,57 @@ impl Db {
         Ok(true)
     }
 
+    /// Atomic follow-up admission and acknowledgement. A replay cannot create a
+    /// second follow-up, and an already active follow-up leaves new input pending.
+    pub fn queue_followup_and_ack(
+        &self,
+        repo: &str,
+        number: i64,
+        updated: &str,
+        ids: &[String],
+        request: &Value,
+    ) -> rusqlite::Result<bool> {
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let merged: bool = tx.query_row(
+            "select exists(select 1 from prs where repo=? and num=? and st='merged')",
+            rusqlite::params![repo, number], |r| r.get(0),
+        )?;
+        if !merged || ids.is_empty() || ids.iter().any(|id| id.is_empty()) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let mut seen=0;
+        for id in ids {
+            let acknowledged:bool=tx.query_row("select exists(select 1 from cm where id=? or id=?)",
+                rusqlite::params![format!("{repo}:{id}"),id],|r|r.get(0))?;
+            if acknowledged { seen+=1; }
+        }
+        if seen==ids.len() {
+            Self::ack_comments_in_tx(&tx,repo,number,updated,ids)?;
+            tx.commit()?;
+            return Ok(true);
+        }
+        // The caller must re-read a partially processed batch instead of
+        // associating an already-consumed comment with a new action.
+        if seen!=0 { return Ok(false); }
+        let active:bool=tx.query_row(
+            "select exists(select 1 from jobs where repo=? and kind='fix' and json_extract(d,'$.after')=? and st not in ('done','drop'))",
+            rusqlite::params![repo,number],|r|r.get(0))?;
+        if active { return Ok(false); }
+        let title=request["title"].as_str().filter(|v|!v.trim().is_empty()).ok_or(rusqlite::Error::InvalidQuery)?;
+        let url=request["url"].as_str().ok_or(rusqlite::Error::InvalidQuery)?;
+        let why=request["why"].as_str().ok_or(rusqlite::Error::InvalidQuery)?;
+        let body=request["body"].as_str().filter(|v|!v.trim().is_empty()).ok_or(rusqlite::Error::InvalidQuery)?;
+        let t=now();
+        let data=json!({"title":title,"body":body,"after":number,"source_comments":ids});
+        tx.execute("insert into jobs(repo,num,kind,title,url,st,why,d,prio,t0,t1) values(?,0,'fix',?,?,'vet',?,?,-1.0,?,?)",
+            rusqlite::params![repo,title,url,why,data.to_string(),t,t])?;
+        Self::ack_comments_in_tx(&tx,repo,number,updated,ids)?;
+        tx.commit()?;
+        crate::app::chg();
+        Ok(true)
+    }
+
     pub fn comment_acknowledged(&self, repo: &str, id: &str) -> rusqlite::Result<bool> {
         let c = self.0.lock().unwrap();
         let count: i64 = c.query_row(
@@ -981,5 +1032,29 @@ mod strict_db_tests {
         assert_eq!(db.try_usd(None).unwrap(), 0.0);
         db.run("drop table cost", vec![]);
         assert!(db.try_usd(None).is_err());
+    }
+}
+
+#[cfg(test)]
+mod late_followup_tests {
+    use super::*;
+    #[test]
+    fn followup_commit_replay_and_pending_batch_are_atomic() {
+        let db=Db::mem();
+        db.run("insert into prs(repo,num,st,d) values('o/r',1,'merged','{}')",vec![]);
+        let request=json!({"title":"follow-up","body":"verified request","url":"https://example.test","why":"maintainer"});
+        let first=vec!["i1".into()];
+        let second=vec!["i2".into()];
+        assert!(db.queue_followup_and_ack("o/r",1,"t1",&first,&request).unwrap());
+        assert!(db.queue_followup_and_ack("o/r",1,"t1",&first,&request).unwrap());
+        assert_eq!(db.n("select count(*) from jobs",vec![]),1);
+        assert!(!db.queue_followup_and_ack("o/r",1,"t2",&second,&request).unwrap());
+        assert!(!db.comment_acknowledged("o/r","i2").unwrap());
+        db.run("update jobs set st='done'",vec![]);
+        assert!(db.queue_followup_and_ack("o/r",1,"t2",&second,&request).unwrap());
+        assert_eq!(db.n("select count(*) from jobs",vec![]),2);
+        assert!(db.comment_acknowledged("o/r","i2").unwrap());
+        assert!(db.queue_followup_and_ack("o/r",2,"t3",&["i3".into()],&request).is_err());
+        assert!(!db.comment_acknowledged("o/r","i3").unwrap());
     }
 }

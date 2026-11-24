@@ -4862,13 +4862,13 @@ fn docker_cache_target(a: &Ax, host: &str) -> Option<String> {
 }
 
 /// Reserves an idle host for cache maintenance; admission is blocked until Drop.
-struct IdleCacheGuard {
+pub(crate) struct IdleCacheGuard {
     a: Ax,
     target: String,
 }
 
 impl IdleCacheGuard {
-    fn claim(a: &Ax, host: &str) -> Option<Self> {
+    pub(crate) fn claim(a: &Ax, host: &str) -> Option<Self> {
         // The same lock serializes admission and cache-cleanup reservation.
         let _transition = a.update_transition.lock().unwrap();
         if a.drain.load(std::sync::atomic::Ordering::SeqCst) {
