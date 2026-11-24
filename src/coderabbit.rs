@@ -25,13 +25,17 @@ fn public_client() -> Result<reqwest::Client, String> {
 }
 
 async fn read_public(client: &reqwest::Client, endpoint: &str, limit: usize) -> Result<String, String> {
-    let mut response = client.get(format!("{API}/{endpoint}"))
+    let response = client.get(format!("{API}/{endpoint}"))
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .send().await.map_err(|_| "public GitHub request failed")?;
     if !response.status().is_success() {
         return Err(format!("public GitHub HTTP {}", response.status().as_u16()));
     }
+    bounded_body(response, limit).await
+}
+
+async fn bounded_body(mut response: reqwest::Response, limit: usize) -> Result<String, String> {
     if response.content_length().is_some_and(|n| n > limit as u64) {
         return Err("public GitHub response exceeds byte budget".into());
     }
@@ -340,6 +344,29 @@ mod tests {
         assert!(accept_page(&mut rows, &mut ids, &mut bytes, "[]").is_err());
         let (mut rows, mut ids, mut bytes) = (Vec::new(), BTreeSet::new(), 0);
         assert!(accept_page(&mut rows, &mut ids, &mut bytes, "[]").unwrap());
+    }
+    async fn mock_response(wire: &'static [u8]) -> reqwest::Response {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = socket.read(&mut request).await.unwrap();
+            let _ = socket.write_all(wire).await;
+        });
+        reqwest::Client::builder().no_proxy().timeout(std::time::Duration::from_secs(5))
+            .build().unwrap().get(format!("http://{addr}/")).send().await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn streamed_response_obeys_byte_budget() {
+        let exact = mock_response(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nabcd").await;
+        assert_eq!(bounded_body(exact, 4).await.unwrap(), "abcd");
+        let declared = mock_response(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nabcde").await;
+        assert!(bounded_body(declared, 4).await.is_err());
+        let chunked = mock_response(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\nabc\r\n3\r\ndef\r\n0\r\n\r\n").await;
+        assert!(bounded_body(chunked, 4).await.is_err());
     }
     #[test]
     fn comment_counts_reject_offset_gap_even_with_same_timestamp() {
