@@ -708,6 +708,17 @@ pub fn npm_cache_cleanup_cmd() -> String {
     )
 }
 
+/// Cap worker CPU allocation to the host and Docker daemon ceilings.
+pub fn cap_docker_cpu(host_cpus: i64, docker_ncpu: Option<i64>, configured: i64) -> i64 {
+    let host = host_cpus.max(1);
+    let cap = docker_ncpu.filter(|&d| d > 0).map_or(host, |d| host.min(d));
+    if configured > 0 {
+        configured.min(cap)
+    } else {
+        (host - 1).clamp(1, cap)
+    }
+}
+
 pub fn dkup(h: &Ho, cpu: i64) -> String {
     let ct = ct();
     let work = format!("{ct}-work");
@@ -716,16 +727,19 @@ pub fn dkup(h: &Ho, cpu: i64) -> String {
     format!(
         r#"command -v docker >/dev/null || {{ echo 'docker is not installed'; exit 2; }}
 docker info >/dev/null 2>&1 || {{ echo 'docker is not running'; exit 2; }}
+paused=$(docker inspect -f '{{{{.State.Paused}}}}' {ct} 2>/dev/null)
+if [ "$paused" = true ]; then echo 'worker container is paused; retry after it resumes' >&2; exit 6; fi
 if ! docker image inspect {im} >/dev/null 2>&1; then docker build -q -t {im} - <<'DOCKERFILE' || {{ echo 'worker image build failed; existing container preserved' >&2; exit 4; }}
 {DF}DOCKERFILE
 fi
 docker image inspect {im} >/dev/null 2>&1 || {{ echo 'replacement worker image unavailable; existing container preserved' >&2; exit 4; }}
 old=$(docker inspect -f '{{{{.Config.Image}}}}' {ct} 2>/dev/null)
-if [ -n "$old" ] && [ "$old" != {im} ]; then docker rm -f {ct} >/dev/null 2>&1 || {{ echo 'cannot remove previous worker container' >&2; exit 5; }}; fi
+ini=$(docker inspect -f '{{{{.HostConfig.Init}}}}' {ct} 2>/dev/null)
+if [ -n "$old" ] && {{ [ "$old" != {im} ] || [ "$ini" = false ] || [ "$ini" = '<nil>' ]; }}; then docker rm -f {ct} >/dev/null 2>&1 || {{ echo 'cannot remove previous worker container' >&2; exit 5; }}; fi
 r=$(docker inspect -f '{{{{.State.Running}}}}' {ct} 2>/dev/null)
 m=$(( $(docker info --format '{{{{.MemTotal}}}}' 2>/dev/null || echo 0) / 1048576 - 3072 ))
 [ "$m" -lt 2048 ] && m=2048
-if [ -z "$r" ]; then docker run -d --name {ct} --restart unless-stopped --cpus {cpu} --cpu-shares 128 --memory "$m"m --memory-swap "$m"m -v {work}:/work -v {cargo}:/usr/local/cargo/registry -v {npm}:/var/cache/apollo-npm {im} sleep infinity >/dev/null 2>&1 || [ "$(docker inspect -f '{{{{.State.Running}}}}' {ct} 2>/dev/null)" = true ] || docker start {ct} >/dev/null || exit 3; elif [ "$r" != true ]; then docker start {ct} >/dev/null || exit 3; fi
+if [ -z "$r" ]; then out=$(docker run -d --init --name {ct} --restart unless-stopped --cpus {cpu} --cpu-shares 128 --memory "$m"m --memory-swap "$m"m -v {work}:/work -v {cargo}:/usr/local/cargo/registry -v {npm}:/var/cache/apollo-npm {im} sleep infinity 2>&1) || [ "$(docker inspect -f '{{{{.State.Running}}}}' {ct} 2>/dev/null)" = true ] || docker start {ct} >/dev/null 2>&1 || {{ printf '%s\n' "$out" >&2; exit 3; }}; elif [ "$r" != true ]; then docker start {ct} >/dev/null || exit 3; fi
 docker update --cpus {cpu} --cpu-shares 128 --memory "$m"m --memory-swap "$m"m {ct} >/dev/null 2>&1
 docker images apollo-office-build --format '{{{{.Repository}}}}:{{{{.Tag}}}}' | grep -vx {im} | xargs -r docker rmi >/dev/null 2>&1
 echo ok {}"#,
@@ -774,21 +788,16 @@ pub async fn ensure(a: &Ax, id: &str) -> Result<(), String> {
             Err(format!("{}{}", r.o, r.e).trim().chars().take(300).collect())
         };
     }
-    let n = hraw(
+    let probe = hraw(
         &h,
-        "getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 4",
+        "getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 4; docker info --format '{{.NCPU}}' 2>/dev/null || echo 0",
         30,
     )
-    .await
-    .o
-    .trim()
-    .parse::<i64>()
-    .unwrap_or(4);
-    let cpu = if h.cpu > 0 {
-        h.cpu.min(n)
-    } else {
-        (n - 1).max(1)
-    };
+    .await;
+    let mut lines = probe.o.lines();
+    let host = lines.next().and_then(|v| v.trim().parse::<i64>().ok()).unwrap_or(4);
+    let daemon = lines.next().and_then(|v| v.trim().parse::<i64>().ok());
+    let cpu = cap_docker_cpu(host, daemon, h.cpu);
     a.db.ks(&format!("cpu:{id}"), &serde_json::json!(cpu));
     let r = hraw(&h, &dkup(&h, cpu), 3600).await;
     if r.c == 0 {
@@ -1049,6 +1058,15 @@ mod t {
     }
 
     #[test]
+    fn docker_cpu_cap_respects_daemon_ceiling() {
+        assert_eq!(cap_docker_cpu(16, Some(12), 0), 12);
+        assert_eq!(cap_docker_cpu(16, Some(12), 15), 12);
+        assert_eq!(cap_docker_cpu(16, Some(12), 6), 6);
+        assert_eq!(cap_docker_cpu(16, None, 0), 15);
+        assert_eq!(cap_docker_cpu(1, Some(1), 0), 1);
+    }
+
+    #[test]
     fn worker_image_build_must_succeed_before_replacing_container() {
         let host = Ho {
             id: "test".into(),
@@ -1071,6 +1089,9 @@ mod t {
         assert!(script.contains("exit 4; }"));
         assert!(script.contains("replacement worker image unavailable"));
         assert!(script.contains("cannot remove previous worker container"));
+        assert!(script.contains("docker run -d --init"));
+        assert!(script.contains("worker container is paused"));
+        assert!(script.contains("HostConfig.Init"));
         assert!(script.contains("-v apollo-office-npm-downloads:/var/cache/apollo-npm"));
         assert!(!script.contains("-v apollo-office-npm:/root/.npm"));
         assert!(!script.contains("-v apollo-office-npm-downloads:/root/.npm"));
