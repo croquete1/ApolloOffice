@@ -111,25 +111,14 @@ class Handler(SimpleHTTPRequestHandler):
       var filter = document.getElementById("aoTaskFilter");
       var repoFilter = document.getElementById("aoRepoFilter");
       assert(Boolean(app), "O dashboard operacional não carregou");
-      assert(canvas && office && canvas.parentElement === office, "O canvas pixelizado não está no escritório");
-      if (canvas && office && window.innerWidth <= 600) {
-        var canvasRect = canvas.getBoundingClientRect();
-        var officeRect = office.getBoundingClientRect();
+      assert(canvas && office && !office.contains(canvas) && canvas.getClientRects().length === 0,
+             "O escritório virtual continua visível");
+      assert(window.AO.disablePixelArt === true && window.AO.pixelMotion === false,
+             "A renderização do escritório não foi desativada");
+      if (window.innerWidth <= 600) {
         assert(getComputedStyle(document.querySelector(".ao-metrics")).gridTemplateColumns.split(" ").length === 2,
                "Os indicadores não se reorganizaram em duas colunas móveis");
-        assert(canvasRect.width > 300 && canvasRect.width <= officeRect.width + 1 &&
-               officeRect.width <= window.innerWidth + 1 &&
-               canvasRect.left >= officeRect.left - 1 && canvasRect.right <= officeRect.right + 1 &&
-               canvasRect.left >= -1 && canvasRect.right <= window.innerWidth + 1,
-               "O canvas pixelizado não cabe no escritório móvel (canvas=" + canvasRect.width + " @" + canvasRect.left +
-                 ".." + canvasRect.right + ", escritório=" + officeRect.width + " @" + officeRect.left + ".." + officeRect.right + ")");
       }
-      assert(canvas && ["pixelated", "crisp-edges"].includes(getComputedStyle(canvas).imageRendering),
-             "O canvas não usa renderização pixelizada");
-      assert(office && !getComputedStyle(office).backgroundImage.includes("office-panorama"),
-             "A imagem panorâmica voltou a aparecer");
-      assert(document.querySelectorAll(".ao-station[data-role]").length === 10,
-             "O estado não tem os dez postos de agentes");
       assert(document.querySelectorAll("#aoAgentList .ao-agent-row").length === 10,
              "A lista de estado dos dez agentes não carregou");
       assert(Boolean(filter && repoFilter), "Faltam os filtros de tarefa ou projeto");
@@ -145,7 +134,7 @@ class Handler(SimpleHTTPRequestHandler):
         assert(document.documentElement.scrollWidth <= window.innerWidth,
                "O dashboard móvel tem overflow horizontal");
       }
-      var fixer = document.querySelector('.ao-station[data-role="fixer"]');
+      var fixer = document.querySelector('#aoAgentList [data-role="fixer"]');
       if (window.__AO_SMOKE_ACTIVE__) {
         assert(document.getElementById("aoMetricWorkers").textContent.includes("1 / 10"),
                "A contagem de agentes ativos não reflete o Fixer");
@@ -214,7 +203,7 @@ class Handler(SimpleHTTPRequestHandler):
   (function waitForDashboard() {
     var ready = document.getElementById("aoControlRoom") &&
       document.getElementById("aoMetricWorkers") &&
-      document.querySelector(".ao-office > #cv") &&
+      document.getElementById("aoAgentList") &&
       document.getElementById("aoMetricWorkers").textContent.trim() !== "—";
     if (ready || Date.now() - started >= 3500) verify();
     else setTimeout(waitForDashboard, 50);
@@ -287,7 +276,7 @@ def run_case(browser: str, active: bool, screenshot: Path | None = None,
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    suffix = query or ("?ui=modern" if modern else (
+    suffix = query or ("" if modern else (
         "?pixel_telemetry=" + telemetry if telemetry else ""
     ))
     url = f"http://127.0.0.1:{server.server_port}/" + suffix

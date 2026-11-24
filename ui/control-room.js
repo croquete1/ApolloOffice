@@ -4,10 +4,7 @@
 (() => {
   "use strict";
   const A = window.AO;
-  // O ApolloOffice personalizado mantém o escritório pixelizado por omissão.
-  // A vista moderna só é carregada por pedido explícito: ?ui=modern.
-  const requestedUi = new URLSearchParams(window.location.search).get("ui");
-  if (requestedUi !== "modern") return;
+  // Operational dashboard is the default presentation.
   if (!A || document.querySelector(".ao-app")) return;
   const byId = (id) => document.getElementById(id);
   const escapeHTML = (value) => A.esc(value ?? "");
@@ -43,7 +40,7 @@
     '    <div class="ao-brand"><span class="ao-logo" aria-hidden="true"><img src="/assets/brand/apollo-mark.svg" alt=""></span><span><strong>Apollo Office</strong><small>Control Center</small></span></div>',
     '    <nav class="ao-navigation" aria-label="Navegação principal">',
     '      <button class="ao-nav-item is-active" type="button" data-target="aoOverview"><img src="/assets/icons/dashboard.svg" alt="" aria-hidden="true"><span>Painel</span></button>',
-    '      <button class="ao-nav-item" type="button" data-target="aoRoomPanel"><img src="/assets/icons/agents.svg" alt="" aria-hidden="true"><span>Agentes</span><span class="ao-nav-count" id="aoNavAgents">' + roles.length + '</span></button>',
+    '      <button class="ao-nav-item" type="button" data-target="aoAgentPanel"><img src="/assets/icons/agents.svg" alt="" aria-hidden="true"><span>Agentes</span><span class="ao-nav-count" id="aoNavAgents">' + roles.length + '</span></button>',
     '      <button class="ao-nav-item" type="button" data-target="aoTasks"><img src="/assets/icons/tasks.svg" alt="" aria-hidden="true"><span>Tarefas</span><span class="ao-nav-count" id="aoNavTasks" hidden></span></button>',
     '      <button class="ao-nav-item" type="button" data-target="aoPulls"><img src="/assets/icons/pulls.svg" alt="" aria-hidden="true"><span>Pull Requests</span><span class="ao-nav-count" id="aoNavPulls" hidden></span></button>',
     '      <button class="ao-nav-item" type="button" data-open="repos"><img src="/assets/icons/folder.svg" alt="" aria-hidden="true"><span>Repositórios</span></button>',
@@ -60,7 +57,7 @@
     '  <div class="ao-workspace">',
     '    <div class="ao-pixel-toolbar">',
     '      <nav class="ao-pixel-nav" aria-label="Navegação principal">',
-    '        <button class="ao-nav-item is-active" type="button" data-target="aoOverview">Painel</button><button class="ao-nav-item" type="button" data-target="aoRoomPanel">Agentes</button><button class="ao-nav-item" type="button" data-target="aoTasks">Tarefas</button><button class="ao-nav-item" type="button" data-target="aoPulls">Pull Requests</button><button class="ao-nav-item" type="button" data-target="aoActivity">Atividade</button>',
+    '        <button class="ao-nav-item is-active" type="button" data-target="aoOverview">Painel</button><button class="ao-nav-item" type="button" data-target="aoAgentPanel">Agentes</button><button class="ao-nav-item" type="button" data-target="aoTasks">Tarefas</button><button class="ao-nav-item" type="button" data-target="aoPulls">Pull Requests</button><button class="ao-nav-item" type="button" data-target="aoActivity">Atividade</button>',
     '      </nav>',
     '      <div class="ao-pixel-tools"><label for="aoRepoFilter">Projeto</label><select id="aoRepoFilter" aria-label="Filtrar por projeto"><option value="">Todos os projetos</option></select><button type="button" data-open="costs">Custos</button><button type="button" data-open="repos">Repositórios</button><button type="button" data-open="hosts">Máquinas</button><button type="button" data-open="settings">Definições</button></div>',
     '    </div>',
@@ -75,8 +72,8 @@
     '        <div class="ao-metric" data-tone="violet"><img src="/assets/icons/pulls.svg" alt="" aria-hidden="true"><span><small>PRs abertos (recentes) · Até 40 PRs registados</small><strong id="aoMetricPR">—</strong></span><span id="aoMetricPRSub" class="ao-metric-sub" hidden></span></div>',
     '        <div class="ao-metric" data-tone="green"><img src="/assets/icons/complete.svg" alt="" aria-hidden="true"><span><small>Correções integradas</small><strong id="aoMetricDone">—</strong></span><span class="ao-metric-sub">Relatório do steward</span></div>',
     '      </section>',
-    '      <section class="ao-primary-grid" aria-label="Escritório e estado dos agentes">',
-    '      <section class="ao-panel ao-room-panel" id="aoRoomPanel" aria-labelledby="aoRoomTitle">',
+    '      <section class="ao-primary-grid" aria-label="Estado dos agentes">',
+    '      <section class="ao-panel ao-room-panel" id="aoRoomPanel" aria-labelledby="aoRoomTitle" hidden>',
     '        <div class="ao-panel-heading"><img class="ao-panel-icon" src="/assets/icons/machines.svg" alt="" aria-hidden="true"><div><h2 id="aoRoomTitle">Escritório Virtual</h2><p>Dez papéis · estados observados em tempo real</p></div>',
     '          <div class="ao-room-controls"><span id="aoOfficeMode" class="ao-room-live" aria-live="polite">A aguardar estado</span><span class="ao-room-view" aria-hidden="true">Vista: Escritório</span><label class="ao-motion-label" for="aoMotion">Animações</label><input id="aoMotion" type="checkbox" checked aria-label="Ativar animações" title="A preferência do sistema para movimento reduzido é respeitada"><button id="aoExpand" type="button" class="ao-icon-button" aria-label="Ampliar o escritório" aria-controls="aoRoomPanel" aria-expanded="false" title="Ampliar o escritório">⤢</button></div>',
     '        </div>',
@@ -86,7 +83,7 @@
     '          <div class="ao-stations" id="aoStations"></div><div id="aoTransfer" class="ao-transfer-label" role="status" aria-live="polite" hidden></div>',
     '        </div>',
     '      </section>',
-    '      <article class="ao-panel ao-agent-panel"><div class="ao-panel-heading"><div><h2>Estado dos agentes</h2><p id="aoAgentSummary">10 papéis</p></div></div><div id="aoAgentList" class="ao-agent-list"></div></article>',
+    '      <article class="ao-panel ao-agent-panel" id="aoAgentPanel"><div class="ao-panel-heading"><div><h2>Estado dos agentes</h2><p id="aoAgentSummary">10 papéis</p></div></div><div id="aoAgentList" class="ao-agent-list"></div></article>',
     '      </section>',
     '      <section class="ao-panel ao-pipeline-panel" aria-label="Estado do fluxo de trabalho">',
     '        <div class="ao-panel-heading"><div><h2>Fluxo de trabalho</h2><p>Contagem total de tarefas por fase</p></div></div><div id="aoPipeline" class="ao-pipeline"></div>',
@@ -144,13 +141,11 @@
   const pixelTipParent = pixelTip?.parentElement || null;
   const pixelTipNext = pixelTip?.nextSibling || null;
   const pixelOffice = app.querySelector(".ao-office");
-  if (pixelCanvas && pixelOffice && pixelStage?.contains(pixelCanvas)) pixelOffice.append(pixelCanvas);
-  if (pixelOffice && pixelMerge && pixelStage?.contains(pixelMerge)) pixelOffice.append(pixelMerge);
-  if (pixelTip) document.body.append(pixelTip);
-  A.pixelDashboard = true;
+  // Keep legacy DOM for operational drawers; never mount the virtual room.
+  A.pixelDashboard = false;
   A.modernRoom = false;
-  A.pixelMotion = true;
-  A.disablePixelArt = false;
+  A.pixelMotion = false;
+  A.disablePixelArt = true;
 
   const stations = byId("aoStations");
   stations.innerHTML = officeRoles.map((role) => {
@@ -168,7 +163,7 @@
       '<span class="ao-agent-status">Sem dados</span></button>'
   ).join("");
   const taskFilterInput = byId("aoTaskFilter");
-  window.AOOfficeV2?.decorate(document.querySelector('.ao-office'), stations);
+  // No virtual room decoration.
   const stationNodes = Object.fromEntries(officeRoles.map((role) => [role, stations.querySelector('[data-role="' + role + '"]')]));
   // Arrow navigation follows the station grid; buttons remain individually tabbable.
   stations.addEventListener("keydown", (event) => {
@@ -213,8 +208,7 @@
   let lastRepoSignature = "", lastListSignature = "", lastMergeSignature = "", lastProdSignature = "", lastPipelineSignature = "";
   let listDialogData = {tasks: "", prs: "", activity: ""};
   let lastMachineSignature = "", lastDetailSignature = "", lastStateAt = 0;
-  let animationsOn = true;
-  try { animationsOn = localStorage.getItem("ao.motion") !== "off"; } catch {}
+  let animationsOn = false;
   const motion = byId("aoMotion");
   motion.checked = animationsOn;
   const syncMotion = () => {
@@ -223,8 +217,8 @@
   };
   syncMotion();
   motion.addEventListener("change", () => {
-    animationsOn = motion.checked;
-    try { localStorage.setItem("ao.motion", animationsOn ? "on" : "off"); } catch {}
+    animationsOn = false;
+    motion.checked = false;
     syncMotion();
     if (!animationsOn) clearReactions();
   });

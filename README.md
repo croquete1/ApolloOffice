@@ -14,9 +14,7 @@
 
 <p align="center"><a href="https://office.apollonet.dev">Website</a></p>
 
-![The pixel-art office, with worker stations, queue, pull requests and activity log](docs/images/office.png)
-
-ApolloOffice keeps the pixel-art office alongside live agent and task metrics,
+ApolloOffice presents an operational dashboard without an animated virtual office, with live agent and task metrics,
 the staged test-first pipeline, queue, pull requests, activity, 24-hour
 productivity and machine resources. The task and repository filters use live
 records, and the modules avoid rebuilding unchanged lists.

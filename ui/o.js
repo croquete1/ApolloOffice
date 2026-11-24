@@ -22,7 +22,7 @@
     const r = await fetch(p, { method: "POST", headers: { "content-type": "application/json", "x-ao": "1" }, body: JSON.stringify(b) });
     return r.json();
   };
-  window.AO = { get, post, esc, $, workLabel };
+  window.AO = { get, post, esc, $, workLabel, disablePixelArt: true, pixelMotion: false };
   // Dedicated, exception-isolated presentation subscriptions. Consumers do not
   // need to wrap the legacy onState callback or perform extra network requests.
   const stateListeners = new Set();
@@ -416,7 +416,6 @@
     // A separate modern-only renderer can leave this fallback canvas idle.
     // The pixel dashboard keeps the canvas visible and shares its motion toggle.
     if (window.AO?.disablePixelArt || (window.AO?.modernRoom && !window.AO?.pixelDashboard)) {
-      if (schedule) setTimeout(() => requestAnimationFrame(frame), 1500);
       return;
     }
     const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
@@ -466,7 +465,7 @@
   };
 
   const stage = cv.parentElement || $("stage");
-  if (window.ResizeObserver && stage) {
+  if (!window.AO.disablePixelArt && window.ResizeObserver && stage) {
     let resizeQueued = false;
     new ResizeObserver(() => {
       if (resizeQueued) return;
@@ -476,7 +475,7 @@
         frame(false);
       });
     }).observe(stage);
-  } else {
+  } else if (!window.AO.disablePixelArt) {
     window.addEventListener("resize", () => frame(false), { passive: true });
   }
 
@@ -911,5 +910,5 @@
   };
   poll();
   live();
-  requestAnimationFrame(frame);
+  if (!window.AO.disablePixelArt) requestAnimationFrame(frame);
 })();

@@ -101,15 +101,14 @@ test("no fictional GPU data or percentages of task completion", () => {
   assert.doesNotMatch(modern, /Ações Rápidas|Nova tarefa|Executar testes/);
 });
 
-test("the pixel canvas is the active office inside the live dashboard", () => {
-  assert.match(original, /window\.AO\?\.disablePixelArt \|\| \(window\.AO\?\.modernRoom && !window\.AO\?\.pixelDashboard\)/);
-  assert.match(original, /cv\.parentElement \|\| \$\("stage"\)/);
-  assert.match(modern, /pixelCanvas && pixelOffice/);
-  assert.match(modern, /A\.pixelDashboard = true/);
-  assert.match(modern, /A\.modernRoom = false/);
-  assert.match(modern, /A\.disablePixelArt = false/);
-  assert.match(pixelCss, /\.ao-office > #cv/);
-  assert.match(pixelCss, /image-rendering:pixelated/);
+test("virtual room is disabled and operational agent list is the default", () => {
+  assert.match(original, /disablePixelArt: true, pixelMotion: false/);
+  assert.match(modern, /A\.disablePixelArt = true/);
+  assert.match(modern, /A\.pixelDashboard = false/);
+  assert.doesNotMatch(modern, /pixelOffice\.append\(pixelCanvas\)/);
+  assert.doesNotMatch(modern, /requestedUi !==/);
+  assert.match(modern, /id="aoAgentPanel"/);
+  assert.match(pixelCss, /#aoRoomPanel\[hidden\]/);
   assert.match(modern, /legacy\.replaceWith/);
 });
 

@@ -265,3 +265,12 @@ body.ao-enabled #dr[hidden] { display:none !important; }
 @media (prefers-reduced-motion:reduce) {
   .ao-app *, .ao-app *::before, .ao-app *::after { scroll-behavior:auto !important; }
 }
+
+/* Operational-only layout: never render the legacy virtual room. */
+.ao-app #aoRoomPanel[hidden], #stage, #tip { display:none !important; }
+.ao-app .ao-primary-grid { grid-template-columns:minmax(0,1fr); }
+.ao-app .ao-agent-list { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr)); gap:6px; max-height:none; padding:9px; }
+.ao-app .ao-agent-row { min-height:56px; padding:8px !important; border:1px solid #2c2f35 !important; border-radius:4px !important; }
+.ao-app .ao-agent-title { font-size:11px; }
+.ao-app .ao-agent-activity,.ao-app .ao-agent-model,.ao-app .ao-agent-status { font-size:10px; }
+.ao-app .ao-agent-row:focus-visible { outline:2px solid #4fb3e0; outline-offset:2px; }
