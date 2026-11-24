@@ -328,5 +328,7 @@ CI #116: Rustfmt, Clippy, Rust (Ubuntu e Windows), release, JavaScript, Chromium
 
 Aprendizagem do CI: #102, #107, #110 e #113 detetaram Rustfmt; #107 detetou também um teste estrutural JavaScript que ainda dependia da implementação antiga. Corrigir todos os hunks e verificar referências de testes estruturais antes de publicar refatorações; manter testes de comportamento e rollback, sem remover gates. O ambiente de edição atual continua sem cargo/rustfmt local. #105 e #116 passaram na primeira execução. Não confundir sucesso de uma matriz parcial com CI completo.
 
+CI #121 (45509652837), HEAD `2abf1af30e3f88f3170c7163d4eab3451c690a91`: Windows aprovado, incluindo a regressão de recuperação atómica; Ubuntu parou em Rustfmt. Correções de formatação aplicadas em lote no commit seguinte; validação integral ainda pendente. Não alterar os gates nem assumir que a recuperação real em produção está validada.
+
 ## Sequência
 Integrar PRs apenas após revisão e testes, uma fase de cada vez. Não ativar Qwen. Não alterar main ou instalação em produção sem evidência. Atualizar este ficheiro com PR, SHA e resultado dos testes de cada fase.
