@@ -627,6 +627,54 @@
     };
   };
 
+  // Owner diagnostics: text is escaped, uncertainty never exposes a resend action.
+  const outboxRows = (rows) => rows.map((r,i)=>{
+    const labels={pending:"Pendente",uncertain:"Entrega incerta",sent:"Enviada",cancelled:"Cancelada"};
+    const date=Number.isFinite(r.created)?new Date(r.created).toLocaleString("pt-PT"):"—";
+    const action=r.state==="pending"?["cancel","Cancelar envio"]:r.state==="uncertain"?["verify","Verificar no GitHub"]:null;
+    return `<div class="sec"><div class="box"><div class="hd2"><b>${esc(r.repo || "—")} · PR #${esc(r.num)}</b><span class="pill">${esc(labels[r.state] || "Desconhecido")}</span></div>
+      <div class="hint">Conta: ${esc(r.author || "—")} · ${esc(date)}</div>
+      <details><summary>Resposta guardada</summary><pre>${esc(r.body || "")}</pre></details>
+      ${action?`<div class="acts"><button type="button" data-outbox-index="${i}" data-outbox-action="${action[0]}">${action[1]}</button></div><div class="msg" data-outbox-msg="${i}" aria-live="polite"></div>`:""}</div></div>`;
+  }).join("");
+  let outboxRequest=0;
+  const outbox = async (offset=0) => {
+    show("Respostas do Watcher","outbox");
+    const request=++outboxRequest;
+    B.innerHTML='<div class="empty">A consultar respostas…</div>';
+    try{
+      const data=await get("/api/watcher-outbox?offset="+offset);
+      if(cur!=="outbox" || request!==outboxRequest)return;
+      if(data.error)throw Error(data.error);
+      if(!Array.isArray(data.rows) || !data.counts)throw Error("Resposta inválida");
+      const rows=data.rows,c=data.counts;
+      B.innerHTML=`<div class="sec"><div class="box"><b>Entregas persistentes</b><div class="hint">Pendentes: ${esc(c.pending)} · Incertas: ${esc(c.uncertain)} · Enviadas: ${esc(c.sent)} · Canceladas: ${esc(c.cancelled)}</div><div class="hint">Verificar consulta os comentários do GitHub. Se não encontrar a resposta exata, mantém a entrega incerta. Nunca reenvia automaticamente.</div><div class="acts"><button id="outboxBack">Diagnóstico</button><button id="outboxRefresh">Atualizar</button></div></div></div>${outboxRows(rows)||'<div class="empty">Sem respostas guardadas.</div>'}<div class="acts">${offset>0?'<button id="outboxPrev">Anterior</button>':""}${data.more?'<button id="outboxNext">Seguinte</button>':""}</div>`;
+      $("outboxBack").onclick=()=>health(false);
+      $("outboxRefresh").onclick=()=>outbox(offset);
+      if(offset>0)$("outboxPrev").onclick=()=>outbox(Math.max(0,offset-50));
+      if(data.more)$("outboxNext").onclick=()=>outbox(offset+50);
+      for(const button of B.querySelectorAll("button[data-outbox-index]")){
+        button.onclick=async()=>{
+          const i=Number(button.dataset.outboxIndex),row=rows[i],action=button.dataset.outboxAction,msg=B.querySelector(`[data-outbox-msg="${i}"]`);
+          if(!row || !["cancel","verify"].includes(action))return;
+          if(action==="cancel" && !confirm("Cancelar esta resposta ainda não enviada?"))return;
+          button.disabled=true;
+          try{
+            const result=await post({id:row.id,action},"/api/watcher-outbox");
+            if(cur!=="outbox" || request!==outboxRequest)return;
+            if(result.error)throw Error(result.error);
+            if(result.state==="uncertain"){msg.textContent="Entrega não confirmada. Não foi efetuado qualquer reenvio.";return;}
+            await outbox(offset);
+          }catch(error){msg.textContent=String(error.message||error);}
+          finally{button.disabled=false;}
+        };
+      }
+    }catch(error){
+      if(cur==="outbox" && request===outboxRequest)B.innerHTML=`<div class="warn">${esc(error.message||error)}</div><div class="acts"><button id="outboxBack">Diagnóstico</button><button id="outboxRefresh">Tentar novamente</button></div>`;
+      if(cur==="outbox" && request===outboxRequest){$("outboxBack").onclick=()=>health(false);$("outboxRefresh").onclick=()=>outbox(offset);}
+    }
+  };
+
   const health = async (f) => {
     show("Health", "health");
     if (!A.H || f) { B.innerHTML = `<div class="empty">checking…</div>`; await A.hlt(f); }
@@ -635,6 +683,8 @@
     const sec = (t, x) => `<div class="sec"><h4>${t}</h4><div class="box">${x}</div></div>`;
     const ls = (v) => (Array.isArray(v.m) ? v.m.map((y) => row(y.ok, y.k, y.m)).join("") : row(v.ok, "", v.m));
     B.innerHTML = H.gh ? sec("GitHub", row(H.gh.ok, "", H.gh.m)) + sec("AI providers in use", ls(H.ai)) + sec("Docker", row(H.docker.ok, "", H.docker.m)) + sec("Machines", ls(H.hosts)) + `<div class="msg">Checked ${new Date(H.t).toLocaleTimeString()}. The office checks again every 5 minutes.</div><div class="acts"><button id="hr">Check now</button></div>` : `<div class="empty">Could not check.</div><div class="acts"><button id="hr">Check now</button></div>`;
+    B.insertAdjacentHTML("beforeend",'<div class="sec"><h4>Respostas do Watcher</h4><div class="box"><div class="hint">Consulte respostas pendentes e confirme entregas incertas, sem reenvio automático.</div><div class="acts"><button id="openOutbox">Consultar respostas</button></div></div></div>');
+    $("openOutbox").onclick=()=>outbox();
     $("hr").onclick = () => health(true);
   };
   A.health = health;

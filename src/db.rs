@@ -563,6 +563,13 @@ impl Db {
         Ok(result)
     }
 
+    /// Owner-only inventory via the authenticated local API. Include unresolved
+    /// entries first and cap each page, without exposing reply bodies in state().
+    pub fn watcher_outbox_page(&self, offset:i64)->rusqlite::Result<Vec<Value>>{
+        if !(0..=100_000).contains(&offset){return Err(rusqlite::Error::InvalidQuery);}
+        self.try_all("select id,repo,num,author,body,state,created,updated from watcher_outbox order by case when state in ('pending','uncertain') then 0 else 1 end,created desc,id limit 51 offset ?",crate::pa![offset])
+    }
+
     /// Persist the uncertain state BEFORE the external POST. A crash or
     /// ambiguous response must never automatically issue a second POST.
     pub fn claim_watcher_reply(&self,id:&str,author:&str)->rusqlite::Result<bool>{
@@ -1226,6 +1233,20 @@ mod watcher_outbox_tests {
         db.run("update jobs set st='done'",vec![]);
         assert!(db.queue_review_and_ack("o/r",1,"next",&["r2".into()],&req).unwrap());
         assert_eq!(db.n("select count(*) from watcher_outbox",vec![]),1);
+    }
+
+    #[test]
+    fn owner_inventory_prioritizes_unresolved_and_cancel_cannot_race_claim(){
+        let db=Db::mem();
+        for (id,state,at) in [("a","sent",3),("b","pending",1),("c","uncertain",2)]{
+            db.run("insert into watcher_outbox(id,repo,num,author,body,state,created,updated) values(?,'o/r',1,'owner','reply',?,?,?)",crate::pa![id.to_string(),state.to_string(),at,at]);
+        }
+        let rows=db.watcher_outbox_page(0).unwrap();
+        assert_eq!(rows.iter().map(|r|r["id"].as_str().unwrap()).collect::<Vec<_>>(),vec!["c","b","a"]);
+        assert!(db.watcher_outbox_page(-1).is_err());
+        assert!(db.claim_watcher_reply("b","owner").unwrap());
+        assert!(!db.finish_watcher_reply("b","cancelled").unwrap());
+        assert_eq!(db.watcher_outbox_counts().unwrap()["uncertain"],2);
     }
 
     #[test]

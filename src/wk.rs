@@ -1616,7 +1616,7 @@ async fn watch_pr(a:&Ax,p:Value,me:&str,
     Ok(())
 }
 
-fn reply_confirmed(rows:&[Value],author:&str,body:&str)->bool{
+pub(crate) fn reply_confirmed(rows:&[Value],author:&str,body:&str)->bool{
     rows.iter().any(|row|row["user"]["login"].as_str()==Some(author) && row["body"].as_str()==Some(body))
 }
 

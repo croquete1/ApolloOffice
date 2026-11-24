@@ -1922,6 +1922,60 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                 })
                 .collect::<Vec<Value>>()
         })),
+        ("GET", "/api/watcher-outbox") => {
+            let offset=if qv("offset").is_empty(){0}else{
+                match qv("offset").parse::<i64>(){
+                    Ok(n) if (0..=100_000).contains(&n)=>n,
+                    _=>return er(StatusCode::BAD_REQUEST,"invalid page offset")
+                }
+            };
+            match (a.db.watcher_outbox_page(offset),a.db.watcher_outbox_counts()){
+                (Ok(mut rows),Ok(counts))=>{
+                    let more=rows.len()>50;
+                    rows.truncate(50);
+                    js(json!({"rows":rows,"counts":counts,"offset":offset,"more":more}))
+                },
+                _=>er(StatusCode::INTERNAL_SERVER_ERROR,"outbox inventory unavailable")
+            }
+        },
+        ("POST", "/api/watcher-outbox") => {
+            let Some(id)=b["id"].as_str().filter(|s|s.len()==64 && s.bytes().all(|c|c.is_ascii_hexdigit())) else{
+                return er(StatusCode::BAD_REQUEST,"invalid reply identifier");
+            };
+            match b["action"].as_str(){
+                Some("cancel")=>{
+                    // CAS refuses cancellation once a worker has claimed a send.
+                    match a.db.finish_watcher_reply(id,"cancelled"){
+                        Ok(true)=>{a.say("watcher","owner cancelled a pending reply",None);js(json!({"ok":true,"state":"cancelled"}))},
+                        Ok(false)=>er(StatusCode::CONFLICT,"reply is no longer pending"),
+                        Err(_)=>er(StatusCode::INTERNAL_SERVER_ERROR,"could not cancel reply")
+                    }
+                },
+                Some("verify")=>{
+                    let rows=match a.db.try_all("select repo,num,author,body from watcher_outbox where id=? and state='uncertain'",pa![id.to_string()]){
+                        Ok(rows)=>rows,
+                        Err(_)=>return er(StatusCode::INTERNAL_SERVER_ERROR,"outbox inventory unavailable")
+                    };
+                    let Some(row)=rows.first() else{return er(StatusCode::CONFLICT,"reply is no longer uncertain");};
+                    let (Some(repo),Some(number),Some(author),Some(body))=(row["repo"].as_str(),row["num"].as_i64(),row["author"].as_str(),row["body"].as_str()) else{
+                        return er(StatusCode::INTERNAL_SERVER_ERROR,"invalid stored reply");
+                    };
+                    let comments=match crate::sh::apip_unique(&format!("repos/{repo}/issues/{number}/comments?per_page=100")).await{
+                        Ok(rows)=>rows,
+                        Err(_)=>return er(StatusCode::BAD_GATEWAY,"could not obtain complete GitHub comments")
+                    };
+                    if !crate::wk::reply_confirmed(&comments,author,body){
+                        return js(json!({"ok":true,"state":"uncertain","confirmed":false}));
+                    }
+                    match a.db.finish_watcher_reply(id,"sent"){
+                        Ok(true)=>{a.say("watcher","owner verified reply delivery on GitHub",None);js(json!({"ok":true,"state":"sent","confirmed":true}))},
+                        Ok(false)=>er(StatusCode::CONFLICT,"reply state changed; refresh inventory"),
+                        Err(_)=>er(StatusCode::INTERNAL_SERVER_ERROR,"could not persist confirmation")
+                    }
+                },
+                _=>er(StatusCode::BAD_REQUEST,"unsupported outbox action")
+            }
+        },
         ("GET", "/api/lessons") => match crate::routing::lessons(a) {
             Ok(rows) => js(json!({"lessons":rows})),
             Err(error) => {
