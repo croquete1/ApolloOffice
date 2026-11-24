@@ -2265,24 +2265,55 @@ mod tests {
     fn repair_cycle_limit_survives_history_cleanup() {
         let db = crate::db::Db::mem();
         let repo = "croquete1/ApolloOffice";
-        let c = db.0.lock().unwrap();
-        for _ in 0..2 {
-            c.execute(
-                "insert into jobs(repo,num,kind,st,d,pr) values(?,67,'review','done',?,67)",
-                rusqlite::params![repo, json!({"coderabbit_source":"coderabbit"}).to_string()],
+        db.0.lock().unwrap().execute_batch(
+            "insert into rp(full,on_,coderabbit_repair,coderabbit_epoch) values('croquete1/ApolloOffice',1,1,4);
+             insert into prs(repo,num,st) values('croquete1/ApolloOffice',67,'open');",
+        ).unwrap();
+        db.ks(
+            &format!("steward:{repo}"),
+            &json!({"prs":[{"number":67,"head_sha":HEAD,"overlaps":[],"possible_duplicates":[],"state":"revisao_final_necessaria"}]}),
+        );
+        for id in 81..=83 {
+            let item = finding(id, "[P1] Check authorization before accepting a token");
+            assert_eq!(
+                reserve_finding(&db, repo, 67, HEAD, &item).unwrap(),
+                "observed"
+            );
+            let ticket = claim_finding_guard(&db, repo, 67, HEAD, &item)
+                .unwrap()
+                .unwrap();
+            assert!(set_finding_state(&db, repo, 67, HEAD, &item, &ticket, "guarded").unwrap());
+            let admitted = queue_findings(
+                &db,
+                (repo, 67, HEAD),
+                "Title",
+                "https://github.com/croquete1/ApolloOffice/pull/67",
+                "codex/change",
+                "cargo test",
+                &[item],
             )
             .unwrap();
-            c.execute("delete from jobs where st in ('done','drop')", [])
+            assert_eq!(admitted, id < 83);
+            db.0.lock()
+                .unwrap()
+                .execute_batch("update jobs set st='done'; delete from jobs where st='done';")
                 .unwrap();
         }
-        let cycles: i64 = c
-            .query_row(
+        assert_eq!(
+            db.n(
                 "select cycles from coderabbit_cycles where repo=? and number=67",
-                [repo],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(cycles, MAX_FIX_CYCLES_PER_PR);
+                crate::pa![repo.to_string()],
+            ),
+            MAX_FIX_CYCLES_PER_PR
+        );
+        assert_eq!(db.n("select count(*) from jobs", crate::pa![]), 0);
+        assert_eq!(
+            db.n(
+                "select count(*) from coderabbit_findings where repo=? and number=67 and state='queued'",
+                crate::pa![repo.to_string()],
+            ),
+            2
+        );
     }
 
     #[test]
