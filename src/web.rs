@@ -81,7 +81,7 @@ fn owner_job_transition(
             Ok((r.get(0)?, r.get(1)?))
         })?;
     if approve {
-        if st != "approve" || assigned {
+        if st != "approve" {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
         let mut d: Value = serde_json::from_str(&raw).map_err(|_| rusqlite::Error::InvalidQuery)?;
@@ -98,7 +98,7 @@ fn owner_job_transition(
             "update jobs set st='submit',why='approved, submitting',d=?,t1=? where id=?",
             rusqlite::params![d.to_string(), now(), id],
         )?;
-    } else if !assigned && matches!(st.as_str(), "ready" | "vet" | "approve" | "park") {
+    } else if st == "approve" || (!assigned && matches!(st.as_str(), "ready" | "vet" | "park")) {
         tx.execute(
             "update jobs set st='drop',why='dropped by the owner',t1=? where id=?",
             rusqlite::params![now(), id],
@@ -2870,11 +2870,19 @@ mod t {
         owner_job_transition(&db, 3, false, false, &json!({})).unwrap();
         assert_eq!(db.kg("kill:3"), json!(true));
         assert!(owner_job_transition(&db, 999, false, false, &json!({})).is_err());
-        db.run("insert into jobs(id,st) values(4,'ready'),(5,'approve')", pa![]);
+        db.run(
+            "insert into jobs(id,st) values(4,'ready'),(5,'approve'),(6,'approve')",
+            pa![],
+        );
         owner_job_transition(&db, 4, false, true, &json!({})).unwrap();
         assert_eq!(db.jg(4).unwrap().st, "ready");
         assert_eq!(db.kg("kill:4"), true);
-        assert!(owner_job_transition(&db, 5, true, true, &json!({})).is_err());
+        // A worker may still be cleaning the checkout after publishing approval.
+        owner_job_transition(&db, 5, true, true, &json!({"pt":"owner title"})).unwrap();
+        assert_eq!(db.jg(5).unwrap().st, "submit");
+        assert_eq!(db.jg(5).unwrap().d["pt"], "owner title");
+        owner_job_transition(&db, 6, false, true, &json!({})).unwrap();
+        assert_eq!(db.jg(6).unwrap().st, "drop");
     }
 
     #[tokio::test]
