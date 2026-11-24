@@ -48,3 +48,11 @@ test("in-flight request is unique and detached panel is ignored",async()=>{
   assert.equal(f.status.textContent,"A consultar evidência no GitHub…");
   assert.equal(f.button.disabled,false);
 });
+
+test("processing and skipped reviews are advisory, not approvals",async()=>{
+  for(const [state,label] of [["pending","Revisão em processamento"],["skipped","Revisão não executada"]]){
+    const f=fixture({head:"abc",state});
+    await f.button.onclick();
+    assert.equal(f.status.textContent,label+" · não equivale a aprovação");
+  }
+});
