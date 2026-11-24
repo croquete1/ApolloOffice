@@ -355,10 +355,10 @@ fn classify(rows: &[Value], reviews: &[Value], head: &str) -> Value {
         let Some(id) = review["id"].as_u64().filter(|n| *n > 0) else {
             continue;
         };
-        if let Some((old, _, signal, surface)) = latest.as_mut()
-            && &at == old
-            && *surface == 1
-        {
+        let tied_summary = latest
+            .as_mut()
+            .filter(|(old, _, _, surface)| &at == old && *surface == 1);
+        if let Some((_, _, signal, _)) = tied_summary {
             if signal["state"] != "skipped" && signal["state"] != "pending" {
                 *signal = json!({"state":"unknown","head":head});
             }
@@ -1642,7 +1642,11 @@ mod tests {
         let at = summary["updated_at"].as_str().unwrap().to_owned();
         let current = review(999, HEAD, &at);
         assert_eq!(
-            classify(std::slice::from_ref(&summary), std::slice::from_ref(&current), HEAD)["state"],
+            classify(
+                std::slice::from_ref(&summary),
+                std::slice::from_ref(&current),
+                HEAD
+            )["state"],
             "unknown"
         );
         summary["body"] = json!("<!-- coderabbit-ai-generated:v1 -->\n<!-- This is an auto-generated comment: summarize by coderabbit.ai -->\n<!-- This is an auto-generated comment: skip review by coderabbit.ai -->");
