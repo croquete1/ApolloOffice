@@ -902,6 +902,38 @@ impl Db {
 
     /// Atomic follow-up admission and acknowledgement. A replay cannot create a
     /// second follow-up, and an already active follow-up leaves new input pending.
+    // Late follow-ups must use the exact observed merged PR timestamp.
+    const MERGED_SNAPSHOT: &'static str = "select exists(select 1 from prs where repo=? and num=? and st='merged' and upd=?)";
+
+    fn ack_merged_in_tx(
+        tx: &rusqlite::Transaction<'_>, repo: &str, number: i64,
+        updated: &str, ids: &[String], complete: bool,
+    ) -> rusqlite::Result<()> {
+        let matched: bool = tx.query_row(Self::MERGED_SNAPSHOT,rusqlite::params![repo,number,updated],|row|row.get(0))?;
+        let unique=ids.iter().collect::<std::collections::HashSet<_>>();
+        if !matched || unique.len()!=ids.len() || ids.iter().any(|id|id.trim().is_empty()) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        if complete {
+            Self::ack_comments_in_tx(tx,repo,number,updated,ids)?;
+        } else {
+            // Keep the old cursor so deferred input is observed again.
+            for id in ids {
+                tx.execute("insert or ignore into cm(id,t) values(?,?)",rusqlite::params![format!("{repo}:{id}"),now()])?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn ack_merged_comments(&self, repo:&str, number:i64, updated:&str, ids:&[String], complete:bool) -> rusqlite::Result<()> {
+        let mut c=self.0.lock().unwrap();
+        let tx=c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        Self::ack_merged_in_tx(&tx,repo,number,updated,ids,complete)?;
+        tx.commit()?;
+        crate::app::chg();
+        Ok(())
+    }
+
     pub fn queue_followup_and_ack(
         &self,
         repo: &str,
@@ -909,15 +941,16 @@ impl Db {
         updated: &str,
         ids: &[String],
         request: &Value,
+        complete: bool,
     ) -> rusqlite::Result<bool> {
         let mut c = self.0.lock().unwrap();
         let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let merged: bool = tx.query_row(
-            "select exists(select 1 from prs where repo=? and num=? and st='merged')",
-            rusqlite::params![repo, number],
+            Self::MERGED_SNAPSHOT,
+            rusqlite::params![repo, number, updated],
             |r| r.get(0),
         )?;
-        if !merged || ids.is_empty() || ids.iter().any(|id| id.is_empty()) {
+        if !merged || ids.is_empty() || ids.iter().any(|id| id.trim().is_empty()) || ids.iter().collect::<std::collections::HashSet<_>>().len()!=ids.len() {
             return Err(rusqlite::Error::InvalidQuery);
         }
         let mut seen = 0;
@@ -932,7 +965,7 @@ impl Db {
             }
         }
         if seen == ids.len() {
-            Self::ack_comments_in_tx(&tx, repo, number, updated, ids)?;
+            Self::ack_merged_in_tx(&tx, repo, number, updated, ids, complete)?;
             tx.commit()?;
             return Ok(true);
         }
@@ -965,7 +998,7 @@ impl Db {
         let data = json!({"title":title,"body":body,"after":number,"source_comments":ids});
         tx.execute("insert into jobs(repo,num,kind,title,url,st,why,d,prio,t0,t1) values(?,0,'fix',?,?,'vet',?,?,-1.0,?,?)",
             rusqlite::params![repo,title,url,why,data.to_string(),t,t])?;
-        Self::ack_comments_in_tx(&tx, repo, number, updated, ids)?;
+        Self::ack_merged_in_tx(&tx, repo, number, updated, ids, complete)?;
         tx.commit()?;
         crate::app::chg();
         Ok(true)
@@ -981,11 +1014,6 @@ impl Db {
         Ok(count != 0)
     }
 
-    // Column order deliberately mirrors the jobs table.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "Typed insert mirrors the existing jobs schema"
-    )]
     /// Admit an exact internal Hunter duplicate at most once while the prior
     /// candidate is active. Different locations and subsequent regressions
     /// after a completed/dropped candidate remain eligible for human triage.
@@ -1017,6 +1045,11 @@ impl Db {
         Ok(changed == 1)
     }
 
+    // Column order deliberately mirrors the jobs table.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Typed insert mirrors the existing jobs schema"
+    )]
     pub fn jnew(
         &self,
         repo: &str,
@@ -1454,34 +1487,49 @@ mod late_followup_tests {
     fn followup_commit_replay_and_pending_batch_are_atomic() {
         let db = Db::mem();
         db.run(
-            "insert into prs(repo,num,st,d) values('o/r',1,'merged','{}')",
+            "insert into prs(repo,num,st,upd,d) values('o/r',1,'merged','t1','{}')",
             vec![],
         );
         let request = json!({"title":"follow-up","body":"verified request","url":"https://example.test","why":"maintainer"});
         let first = vec!["i1".into()];
         let second = vec!["i2".into()];
         assert!(db
-            .queue_followup_and_ack("o/r", 1, "t1", &first, &request)
+            .queue_followup_and_ack("o/r", 1, "t1", &first, &request,true)
             .unwrap());
         assert!(db
-            .queue_followup_and_ack("o/r", 1, "t1", &first, &request)
+            .queue_followup_and_ack("o/r", 1, "t1", &first, &request,true)
             .unwrap());
         assert_eq!(db.n("select count(*) from jobs", vec![]), 1);
+        db.run("update prs set upd='t2' where repo='o/r' and num=1",vec![]);
+        assert!(db.queue_followup_and_ack("o/r",1,"t1",&second,&request,true).is_err());
         assert!(!db
-            .queue_followup_and_ack("o/r", 1, "t2", &second, &request)
+            .queue_followup_and_ack("o/r", 1, "t2", &second, &request,true)
             .unwrap());
         assert!(!db.comment_acknowledged("o/r", "i2").unwrap());
         db.run("update jobs set st='done'", vec![]);
         assert!(db
-            .queue_followup_and_ack("o/r", 1, "t2", &second, &request)
+            .queue_followup_and_ack("o/r", 1, "t2", &second, &request,true)
             .unwrap());
         assert_eq!(db.n("select count(*) from jobs", vec![]), 2);
         assert!(db.comment_acknowledged("o/r", "i2").unwrap());
         assert!(db
-            .queue_followup_and_ack("o/r", 2, "t3", &["i3".into()], &request)
+            .queue_followup_and_ack("o/r", 2, "t3", &["i3".into()], &request,true)
             .is_err());
         assert!(!db.comment_acknowledged("o/r", "i3").unwrap());
     }
+    #[test]
+    fn partial_merged_ack_preserves_cursor_until_complete() {
+        let db=Db::mem();
+        db.run("insert into prs(repo,num,st,upd,d) values('o/r',1,'merged','new',?)",crate::pa![json!({"comment_seen_at":"old"}).to_string()]);
+        assert!(db.ack_merged_comments("o/r",1,"old",&["i1".into()],false).is_err());
+        assert!(!db.comment_acknowledged("o/r","i1").unwrap());
+        db.ack_merged_comments("o/r",1,"new",&["i1".into()],false).unwrap();
+        assert!(db.comment_acknowledged("o/r","i1").unwrap());
+        assert_eq!(db.one("select d from prs where repo='o/r' and num=1",vec![]).unwrap()["d"]["comment_seen_at"],"old");
+        db.ack_merged_comments("o/r",1,"new",&["i2".into()],true).unwrap();
+        assert_eq!(db.one("select d from prs where repo='o/r' and num=1",vec![]).unwrap()["d"]["comment_seen_at"],"new");
+    }
+
 }
 
 #[cfg(test)]
