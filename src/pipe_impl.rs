@@ -4589,6 +4589,12 @@ pub(crate) fn admit(a: &Ax, repo: &str, host: &str, id: i64) -> bool {
     }
     let Some(job)=a.db.jg(id) else{return false;};
     let is_hunt=job.kind=="hunt";
+    // Recheck the same lane holds at final admission, not only before pick.
+    if ["repro", "fixer", "submit"].iter().any(|w| a.hold(w))
+        || (is_hunt && a.hold("hunter"))
+    {
+        return false;
+    }
     // Reserve Codex capacity for ordinary fixes and review. The call-level
     // gate also covers fallback models; never block a verified review/submit.
     if job.st=="ready" && job.opt() && job.d["rs"]!=true
@@ -4861,7 +4867,7 @@ fn mk_hunt(a: &Ax) -> bool {
     {
         return false;
     }
-    if a.hunter_quota_blocked() {
+    if a.hold("hunter") || a.hunter_quota_blocked() {
         return false;
     }
     let on = a.db.all(

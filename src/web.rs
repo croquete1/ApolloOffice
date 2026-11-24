@@ -1846,17 +1846,25 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                     );
                 }
                 "hold" => {
-                    let w = b["w"].as_str().unwrap_or("").to_string();
-                    let on = b["on"].as_bool().unwrap_or(false);
-                    if let Some(x) = a.lv.lock().unwrap().w.get_mut(&w) {
+                    let w = b["w"].as_str().unwrap_or("");
+                    let Some(on) = b["on"].as_bool() else {
+                        return er(StatusCode::BAD_REQUEST, "hold requires a boolean");
+                    };
+                    if !WS.contains(&w) {
+                        return er(StatusCode::BAD_REQUEST, "unknown agent");
+                    }
+                    let _transition = a.update_transition.lock().unwrap();
+                    let mut h = json!({});
+                    h[w] = json!(on);
+                    if a.db.run(
+                        "insert into kv(k,v) values('hold',?) on conflict(k) do update set v=json_patch(kv.v,excluded.v)",
+                        pa![h.to_string()],
+                    ) < 0 {
+                        return er(StatusCode::CONFLICT, "agent hold was not saved");
+                    }
+                    if let Some(x) = a.lv.lock().unwrap().w.get_mut(w) {
                         x.hold = on;
                     }
-                    let mut h = a.db.kg("hold");
-                    if !h.is_object() {
-                        h = json!({});
-                    }
-                    h[&w] = json!(on);
-                    a.db.ks("hold", &h);
                 }
                 "drop" => {
                     if let Some(j) = a.db.jg(id) {
@@ -2716,6 +2724,48 @@ mod t {
             ),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn agent_hold_is_persisted_before_changing_live_state() {
+        let db = crate::db::Db::mem();
+        db.ks("hold", &json!({"hunter":true}));
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::env::temp_dir(),
+            1,
+            "x".into(),
+        ));
+        let request = |w: &str, on: bool| {
+            api(
+                &a,
+                &Method::POST,
+                "/api/act",
+                "",
+                json!({"a":"hold","w":w,"on":on}),
+            )
+        };
+        assert_eq!(
+            request("unknown", true).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+        a.db.0.lock().unwrap().execute_batch(
+            "create trigger fail_hold before update on kv when old.k='hold' begin select raise(abort,'injected'); end;",
+        ).unwrap();
+        assert_eq!(request("fixer", true).await.status(), StatusCode::CONFLICT);
+        assert!(!a.lv.lock().unwrap().w["fixer"].hold);
+        assert_eq!(a.db.kg("hold"), json!({"hunter":true}));
+        a.db.0
+            .lock()
+            .unwrap()
+            .execute_batch("drop trigger fail_hold")
+            .unwrap();
+        assert_eq!(request("fixer", true).await.status(), StatusCode::OK);
+        assert!(a.lv.lock().unwrap().w["fixer"].hold);
+        assert_eq!(a.db.kg("hold"), json!({"hunter":true,"fixer":true}));
+        assert_eq!(request("fixer", false).await.status(), StatusCode::OK);
+        assert!(!a.lv.lock().unwrap().w["fixer"].hold);
+        assert_eq!(a.db.kg("hold"), json!({"hunter":true,"fixer":false}));
     }
 
     #[tokio::test]
