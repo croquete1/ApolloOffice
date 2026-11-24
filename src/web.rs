@@ -2238,7 +2238,11 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                     if clear_job_history(&a.db).is_err() {
                         return er(StatusCode::CONFLICT, "job history was not cleared");
                     }
-                    a.say("scout", "job history cleared; active prerequisites retained", None);
+                    a.say(
+                        "scout",
+                        "job history cleared; active prerequisites retained",
+                        None,
+                    );
                 }
                 "reset" => {
                     for k in ["set", "hold", "man"] {
