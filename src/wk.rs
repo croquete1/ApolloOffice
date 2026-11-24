@@ -1627,8 +1627,16 @@ async fn watch1(a: &Ax) -> R<()> {
         };
         let cr: Vec<String> = if v["reviewDecision"] == "CHANGES_REQUESTED" { pushers(&r, n).await } else { vec![] };
         let tr = |c: &Value| MA.contains(&c["as"].as_str().unwrap_or("")) || (c["k"] == "review" && c["t"].as_str().map(|t| t.starts_with("[review: CHANGES_REQUESTED]")).unwrap_or(false) && c["rid"].as_str().map(|x| cr.iter().any(|y| y == x)).unwrap_or(false));
-        let mut nw: Vec<Value> = cs.into_iter().filter(|c| a.db.n("select count(*) from cm where id=? or id=?", pa![format!("{r}:{}", c["id"].as_str().unwrap_or("")), c["id"].as_str().unwrap_or("").to_string()]) == 0).collect();
+        let mut nw = Vec::new();
+        for c in cs {
+            let id = c["id"].as_str().filter(|id| !id.is_empty())
+                .ok_or_else(|| X::E("PR comment has no identifier".into()))?;
+            if !a.db.comment_acknowledged(&r, id).map_err(|e| X::E(e.to_string()))? {
+                nw.push(c);
+            }
+        }
         let received_ids: Vec<String> = nw.iter().filter_map(|c| c["id"].as_str().map(String::from)).collect();
+        let mut batch_acked = false;
         if first && !nw.is_empty() {
             let lc = ghj(&["pr", "view", &n.to_string(), "-R", &r, "--json", "commits", "--jq", ".commits[-1].committedDate"], 60).await.ok().and_then(|x| x.as_str().map(String::from)).unwrap_or_default();
             nw = pending(nw, &lc);
@@ -1644,7 +1652,10 @@ async fn watch1(a: &Ax) -> R<()> {
                 let mc: Vec<&Value> = okc.iter().filter(|c| tr(c)).cloned().collect();
                 let ma = !mc.is_empty();
                 let src: &Vec<&Value> = if ma { &mc } else { &okc };
-                let pv = ghj(&["pr", "view", &n.to_string(), "-R", &r, "--json", "body,files"], 60).await.unwrap_or(Value::Null);
+                let pv = ghj(&["pr", "view", &n.to_string(), "-R", &r, "--json", "body,files"], 60).await.map_err(X::E)?;
+                if !pv["files"].is_array() {
+                    return Err(X::E("PR file list is unavailable".into()));
+                }
                 let fl = pv["files"].as_array().map(|x| x.iter().filter_map(|f| f["path"].as_str()).collect::<Vec<_>>().join("\n")).unwrap_or_default();
                 let pr = format!("PR {tag}: {}\n\n{}\n\n{}\n\n{}", v["title"].as_str().unwrap_or(""), wrap("description", &crate::sh::head(pv["body"].as_str().unwrap_or(""), 4000)), wrap("files", &crate::sh::head(&fl, 2000)), src.iter().map(|c| wrap(c["id"].as_str().unwrap_or(""), &format!("{} by {} ({})\n\n{}", c["k"].as_str().unwrap_or(""), c["by"].as_str().unwrap_or(""), c["as"].as_str().unwrap_or(""), crate::sh::head(c["t"].as_str().unwrap_or(""), 4000)))).collect::<Vec<_>>().join("\n\n"));
                 let mut o = Ask::new("watcher", a.md("watcher"), P("watcher"), pr);
@@ -1655,6 +1666,22 @@ async fn watch1(a: &Ax) -> R<()> {
                 }
                 let by = okc.iter().filter_map(|c| c["by"].as_str()).collect::<Vec<_>>().join(", ");
                 let act = js["act"].as_bool().unwrap_or(false);
+                if act && ma {
+                    let ch = js["change"].as_str().unwrap_or("").to_string();
+                    let data = json!({"change": ch, "comment": crate::sh::head(&mc.iter().map(|c| format!("{}: {}", c["by"].as_str().unwrap_or(""), c["t"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("\n\n"), 6000), "branch": hrn, "head": hd, "test_cmd": p["d"]["test_cmd"]});
+                    let request = json!({"title":v["title"],"url":v["url"],"change":ch,"data":data});
+                    if !a.db.queue_review_and_ack(&r, n, &up, &received_ids, &request).map_err(|e| X::E(e.to_string()))? {
+                        a.say("watcher", &format!("{tag}: new review deferred until active review finishes"), None);
+                        continue;
+                    }
+                    batch_acked = true;
+                    a.flow("watcher", "fixer", "review");
+                    a.say("watcher", &format!("{tag}: change requested by {by}, sent to Fixer"), None);
+                    a.note("Change requested", &format!("{tag} ({by}): {ch}\n\nDraft reply:\n{}\n{}", js["draft"].as_str().unwrap_or("-"), v["url"].as_str().unwrap_or("")), 4);
+                } else {
+                    a.say("watcher", &format!("{tag}: {by} commented{}", if act && !ma { " (not a maintainer, not applied)" } else { "" }), None);
+                    a.note(&format!("Comment on {tag}"), &format!("{by}: {}\n\nDraft reply:\n{}\n{}", crate::sh::head(okc.last().and_then(|c| c["t"].as_str()).unwrap_or(""), 600), js["draft"].as_str().unwrap_or("-"), v["url"].as_str().unwrap_or("")), 3);
+                }
                 let rp = js["reply"].as_str().unwrap_or("").trim().to_string();
                 let wk = format!("wr:{tag}");
                 if ma && !rp.is_empty() && a.db.kg(&wk).as_i64().map(|t| now() - t > 86_400_000).unwrap_or(true) {
@@ -1666,21 +1693,12 @@ async fn watch1(a: &Ax) -> R<()> {
                         Err(e) => a.say("watcher", &format!("{tag}: reply failed: {e}"), None),
                     }
                 }
-                if act && ma && a.db.n("select count(*) from jobs where repo=? and pr=? and kind='review' and st not in ('done','drop')", pa![r.clone(), n]) == 0 {
-                    let ch = js["change"].as_str().unwrap_or("").to_string();
-                    let queued = a.db.jnew(&r, n, "review", v["title"].as_str().unwrap_or(""), v["url"].as_str().unwrap_or(""), "ready", &ch, json!({"change": ch, "comment": crate::sh::head(&mc.iter().map(|c| format!("{}: {}", c["by"].as_str().unwrap_or(""), c["t"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("\n\n"), 6000), "branch": hrn, "head": hd, "test_cmd": p["d"]["test_cmd"]}), Some(n), -1.0);
-                    if queued < 0 { return Err(X::E("Could not persist review task".into())); }
-                    a.flow("watcher", "fixer", "review");
-                    a.say("watcher", &format!("{tag}: change requested by {by}, sent to Fixer"), None);
-                    a.note("Change requested", &format!("{tag} ({by}): {ch}\n\nDraft reply:\n{}\n{}", js["draft"].as_str().unwrap_or("-"), v["url"].as_str().unwrap_or("")), 4);
-                } else {
-                    a.say("watcher", &format!("{tag}: {by} commented{}", if act && !ma { " (not a maintainer, not applied)" } else { "" }), None);
-                    a.note(&format!("Comment on {tag}"), &format!("{by}: {}\n\nDraft reply:\n{}\n{}", crate::sh::head(okc.last().and_then(|c| c["t"].as_str()).unwrap_or(""), 600), js["draft"].as_str().unwrap_or("-"), v["url"].as_str().unwrap_or("")), 3);
-                }
             }
         }
         // Advance the comment cursor only after successful analysis and queue persistence.
-        a.db.ack_pr_comments(&r, n, &up, &received_ids).map_err(|e| X::E(e.to_string()))?;
+        if !batch_acked {
+            a.db.ack_pr_comments(&r, n, &up, &received_ids).map_err(|e| X::E(e.to_string()))?;
+        }
     }
     a.st("watcher", "idle", None, "");
     Ok(())

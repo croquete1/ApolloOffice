@@ -218,16 +218,9 @@ impl Db {
         self.jset(j.id, &[("d", j.d.clone())]);
     }
 
-    // Column order deliberately mirrors the jobs table; refactoring this API
-    // would alter numerous pipeline call sites without improving validation.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "Typed insert mirrors the existing jobs schema"
-    )]
-    /// Atomically acknowledge a successfully processed comment batch and its PR cursor.
-    pub fn ack_pr_comments(&self, repo: &str, number: i64, updated: &str, ids: &[String]) -> rusqlite::Result<()> {
-        let mut c = self.0.lock().unwrap();
-        let tx = c.transaction()?;
+    fn ack_comments_in_tx(
+        tx: &rusqlite::Transaction<'_>, repo: &str, number: i64, updated: &str, ids: &[String],
+    ) -> rusqlite::Result<()> {
         for id in ids {
             tx.execute("insert or ignore into cm(id,t) values(?,?)", rusqlite::params![format!("{repo}:{id}"), now()])?;
         }
@@ -235,11 +228,55 @@ impl Db {
         if changed != 1 {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
+        Ok(())
+    }
+
+    /// Atomically acknowledge a successfully processed comment batch and its PR cursor.
+    pub fn ack_pr_comments(&self, repo: &str, number: i64, updated: &str, ids: &[String]) -> rusqlite::Result<()> {
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction()?;
+        Self::ack_comments_in_tx(&tx, repo, number, updated, ids)?;
         tx.commit()?;
         crate::app::chg();
         Ok(())
     }
 
+    /// Queue a review and acknowledge its source comments in the same transaction.
+    /// If another review is active, do not acknowledge the batch: retry it later.
+    pub fn queue_review_and_ack(
+        &self, repo: &str, number: i64, updated: &str, ids: &[String], request: &Value,
+    ) -> rusqlite::Result<bool> {
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let active: i64 = tx.query_row(
+            "select count(*) from jobs where repo=? and pr=? and kind='review' and st not in ('done','drop')",
+            rusqlite::params![repo, number], |row| row.get(0),
+        )?;
+        if active != 0 {
+            return Ok(false);
+        }
+        let title = request["title"].as_str().ok_or(rusqlite::Error::InvalidQuery)?;
+        let url = request["url"].as_str().ok_or(rusqlite::Error::InvalidQuery)?;
+        let change = request["change"].as_str().filter(|v| !v.trim().is_empty()).ok_or(rusqlite::Error::InvalidQuery)?;
+        let data = request["data"].as_object().ok_or(rusqlite::Error::InvalidQuery)?;
+        let t = now();
+        tx.execute("insert into jobs(repo,num,kind,title,url,st,why,d,pr,prio,t0,t1) values(?,?,'review',?,?,'ready',?,?,?,-1.0,?,?)",
+            rusqlite::params![repo, number, title, url, change, json!(data).to_string(), number, t, t])?;
+        Self::ack_comments_in_tx(&tx, repo, number, updated, ids)?;
+        tx.commit()?;
+        crate::app::chg();
+        Ok(true)
+    }
+
+    pub fn comment_acknowledged(&self, repo: &str, id: &str) -> rusqlite::Result<bool> {
+        let c = self.0.lock().unwrap();
+        let count: i64 = c.query_row("select count(*) from cm where id=? or id=?",
+            rusqlite::params![format!("{repo}:{id}"), id], |row| row.get(0))?;
+        Ok(count != 0)
+    }
+
+    // Column order deliberately mirrors the jobs table.
+    #[expect(clippy::too_many_arguments, reason = "Typed insert mirrors the existing jobs schema")]
     pub fn jnew(
         &self,
         repo: &str,
@@ -445,4 +482,23 @@ mod comment_cursor_tests {
         assert_eq!(row["d"]["seen"], true);
         assert_eq!(row["d"]["auto_merge"], true);
     }
+    #[test]
+    fn review_admission_and_ack_share_one_transaction_and_defer_active_work() {
+        let db = Db::mem();
+        let ids = vec!["review-1".to_string()];
+        let request = json!({"title":"Fix","url":"https://github.com/a/b/pull/1","change":"Correct bug","data":{}});
+        assert!(db.queue_review_and_ack("a/b", 1, "new", &ids, &request).is_err());
+        assert_eq!(db.n("select count(*) from jobs", vec![]), 0);
+        db.run("insert into prs(repo,num,d) values(?,?,?)", crate::pa!["a/b".to_string(), 1_i64, "{}".to_string()]);
+        assert!(db.queue_review_and_ack("a/b", 1, "new", &ids, &request).unwrap());
+        assert!(db.comment_acknowledged("a/b", "review-1").unwrap());
+        let next = vec!["review-2".to_string()];
+        assert!(!db.queue_review_and_ack("a/b", 1, "later", &next, &request).unwrap());
+        assert!(!db.comment_acknowledged("a/b", "review-2").unwrap());
+        assert_eq!(db.n("select count(*) from jobs", vec![]), 1);
+        db.run("update jobs set st='done'", vec![]);
+        assert!(db.queue_review_and_ack("a/b", 1, "later", &next, &request).unwrap());
+        assert!(db.comment_acknowledged("a/b", "review-2").unwrap());
+    }
+
 }
