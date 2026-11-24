@@ -848,10 +848,10 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
         if command.is_empty() {
             return Ok(false);
         }
-        let proven = a.db.all(
+        let proven = a.db.try_all(
             "select kind,st,d from jobs where repo=? and pr=? and kind in ('fix','review','mergecheck') and st='done'",
             pa![repo.to_string(), number],
-        );
+        ).map_err(|error| format!("local merge proof database unavailable: {error}"))?;
         if !proven
             .iter()
             .any(|job| local_proof(job, &head, base_sha, tree, &command))

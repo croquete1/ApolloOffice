@@ -382,16 +382,22 @@ impl App {
         let n = now();
         let td = self.set()["tokday"].as_i64().unwrap_or(0);
         let used = if td > 0 {
-            self.db.n(
-                "select coalesce(sum(tin+tout),0) from tok where day=?",
-                pa![crate::db::day()],
-            )
+            self.db
+                .try_n(
+                    "select coalesce(sum(tin+tout),0) from tok where day=?",
+                    pa![crate::db::day()],
+                )
+                .ok()
         } else {
-            0
+            Some(0)
         };
         let wh = off_hours(&self.set()["wh"]);
         let bd = self.set()["budday"].as_f64().unwrap_or(0.0);
-        let bu = if bd > 0.0 { self.db.usd(None) } else { 0.0 };
+        let bu = if bd > 0.0 {
+            self.db.try_usd(None).ok()
+        } else {
+            Some(0.0)
+        };
         let free_first = crate::routing::enabled(self);
         let settings = self.set();
         // Only a Claude-only configuration needs the legacy global pause.
@@ -419,9 +425,11 @@ impl App {
                     .map(|d| d.with_timezone(&chrono::Local).format("%H:%M").to_string())
                     .unwrap_or_default()
             )
-        } else if td > 0 && used >= td {
+        } else if used.is_none() || bu.is_none() {
+            "budget or token ledger unavailable; paused until database recovers".into()
+        } else if td > 0 && used.is_some_and(|u| u >= td) {
             "daily token limit reached, paused until midnight".into()
-        } else if bd > 0.0 && bu >= bd {
+        } else if bd > 0.0 && bu.is_some_and(|u| u >= bd) {
             format!("daily budget of ${bd:.2} reached, paused until midnight")
         } else if let Some(f) = wh {
             format!("outside working hours, resumes at {f}")

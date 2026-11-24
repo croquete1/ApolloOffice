@@ -4464,9 +4464,12 @@ async fn pick(a: &Ax, h: &str, allow_hunt: bool) -> Option<i64> {
     if a.drain.load(std::sync::atomic::Ordering::Relaxed) {
         return None;
     }
-    let mut c = a.db.all("select j.*,s.manual_priority,coalesce(s.retry_after,0) retry_after,
+    let mut c = match a.db.try_all("select j.*,s.manual_priority,coalesce(s.retry_after,0) retry_after,
         coalesce((select max(hist.admitted_at) from job_schedule hist join jobs previous on previous.id=hist.job where previous.repo=j.repo),0) repo_last_admitted
-        from jobs j left join job_schedule s on s.job=j.id where j.st in ('ready','submit') order by j.id", pa![]);
+        from jobs j left join job_schedule s on s.job=j.id where j.st in ('ready','submit') order by j.id", pa![]) {
+        Ok(rows)=>rows,
+        Err(error)=>{ eprintln!("scheduler inventory unavailable: {error}"); return None; }
+    };
     let active_repos = a.act.lock().unwrap().iter().filter_map(|entry| entry.split_once(' ').map(|(repo,_)|repo.to_string())).collect::<Vec<_>>();
     c.sort_by(|x,y| {
         let left=pick_rank(x); let right=pick_rank(y);
