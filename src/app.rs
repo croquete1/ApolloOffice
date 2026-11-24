@@ -470,39 +470,56 @@ impl App {
     }
 
     pub fn provider_limit(&self, model: &str) -> Option<String> {
-        let provider=crate::prov::parse(model).0;
-        let at=now();
-        if provider=="cc" {
-            let l=self.lv.lock().unwrap();
-            if l.o.rl!="allowed" && l.o.rl!="allowed_warning" && l.o.rst>at {
-                return Some("Claude usage limit is active; try another configured provider".into());
+        let provider = crate::prov::parse(model).0;
+        let at = now();
+        if provider == "cc" {
+            let l = self.lv.lock().unwrap();
+            if l.o.rl != "allowed" && l.o.rl != "allowed_warning" && l.o.rst > at {
+                return Some(
+                    "Claude usage limit is active; try another configured provider".into(),
+                );
             }
         }
-        if provider=="codex" {
-            let usage=self.codex_usage.lock().unwrap_or_else(|e|e.into_inner());
-            if crate::codex_usage::hunt_reserve_reached(&usage,at,0.0) {
+        if provider == "codex" {
+            let usage = self.codex_usage.lock().unwrap_or_else(|e| e.into_inner());
+            if crate::codex_usage::hunt_reserve_reached(&usage, at, 0.0) {
                 return Some("Codex quota exhausted in a current observed window".into());
             }
         }
-        match self.db.provider_cooldown(provider,at) {
-            Ok(Some(v))=>Some(format!("{provider} cooldown ({}) until {}",v["kind"].as_str().unwrap_or("unavailable"),
-                chrono::DateTime::from_timestamp_millis(v["until"].as_i64().unwrap_or(at)).map(|d|d.with_timezone(&chrono::Local).format("%H:%M:%S").to_string()).unwrap_or_default())),
-            Ok(None)=>None,
-            Err(_)=>Some(format!("{provider} cooldown ledger unavailable")),
+        match self.db.provider_cooldown(provider, at) {
+            Ok(Some(v)) => Some(format!(
+                "{provider} cooldown ({}) until {}",
+                v["kind"].as_str().unwrap_or("unavailable"),
+                chrono::DateTime::from_timestamp_millis(v["until"].as_i64().unwrap_or(at))
+                    .map(|d| d
+                        .with_timezone(&chrono::Local)
+                        .format("%H:%M:%S")
+                        .to_string())
+                    .unwrap_or_default()
+            )),
+            Ok(None) => None,
+            Err(_) => Some(format!("{provider} cooldown ledger unavailable")),
         }
     }
 
     /// Reserve observed capacity for high-priority fixes and independent reviews.
     /// No prediction or stale measurement is treated as actual remaining quota.
-    pub fn codex_low_priority_blocked(&self, model:&str)->bool {
-        if crate::prov::parse(model).0!="codex" {return false;}
-        let reserve=self.set()["codex_hunt_reserve_percent"].as_f64().unwrap_or(15.0).clamp(0.0,100.0);
-        let usage=self.codex_usage.lock().unwrap_or_else(|e|e.into_inner());
-        crate::codex_usage::hunt_reserve_reached(&usage,now(),reserve)
+    pub fn codex_low_priority_blocked(&self, model: &str) -> bool {
+        if crate::prov::parse(model).0 != "codex" {
+            return false;
+        }
+        let reserve = self.set()["codex_hunt_reserve_percent"]
+            .as_f64()
+            .unwrap_or(15.0)
+            .clamp(0.0, 100.0);
+        let usage = self.codex_usage.lock().unwrap_or_else(|e| e.into_inner());
+        crate::codex_usage::hunt_reserve_reached(&usage, now(), reserve)
     }
 
     pub fn hunter_quota_blocked(&self) -> bool {
-        if crate::routing::enabled(self) {return false;}
+        if crate::routing::enabled(self) {
+            return false;
+        }
         self.codex_low_priority_blocked(&self.md("hunter"))
     }
 
@@ -607,18 +624,18 @@ mod quota_reservation_tests {
     use super::*;
     #[test]
     fn codex_reserve_and_exhaustion_distinguish_priority_and_staleness() {
-        let a=App::new(Db::mem(),std::env::temp_dir(),1,"x".into());
-        let t=now();
-        *a.codex_usage.lock().unwrap()=json!({"status":"ok","updated_at":t,"five_hour":{"remaining":10,"resets_at":t/1000+3600}});
+        let a = App::new(Db::mem(), std::env::temp_dir(), 1, "x".into());
+        let t = now();
+        *a.codex_usage.lock().unwrap() = json!({"status":"ok","updated_at":t,"five_hour":{"remaining":10,"resets_at":t/1000+3600}});
         assert!(a.codex_low_priority_blocked("codex:"));
         assert!(!a.codex_low_priority_blocked("cc:sonnet"));
         assert!(a.provider_limit("codex:").is_none());
-        a.codex_usage.lock().unwrap()["five_hour"]["remaining"]=json!(0);
+        a.codex_usage.lock().unwrap()["five_hour"]["remaining"] = json!(0);
         assert!(a.provider_limit("codex:").is_some());
-        a.codex_usage.lock().unwrap()["status"]=json!("stale");
+        a.codex_usage.lock().unwrap()["status"] = json!("stale");
         assert!(a.provider_limit("codex:").is_none());
         assert!(!a.codex_low_priority_blocked("codex:"));
-        a.db.provider_failure("cc","network",t).unwrap();
+        a.db.provider_failure("cc", "network", t).unwrap();
         assert!(a.provider_limit("cc:sonnet").is_some());
         assert!(a.provider_limit("codex:").is_none());
     }

@@ -77,7 +77,11 @@ pub fn host_capacity(a: &App, host: &str, configured: i64) -> (i64, &'static str
 pub fn ci_capacity(a: &App, host: &str, configured: i64, restartable: bool) -> i64 {
     let configured = configured.clamp(1, 8);
     let (cap, _) = host_capacity(a, host, configured);
-    if restartable { cap } else { cap.max(1) }
+    if restartable {
+        cap
+    } else {
+        cap.max(1)
+    }
 }
 
 pub fn hunter_cap(a: &App, configured: i64) -> i64 {
@@ -101,9 +105,17 @@ pub fn status(a: &App) -> Value {
                 .iter()
                 .filter(|s| s.split_once(' ').is_some_and(|(_, host)| host == h.id))
                 .count();
-            let telemetry = a.lv.lock().unwrap().hst.get(&h.id).cloned().unwrap_or(Value::Null);
+            let telemetry =
+                a.lv.lock()
+                    .unwrap()
+                    .hst
+                    .get(&h.id)
+                    .cloned()
+                    .unwrap_or(Value::Null);
             let at = crate::db::now();
-            let fresh = telemetry["t"].as_i64().is_some_and(|t| t > 0 && t <= at && at.saturating_sub(t) <= 180_000);
+            let fresh = telemetry["t"]
+                .as_i64()
+                .is_some_and(|t| t > 0 && t <= at && at.saturating_sub(t) <= 180_000);
             json!({"id":h.id,"enabled":h.on,"configured_lanes":h.ln,
             "effective_lanes":if h.on {cap} else {0},"active":running,"reason":reason,
             "configured_ci":h.ci,"effective_ci":if h.on {ci_capacity(a,&h.id,h.ci,true)} else {0},
@@ -183,20 +195,20 @@ mod tests {
 
     #[test]
     fn ci_slots_follow_profile_without_blocking_nonrestartable_completion() {
-        let db=crate::db::Db::mem();
-        db.run("insert into hs(id,ln,ci,on_) values('local',4,4,1)",vec![]);
-        let a=App::new(db,std::env::temp_dir(),1,"apollo-office".into());
-        a.db.ks("set",&json!({"resource_profile":"night"}));
-        assert_eq!(ci_capacity(&a,"local",4,true),1);
-        a.db.ks("set",&json!({"resource_profile":"performance"}));
-        assert_eq!(ci_capacity(&a,"local",4,true),1);
+        let db = crate::db::Db::mem();
+        db.run("insert into hs(id,ln,ci,on_) values('local',4,4,1)", vec![]);
+        let a = App::new(db, std::env::temp_dir(), 1, "apollo-office".into());
+        a.db.ks("set", &json!({"resource_profile":"night"}));
+        assert_eq!(ci_capacity(&a, "local", 4, true), 1);
+        a.db.ks("set", &json!({"resource_profile":"performance"}));
+        assert_eq!(ci_capacity(&a, "local", 4, true), 1);
         a.lv.lock().unwrap().hst.insert("local".into(),json!({"t":crate::db::now(),"cpu":8,"load":1,"mem":[16000,8000],"temp":96,"gpu":[{"index":0}]}));
-        assert_eq!(ci_capacity(&a,"local",4,true),0);
-        assert_eq!(ci_capacity(&a,"local",4,false),1);
-        assert_eq!(status(&a)["hosts"][0]["effective_ci"],0);
-        a.db.ks("set",&json!({"resource_profile":"manual"}));
-        assert_eq!(ci_capacity(&a,"local",4,true),4);
-        a.lv.lock().unwrap().hst.get_mut("local").unwrap()["t"]=json!(1);
+        assert_eq!(ci_capacity(&a, "local", 4, true), 0);
+        assert_eq!(ci_capacity(&a, "local", 4, false), 1);
+        assert_eq!(status(&a)["hosts"][0]["effective_ci"], 0);
+        a.db.ks("set", &json!({"resource_profile":"manual"}));
+        assert_eq!(ci_capacity(&a, "local", 4, true), 4);
+        a.lv.lock().unwrap().hst.get_mut("local").unwrap()["t"] = json!(1);
         assert!(status(&a)["hosts"][0]["gpu"].is_null());
     }
 

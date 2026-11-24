@@ -1,5 +1,6 @@
 mod ai;
 mod app;
+mod coderabbit;
 mod codex_forecast;
 mod codex_usage;
 mod db;
@@ -17,7 +18,6 @@ mod resources;
 mod routing;
 mod sh;
 mod star;
-mod coderabbit;
 mod steward;
 // This opt-in cleanup implementation is retained until its Control Room toggle ships.
 #[allow(dead_code)]

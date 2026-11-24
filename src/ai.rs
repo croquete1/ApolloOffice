@@ -235,10 +235,13 @@ pub async fn ask1(a: &Ax, mut o: Ask) -> R<(String, Value)> {
     if let Some(reason) = a.provider_limit(&o.md) {
         return Err(X::Lim(reason));
     }
-    let low_priority=o.w=="hunter" || (matches!(o.w,"fixer"|"repro")
-        && o.job.and_then(|id|a.db.jg(id)).is_some_and(|j|j.opt()));
+    let low_priority = o.w == "hunter"
+        || (matches!(o.w, "fixer" | "repro")
+            && o.job.and_then(|id| a.db.jg(id)).is_some_and(|j| j.opt()));
     if low_priority && a.codex_low_priority_blocked(&o.md) {
-        return Err(X::Lim("Codex quota reserved for fixes and independent reviews".into()));
+        return Err(X::Lim(
+            "Codex quota reserved for fixes and independent reviews".into(),
+        ));
     }
     if crate::routing::enabled(a) && crate::routing::is_free(&o.md) {
         o.t = o.t.min(240);
@@ -249,21 +252,21 @@ pub async fn ask1(a: &Ax, mut o: Ask) -> R<(String, Value)> {
         r.w = o.w.to_string();
         r.md = o.md.clone();
     }
-    let provider=crate::prov::parse(&o.md).0;
-    let result=match provider {
+    let provider = crate::prov::parse(&o.md).0;
+    let result = match provider {
         "cc" => cc(a, o).await,
         "codex" => codex(a, o).await,
         _ => api(a, o).await,
     };
     // Only actual provider-call failures update cooldowns. A preflight refusal
     // must never extend the deadline on every retry.
-    let kind=match &result {
-        Err(X::Lim(_))=>Some("quota"),
-        Err(X::Net(_))=>Some("network"),
-        _=>None,
+    let kind = match &result {
+        Err(X::Lim(_)) => Some("quota"),
+        Err(X::Net(_)) => Some("network"),
+        _ => None,
     };
-    if let Some(kind)=kind {
-        if let Err(error)=a.db.provider_failure(provider,kind,crate::db::now()) {
+    if let Some(kind) = kind {
+        if let Err(error) = a.db.provider_failure(provider, kind, crate::db::now()) {
             eprintln!("provider cooldown persistence failed: {error}");
         }
     }

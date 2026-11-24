@@ -1141,20 +1141,44 @@ async fn pushers(r: &str, n: i64) -> Result<Vec<String>, String> {
     }
 }
 
-async fn recheck_merged_evidence(repo: &str, number: i64, me: &str, original: &Value, observed: &[Value]) -> R<()> {
+async fn recheck_merged_evidence(
+    repo: &str,
+    number: i64,
+    me: &str,
+    original: &Value,
+    observed: &[Value],
+) -> R<()> {
     let current = comments(repo, number, me).await?;
     if !same_comment_inventory(observed, &current) {
-        return Err(X::E("Merged PR comments changed during analysis; comments remain pending".into()));
+        return Err(X::E(
+            "Merged PR comments changed during analysis; comments remain pending".into(),
+        ));
     }
-    let fresh = ghj(&["pr","view",&number.to_string(),"-R",repo,"--json","state,mergedAt,updatedAt,baseRefName"],60).await.map_err(X::E)?;
+    let fresh = ghj(
+        &[
+            "pr",
+            "view",
+            &number.to_string(),
+            "-R",
+            repo,
+            "--json",
+            "state,mergedAt,updatedAt,baseRefName",
+        ],
+        60,
+    )
+    .await
+    .map_err(X::E)?;
     if !same_merged_snapshot(original, &fresh) {
-        return Err(X::E("Merged PR snapshot changed during analysis; comments remain pending".into()));
+        return Err(X::E(
+            "Merged PR snapshot changed during analysis; comments remain pending".into(),
+        ));
     }
     Ok(())
 }
 
 fn same_merged_snapshot(before: &Value, after: &Value) -> bool {
-    before["state"] == "MERGED" && after["state"] == "MERGED"
+    before["state"] == "MERGED"
+        && after["state"] == "MERGED"
         && ["mergedAt", "updatedAt", "baseRefName"].iter().all(|key| {
             before[*key].as_str().is_some_and(|value| !value.is_empty())
                 && before[*key] == after[*key]
@@ -1190,7 +1214,14 @@ async fn late(a: &Ax, r: &str, n: i64, me: &str, v: &Value) -> R<()> {
     ids.retain(|id| !deferred.contains(id));
     let complete = deferred.is_empty();
     if !complete {
-        a.say("watcher", &format!("{tag}: {} post-merge comment(s) require manual review", deferred.len()), None);
+        a.say(
+            "watcher",
+            &format!(
+                "{tag}: {} post-merge comment(s) require manual review",
+                deferred.len()
+            ),
+            None,
+        );
     }
     if nw.is_empty() {
         recheck_merged_evidence(r, n, me, v, &observed).await?;
@@ -1455,38 +1486,76 @@ fn observe_auto_merge(
     Ok(())
 }
 
-fn valid_pr_timestamp(v:&Value)->R<String>{
-    v["updatedAt"].as_str().filter(|s|issue_updated_at(s).is_some()).map(String::from)
-        .ok_or_else(||X::E("invalid PR update timestamp".into()))
+fn valid_pr_timestamp(v: &Value) -> R<String> {
+    v["updatedAt"]
+        .as_str()
+        .filter(|s| issue_updated_at(s).is_some())
+        .map(String::from)
+        .ok_or_else(|| X::E("invalid PR update timestamp".into()))
 }
 
-fn valid_pr_base(v:&Value)->R<String>{
-    v["baseRefName"].as_str().filter(|s|!s.trim().is_empty()).map(String::from)
-        .ok_or_else(||X::E("missing PR base branch".into()))
+fn valid_pr_base(v: &Value) -> R<String> {
+    v["baseRefName"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .map(String::from)
+        .ok_or_else(|| X::E("missing PR base branch".into()))
 }
 
-fn pending_checked(cs:Vec<Value>,last:&str)->R<Vec<Value>>{
-    if issue_updated_at(last).is_none() || cs.iter().any(|c|c["at"].as_str().and_then(issue_updated_at).is_none()){
-        return Err(X::E("comment or last commit timestamp unavailable; keep batch pending".into()));
+fn pending_checked(cs: Vec<Value>, last: &str) -> R<Vec<Value>> {
+    if issue_updated_at(last).is_none()
+        || cs
+            .iter()
+            .any(|c| c["at"].as_str().and_then(issue_updated_at).is_none())
+    {
+        return Err(X::E(
+            "comment or last commit timestamp unavailable; keep batch pending".into(),
+        ));
     }
-    Ok(pending(cs,last))
+    Ok(pending(cs, last))
 }
 
-fn same_review_snapshot(original:&Value,fresh:&Value)->bool{
-    original["state"]=="OPEN" && fresh["state"]=="OPEN"
-        && original["headRefOid"].as_str().is_some_and(crate::db::valid_git_sha)
-        && original["updatedAt"].as_str().and_then(issue_updated_at).is_some()
-        && original["headRefName"].as_str().is_some_and(|s|!s.trim().is_empty())
-        && original["baseRefName"].as_str().is_some_and(|s|!s.trim().is_empty())
-        && original["headRepositoryOwner"]["login"].as_str().is_some_and(|s|!s.trim().is_empty())
-        && original["headRepository"]["name"].as_str().is_some_and(|s|!s.trim().is_empty())
-        && ["headRefOid","updatedAt","headRefName","headRepositoryOwner","headRepository","baseRefName","reviewDecision"].iter().all(|key|original[*key]==fresh[*key])
+fn same_review_snapshot(original: &Value, fresh: &Value) -> bool {
+    original["state"] == "OPEN"
+        && fresh["state"] == "OPEN"
+        && original["headRefOid"]
+            .as_str()
+            .is_some_and(crate::db::valid_git_sha)
+        && original["updatedAt"]
+            .as_str()
+            .and_then(issue_updated_at)
+            .is_some()
+        && original["headRefName"]
+            .as_str()
+            .is_some_and(|s| !s.trim().is_empty())
+        && original["baseRefName"]
+            .as_str()
+            .is_some_and(|s| !s.trim().is_empty())
+        && original["headRepositoryOwner"]["login"]
+            .as_str()
+            .is_some_and(|s| !s.trim().is_empty())
+        && original["headRepository"]["name"]
+            .as_str()
+            .is_some_and(|s| !s.trim().is_empty())
+        && [
+            "headRefOid",
+            "updatedAt",
+            "headRefName",
+            "headRepositoryOwner",
+            "headRepository",
+            "baseRefName",
+            "reviewDecision",
+        ]
+        .iter()
+        .all(|key| original[*key] == fresh[*key])
 }
 
-async fn recheck_review_snapshot(repo:&str,number:i64,original:&Value)->R<()>{
+async fn recheck_review_snapshot(repo: &str, number: i64, original: &Value) -> R<()> {
     let fresh=ghj(&["pr","view",&number.to_string(),"-R",repo,"--json","state,headRefOid,updatedAt,headRefName,headRepositoryOwner,headRepository,baseRefName,reviewDecision"],60).await.map_err(X::E)?;
-    if !same_review_snapshot(original,&fresh){
-        return Err(X::E("PR changed during review analysis; comments remain pending".into()));
+    if !same_review_snapshot(original, &fresh) {
+        return Err(X::E(
+            "PR changed during review analysis; comments remain pending".into(),
+        ));
     }
     Ok(())
 }
@@ -1512,19 +1581,27 @@ fn same_comment_inventory(before: &[Value], after: &[Value]) -> bool {
 }
 
 async fn recheck_review_evidence(
-    repo: &str, number: i64, me: &str, original: &Value,
-    observed: &[Value], authorized_review_ids: &[String],
+    repo: &str,
+    number: i64,
+    me: &str,
+    original: &Value,
+    observed: &[Value],
+    authorized_review_ids: &[String],
 ) -> R<()> {
     let current = comments(repo, number, me).await?;
     if !same_comment_inventory(observed, &current) {
-        return Err(X::E("PR comment inventory changed during analysis; receipts remain pending".into()));
+        return Err(X::E(
+            "PR comment inventory changed during analysis; receipts remain pending".into(),
+        ));
     }
     if original["reviewDecision"] == "CHANGES_REQUESTED" {
         let current = pushers(repo, number).await.map_err(X::E)?;
         let before: std::collections::BTreeSet<_> = authorized_review_ids.iter().collect();
         let after: std::collections::BTreeSet<_> = current.iter().collect();
         if before != after {
-            return Err(X::E("Reviewer permissions changed during analysis; receipts remain pending".into()));
+            return Err(X::E(
+                "Reviewer permissions changed during analysis; receipts remain pending".into(),
+            ));
         }
     }
     recheck_review_snapshot(repo, number, original).await
@@ -1547,275 +1624,697 @@ fn defer_oversized_comments(rows: &mut Vec<Value>) -> std::collections::BTreeSet
     deferred
 }
 
-async fn watch_pr(a:&Ax,p:Value,me:&str,
-    lu:&mut std::collections::HashMap<String,std::collections::HashMap<i64,String>>,
-    default_branches:&mut std::collections::HashMap<String,String>)->R<()>{
-    let r=p["repo"].as_str().filter(|s|!s.trim().is_empty()).ok_or_else(||X::E("tracked PR without repository".into()))?.to_string();
-    let n=p["num"].as_i64().filter(|n|*n>0).ok_or_else(||X::E("tracked PR without number".into()))?;
-        let default_branch = repo_default_branch(a, default_branches, &r).await;
-        if p["st"] == "merged" {
-            let wk = format!("wm:{r}#{n}");
-            if a.db.kg(&wk).as_i64().map(|t| now() - t < 1_800_000).unwrap_or(false) {
-                return Ok(());
-            }
-            let v = ghj(&["pr", "view", &n.to_string(), "-R", &r, "--json", "state,mergedAt,updatedAt,title,url,baseRefName"], 60).await.map_err(X::E)?;
-            let up = valid_pr_timestamp(&v)?;
-            let base = valid_pr_base(&v)?;
-            if a.db.ch("update prs set upd=?, d=json_set(d,'$.base',?,'$.default_branch',?) where repo=? and num=? and st='merged' and upd is ?", pa![up.clone(), base, default_branch.clone(), r.clone(), n,p["upd"].as_str().map(String::from)]) != 1 {
+async fn watch_pr(
+    a: &Ax,
+    p: Value,
+    me: &str,
+    lu: &mut std::collections::HashMap<String, std::collections::HashMap<i64, String>>,
+    default_branches: &mut std::collections::HashMap<String, String>,
+) -> R<()> {
+    let r = p["repo"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| X::E("tracked PR without repository".into()))?
+        .to_string();
+    let n = p["num"]
+        .as_i64()
+        .filter(|n| *n > 0)
+        .ok_or_else(|| X::E("tracked PR without number".into()))?;
+    let default_branch = repo_default_branch(a, default_branches, &r).await;
+    if p["st"] == "merged" {
+        let wk = format!("wm:{r}#{n}");
+        if a.db
+            .kg(&wk)
+            .as_i64()
+            .map(|t| now() - t < 1_800_000)
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        let v = ghj(
+            &[
+                "pr",
+                "view",
+                &n.to_string(),
+                "-R",
+                &r,
+                "--json",
+                "state,mergedAt,updatedAt,title,url,baseRefName",
+            ],
+            60,
+        )
+        .await
+        .map_err(X::E)?;
+        let up = valid_pr_timestamp(&v)?;
+        let base = valid_pr_base(&v)?;
+        if a.db.ch("update prs set upd=?, d=json_set(d,'$.base',?,'$.default_branch',?) where repo=? and num=? and st='merged' and upd is ?", pa![up.clone(), base, default_branch.clone(), r.clone(), n,p["upd"].as_str().map(String::from)]) != 1 {
                 return Err(X::E("could not persist merged PR metadata".into()));
             }
-            if p["d"]["comment_seen_at"].as_str() != Some(up.as_str()) {
-                late(a,&r,n,me,&v).await?;
-            }
-            a.db.ks(&wk,&json!(now()));
+        if p["d"]["comment_seen_at"].as_str() != Some(up.as_str()) {
+            late(a, &r, n, me, &v).await?;
+        }
+        a.db.ks(&wk, &json!(now()));
+        return Ok(());
+    }
+    let has_pending =
+        a.db.has_pending_review(&r, n)
+            .map_err(|e| X::E(e.to_string()))?;
+    let ag = p["upd"]
+        .as_str()
+        .and_then(|u| chrono::DateTime::parse_from_rfc3339(u).ok())
+        .map(|u| now() - u.timestamp_millis())
+        .unwrap_or(0);
+    let gap = if ag > 14 * 86_400_000 {
+        6 * 3_600_000
+    } else if ag > 7 * 86_400_000 {
+        3_600_000
+    } else {
+        0
+    };
+    if gap > 0 && !has_pending {
+        let sk = format!("ws:{r}#{n}");
+        if !lu.contains_key(&r) {
+            let m: std::collections::HashMap<i64, String> = ghj(
+                &[
+                    "pr",
+                    "list",
+                    "-R",
+                    &r,
+                    "--state",
+                    "open",
+                    "--author",
+                    "@me",
+                    "--limit",
+                    "1000",
+                    "--json",
+                    "number,updatedAt",
+                ],
+                120,
+            )
+            .await
+            .ok()
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .map(|x| {
+                (
+                    x["number"].as_i64().unwrap_or(0),
+                    x["updatedAt"].as_str().unwrap_or("").to_string(),
+                )
+            })
+            .collect();
+            lu.insert(r.clone(), m);
+        }
+        let ch = lu
+            .get(&r)
+            .and_then(|m| m.get(&n))
+            .map(|u| Some(u.as_str()) != p["upd"].as_str())
+            .unwrap_or(true);
+        if !ch
+            && a.db
+                .kg(&sk)
+                .as_i64()
+                .map(|t| now() - t < gap)
+                .unwrap_or(false)
+        {
             return Ok(());
         }
-        let has_pending = a.db.has_pending_review(&r,n).map_err(|e|X::E(e.to_string()))?;
-        let ag = p["upd"].as_str().and_then(|u| chrono::DateTime::parse_from_rfc3339(u).ok()).map(|u| now() - u.timestamp_millis()).unwrap_or(0);
-        let gap = if ag > 14 * 86_400_000 { 6 * 3_600_000 } else if ag > 7 * 86_400_000 { 3_600_000 } else { 0 };
-        if gap > 0 && !has_pending {
-            let sk = format!("ws:{r}#{n}");
-            if !lu.contains_key(&r) {
-                let m: std::collections::HashMap<i64, String> = ghj(&["pr", "list", "-R", &r, "--state", "open", "--author", "@me", "--limit", "1000", "--json", "number,updatedAt"], 120).await.ok().and_then(|v| v.as_array().cloned()).unwrap_or_default().iter().map(|x| (x["number"].as_i64().unwrap_or(0), x["updatedAt"].as_str().unwrap_or("").to_string())).collect();
-                lu.insert(r.clone(), m);
-            }
-            let ch = lu.get(&r).and_then(|m| m.get(&n)).map(|u| Some(u.as_str()) != p["upd"].as_str()).unwrap_or(true);
-            if !ch && a.db.kg(&sk).as_i64().map(|t| now() - t < gap).unwrap_or(false) {
-                return Ok(());
-            }
+    }
+    let fields = if p["d"]["auto_merge"].as_bool() == Some(true) {
+        "state,mergedAt,updatedAt,title,url,mergeable,headRefName,headRepositoryOwner,headRepository,baseRefName,reviewDecision,isDraft,headRefOid,statusCheckRollup"
+    } else {
+        "state,mergedAt,updatedAt,title,url,mergeable,headRefName,headRepositoryOwner,headRepository,baseRefName,reviewDecision,headRefOid"
+    };
+    let v = match ghj(
+        &["pr", "view", &n.to_string(), "-R", &r, "--json", fields],
+        60,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            a.say(
+                "watcher",
+                &format!("{r}#{n}: {}", crate::sh::head(&e, 200)),
+                None,
+            );
+            return Ok(());
         }
-        let fields = if p["d"]["auto_merge"].as_bool() == Some(true) {
-            "state,mergedAt,updatedAt,title,url,mergeable,headRefName,headRepositoryOwner,headRepository,baseRefName,reviewDecision,isDraft,headRefOid,statusCheckRollup"
-        } else {
-            "state,mergedAt,updatedAt,title,url,mergeable,headRefName,headRepositoryOwner,headRepository,baseRefName,reviewDecision,headRefOid"
-        };
-        let v = match ghj(&["pr", "view", &n.to_string(), "-R", &r, "--json", fields], 60).await {
-            Ok(v) => v,
-            Err(e) => {
-                a.say("watcher", &format!("{r}#{n}: {}", crate::sh::head(&e, 200)), None);
-                return Ok(());
-            }
-        };
-        let up=valid_pr_timestamp(&v)?;
-        let base=valid_pr_base(&v)?;
-        let st=match v["state"].as_str() {
-            Some("MERGED") if v["mergedAt"].as_str().and_then(issue_updated_at).is_some()=> "merged",
-            Some("OPEN") if v["mergedAt"].is_null()=> "open",
-            Some("CLOSED") if v["mergedAt"].is_null()=> "closed",
-            _=>return Err(X::E("invalid PR state or merge timestamp".into())),
-        };
-        let source_head=v["headRefOid"].as_str().filter(|s|crate::db::valid_git_sha(s)).unwrap_or("").to_string();
-        if st=="open" && source_head.is_empty(){return Err(X::E("open PR HEAD unavailable".into()));}
-        if a.db.ch("update prs set st=?,title=?,upd=?,merged=?,d=json_set(d,'$.base',?,'$.default_branch',?,'$.watcher_head',?) where repo=? and num=? and st='open' and upd is ?",pa![st.to_string(),v["title"].as_str().unwrap_or("").to_string(),up.clone(),v["mergedAt"].as_str().map(String::from),base,default_branch.clone(),source_head.clone(),r.clone(),n,p["upd"].as_str().map(String::from)])!=1 {
+    };
+    let up = valid_pr_timestamp(&v)?;
+    let base = valid_pr_base(&v)?;
+    let st = match v["state"].as_str() {
+        Some("MERGED") if v["mergedAt"].as_str().and_then(issue_updated_at).is_some() => "merged",
+        Some("OPEN") if v["mergedAt"].is_null() => "open",
+        Some("CLOSED") if v["mergedAt"].is_null() => "closed",
+        _ => return Err(X::E("invalid PR state or merge timestamp".into())),
+    };
+    let source_head = v["headRefOid"]
+        .as_str()
+        .filter(|s| crate::db::valid_git_sha(s))
+        .unwrap_or("")
+        .to_string();
+    if st == "open" && source_head.is_empty() {
+        return Err(X::E("open PR HEAD unavailable".into()));
+    }
+    if a.db.ch("update prs set st=?,title=?,upd=?,merged=?,d=json_set(d,'$.base',?,'$.default_branch',?,'$.watcher_head',?) where repo=? and num=? and st='open' and upd is ?",pa![st.to_string(),v["title"].as_str().unwrap_or("").to_string(),up.clone(),v["mergedAt"].as_str().map(String::from),base,default_branch.clone(),source_head.clone(),r.clone(),n,p["upd"].as_str().map(String::from)])!=1 {
             return Err(X::E("could not persist PR metadata".into()));
         }
-        let tag = format!("{r}#{n}");
-        if st == "merged" {
-            a.note("Merged", &format!("{tag} {}\n{}", v["title"].as_str().unwrap_or(""), v["url"].as_str().unwrap_or("")), 3);
-            a.flow("watcher", "submit", "merged");
-            a.say("watcher", &format!("{tag} merged"), None);
-            a.db.ks("lm", &json!({"repo": r, "num": n, "title": v["title"], "url": v["url"], "t": now()}));
-            late(a,&r,n,me,&v).await?;
-            a.db.ks(&format!("wm:{tag}"),&json!(now()));
+    let tag = format!("{r}#{n}");
+    if st == "merged" {
+        a.note(
+            "Merged",
+            &format!(
+                "{tag} {}\n{}",
+                v["title"].as_str().unwrap_or(""),
+                v["url"].as_str().unwrap_or("")
+            ),
+            3,
+        );
+        a.flow("watcher", "submit", "merged");
+        a.say("watcher", &format!("{tag} merged"), None);
+        a.db.ks(
+            "lm",
+            &json!({"repo": r, "num": n, "title": v["title"], "url": v["url"], "t": now()}),
+        );
+        late(a, &r, n, me, &v).await?;
+        a.db.ks(&format!("wm:{tag}"), &json!(now()));
+        return Ok(());
+    }
+    if st == "closed" {
+        a.note(
+            "Closed without merge",
+            &format!(
+                "{tag} {}\n{}",
+                v["title"].as_str().unwrap_or(""),
+                v["url"].as_str().unwrap_or("")
+            ),
+            4,
+        );
+        a.say("watcher", &format!("{tag} closed without merge"), None);
+        return Ok(());
+    }
+    let hd = format!(
+        "{}/{}",
+        v["headRepositoryOwner"]["login"].as_str().unwrap_or(""),
+        v["headRepository"]["name"].as_str().unwrap_or("")
+    );
+    let hrn = v["headRefName"].as_str().unwrap_or("").to_string();
+    if v["mergeable"] == "CONFLICTING" && v["headRepositoryOwner"]["login"].as_str() == Some(me) {
+        let request = json!({
+            "title":v["title"],"url":v["url"],
+            "why":format!("merge conflict with {}",v["baseRefName"].as_str().unwrap_or("")),
+            "data":{"branch":hrn,"head":hd,"test_cmd":p["d"]["test_cmd"]}
+        });
+        if a.db
+            .queue_watcher_rebase(&r, n, &up, &source_head, &request)
+            .map_err(|e| X::E(e.to_string()))?
+        {
+            a.flow("watcher", "fixer", "rebase");
+            a.say(
+                "watcher",
+                &format!("{tag} has a merge conflict, sent to rebase"),
+                None,
+            );
+        }
+    }
+    observe_auto_merge(a, &r, n, &v, &p["d"], me)?;
+    if !has_pending
+        && p["d"]["comment_seen_at"].as_str() == Some(up.as_str())
+        && p["d"]["watcher_head"] == source_head
+        && p["d"]["seen"].as_bool().unwrap_or(false)
+    {
+        a.db.ks(&format!("ws:{tag}"), &json!(now()));
+        return Ok(());
+    }
+    let first = !p["d"]["seen"].as_bool().unwrap_or(false);
+    let cs = match comments(&r, n, me).await {
+        Ok(x) => x,
+        Err(e) => {
+            a.say(
+                "watcher",
+                &format!("{tag}: {}", crate::sh::head(&errm(&e), 200)),
+                None,
+            );
             return Ok(());
         }
-        if st == "closed" {
-            a.note("Closed without merge", &format!("{tag} {}\n{}", v["title"].as_str().unwrap_or(""), v["url"].as_str().unwrap_or("")), 4);
-            a.say("watcher", &format!("{tag} closed without merge"), None);
+    };
+    let cr: Vec<String> = if v["reviewDecision"] == "CHANGES_REQUESTED" {
+        match pushers(&r, n).await {
+            Ok(ids) => ids,
+            Err(error) => {
+                a.say(
+                    "watcher",
+                    &format!(
+                        "{tag}: reviewer permissions unavailable: {}",
+                        crate::sh::head(&error, 160)
+                    ),
+                    None,
+                );
+                return Ok(());
+            }
+        }
+    } else {
+        vec![]
+    };
+    let tr = |c: &Value| {
+        MA.contains(&c["as"].as_str().unwrap_or(""))
+            || (c["k"] == "review"
+                && c["t"]
+                    .as_str()
+                    .map(|t| t.starts_with("[review: CHANGES_REQUESTED]"))
+                    .unwrap_or(false)
+                && c["rid"]
+                    .as_str()
+                    .map(|x| cr.iter().any(|y| y == x))
+                    .unwrap_or(false))
+    };
+    let observed_comments = cs.clone();
+    let mut nw = Vec::new();
+    for c in cs {
+        let id = c["id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| X::E("PR comment has no identifier".into()))?;
+        if !a
+            .db
+            .comment_acknowledged(&r, id)
+            .map_err(|e| X::E(e.to_string()))?
+        {
+            nw.push(c);
+        }
+    }
+    let received_ids: Vec<String> = nw
+        .iter()
+        .filter_map(|c| c["id"].as_str().map(String::from))
+        .collect();
+    if has_pending {
+        recheck_review_evidence(&r, n, me, &v, &observed_comments, &cr).await?;
+        let retired =
+            a.db.reconcile_review_receipts(&r, n, &up, &source_head, &received_ids)
+                .map_err(|e| X::E(e.to_string()))?;
+        if retired > 0 {
+            a.say("watcher",&format!("{tag}: {retired} receipt(s) no longer in observed pending inventory; no acknowledgement or action"),None);
+        }
+    }
+    a.db.receive_review_batch(&r, n, &up, &source_head, &received_ids)
+        .map_err(|e| X::E(e.to_string()))?;
+    if !received_ids.is_empty()
+        || a.db
+            .has_pending_review(&r, n)
+            .map_err(|e| X::E(e.to_string()))?
+    {
+        if !a
+            .db
+            .claim_review_attempt(&r, n, &up, &source_head, now())
+            .map_err(|e| X::E(e.to_string()))?
+        {
             return Ok(());
         }
-        let hd = format!("{}/{}", v["headRepositoryOwner"]["login"].as_str().unwrap_or(""), v["headRepository"]["name"].as_str().unwrap_or(""));
-        let hrn = v["headRefName"].as_str().unwrap_or("").to_string();
-        if v["mergeable"] == "CONFLICTING" && v["headRepositoryOwner"]["login"].as_str() == Some(me) {
-            let request=json!({
-                "title":v["title"],"url":v["url"],
-                "why":format!("merge conflict with {}",v["baseRefName"].as_str().unwrap_or("")),
-                "data":{"branch":hrn,"head":hd,"test_cmd":p["d"]["test_cmd"]}
-            });
-            if a.db.queue_watcher_rebase(&r,n,&up,&source_head,&request).map_err(|e|X::E(e.to_string()))?{
-                a.flow("watcher","fixer","rebase");
-                a.say("watcher",&format!("{tag} has a merge conflict, sent to rebase"),None);
-            }
-        }
-        observe_auto_merge(a, &r, n, &v, &p["d"], me)?;
-        if !has_pending && p["d"]["comment_seen_at"].as_str() == Some(up.as_str()) && p["d"]["watcher_head"]==source_head && p["d"]["seen"].as_bool().unwrap_or(false) {
-            a.db.ks(&format!("ws:{tag}"),&json!(now()));
+    }
+    let mut batch_acked = false;
+    let mut outbound = Value::Null;
+    if first && !nw.is_empty() {
+        let lc = ghj(
+            &[
+                "pr",
+                "view",
+                &n.to_string(),
+                "-R",
+                &r,
+                "--json",
+                "commits",
+                "--jq",
+                ".commits[-1].committedDate",
+            ],
+            60,
+        )
+        .await
+        .map_err(X::E)?;
+        nw = pending_checked(nw, lc.as_str().unwrap_or(""))?;
+    }
+    // Oversized comments remain in the durable inbox without acknowledgement.
+    // Other comments can be handled independently; the existing retry
+    // window stays active while any receipt remains pending.
+    let deferred = defer_oversized_comments(&mut nw);
+    let ack_ids: Vec<String> = received_ids
+        .iter()
+        .filter(|id| !deferred.contains(id.as_str()))
+        .cloned()
+        .collect();
+    if !deferred.is_empty() {
+        a.say(
+            "watcher",
+            &format!(
+                "{tag}: {} comment(s) exceed complete Guard input limit; manual review required",
+                deferred.len()
+            ),
+            None,
+        );
+        if nw.is_empty() && ack_ids.is_empty() {
             return Ok(());
         }
-        let first = !p["d"]["seen"].as_bool().unwrap_or(false);
-        let cs = match comments(&r, n, me).await {
-            Ok(x) => x,
-            Err(e) => {
-                a.say("watcher", &format!("{tag}: {}", crate::sh::head(&errm(&e), 200)), None);
-                return Ok(());
-            }
-        };
-        let cr: Vec<String> = if v["reviewDecision"] == "CHANGES_REQUESTED" {
-            match pushers(&r,n).await{
-                Ok(ids)=>ids,
-                Err(error)=>{a.say("watcher",&format!("{tag}: reviewer permissions unavailable: {}",crate::sh::head(&error,160)),None);return Ok(());}
-            }
-        } else { vec![] };
-        let tr = |c: &Value| MA.contains(&c["as"].as_str().unwrap_or("")) || (c["k"] == "review" && c["t"].as_str().map(|t| t.starts_with("[review: CHANGES_REQUESTED]")).unwrap_or(false) && c["rid"].as_str().map(|x| cr.iter().any(|y| y == x)).unwrap_or(false));
-        let observed_comments = cs.clone();
-        let mut nw = Vec::new();
-        for c in cs {
-            let id = c["id"].as_str().filter(|id| !id.is_empty())
-                .ok_or_else(|| X::E("PR comment has no identifier".into()))?;
-            if !a.db.comment_acknowledged(&r, id).map_err(|e| X::E(e.to_string()))? {
-                nw.push(c);
-            }
+    }
+    if !nw.is_empty() {
+        a.say(
+            "watcher",
+            &format!("{tag}: {} new comment(s)", nw.len()),
+            None,
+        );
+        let g = guard(
+            a,
+            nw.iter()
+                .map(|c| {
+                    (
+                        c["id"].as_str().unwrap_or("").to_string(),
+                        c["t"].as_str().unwrap_or("").to_string(),
+                    )
+                })
+                .collect(),
+            "watcher",
+            None,
+        )
+        .await?;
+        for c in nw.iter().filter(|c| {
+            g[c["id"].as_str().unwrap_or("")]["inj"]
+                .as_bool()
+                .unwrap_or(false)
+        }) {
+            a.note(
+                "Guard: suspicious comment",
+                &format!(
+                    "{tag} by {}: {}\n{}",
+                    c["by"].as_str().unwrap_or(""),
+                    g[c["id"].as_str().unwrap_or("")]["why"]
+                        .as_str()
+                        .unwrap_or(""),
+                    v["url"].as_str().unwrap_or("")
+                ),
+                4,
+            );
         }
-        let received_ids: Vec<String> = nw.iter().filter_map(|c| c["id"].as_str().map(String::from)).collect();
-        if has_pending {
-            recheck_review_evidence(&r,n,me,&v,&observed_comments,&cr).await?;
-            let retired=a.db.reconcile_review_receipts(&r,n,&up,&source_head,&received_ids).map_err(|e|X::E(e.to_string()))?;
-            if retired>0 {
-                a.say("watcher",&format!("{tag}: {retired} receipt(s) no longer in observed pending inventory; no acknowledgement or action"),None);
+        let okc: Vec<&Value> = nw
+            .iter()
+            .filter(|c| {
+                !g[c["id"].as_str().unwrap_or("")]["inj"]
+                    .as_bool()
+                    .unwrap_or(false)
+            })
+            .collect();
+        if !okc.is_empty() {
+            let mc: Vec<&Value> = okc.iter().filter(|c| tr(c)).cloned().collect();
+            let ma = !mc.is_empty();
+            let src: &Vec<&Value> = if ma { &mc } else { &okc };
+            let pv = ghj(
+                &[
+                    "pr",
+                    "view",
+                    &n.to_string(),
+                    "-R",
+                    &r,
+                    "--json",
+                    "body,files,headRefOid,updatedAt,changedFiles",
+                ],
+                60,
+            )
+            .await
+            .map_err(X::E)?;
+            if pv["headRefOid"] != source_head
+                || pv["updatedAt"] != up
+                || !pv["files"].as_array().is_some_and(|files| {
+                    pv["changedFiles"].as_u64() == Some(files.len() as u64)
+                        && files
+                            .iter()
+                            .all(|f| f["path"].as_str().is_some_and(|p| !p.is_empty()))
+                })
+            {
+                return Err(X::E("PR file list is unavailable".into()));
             }
-        }
-        a.db.receive_review_batch(&r,n,&up,&source_head,&received_ids).map_err(|e|X::E(e.to_string()))?;
-        if !received_ids.is_empty() || a.db.has_pending_review(&r,n).map_err(|e|X::E(e.to_string()))? {
-            if !a.db.claim_review_attempt(&r,n,&up,&source_head,now()).map_err(|e|X::E(e.to_string()))? {
-                return Ok(());
+            let fl = pv["files"]
+                .as_array()
+                .map(|x| {
+                    x.iter()
+                        .filter_map(|f| f["path"].as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .unwrap_or_default();
+            let pr = format!(
+                "PR {tag}: {}\n\n{}\n\n{}\n\n{}",
+                v["title"].as_str().unwrap_or(""),
+                wrap(
+                    "description",
+                    &crate::sh::head(pv["body"].as_str().unwrap_or(""), 4000)
+                ),
+                wrap("files", &crate::sh::head(&fl, 2000)),
+                src.iter()
+                    .map(|c| wrap(
+                        c["id"].as_str().unwrap_or(""),
+                        &format!(
+                            "{} by {} ({})\n\n{}",
+                            c["k"].as_str().unwrap_or(""),
+                            c["by"].as_str().unwrap_or(""),
+                            c["as"].as_str().unwrap_or(""),
+                            crate::sh::head(c["t"].as_str().unwrap_or(""), 4000)
+                        )
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+            );
+            let mut o = Ask::new("watcher", a.md("watcher"), P("watcher"), pr);
+            o.ef = Some("low");
+            let (_, js) = ask(a, o).await?;
+            if !js["act"].is_boolean() {
+                return Err(X::E("Watcher gave no readable action verdict".into()));
             }
-        }
-        let mut batch_acked = false;
-        let mut outbound=Value::Null;
-        if first && !nw.is_empty() {
-            let lc = ghj(&["pr", "view", &n.to_string(), "-R", &r, "--json", "commits", "--jq", ".commits[-1].committedDate"], 60).await.map_err(X::E)?;
-            nw = pending_checked(nw,lc.as_str().unwrap_or(""))?;
-        }
-        // Oversized comments remain in the durable inbox without acknowledgement.
-        // Other comments can be handled independently; the existing retry
-        // window stays active while any receipt remains pending.
-        let deferred = defer_oversized_comments(&mut nw);
-        let ack_ids: Vec<String> = received_ids.iter().filter(|id| !deferred.contains(id.as_str())).cloned().collect();
-        if !deferred.is_empty() {
-            a.say("watcher", &format!("{tag}: {} comment(s) exceed complete Guard input limit; manual review required", deferred.len()), None);
-            if nw.is_empty() && ack_ids.is_empty() {
-                return Ok(());
-            }
-        }
-        if !nw.is_empty() {
-            a.say("watcher", &format!("{tag}: {} new comment(s)", nw.len()), None);
-            let g = guard(a, nw.iter().map(|c| (c["id"].as_str().unwrap_or("").to_string(), c["t"].as_str().unwrap_or("").to_string())).collect(), "watcher", None).await?;
-            for c in nw.iter().filter(|c| g[c["id"].as_str().unwrap_or("")]["inj"].as_bool().unwrap_or(false)) {
-                a.note("Guard: suspicious comment", &format!("{tag} by {}: {}\n{}", c["by"].as_str().unwrap_or(""), g[c["id"].as_str().unwrap_or("")]["why"].as_str().unwrap_or(""), v["url"].as_str().unwrap_or("")), 4);
-            }
-            let okc: Vec<&Value> = nw.iter().filter(|c| !g[c["id"].as_str().unwrap_or("")]["inj"].as_bool().unwrap_or(false)).collect();
-            if !okc.is_empty() {
-                let mc: Vec<&Value> = okc.iter().filter(|c| tr(c)).cloned().collect();
-                let ma = !mc.is_empty();
-                let src: &Vec<&Value> = if ma { &mc } else { &okc };
-                let pv = ghj(&["pr", "view", &n.to_string(), "-R", &r, "--json", "body,files,headRefOid,updatedAt,changedFiles"], 60).await.map_err(X::E)?;
-                if pv["headRefOid"]!=source_head || pv["updatedAt"]!=up
-                    || !pv["files"].as_array().is_some_and(|files|pv["changedFiles"].as_u64()==Some(files.len() as u64) && files.iter().all(|f|f["path"].as_str().is_some_and(|p|!p.is_empty()))) {
-                    return Err(X::E("PR file list is unavailable".into()));
+            let by = okc
+                .iter()
+                .filter_map(|c| c["by"].as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let act = js["act"].as_bool().unwrap_or(false);
+            if ma {
+                let reply = js["reply"].as_str().unwrap_or("").trim();
+                if !reply.is_empty() {
+                    outbound = json!({"author":me,"body":crate::sh::head(reply,1500)});
                 }
-                let fl = pv["files"].as_array().map(|x| x.iter().filter_map(|f| f["path"].as_str()).collect::<Vec<_>>().join("\n")).unwrap_or_default();
-                let pr = format!("PR {tag}: {}\n\n{}\n\n{}\n\n{}", v["title"].as_str().unwrap_or(""), wrap("description", &crate::sh::head(pv["body"].as_str().unwrap_or(""), 4000)), wrap("files", &crate::sh::head(&fl, 2000)), src.iter().map(|c| wrap(c["id"].as_str().unwrap_or(""), &format!("{} by {} ({})\n\n{}", c["k"].as_str().unwrap_or(""), c["by"].as_str().unwrap_or(""), c["as"].as_str().unwrap_or(""), crate::sh::head(c["t"].as_str().unwrap_or(""), 4000)))).collect::<Vec<_>>().join("\n\n"));
-                let mut o = Ask::new("watcher", a.md("watcher"), P("watcher"), pr);
-                o.ef = Some("low");
-                let (_, js) = ask(a, o).await?;
-                if !js["act"].is_boolean() {
-                    return Err(X::E("Watcher gave no readable action verdict".into()));
+            }
+            if act && ma {
+                let ch = js["change"]
+                    .as_str()
+                    .filter(|s| !s.trim().is_empty())
+                    .ok_or_else(|| X::E("missing requested change".into()))?
+                    .to_string();
+                let data = json!({"change": ch, "comment": crate::sh::head(&mc.iter().map(|c| format!("{}: {}", c["by"].as_str().unwrap_or(""), c["t"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("\n\n"), 6000), "branch": hrn, "head": hd, "test_cmd": p["d"]["test_cmd"],"source_head":source_head});
+                recheck_review_evidence(&r, n, me, &v, &observed_comments, &cr).await?;
+                let request = json!({"title":v["title"],"url":v["url"],"change":ch,"data":data,"reply":outbound});
+                if !a
+                    .db
+                    .queue_review_and_ack(&r, n, &up, &ack_ids, &request)
+                    .map_err(|e| X::E(e.to_string()))?
+                {
+                    a.say(
+                        "watcher",
+                        &format!("{tag}: new review deferred until active review finishes"),
+                        None,
+                    );
+                    return Ok(());
                 }
-                let by = okc.iter().filter_map(|c| c["by"].as_str()).collect::<Vec<_>>().join(", ");
-                let act = js["act"].as_bool().unwrap_or(false);
-                if ma {
-                    let reply=js["reply"].as_str().unwrap_or("").trim();
-                    if !reply.is_empty(){
-                        outbound=json!({"author":me,"body":crate::sh::head(reply,1500)});
-                    }
-                }
-                if act && ma {
-                    let ch=js["change"].as_str().filter(|s|!s.trim().is_empty()).ok_or_else(||X::E("missing requested change".into()))?.to_string();
-                    let data = json!({"change": ch, "comment": crate::sh::head(&mc.iter().map(|c| format!("{}: {}", c["by"].as_str().unwrap_or(""), c["t"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("\n\n"), 6000), "branch": hrn, "head": hd, "test_cmd": p["d"]["test_cmd"],"source_head":source_head});
-                    recheck_review_evidence(&r,n,me,&v,&observed_comments,&cr).await?;
-                    let request = json!({"title":v["title"],"url":v["url"],"change":ch,"data":data,"reply":outbound});
-                    if !a.db.queue_review_and_ack(&r, n, &up, &ack_ids, &request).map_err(|e| X::E(e.to_string()))? {
-                        a.say("watcher", &format!("{tag}: new review deferred until active review finishes"), None);
-                        return Ok(());
-                    }
-                    batch_acked = true;
-                    a.flow("watcher", "fixer", "review");
-                    a.say("watcher", &format!("{tag}: change requested by {by}, sent to Fixer"), None);
-                    a.note("Change requested", &format!("{tag} ({by}): {ch}\n\nDraft reply:\n{}\n{}", js["draft"].as_str().unwrap_or("-"), v["url"].as_str().unwrap_or("")), 4);
-                } else {
-                    a.say("watcher", &format!("{tag}: {by} commented{}", if act && !ma { " (not a maintainer, not applied)" } else { "" }), None);
-                    a.note(&format!("Comment on {tag}"), &format!("{by}: {}\n\nDraft reply:\n{}\n{}", crate::sh::head(okc.last().and_then(|c| c["t"].as_str()).unwrap_or(""), 600), js["draft"].as_str().unwrap_or("-"), v["url"].as_str().unwrap_or("")), 3);
-                }
+                batch_acked = true;
+                a.flow("watcher", "fixer", "review");
+                a.say(
+                    "watcher",
+                    &format!("{tag}: change requested by {by}, sent to Fixer"),
+                    None,
+                );
+                a.note(
+                    "Change requested",
+                    &format!(
+                        "{tag} ({by}): {ch}\n\nDraft reply:\n{}\n{}",
+                        js["draft"].as_str().unwrap_or("-"),
+                        v["url"].as_str().unwrap_or("")
+                    ),
+                    4,
+                );
+            } else {
+                a.say(
+                    "watcher",
+                    &format!(
+                        "{tag}: {by} commented{}",
+                        if act && !ma {
+                            " (not a maintainer, not applied)"
+                        } else {
+                            ""
+                        }
+                    ),
+                    None,
+                );
+                a.note(
+                    &format!("Comment on {tag}"),
+                    &format!(
+                        "{by}: {}\n\nDraft reply:\n{}\n{}",
+                        crate::sh::head(
+                            okc.last().and_then(|c| c["t"].as_str()).unwrap_or(""),
+                            600
+                        ),
+                        js["draft"].as_str().unwrap_or("-"),
+                        v["url"].as_str().unwrap_or("")
+                    ),
+                    3,
+                );
+            }
+        }
+    }
+    // Advance the comment cursor only after successful analysis and queue persistence.
+    if !batch_acked {
+        recheck_review_evidence(&r, n, me, &v, &observed_comments, &cr).await?;
+        a.db.ack_pr_comments_with_reply(&r, n, &up, &source_head, &ack_ids, &outbound)
+            .map_err(|e| X::E(e.to_string()))?;
+    }
 
-            }
-        }
-        // Advance the comment cursor only after successful analysis and queue persistence.
-        if !batch_acked {
-            recheck_review_evidence(&r,n,me,&v,&observed_comments,&cr).await?;
-            a.db.ack_pr_comments_with_reply(&r,n,&up,&source_head,&ack_ids,&outbound).map_err(|e|X::E(e.to_string()))?;
-        }
-
-    a.db.ks(&format!("ws:{tag}"),&json!(now()));
+    a.db.ks(&format!("ws:{tag}"), &json!(now()));
     Ok(())
 }
 
-pub(crate) fn reply_confirmed(rows:&[Value],author:&str,body:&str)->bool{
-    rows.iter().any(|row|row["user"]["login"].as_str()==Some(author) && row["body"].as_str()==Some(body))
+pub(crate) fn reply_confirmed(rows: &[Value], author: &str, body: &str) -> bool {
+    rows.iter().any(|row| {
+        row["user"]["login"].as_str() == Some(author) && row["body"].as_str() == Some(body)
+    })
 }
 
-async fn deliver_watcher_outbox(a:&Ax,me:&str)->R<()>{
+async fn deliver_watcher_outbox(a: &Ax, me: &str) -> R<()> {
     // Pending sends first, then ambiguous sends. No uncertain row can be claimed again.
     let rows=a.db.try_all("select * from watcher_outbox where author=? and (state='pending' or (state='uncertain' and updated<=?)) order by updated,id limit 20",pa![me.to_string(),now()-600_000]).map_err(|e|X::E(e.to_string()))?;
     for row in rows {
-        if a.hold("watcher"){break;}
-        let (Some(id),Some(repo),Some(number),Some(author),Some(body))=(row["id"].as_str(),row["repo"].as_str(),row["num"].as_i64(),row["author"].as_str(),row["body"].as_str()) else {continue;};
-        let tag=format!("{repo}#{number}");
-        if author!=me {
-            a.say("watcher",&format!("{tag}: pending reply belongs to a different GitHub identity"),None);
+        if a.hold("watcher") {
+            break;
+        }
+        let (Some(id), Some(repo), Some(number), Some(author), Some(body)) = (
+            row["id"].as_str(),
+            row["repo"].as_str(),
+            row["num"].as_i64(),
+            row["author"].as_str(),
+            row["body"].as_str(),
+        ) else {
+            continue;
+        };
+        let tag = format!("{repo}#{number}");
+        if author != me {
+            a.say(
+                "watcher",
+                &format!("{tag}: pending reply belongs to a different GitHub identity"),
+                None,
+            );
             continue;
         }
-        if row["state"]=="uncertain"{
+        if row["state"] == "uncertain" {
             // Positive confirmation only: absence is not evidence that a POST failed.
-            if let Ok(comments)=apip_unique(&format!("repos/{repo}/issues/{number}/comments?per_page=100")).await{
-                if reply_confirmed(&comments,author,body){
-                    a.db.finish_watcher_reply(id,"sent").map_err(|e|X::E(e.to_string()))?;
-                    a.say("watcher",&format!("{tag}: previously uncertain reply confirmed"),None);
+            if let Ok(comments) = apip_unique(&format!(
+                "repos/{repo}/issues/{number}/comments?per_page=100"
+            ))
+            .await
+            {
+                if reply_confirmed(&comments, author, body) {
+                    a.db.finish_watcher_reply(id, "sent")
+                        .map_err(|e| X::E(e.to_string()))?;
+                    a.say(
+                        "watcher",
+                        &format!("{tag}: previously uncertain reply confirmed"),
+                        None,
+                    );
                 }
             }
             // Rotate ambiguous rows rather than starve later rows.
-            a.db.run("update watcher_outbox set updated=? where id=? and state='uncertain'",pa![now(),id.to_string()]);
+            a.db.run(
+                "update watcher_outbox set updated=? where id=? and state='uncertain'",
+                pa![now(), id.to_string()],
+            );
             continue;
         }
-        if now().saturating_sub(row["created"].as_i64().unwrap_or(0))>=86_400_000{
-            a.db.finish_watcher_reply(id,"cancelled").map_err(|e|X::E(e.to_string()))?;
-            a.say("watcher",&format!("{tag}: unsent reply expired; manual review required"),None);
+        if now().saturating_sub(row["created"].as_i64().unwrap_or(0)) >= 86_400_000 {
+            a.db.finish_watcher_reply(id, "cancelled")
+                .map_err(|e| X::E(e.to_string()))?;
+            a.say(
+                "watcher",
+                &format!("{tag}: unsent reply expired; manual review required"),
+                None,
+            );
             continue;
         }
         // Recheck the remote state before publishing previously queued content.
-        a.db.run("update watcher_outbox set updated=? where id=? and state='pending'",pa![now(),id.to_string()]);
-        let Ok(pr)=ghj(&["pr","view",&number.to_string(),"-R",repo,"--json","state"],45).await else{continue;};
-        match pr["state"].as_str(){
-            Some("OPEN")=>{},
-            Some("MERGED"|"CLOSED")=>{
-                a.db.finish_watcher_reply(id,"cancelled").map_err(|e|X::E(e.to_string()))?;
-                a.say("watcher",&format!("{tag}: unsent reply cancelled because PR is no longer open"),None);
+        a.db.run(
+            "update watcher_outbox set updated=? where id=? and state='pending'",
+            pa![now(), id.to_string()],
+        );
+        let Ok(pr) = ghj(
+            &[
+                "pr",
+                "view",
+                &number.to_string(),
+                "-R",
+                repo,
+                "--json",
+                "state",
+            ],
+            45,
+        )
+        .await
+        else {
+            continue;
+        };
+        match pr["state"].as_str() {
+            Some("OPEN") => {}
+            Some("MERGED" | "CLOSED") => {
+                a.db.finish_watcher_reply(id, "cancelled")
+                    .map_err(|e| X::E(e.to_string()))?;
+                a.say(
+                    "watcher",
+                    &format!("{tag}: unsent reply cancelled because PR is no longer open"),
+                    None,
+                );
                 continue;
-            },
-            _=>continue
+            }
+            _ => continue,
         }
-        let identity=ghj(&["api","user"],45).await.map_err(X::E)?;
-        if identity["login"].as_str()!=Some(author){
+        let identity = ghj(&["api", "user"], 45).await.map_err(X::E)?;
+        if identity["login"].as_str() != Some(author) {
             return Err(X::E("GitHub identity changed; delivery deferred".into()));
         }
-        if a.hold("watcher"){break;}
-        if !a.db.claim_watcher_reply(id,me).map_err(|e|X::E(e.to_string()))?{continue;}
-        match gh(&["pr","comment",&number.to_string(),"-R",repo,"--body",body],60).await{
-            Ok(_)=>{
-                a.db.finish_watcher_reply(id,"sent").map_err(|e|X::E(e.to_string()))?;
-                a.db.ks(&format!("wr:{tag}"),&json!(now()));
-                a.say("watcher",&format!("{tag}: queued reply delivered"),None);
-            },
-            Err(_)=>a.say("watcher",&format!("{tag}: reply delivery uncertain; automatic resend disabled"),None)
+        if a.hold("watcher") {
+            break;
+        }
+        if !a
+            .db
+            .claim_watcher_reply(id, me)
+            .map_err(|e| X::E(e.to_string()))?
+        {
+            continue;
+        }
+        match gh(
+            &[
+                "pr",
+                "comment",
+                &number.to_string(),
+                "-R",
+                repo,
+                "--body",
+                body,
+            ],
+            60,
+        )
+        .await
+        {
+            Ok(_) => {
+                a.db.finish_watcher_reply(id, "sent")
+                    .map_err(|e| X::E(e.to_string()))?;
+                a.db.ks(&format!("wr:{tag}"), &json!(now()));
+                a.say("watcher", &format!("{tag}: queued reply delivered"), None);
+            }
+            Err(_) => a.say(
+                "watcher",
+                &format!("{tag}: reply delivery uncertain; automatic resend disabled"),
+                None,
+            ),
         }
     }
     Ok(())
@@ -1824,22 +2323,31 @@ async fn deliver_watcher_outbox(a:&Ax,me:&str)->R<()>{
 async fn watch1(a: &Ax) -> R<()> {
     need(a, "watcher", &["gh"]).await?;
     a.st("watcher", "work", None, "");
-    let me=crate::gh::login(a).await;
-    if me.trim().is_empty(){return Err(X::E("GitHub identity unavailable".into()));}
-    let mut lu=std::collections::HashMap::new();
-    let mut default_branches=std::collections::HashMap::new();
+    let me = crate::gh::login(a).await;
+    if me.trim().is_empty() {
+        return Err(X::E("GitHub identity unavailable".into()));
+    }
+    let mut lu = std::collections::HashMap::new();
+    let mut default_branches = std::collections::HashMap::new();
     let rows=a.db.try_all("select * from prs where st='open' or (st='merged' and merged>strftime('%Y-%m-%dT%H:%M:%SZ','now','-2 days')) order by repo,num",pa![]).map_err(|e|X::E(e.to_string()))?;
-    for p in rows{
+    for p in rows {
         a.held("watcher").await;
-        let tag=format!("{}#{}",p["repo"].as_str().unwrap_or("?"),p["num"]);
-        if let Err(error)=watch_pr(a,p,&me,&mut lu,&mut default_branches).await{
-            a.say("watcher",&format!("{tag}: processing deferred: {}",crate::sh::head(&errm(&error),200)),None);
+        let tag = format!("{}#{}", p["repo"].as_str().unwrap_or("?"), p["num"]);
+        if let Err(error) = watch_pr(a, p, &me, &mut lu, &mut default_branches).await {
+            a.say(
+                "watcher",
+                &format!(
+                    "{tag}: processing deferred: {}",
+                    crate::sh::head(&errm(&error), 200)
+                ),
+                None,
+            );
         }
     }
-    if let Err(error)=deliver_watcher_outbox(a,&me).await{
-        a.say("watcher",&format!("outbox: {}",errm(&error)),None);
+    if let Err(error) = deliver_watcher_outbox(a, &me).await {
+        a.say("watcher", &format!("outbox: {}", errm(&error)), None);
     }
-    a.st("watcher","idle",None,"");
+    a.st("watcher", "idle", None, "");
     Ok(())
 }
 
@@ -1899,34 +2407,60 @@ mod t {
     }
 
     #[test]
-    fn review_snapshot_requires_same_head_and_review_state(){
-        let original=json!({"state":"OPEN","headRefOid":"a".repeat(40),"updatedAt":"2026-11-24T11:00:00Z","headRefName":"fix","headRepositoryOwner":{"login":"owner"},"headRepository":{"name":"repo"},"baseRefName":"main","reviewDecision":"CHANGES_REQUESTED"});
-        assert!(same_review_snapshot(&original,&original));
-        for (key,value) in [("headRefOid",json!("b".repeat(40))),("state",json!("CLOSED")),("reviewDecision",json!("APPROVED")),("updatedAt",json!("later")),("baseRefName",json!("next"))]{
-            let mut changed=original.clone();
-            changed[key]=value;
-            assert!(!same_review_snapshot(&original,&changed));
+    fn review_snapshot_requires_same_head_and_review_state() {
+        let original = json!({"state":"OPEN","headRefOid":"a".repeat(40),"updatedAt":"2026-11-24T11:00:00Z","headRefName":"fix","headRepositoryOwner":{"login":"owner"},"headRepository":{"name":"repo"},"baseRefName":"main","reviewDecision":"CHANGES_REQUESTED"});
+        assert!(same_review_snapshot(&original, &original));
+        for (key, value) in [
+            ("headRefOid", json!("b".repeat(40))),
+            ("state", json!("CLOSED")),
+            ("reviewDecision", json!("APPROVED")),
+            ("updatedAt", json!("later")),
+            ("baseRefName", json!("next")),
+        ] {
+            let mut changed = original.clone();
+            changed[key] = value;
+            assert!(!same_review_snapshot(&original, &changed));
         }
-        let invalid=json!({"state":"OPEN","headRefOid":"invalid"});
-        assert!(!same_review_snapshot(&invalid,&invalid));
+        let invalid = json!({"state":"OPEN","headRefOid":"invalid"});
+        assert!(!same_review_snapshot(&invalid, &invalid));
     }
 
     #[test]
-    fn uncertain_reply_requires_exact_body_and_author_confirmation(){
-        let body="reply\n\n<!-- apollo-office-reply:abc -->";
-        assert!(reply_confirmed(&[json!({"user":{"login":"owner"},"body":body})],"owner",body));
-        assert!(!reply_confirmed(&[json!({"user":{"login":"other"},"body":body})],"owner",body));
-        assert!(!reply_confirmed(&[json!({"user":{"login":"owner"},"body":"different"})],"owner",body));
-        assert!(!reply_confirmed(&[],"owner",body));
+    fn uncertain_reply_requires_exact_body_and_author_confirmation() {
+        let body = "reply\n\n<!-- apollo-office-reply:abc -->";
+        assert!(reply_confirmed(
+            &[json!({"user":{"login":"owner"},"body":body})],
+            "owner",
+            body
+        ));
+        assert!(!reply_confirmed(
+            &[json!({"user":{"login":"other"},"body":body})],
+            "owner",
+            body
+        ));
+        assert!(!reply_confirmed(
+            &[json!({"user":{"login":"owner"},"body":"different"})],
+            "owner",
+            body
+        ));
+        assert!(!reply_confirmed(&[], "owner", body));
     }
 
     #[test]
     fn incomplete_pr_metadata_and_comment_timestamps_defer_processing() {
         assert!(valid_pr_timestamp(&json!({"updatedAt":"invalid"})).is_err());
         assert!(valid_pr_base(&json!({"baseRefName":""})).is_err());
-        assert!(pending_checked(vec![json!({"at":"invalid"})],"2026-10-18T10:00:00Z").is_err());
-        assert!(pending_checked(vec![json!({"at":"2026-10-19T10:00:00Z"})],"").is_err());
-        assert_eq!(pending_checked(vec![json!({"at":"2026-10-19T10:00:00Z"})],"2026-10-18T10:00:00Z").unwrap().len(),1);
+        assert!(pending_checked(vec![json!({"at":"invalid"})], "2026-10-18T10:00:00Z").is_err());
+        assert!(pending_checked(vec![json!({"at":"2026-10-19T10:00:00Z"})], "").is_err());
+        assert_eq!(
+            pending_checked(
+                vec![json!({"at":"2026-10-19T10:00:00Z"})],
+                "2026-10-18T10:00:00Z"
+            )
+            .unwrap()
+            .len(),
+            1
+        );
     }
 
     #[test]
@@ -2032,14 +2566,20 @@ mod watcher_evidence_inventory_tests {
 
     #[test]
     fn merged_snapshot_requires_same_state_merge_time_and_update() {
-        let original = json!({"state":"MERGED","mergedAt":"m","updatedAt":"u","baseRefName":"main"});
-        assert!(same_merged_snapshot(&original,&original));
-        for (key,value) in [("state","OPEN"),("mergedAt","other"),("updatedAt","new"),("baseRefName","dev")] {
-            let mut changed=original.clone();
-            changed[key]=json!(value);
-            assert!(!same_merged_snapshot(&original,&changed));
+        let original =
+            json!({"state":"MERGED","mergedAt":"m","updatedAt":"u","baseRefName":"main"});
+        assert!(same_merged_snapshot(&original, &original));
+        for (key, value) in [
+            ("state", "OPEN"),
+            ("mergedAt", "other"),
+            ("updatedAt", "new"),
+            ("baseRefName", "dev"),
+        ] {
+            let mut changed = original.clone();
+            changed[key] = json!(value);
+            assert!(!same_merged_snapshot(&original, &changed));
         }
-        assert!(!same_merged_snapshot(&json!({}),&json!({})));
+        assert!(!same_merged_snapshot(&json!({}), &json!({})));
     }
 
     #[test]
@@ -2051,27 +2591,35 @@ mod watcher_evidence_inventory_tests {
             json!({"id":"r4","t":"Valid request"}),
         ];
         let deferred = defer_oversized_comments(&mut rows);
-        assert_eq!(deferred.into_iter().collect::<Vec<_>>(), vec!["r2".to_string(),"r3".to_string()]);
-        assert_eq!(rows.iter().map(|row|row["id"].as_str().unwrap()).collect::<Vec<_>>(), vec!["r1","r4"]);
+        assert_eq!(
+            deferred.into_iter().collect::<Vec<_>>(),
+            vec!["r2".to_string(), "r3".to_string()]
+        );
+        assert_eq!(
+            rows.iter()
+                .map(|row| row["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["r1", "r4"]
+        );
     }
 
     #[test]
     fn inventory_rejects_edits_removals_duplicates_and_permission_changes() {
-        let a=json!({"id":"r1","t":"Original request","as":"MEMBER","actor_id":42});
-        let b=json!({"id":"c2","t":"Another comment","as":"OWNER","actor_id":43});
-        let original=vec![a.clone(),b.clone()];
-        assert!(same_comment_inventory(&original,&[b.clone(),a.clone()]));
-        assert!(!same_comment_inventory(&original,&[a.clone()]));
-        assert!(!same_comment_inventory(&original,&[a.clone(),a.clone()]));
-        let mut edited=a.clone();
-        edited["t"]=json!("Edited request");
-        assert!(!same_comment_inventory(&original,&[edited,b.clone()]));
-        let mut changed=a.clone();
-        changed["as"]=json!("NONE");
-        assert!(!same_comment_inventory(&original,&[changed,b.clone()]));
-        let mut actor=a.clone();
-        actor["actor_id"]=json!(99);
-        assert!(!same_comment_inventory(&original,&[actor,b]));
-        assert!(!same_comment_inventory(&[json!({})],&[json!({})]));
+        let a = json!({"id":"r1","t":"Original request","as":"MEMBER","actor_id":42});
+        let b = json!({"id":"c2","t":"Another comment","as":"OWNER","actor_id":43});
+        let original = vec![a.clone(), b.clone()];
+        assert!(same_comment_inventory(&original, &[b.clone(), a.clone()]));
+        assert!(!same_comment_inventory(&original, &[a.clone()]));
+        assert!(!same_comment_inventory(&original, &[a.clone(), a.clone()]));
+        let mut edited = a.clone();
+        edited["t"] = json!("Edited request");
+        assert!(!same_comment_inventory(&original, &[edited, b.clone()]));
+        let mut changed = a.clone();
+        changed["as"] = json!("NONE");
+        assert!(!same_comment_inventory(&original, &[changed, b.clone()]));
+        let mut actor = a.clone();
+        actor["actor_id"] = json!(99);
+        assert!(!same_comment_inventory(&original, &[actor, b]));
+        assert!(!same_comment_inventory(&[json!({})], &[json!({})]));
     }
 }

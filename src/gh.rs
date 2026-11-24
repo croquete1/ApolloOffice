@@ -85,7 +85,9 @@ fn normalize_open_pr_summaries(rows: Vec<Value>) -> Result<Vec<Value>, String> {
             || !row["title"].is_string()
             || !(row["body"].is_null() || row["body"].is_string())
         {
-            return Err(format!("PR #{number} has duplicate or incomplete inventory metadata"));
+            return Err(format!(
+                "PR #{number} has duplicate or incomplete inventory metadata"
+            ));
         }
         summaries.push(json!({"number":number,"title":row["title"],"body":row["body"]}));
     }
@@ -160,7 +162,7 @@ mod issue_listing_tests {
         let row = |n| json!({"number":n,"state":"open","title":"Fix","body":null});
         let rows = (1..=1001).map(row).collect();
         assert_eq!(normalize_open_pr_summaries(rows).unwrap().len(), 1001);
-        assert!(normalize_open_pr_summaries(vec![row(1),row(1)]).is_err());
+        assert!(normalize_open_pr_summaries(vec![row(1), row(1)]).is_err());
         assert!(normalize_open_pr_summaries(vec![json!({"number":1})]).is_err());
         assert!(normalize_open_pr_summaries(vec![]).unwrap().is_empty());
     }
