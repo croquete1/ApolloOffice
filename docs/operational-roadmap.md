@@ -42,6 +42,11 @@ Estas PRs estão em draft e **não estão integradas**. A main funcional continu
 - #68 — F11/F14/F15: capacidade de CI adaptada aos perfis e pressão observada; tarefas retomáveis podem adiar CI, mantendo um limite mínimo de uma vaga para concluir trabalho não retomável; GPU/VRAM/temperatura/utilização NVIDIA opcionais, sem drivers novos, sem dependência de Ollama ou Qwen; diagnóstico no drawer Health, dados stale omitidos. Dois testes Rust criados, não executados. Quatro cenários do probe shell com utilitário simulado e dois testes JS isolados do renderer PASS, hashes dos trechos e teste confirmados. HEAD 6777ef95eef51dabcc6e77134b087994188ca41e. Não é validação em GPU real nem suporta ainda telemetria AMD/Intel.
 - Bloqueio: limite Hobby Vercel anteriormente atingido; ambiente local sem cargo/rustc e sem resolução DNS GitHub; sem runs CI verificados. Não declarar fase encerrada ou fazer merge funcional até resolver conflitos, formatar e validar a árvore conjunta. Preservar interface dos agentes e configuração dos modelos.
 
+## Quinta entrega — revisão em desenvolvimento (24/11/2026)
+- PR #70 (draft) — F02/F03/F04: isolamento de falhas por PR; validação de metadados e timestamps, atualização condicional preservando o cursor e recusando snapshots concorrentes desatualizados; scans com falha não avançam o throttle de sucesso; admissão transacional de revisões inéditas com PR aberta, exclusão perante revisão/rebase/recheck ativo, registo dos comentários de origem. HEAD c3e43db9eea912e7750b6e47758ebdca944f357c.
+- QA SQLite isolado com Python: cinco cenários PASS (8 ligações concorrentes, uma inserção; replay integral/parcial; bloqueio por rebase e recuperação; preservação de cursor e rejeição de snapshot stale; PR encerrada). Dois testes Rust novos e extensão de teste existente, não executados. Não constitui compilação, teste integral do Watcher ou validação da API GitHub.
+- Inbox/outbox integral, HEAD remoto na admissão, exclusão universal de operações concorrentes e testes Rust permanecem pendentes. As PRs #65–70 funcionais (#65, #66, #67, #68, #70) não foram integradas; #69 é documentação já integrada. Última bateria integral validada: 395 testes. Interface dos agentes e configuração de modelos preservadas.
+
 ## Balanço por fase
 | Fase | Estado | Falta |
 |---|---|---|
