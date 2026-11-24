@@ -4380,8 +4380,12 @@ pub(crate) fn admit(a: &Ax, repo: &str, host: &str, id: i64) -> bool {
     {
         return false;
     }
+    let capacity = ho(a,host).map(|h| crate::resources::host_capacity(a,host,h.ln).0);
     let mut active = a.act.lock().unwrap();
     let mut locked = a.lk.lock().unwrap();
+    if capacity.is_some_and(|cap| active.iter().filter(|entry| entry.split_once(' ').is_some_and(|(_,h)| h==host)).count() as i64 >= cap) {
+        return false;
+    }
     let claim = format!("{repo} {host}");
     if active.contains(&claim) || locked.contains(&id) {
         return false;
@@ -4456,7 +4460,7 @@ fn pick_rank(j: &Value) -> (i32, i32, i32, f64, i64, i64) {
 }
 
 /// Selects eligible work, reserving the final admission under update_transition.
-async fn pick(a: &Ax, h: &str) -> Option<i64> {
+async fn pick(a: &Ax, h: &str, allow_hunt: bool) -> Option<i64> {
     if a.drain.load(std::sync::atomic::Ordering::Relaxed) {
         return None;
     }
@@ -4490,7 +4494,7 @@ async fn pick(a: &Ax, h: &str) -> Option<i64> {
         {
             continue;
         }
-        if j["kind"] == "hunt" && (a.hold("hunter") || crate::hunt_health::blocked(a, &r) || a.hunter_quota_blocked()) {
+        if j["kind"] == "hunt" && (!allow_hunt || a.hold("hunter") || crate::hunt_health::blocked(a, &r) || a.hunter_quota_blocked()) {
             continue;
         }
         if !pin && (j["kind"] == "rebase" || j["kind"] == "review") {
@@ -4570,7 +4574,7 @@ fn hn(a: &Ax) -> i64 {
     if crate::routing::enabled(a) {
         return 0;
     }
-    let cap = a.set()["hunters"].as_i64().unwrap_or(2).clamp(0, 12);
+    let cap = crate::resources::hunter_cap(a,a.set()["hunters"].as_i64().unwrap_or(2).clamp(0,12));
     let l: i64 = hosts(a)
         .iter()
         .filter(|h| h.on && a.net(&h.id))
@@ -4708,13 +4712,18 @@ async fn lane(a: Ax, h: String, k: i64) {
         // Capacity reservation: when a host has two or more lanes, the top lane
         // never starts new hunts, so fixes and PR rechecks keep a lane and are
         // never starved by continuous hunting.
-        let reserve_for_fixes = x.ln >= 2 && k == x.ln;
+        let effective = crate::resources::host_capacity(&a,&h,x.ln).0;
+        if effective == 0 || k > effective {
+            sl(20_000).await;
+            continue;
+        }
+        let reserve_for_fixes = effective >= 2 && k == effective;
         while !reserve_for_fixes
             && !a.hold("hunter")
             && !a.drain.load(std::sync::atomic::Ordering::Relaxed)
             && mk_hunt(&a)
         {}
-        let Some(id) = pick(&a, &h).await else {
+        let Some(id) = pick(&a, &h, !reserve_for_fixes).await else {
             sl(20_000).await;
             continue;
         };

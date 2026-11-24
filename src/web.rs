@@ -461,7 +461,7 @@ fn state(a: &Ax) -> Value {
             "open_fixes": a.db.n("select count(distinct p.repo || '#' || p.num) from jobs j join prs p on p.repo=j.repo and p.num=j.pr where j.kind='fix' and j.st='done' and p.st='open'", pa![]),
             "merged_fixes": a.db.n("select count(distinct p.repo || '#' || p.num) from jobs j join prs p on p.repo=j.repo and p.num=j.pr where j.kind='fix' and j.st='done' and p.st='merged' and coalesce(json_extract(p.d,'$.default_branch'),'')<>'' and json_extract(p.d,'$.base')=json_extract(p.d,'$.default_branch')", pa![])
         },
-        "ops": {"waiting": waiting, "blocked_hunts": blocked_hunts, "paused": paused},
+        "ops": {"waiting": waiting, "blocked_hunts": blocked_hunts, "paused": paused, "resources": crate::resources::status(a)},
         "diag": {"hosts": hosts_diag, "hunt_off": hunt_off, "iss_off": iss_off, "hunt_enabled": hunt_enabled},
         "hs": a.db.all("select id, ln, dk, on_ from hs order by id='local' desc, id", pa![]),
         "rp": a.db.all("select full repo,on_ from rp order by full", pa![]),
@@ -636,6 +636,12 @@ fn sets(a: &Ax, b: &Value) {
     }
     if let Some(x) = b["big"].as_bool() {
         s["big"] = json!(x);
+    }
+    if let Some(x) = b["resource_profile"].as_str().filter(|p| crate::resources::PROFILES.contains(p)) {
+        s["resource_profile"] = json!(x);
+    }
+    if let Some(x) = b["codex_hunt_reserve_percent"].as_f64().filter(|v| v.is_finite() && (0.0..=100.0).contains(v)) {
+        s["codex_hunt_reserve_percent"] = json!(x);
     }
     if let Some(x) = b["hunters"].as_i64() {
         s["hunters"] = json!(x.clamp(0, 12));
@@ -1529,7 +1535,7 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
             let id: i64 = qv("id").parse().unwrap_or(0);
             match a.db.one("select * from jobs where id=?", pa![id]) {
                 Some(j) => js(
-                    json!({"id": j["id"], "repo": j["repo"], "num": j["num"], "kind": j["kind"], "work_class": work_class(&j), "title": j["title"], "url": j["url"], "st": j["st"], "why": j["why"], "schedule": a.db.one("select manual_priority,retry_after,retry_reason from job_schedule where job=?",pa![id]), "dependencies": a.db.all("select d.prerequisite,j.st,p.st pr_state from job_dependencies d left join jobs j on j.id=d.prerequisite left join prs p on p.repo=j.repo and p.num=j.pr where d.job=? order by d.prerequisite",pa![id]), "failure": j["d"]["failure"], "pt": j["d"]["pt"], "pb": j["d"]["pb"], "df": j["d"]["df"], "proof": j["d"]["proof"], "known": j["d"]["known"], "h": j["d"]["h"], "ext": j["d"]["ext"]["src"], "cost": a.db.one("select sum(case when sub=0 then usd end) usd, sum(case when sub=1 then usd end) val, sum(tin+tcw+tcr) ti, sum(tout) tou, count(*) n from cost where job=?", pa![id]), "ev": a.db.all("select t,w,m from ev where j=? order by id desc limit 80", pa![id])}),
+                    json!({"id": j["id"], "repo": j["repo"], "num": j["num"], "kind": j["kind"], "work_class": work_class(&j), "title": j["title"], "url": j["url"], "st": j["st"], "why": j["why"], "schedule": a.db.one("select manual_priority,retry_after,retry_reason from job_schedule where job=?",pa![id]), "schedule_editable": j["st"]=="ready" && j["kind"]=="fix" && j["d"]["rs"]!=true && j["d"]["rp"]!=true && !a.lk.lock().unwrap().contains(&id), "dependencies": a.db.all("select d.prerequisite,j.st,p.st pr_state from job_dependencies d left join jobs j on j.id=d.prerequisite left join prs p on p.repo=j.repo and p.num=j.pr where d.job=? order by d.prerequisite",pa![id]), "failure": j["d"]["failure"], "pt": j["d"]["pt"], "pb": j["d"]["pb"], "df": j["d"]["df"], "proof": j["d"]["proof"], "known": j["d"]["known"], "h": j["d"]["h"], "ext": j["d"]["ext"]["src"], "cost": a.db.one("select sum(case when sub=0 then usd end) usd, sum(case when sub=1 then usd end) val, sum(tin+tcw+tcr) ti, sum(tout) tou, count(*) n from cost where job=?", pa![id]), "ev": a.db.all("select t,w,m from ev where j=? order by id desc limit 80", pa![id])}),
                 ),
                 None => er(StatusCode::NOT_FOUND, "no such job"),
             }

@@ -14,6 +14,7 @@ mod pipe;
 mod prov;
 mod quality;
 mod routing;
+mod resources;
 mod sh;
 mod star;
 mod steward;

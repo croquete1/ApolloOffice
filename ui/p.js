@@ -388,6 +388,8 @@
       </div></div></div>
       <div data-tab="gen" class="sec"><h4>Sign in</h4><div class="box">${cfg.google ? `<div class="ck"><b class="ok2">Google</b> ${esc(cfg.google)} can sign in.</div><div class="acts"><button type="button" class="dng" id="gu">Disconnect Google</button></div>` : `<div class="ck">Sign in with a one-time link from <code>apollo-office login-link</code>, or connect a Google account.</div><div class="acts"><button type="button" id="gl">Connect Google account</button></div>`}</div></div>
       <div data-tab="gen" class="sec"><h4>Work</h4><div class="box"><div class="fm" style="margin:0">
+        <label>Perfil de recursos</label><select name="resource_profile">${[["manual","Manual"],["economic","Económico"],["balanced","Equilibrado"],["performance","Desempenho"],["night","Noturno"]].map(([id,label])=>`<option value="${id}" ${(s.resource_profile || "manual")===id?"selected":""}>${label}</option>`).join("")}</select><div class="hint">Os perfis limitam apenas novas tarefas; nunca interrompem trabalho ativo. Manual mantém os limites existentes. Noturno limita a uma lane por máquina e desativa novas pesquisas.</div>
+        <label>Reserva de quota Codex (%)</label><input type="number" name="codex_hunt_reserve_percent" min="0" max="100" step="1" value="${Number.isFinite(s.codex_hunt_reserve_percent)?s.codex_hunt_reserve_percent:15}"><div class="hint">Abaixo deste valor, novas pesquisas Codex aguardam. Não afeta tarefas em execução.</div>
         <label>Hunters</label><input type="number" name="hunters" min="0" max="12" value="${s.hunters}"><div class="hint">How many bug hunts may run at once (only in repos with hunting on).</div>
         <label>Daily token limit</label><input type="number" name="tokday" min="0" value="${s.tokday}"><div class="hint">0 = no limit. The office always pauses when a provider reports a usage limit.</div>
         <label>Working hours</label><div class="acts" style="margin:0;align-items:center">${tg("whon", s.wh?.on, "only work from")}<input type="time" name="whf" value="${esc(s.wh?.from || "08:00")}" style="width:auto"> to <input type="time" name="wht" value="${esc(s.wh?.to || "22:00")}" style="width:auto"></div><div class="hint">Outside these hours the office pauses; running steps finish first. Times of this computer.</div>
@@ -500,7 +502,7 @@
         const r = await post({ id: e.dataset.key, key: e.value.trim() }, "/api/prov");
         if (r.error) { $("sbar").hidden = false; $("sm").className = "bad2"; $("sm").textContent = r.error; return; }
       }
-      const r = await post({ wh: { on: v.whon, from: v.whf, to: v.wht }, hunters: v.hunters, tokday: v.tokday, ntfy: v.ntfy, discord: v.discord, auto: v.auto, updates: v.updates, ollama: v.ollama, octx: v.octx, cckc: v.cckc, test }, "/api/set");
+      const r = await post({ wh: { on: v.whon, from: v.whf, to: v.wht }, hunters: v.hunters, resource_profile: v.resource_profile, codex_hunt_reserve_percent: v.codex_hunt_reserve_percent, tokday: v.tokday, ntfy: v.ntfy, discord: v.discord, auto: v.auto, updates: v.updates, ollama: v.ollama, octx: v.octx, cckc: v.cckc, test }, "/api/set");
       if (r.error) { $("sbar").hidden = false; $("sm").className = "bad2"; $("sm").textContent = r.error; return; }
       await settings();
       const sb = $("sbar");
@@ -629,6 +631,14 @@
       const output = f.output && f.output !== message ? `<pre>${esc(f.output)}</pre>` : "";
       return `<div class="sec dz"><h4>Diagnóstico técnico</h4><div class="box"><div class="hint">${esc(details)}</div>${message ? `<pre>${esc(message)}</pre>` : ""}${output}</div></div>`;
     })() : "";
+    const dependencies = Array.isArray(j.dependencies) ? j.dependencies : [];
+    const schedule = j.schedule || {};
+    const scheduleHtml = `<div class="sec"><h4>Agendamento</h4><div class="box">
+      <div class="hint">Prioridade: ${schedule.manual_priority == null ? "Automática" : "P"+esc(schedule.manual_priority)}${schedule.retry_after > Date.now() ? " · Retoma após "+esc(new Date(schedule.retry_after).toLocaleString("pt-PT")) : ""}</div>
+      ${schedule.retry_reason ? `<div class="hint">${esc(schedule.retry_reason)}</div>` : ""}
+      ${dependencies.map(d=>`<div class="hint">Tarefa #${esc(d.prerequisite)} · ${d.st==="done" && d.pr_state==="merged" ? "Integrada" : "Pendente"} (${esc(d.st || "desconhecida")})</div>`).join("")}
+      ${j.schedule_editable ? `<form id="jobSchedule" class="fm"><label>Prioridade</label><select name="priority">${[["","Automática"],["0","P0"],["1","P1"],["2","P2"],["3","P3"]].map(([v,label])=>`<option value="${v}" ${String(schedule.manual_priority ?? "")===v?"selected":""}>${label}</option>`).join("")}</select><label>IDs das tarefas pré-requisito</label><input name="dependencies" type="text" value="${esc(dependencies.map(d=>d.prerequisite).join(", "))}" placeholder="12, 34"><div class="hint">Cada pré-requisito deve estar concluído e a sua PR integrada.</div><div class="acts"><button type="submit">Guardar agendamento</button></div><div id="scheduleMsg" class="msg" aria-live="polite"></div></form>` : ""}
+      </div></div>`;
     const retry = window.AO.retryStates?.get(id);
     const cs = j.cost && j.cost.n ? `<div class="msg">Cost: ${j.cost.usd != null ? usd(j.cost.usd) + " API" : ""}${j.cost.usd != null && j.cost.val != null ? " · " : ""}${j.cost.val != null ? usd(j.cost.val) + " login value" : ""}${j.cost.usd == null && j.cost.val == null ? "unknown" : ""} · ${Math.round((j.cost.ti || 0) / 1000)}k in, ${Math.round((j.cost.tou || 0) / 1000)}k out</div>` : "";
     const ev = (j.ev || []).map((e) => `<div><span class="tm">${new Date(e.t).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}</span><span>${esc(e.w)}</span><span>${esc(e.m)}</span></div>`).join("");
@@ -653,9 +663,25 @@
     }
     B.innerHTML = `<div class="sec"><div class="box"><div class="hd2"><b>${esc(j.title)}</b><span class="pill">${esc(j.st)}</span></div><div class="msg">${esc(j.repo)} ${esc(tag)} · ${esc(work)}${j.h ? " · " + esc(j.h) : ""}\n${esc(j.why || "")}</div>${cs}
       <div class="acts">${j.url ? `<button data-u="${esc(j.url)}">Open on GitHub</button>` : ""}${!["done", "drop"].includes(j.st) ? `<button class="dng" data-d="${id}">Drop</button>` : ""}${j.st === "drop" && j.kind === "fix" ? `<button data-rq="${id}" ${window.AO.retryStates?.get(id)?.pending ? "disabled" : ""}>Try again</button>` : ""}</div><div class="msg ${retry?.error ? "bad2" : ""}" data-requeue-message="${id}" aria-live="polite">${esc(retry?.error || "")}</div></div></div>
+      ${scheduleHtml}
       ${failure}
       ${j.df ? `<div class="sec"><h4>Diff</h4>${dview(j.df)}</div>` : ""}
       <div class="sec"><h4>Log</h4><div class="log">${ev || `<div class="empty">nothing yet</div>`}</div></div>`;
+    const scheduling = $("jobSchedule");
+    if (scheduling) scheduling.onsubmit = async (event) => {
+      event.preventDefault();
+      const v = fv(scheduling), msg = $("scheduleMsg");
+      const ids = v.dependencies.trim() ? v.dependencies.split(",").map(x=>x.trim()) : [];
+      if (ids.some(x=>!/^\d+$/.test(x) || !Number.isSafeInteger(Number(x)) || Number(x)<=0)) { msg.textContent="IDs inválidos."; return; }
+      const button = scheduling.querySelector("button");
+      button.disabled = true;
+      try {
+        const result = await post({a:"schedule",id,priority:v.priority===""?null:Number(v.priority),dependencies:ids.map(Number)});
+        if (result.error) { msg.textContent=result.error; return; }
+        A.apply(result); await job(id);
+      } catch (error) { msg.textContent=String(error.message || error); }
+      finally { button.disabled=false; }
+    };
   };
   A.job = job;
 
