@@ -25,6 +25,8 @@ create index if not exists github_issues_open on github_issues(repo,is_open,upda
 create table if not exists tok(day text, w text, tin int default 0, tout int default 0, primary key(day, w));
 create table if not exists seen(repo text, num int, upd text, primary key(repo, num));
 create table if not exists cm(id text primary key, t int);
+create table if not exists watcher_inbox(repo text not null,num integer not null,head text not null,comment_id text not null,snapshot text not null,state text not null check(state in ('received','done')),received_at integer not null,updated_at integer not null,primary key(repo,num,head,comment_id));
+create index if not exists watcher_inbox_pending on watcher_inbox(repo,num,state,updated_at);
 create table if not exists watcher_outbox(id text primary key, repo text not null, num int not null, author text not null, body text not null, state text not null check(state in ('pending','uncertain','sent','cancelled')), created int not null, updated int not null);
 create index if not exists watcher_outbox_pending on watcher_outbox(state,updated);
 create index if not exists watcher_outbox_pr on watcher_outbox(repo,num,created);
@@ -545,6 +547,33 @@ impl Db {
         tx.query_row("select exists(select 1 from prs where repo=? and num=? and st='open' and upd=? and json_extract(d,'$.watcher_head')=?)",rusqlite::params![repo,number,updated,head],|r|r.get(0))
     }
 
+    /// Record receipt before invoking Guard/Watcher. Only identifiers are stored;
+    /// comment bodies are always fetched again and never treated as authorization.
+    pub fn receive_review_batch(&self, repo:&str, number:i64, updated:&str, head:&str, ids:&[String])->rusqlite::Result<()> {
+        let mut c=self.0.lock().unwrap();
+        let tx=c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if !Self::review_snapshot_matches(&tx,repo,number,updated,head)? {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let unique=ids.iter().collect::<std::collections::HashSet<_>>();
+        if unique.len()!=ids.len() || ids.iter().any(|id|id.is_empty() || id.len()>128){
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let at=now();
+        for id in ids {
+            tx.execute("insert into watcher_inbox(repo,num,head,comment_id,snapshot,state,received_at,updated_at) values(?,?,?,?,?,'received',?,?) on conflict(repo,num,head,comment_id) do update set snapshot=excluded.snapshot,updated_at=excluded.updated_at where watcher_inbox.state='received'",rusqlite::params![repo,number,head,id,updated,at,at])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn finish_review_inbox(tx:&rusqlite::Transaction<'_>,repo:&str,number:i64,head:&str,ids:&[String])->rusqlite::Result<()> {
+        for id in ids {
+            tx.execute("update watcher_inbox set state='done',updated_at=? where repo=? and num=? and head=? and comment_id=? and state='received'",rusqlite::params![now(),repo,number,head,id])?;
+        }
+        Ok(())
+    }
+
     pub fn ack_pr_comments_with_reply(&self,repo:&str,number:i64,updated:&str,head:&str,ids:&[String],reply:&Value)->rusqlite::Result<()>{
         let mut c=self.0.lock().unwrap();
         let tx=c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -560,6 +589,7 @@ impl Db {
         if consumed && !reply.is_null(){return Err(rusqlite::Error::InvalidQuery);}
         Self::queue_watcher_reply(&tx,repo,number,ids,reply)?;
         Self::ack_comments_in_tx(&tx,repo,number,updated,ids)?;
+        Self::finish_review_inbox(&tx,repo,number,head,ids)?;
         tx.commit()?;
         crate::app::chg();
         Ok(())
@@ -669,6 +699,7 @@ impl Db {
             rusqlite::params![repo, number, title, url, change, json!(data).to_string(), number, t, t])?;
         Self::queue_watcher_reply(&tx,repo,number,ids,&request["reply"])?;
         Self::ack_comments_in_tx(&tx, repo, number, updated, ids)?;
+        Self::finish_review_inbox(&tx,repo,number,head,ids)?;
         tx.commit()?;
         crate::app::chg();
         Ok(true)
@@ -1294,5 +1325,26 @@ mod watcher_outbox_tests {
         db.ack_pr_comments_with_reply("o/r",1,"t","aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",&["r1".into()],&reply).unwrap();
         assert!(db.ack_pr_comments_with_reply("o/r",1,"t","aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",&["r1".into()],&reply).is_err());
         assert_eq!(db.n("select count(*) from watcher_outbox",vec![]),1);
+    }
+}
+
+#[cfg(test)]
+mod watcher_inbox_tests {
+    use super::*;
+    const HEAD:&str="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    #[test]
+    fn receipt_survives_failed_ack_and_replay_is_idempotent(){
+        let db=Db::mem();
+        db.run("insert into prs(repo,num,st,upd,d) values('o/r',1,'open','t',?)",crate::pa![json!({"watcher_head":HEAD}).to_string()]);
+        let ids=vec!["r1".to_string()];
+        db.receive_review_batch("o/r",1,"t",HEAD,&ids).unwrap();
+        db.receive_review_batch("o/r",1,"t",HEAD,&ids).unwrap();
+        assert_eq!(db.n("select count(*) from watcher_inbox where state='received'",vec![]),1);
+        assert!(db.ack_pr_comments_with_reply("o/r",1,"wrong",HEAD,&ids,&Value::Null).is_err());
+        assert_eq!(db.n("select count(*) from watcher_inbox where state='received'",vec![]),1);
+        db.ack_pr_comments_with_reply("o/r",1,"t",HEAD,&ids,&Value::Null).unwrap();
+        assert_eq!(db.n("select count(*) from watcher_inbox where state='done'",vec![]),1);
+        db.receive_review_batch("o/r",1,"t",HEAD,&ids).unwrap();
+        assert_eq!(db.n("select count(*) from watcher_inbox where state='done'",vec![]),1);
     }
 }
