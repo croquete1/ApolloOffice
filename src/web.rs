@@ -2262,7 +2262,17 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                     if b["sure"].as_str() != Some("delete") {
                         return er(StatusCode::BAD_REQUEST, "type delete to confirm");
                     }
-                    a.lv.lock().unwrap().o.man = true;
+                    let _transition = a.update_transition.lock().unwrap();
+                    if a.drain.load(std::sync::atomic::Ordering::SeqCst)
+                        || !crate::upd::manually_paused(a)
+                        || !crate::upd::idle(a)
+                        || !a.cache_maintenance.lock().unwrap().is_empty()
+                    {
+                        return er(
+                            StatusCode::CONFLICT,
+                            "pause the office and wait for active work before deleting data",
+                        );
+                    }
                     if wipe_office_data(&a.db).is_err() {
                         return er(
                             StatusCode::CONFLICT,
@@ -2693,6 +2703,36 @@ mod t {
             ),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn wipe_requires_pause_and_idle_workers() {
+        let db = crate::db::Db::mem();
+        db.run("insert into rp(full) values('o/r')", pa![]);
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::env::temp_dir(),
+            1,
+            "x".into(),
+        ));
+        let request = || {
+            api(
+                &a,
+                &Method::POST,
+                "/api/danger",
+                "",
+                json!({"op":"wipe","sure":"delete"}),
+            )
+        };
+        assert_eq!(request().await.status(), StatusCode::CONFLICT);
+        a.lv.lock().unwrap().o.man = true;
+        a.act.lock().unwrap().insert("o/r local".into());
+        assert_eq!(request().await.status(), StatusCode::CONFLICT);
+        assert_eq!(a.db.n("select count(*) from rp", pa![]), 1);
+        a.act.lock().unwrap().clear();
+        assert_eq!(request().await.status(), StatusCode::OK);
+        assert_eq!(a.db.n("select count(*) from rp", pa![]), 0);
+        assert_eq!(a.db.kg("man"), json!(true));
     }
 
     #[test]
