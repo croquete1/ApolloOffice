@@ -1845,7 +1845,10 @@ mod tests {
         assert_eq!(eligible_creation(&pr, at), Some(at));
         assert_eq!(eligible_creation(&pr, at + 1), None);
         assert_eq!(eligible_creation(&json!({}), at), None);
-        assert_eq!(eligible_creation(&json!({"created_at":"invalid"}), at), None);
+        assert_eq!(
+            eligible_creation(&json!({"created_at":"invalid"}), at),
+            None
+        );
     }
 
     #[test]
@@ -1856,9 +1859,13 @@ mod tests {
             "insert into rp(full,on_,coderabbit_review,coderabbit_free_confirmed,coderabbit_epoch,coderabbit_review_since) values(?,1,1,1,3,100)", [repo],
         ).unwrap();
         let old = request_activation(&db, repo).unwrap();
-        db.0.lock().unwrap().execute(
-            "update rp set coderabbit_epoch=5,coderabbit_review_since=200 where full=?", [repo],
-        ).unwrap();
+        db.0.lock()
+            .unwrap()
+            .execute(
+                "update rp set coderabbit_epoch=5,coderabbit_review_since=200 where full=?",
+                [repo],
+            )
+            .unwrap();
         assert!(!reserve_request(&db, repo, 67, HEAD, old, 250).unwrap());
         let current = request_activation(&db, repo).unwrap();
         assert!(!reserve_request(&db, repo, 67, HEAD, current, 150).unwrap());
@@ -1904,7 +1911,8 @@ mod tests {
         assert!(request_followup_allowed(&db, repo, 67, OLD));
         assert!(reserve_test_request(&db, repo, 67, OLD).unwrap());
         assert!(
-            !reserve_test_request(&db, repo, 67, "0123456789012345678901234567890123456789").unwrap()
+            !reserve_test_request(&db, repo, 67, "0123456789012345678901234567890123456789")
+                .unwrap()
         );
         assert_eq!(request_history(&db, repo, 67)["attempts"], 2);
     }
@@ -1916,7 +1924,8 @@ mod tests {
         assert!(reserve_test_request(&db, repo, 67, HEAD).unwrap());
         assert!(reserve_test_request(&db, repo, 68, OLD).unwrap());
         assert!(
-            reserve_test_request(&db, repo, 69, "0123456789012345678901234567890123456789").unwrap()
+            reserve_test_request(&db, repo, 69, "0123456789012345678901234567890123456789")
+                .unwrap()
         );
         assert!(finish_request(
             &db,
@@ -1929,7 +1938,8 @@ mod tests {
         )
         .unwrap());
         assert!(
-            !reserve_test_request(&db, repo, 70, "abcdefabcdefabcdefabcdefabcdefabcdefabcd").unwrap()
+            !reserve_test_request(&db, repo, 70, "abcdefabcdefabcdefabcdefabcdefabcdefabcd")
+                .unwrap()
         );
     }
     #[test]
