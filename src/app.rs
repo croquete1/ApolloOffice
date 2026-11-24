@@ -540,11 +540,20 @@ impl App {
         Ok(Some(permit))
     }
 
-    pub fn hunter_quota_blocked(&self) -> bool {
+    pub fn hunter_quota_blocked(self: &Arc<Self>) -> bool {
         if crate::routing::enabled(self) {
             return false;
         }
-        self.codex_low_priority_blocked(&self.md("hunter"))
+        let preferred = self.md("hunter");
+        if !self.codex_low_priority_blocked(&preferred) {
+            return false;
+        }
+        // Admission must agree with the opted-in call-level route selection.
+        // The actual call still rechecks quota and provider availability.
+        !matches!(
+            crate::routing::adaptive_support(self, "hunter", &preferred),
+            Ok(Some(_))
+        )
     }
 
     pub fn net(&self, k: &str) -> bool {
@@ -670,6 +679,21 @@ mod quota_reservation_tests {
             .reserve_codex_background("codex:", true)
             .unwrap()
             .is_some());
+    }
+
+    #[test]
+    fn hunter_admission_respects_explicit_support_fallback() {
+        let a = Arc::new(App::new(Db::mem(), std::env::temp_dir(), 1, "x".into()));
+        let t = now();
+        *a.codex_usage.lock().unwrap() = json!({"status":"ok","updated_at":t,"five_hour":{"remaining":10,"resets_at":t/1000+3600}});
+        a.db.ks("set", &json!({"md":{"hunter":"codex:","fixer":"cc:sonnet"}}));
+        assert!(a.hunter_quota_blocked());
+        a.db.ks("set",&json!({"adaptive_support_routing":true,"md":{"hunter":"codex:","fixer":"cc:sonnet"}}));
+        assert!(!a.hunter_quota_blocked());
+        a.db.provider_failure("cc", "network", t).unwrap();
+        assert!(a.hunter_quota_blocked());
+        a.db.ks("set",&json!({"adaptive_support_routing":true,"md":{"hunter":"codex:","fixer":"ollama:local","reviewer":"cc:sonnet"}}));
+        assert!(a.hunter_quota_blocked());
     }
 
     #[test]
