@@ -179,6 +179,7 @@ pub fn dset() -> Value {
         "hunters": 2,
         "tokday": 0,
         "budday": 0,
+        "codex_hunt_reserve_percent": 15,
         "ntfy": "",
         "discord": "",
         "updates": false,
@@ -391,6 +392,14 @@ impl App {
         let bd = self.set()["budday"].as_f64().unwrap_or(0.0);
         let bu = if bd > 0.0 { self.db.usd(None) } else { 0.0 };
         let free_first = crate::routing::enabled(self);
+        let settings = self.set();
+        // Only a Claude-only configuration needs the legacy global pause.
+        // An explicitly configured alternative must remain usable.
+        let mixed_providers = settings["md"].as_object().is_some_and(|models| {
+            models.values().filter_map(Value::as_str).any(|md| {
+                matches!(crate::prov::parse(md).0, "codex" | "opencode" | "nvidia" | "mistral" | "groq" | "openai" | "anthropic")
+            })
+        });
         let mut l = self.lv.lock().unwrap();
         let p0 = l.o.pause.clone();
         if l.o.rst > 0 && l.o.rst <= n {
@@ -399,7 +408,7 @@ impl App {
         }
         let lim = l.o.rl != "allowed" && l.o.rl != "allowed_warning" && l.o.rst > n;
         l.o.warn = l.o.rl == "allowed_warning";
-        l.o.pause = if lim && !free_first {
+        l.o.pause = if lim && !free_first && !mixed_providers {
             format!(
                 "Claude usage limit reached, paused until {}",
                 chrono::DateTime::from_timestamp_millis(l.o.rst)
@@ -439,7 +448,7 @@ impl App {
     }
 
     pub fn provider_limit(&self, model: &str) -> Option<String> {
-        if !crate::routing::enabled(self) || crate::prov::parse(model).0 != "cc" {
+        if crate::prov::parse(model).0 != "cc" {
             return None;
         }
         let l = self.lv.lock().unwrap();
@@ -448,6 +457,19 @@ impl App {
         } else {
             None
         }
+    }
+
+    /// Preserve subscription capacity for fixes and independent reviews.
+    /// Unknown/stale telemetry does not claim a quota limit.
+    pub fn hunter_quota_blocked(&self) -> bool {
+        let settings = self.set();
+        // Free-first hunters have a separate explicitly authorized plan.
+        if crate::routing::enabled(self) || crate::prov::parse(&self.md("hunter")).0 != "codex" {
+            return false;
+        }
+        let reserve = settings["codex_hunt_reserve_percent"].as_f64().unwrap_or(15.0).clamp(0.0, 100.0);
+        let usage = self.codex_usage.lock().unwrap_or_else(|e| e.into_inner());
+        crate::codex_usage::hunt_reserve_reached(&usage, now(), reserve)
     }
 
     pub fn net(&self, k: &str) -> bool {
@@ -525,5 +547,20 @@ mod provider_limit_tests {
         a.db.ks("set", &json!({"free_first":false,"tokday":0}));
         a.tick();
         assert!(a.lv.lock().unwrap().o.pause.contains("Claude usage limit"));
+    }
+
+    #[test]
+    fn mixed_models_keep_non_claude_routes_available_without_enabling_fallback() {
+        let db = Db::mem();
+        db.ks("set", &json!({"free_first":false,"md":{"fixer":"codex:","hunter":"codex:"}}));
+        let a = App::new(db, std::env::temp_dir(), 1, "x".into());
+        a.rl(&json!({"status":"rejected","resetsAt":now()/1000+3600}));
+        assert!(a.lv.lock().unwrap().o.pause.is_empty());
+        assert!(a.provider_limit("cc:sonnet").is_some());
+        assert!(a.provider_limit("claude-haiku-5-5").is_some());
+        assert!(a.provider_limit("codex:").is_none());
+        assert_eq!(a.md("fixer"), "codex:");
+        a.lv.lock().unwrap().o.man = true;
+        assert!(a.hold("fixer"));
     }
 }

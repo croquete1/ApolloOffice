@@ -63,6 +63,23 @@ fn parse_limits(response: &Value, at: i64) -> Result<Value, &'static str> {
     }))
 }
 
+/// Only fresh observations from an unexpired window can reserve capacity.
+pub fn hunt_reserve_reached(snapshot: &Value, at_ms: i64, reserve: f64) -> bool {
+    if snapshot["status"] != "ok" || !snapshot["updated_at"].as_i64().is_some_and(|t| {
+        t > 0 && t <= at_ms && at_ms.saturating_sub(t) <= 2 * POLL_INTERVAL.as_millis() as i64
+    }) {
+        return false;
+    }
+    ["five_hour","weekly"].iter().any(|key| {
+        let window = &snapshot[*key];
+        let current = window["resets_at"].as_i64().and_then(|t| t.checked_mul(1000))
+            .is_some_and(|reset| reset > at_ms);
+        current && window["remaining"].as_f64().is_some_and(|left| {
+            left.is_finite() && (0.0..=100.0).contains(&left) && left <= reserve
+        })
+    })
+}
+
 /// Escreve um pedido JSON-RPC e confirma que foi enviado.
 async fn write_rpc(input: &mut tokio::process::ChildStdin, v: Value) -> Result<(), String> {
     input
@@ -326,5 +343,28 @@ printf '%s\n' '{"id":2,"result":{"rateLimits":{"limitId":"codex","primary":{"use
         let v = parse_limits(&raw, 100).unwrap();
         assert_eq!(v["five_hour"]["remaining"], 75.0);
         assert!(v["five_hour"]["resets_at"].is_null());
+    }
+}
+
+#[cfg(test)]
+mod reserve_tests {
+    use super::*;
+
+    #[test]
+    fn reserve_uses_fresh_unexpired_windows_only() {
+        let at = 1_800_000_000_000_i64;
+        let mut snapshot = json!({"status":"ok","updated_at":at-1000,
+            "five_hour":{"remaining":70.0,"resets_at":at/1000+3600},
+            "weekly":{"remaining":12.0,"resets_at":at/1000+86400}});
+        assert!(hunt_reserve_reached(&snapshot,at,15.0));
+        assert!(!hunt_reserve_reached(&snapshot,at,10.0));
+        snapshot["status"] = json!("stale");
+        assert!(!hunt_reserve_reached(&snapshot,at,15.0));
+        snapshot["status"] = json!("ok");
+        snapshot["updated_at"] = json!(at-400_000);
+        assert!(!hunt_reserve_reached(&snapshot,at,15.0));
+        snapshot["updated_at"] = json!(at-1000);
+        snapshot["weekly"]["resets_at"] = json!(at/1000-1);
+        assert!(!hunt_reserve_reached(&snapshot,at,15.0));
     }
 }

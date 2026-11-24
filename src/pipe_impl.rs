@@ -4356,7 +4356,7 @@ pub(crate) fn admit(a: &Ax, repo: &str, host: &str, id: i64) -> bool {
         return false;
     }
     let is_hunt = a.db.jg(id).is_some_and(|job| job.kind == "hunt");
-    if is_hunt && crate::hunt_health::blocked(a, repo) {
+    if is_hunt && (crate::hunt_health::blocked(a, repo) || a.hunter_quota_blocked()) {
         return false;
     }
     let hunter_limit = if is_hunt { hn(a) } else { 0 };
@@ -4452,7 +4452,7 @@ async fn pick(a: &Ax, h: &str) -> Option<i64> {
         {
             continue;
         }
-        if j["kind"] == "hunt" && (a.hold("hunter") || crate::hunt_health::blocked(a, &r)) {
+        if j["kind"] == "hunt" && (a.hold("hunter") || crate::hunt_health::blocked(a, &r) || a.hunter_quota_blocked()) {
             continue;
         }
         if !pin && (j["kind"] == "rebase" || j["kind"] == "review") {
@@ -4576,6 +4576,9 @@ fn mk_hunt(a: &Ax) -> bool {
     // Coordinate creation with admission and breaker updates across lanes.
     let _transition = a.update_transition.lock().unwrap();
     if a.drain.load(std::sync::atomic::Ordering::SeqCst) {
+        return false;
+    }
+    if a.hunter_quota_blocked() {
         return false;
     }
     let on = a.db.all(
