@@ -847,6 +847,12 @@ impl Db {
         if !Self::review_snapshot_matches(&tx, repo, number, updated, head)? {
             return Err(rusqlite::Error::InvalidQuery);
         }
+        let unique = ids.iter().collect::<std::collections::HashSet<_>>();
+        if unique.len() != ids.len()
+            || ids.iter().any(|id| id.trim().is_empty() || id.len() > 128)
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
         // Do not create an outbound action for a replayed or partially consumed batch.
         let mut consumed = false;
         for id in ids {
@@ -988,7 +994,7 @@ impl Db {
         if !open
             || ids.is_empty()
             || unique.len() != ids.len()
-            || ids.iter().any(|id| id.trim().is_empty())
+            || ids.iter().any(|id| id.trim().is_empty() || id.len() > 128)
         {
             return Err(rusqlite::Error::InvalidQuery);
         }
@@ -2201,5 +2207,127 @@ mod watcher_rebase_admission_tests {
         assert!(!db
             .queue_watcher_rebase("o/r", 1, "t", HEAD, &request)
             .unwrap());
+    }
+}
+
+#[cfg(test)]
+mod watcher_storage_failure_tests {
+    use super::*;
+
+    const HEAD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn seed(db: &Db) {
+        db.run(
+            "insert into prs(repo,num,st,upd,d) values('o/r',1,'open','t',?)",
+            crate::pa![json!({"watcher_head":HEAD}).to_string()],
+        );
+        db.receive_review_batch("o/r", 1, "t", HEAD, &["r1".into()])
+            .unwrap();
+    }
+
+    fn request() -> Value {
+        json!({"title":"Fix","url":"https://github.com/o/r/pull/1","change":"Correct bug","data":{"source_head":HEAD},"reply":{"author":"maintainer","body":"Acknowledged"}})
+    }
+
+    fn assert_pending(db: &Db) {
+        assert_eq!(db.n("select count(*) from jobs", vec![]), 0);
+        assert_eq!(db.n("select count(*) from cm", vec![]), 0);
+        assert_eq!(db.n("select count(*) from watcher_outbox", vec![]), 0);
+        assert_eq!(
+            db.n(
+                "select count(*) from watcher_inbox where state='received'",
+                vec![]
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn busy_writer_leaves_receipt_pending_and_allows_retry_after_restart() {
+        let path = std::env::temp_dir().join(format!("apollo-db-busy-{}", rand::random::<u64>()));
+        std::fs::create_dir(&path).unwrap();
+        let file = path.join("state.db");
+        {
+            let db = Db::open(&file).unwrap();
+            seed(&db);
+            db.0
+                .lock()
+                .unwrap()
+                .busy_timeout(std::time::Duration::ZERO)
+                .unwrap();
+            let mut other = Connection::open(&file).unwrap();
+            let lock = other
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+            let error = db
+                .queue_review_and_ack("o/r", 1, "t", &["r1".into()], &request())
+                .unwrap_err();
+            assert_eq!(
+                error.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::DatabaseBusy)
+            );
+            lock.rollback().unwrap();
+            assert_pending(&db);
+        }
+        {
+            let db = Db::open(&file).unwrap();
+            assert_pending(&db);
+            assert!(db
+                .queue_review_and_ack("o/r", 1, "t", &["r1".into()], &request())
+                .unwrap());
+            assert!(db.comment_acknowledged("o/r", "r1").unwrap());
+            assert_eq!(db.n("select count(*) from jobs", vec![]), 1);
+        }
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn full_database_does_not_consume_review_receipt() {
+        let db = Db::mem();
+        seed(&db);
+        let pages: i64 = db
+            .0
+            .lock()
+            .unwrap()
+            .pragma_query_value(None, "page_count", |r| r.get(0))
+            .unwrap();
+        db.0
+            .lock()
+            .unwrap()
+            .pragma_update(None, "max_page_count", pages)
+            .unwrap();
+        let mut req = request();
+        req["change"] = json!("x".repeat(1_048_576));
+        let error = db
+            .queue_review_and_ack("o/r", 1, "t", &["r1".into()], &req)
+            .unwrap_err();
+        assert_eq!(
+            error.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::DiskFull)
+        );
+        assert_pending(&db);
+    }
+
+    #[test]
+    fn failure_after_job_insert_rolls_back_job_reply_and_ack() {
+        let db = Db::mem();
+        seed(&db);
+        db.0.lock().unwrap().execute_batch(
+            "create trigger fail_ack before insert on cm begin select raise(abort,'injected ack failure'); end;"
+        ).unwrap();
+        assert!(db
+            .queue_review_and_ack("o/r", 1, "t", &["r1".into()], &request())
+            .is_err());
+        assert_pending(&db);
+        db.0
+            .lock()
+            .unwrap()
+            .execute_batch("drop trigger fail_ack")
+            .unwrap();
+        assert!(db
+            .queue_review_and_ack("o/r", 1, "t", &["r1".into()], &request())
+            .unwrap());
+        assert_eq!(db.n("select count(*) from watcher_outbox", vec![]), 1);
+        assert_eq!(db.n("select count(*) from jobs", vec![]), 1);
     }
 }
