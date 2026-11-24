@@ -3,6 +3,53 @@ mod t {
     use super::*;
 
     #[test]
+    fn startup_recovery_is_atomic_and_preserves_approved_submission() {
+        let db = crate::db::Db::mem();
+        db.0.lock().unwrap().execute_batch(
+            "insert into jobs(id,st,kind,d) values
+             (1,'fix','fix','{\"h\":\"local\"}'),
+             (2,'ci','fix','{\"h\":\"local\",\"br\":\"fix/2\"}'),
+             (3,'submit','fix','{\"ap\":true,\"h\":\"local\",\"br\":\"fix/3\"}'),
+             (4,'done','fix','{}');
+             create trigger fail_recovery before update on jobs when old.id=2 begin select raise(abort,'injected'); end;",
+        ).unwrap();
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::env::temp_dir(),
+            1,
+            "x".into(),
+        ));
+        assert!(recover(&a).is_err());
+        assert_eq!(a.db.jg(1).unwrap().st, "fix");
+        assert_eq!(a.db.jg(2).unwrap().st, "ci");
+        a.db.0
+            .lock()
+            .unwrap()
+            .execute_batch("drop trigger fail_recovery")
+            .unwrap();
+        a.db.run("update jobs set d='invalid' where id=2", pa![]);
+        assert!(recover(&a).is_err());
+        assert_eq!(a.db.jg(1).unwrap().st, "fix");
+        a.db.run(
+            "update jobs set d=? where id=2",
+            pa![json!({"h":"local","br":"fix/2"}).to_string()],
+        );
+        recover(&a).unwrap();
+        let prep = a.db.jg(1).unwrap();
+        let verified = a.db.jg(2).unwrap();
+        assert_eq!(prep.st, "ready");
+        assert_eq!(prep.d["rp"], true);
+        assert_eq!(verified.st, "ready");
+        assert_eq!(verified.d["rs"], true);
+        assert_eq!(a.db.jg(3).unwrap().st, "submit");
+        assert_eq!(a.db.jg(3).unwrap().d["ap"], true);
+        assert_eq!(a.db.jg(4).unwrap().st, "done");
+        recover(&a).unwrap();
+        assert_eq!(a.db.jg(1).unwrap().d, prep.d);
+        assert_eq!(a.db.jg(2).unwrap().d, verified.d);
+    }
+
+    #[test]
     fn coderabbit_review_prompt_never_claims_maintainer_authority() {
         let mut job = Job::of(json!({"kind":"review","d":{"coderabbit_source":"coderabbit"}}));
         let (authority, action) = review_prompt_policy(&job);

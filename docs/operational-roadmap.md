@@ -318,10 +318,17 @@ Este registo atualiza os estados históricos anteriores. Os merges abaixo foram 
 | #84 | `55cbaa5f1c6914dcb255a5dabbcf133e23bc0a13` | #111 (45503369220) | F04: configuração e importação atómicas |
 | #85 | `944f65d8b4a5c12d6cf41d769b8255db6c3bb10e` | #114 (45505445658) | F04: autenticação e revogação de tokens |
 | #86 | `91b7949913f5c6f5a16146f6b98adba71ab81c27` | #116 (45506660407) | F04: links de acesso e sessões transacionais |
+| #87 | `c536f982bcec5cdd1ef6c77fd63fde2026972efa` | #119 (45508555167) | F04/F16: sessões Google e registo de evidência |
+
+CI #118: Windows 304 Rust unitários, 2 integração e 133 JS aprovados; Ubuntu Rustfmt falhou em dois hunks. Correção `272c463e6f74fe33479e42fe20705646e985b9d3`; CI #119 integralmente aprovado. OAuth real, revisão externa e faturação autenticada permanecem não verificados.
+
+F04/F05 — próximo lote: recuperação inicial de tarefas numa transação imediata, recusa de dados JSON inválidos, rollback integral e abortar arranque dos workers perante erro de recuperação. Preserva checkpoints, aprovação e tarefas terminais; teste de falha de escrita, metadados inválidos e idempotência. Implementação submetida neste lote; CI ainda não validado. Não declarar F04/F05 concluídas: restam recuperação real de processos e publicação, SQLITE_BUSY/disco cheio e diagnóstico operacional.
 
 CI #116: Rustfmt, Clippy, Rust (Ubuntu e Windows), release, JavaScript, Chromium, testes de aceitação e Docker/SSH reais em runners isolados aprovados. Não equivale a ensaio de instalação/rollback em produção, validação de hardware físico ou fornecedores reais. Sem nova confirmação autenticada da faturação CodeRabbit nem pedido de revisão paga. Interface dos agentes e modelos preservados.
 
 Aprendizagem do CI: #102, #107, #110 e #113 detetaram Rustfmt; #107 detetou também um teste estrutural JavaScript que ainda dependia da implementação antiga. Corrigir todos os hunks e verificar referências de testes estruturais antes de publicar refatorações; manter testes de comportamento e rollback, sem remover gates. O ambiente de edição atual continua sem cargo/rustfmt local. #105 e #116 passaram na primeira execução. Não confundir sucesso de uma matriz parcial com CI completo.
+
+CI #121 (45509652837), HEAD `2abf1af30e3f88f3170c7163d4eab3451c690a91`: Windows aprovado, incluindo a regressão de recuperação atómica; Ubuntu parou em Rustfmt. Correções de formatação aplicadas em lote no commit seguinte; validação integral ainda pendente. Não alterar os gates nem assumir que a recuperação real em produção está validada.
 
 ## Sequência
 Integrar PRs apenas após revisão e testes, uma fase de cada vez. Não ativar Qwen. Não alterar main ou instalação em produção sem evidência. Atualizar este ficheiro com PR, SHA e resultado dos testes de cada fase.
