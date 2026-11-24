@@ -653,13 +653,22 @@ mod quota_reservation_tests {
         let permit = a.reserve_codex_background("codex:", true).unwrap();
         assert!(permit.is_some());
         assert!(a.reserve_codex_background("codex:", true).is_err());
-        assert!(a.reserve_codex_background("codex:", false).unwrap().is_none());
-        assert!(a.reserve_codex_background("cc:sonnet", true).unwrap().is_none());
+        assert!(a
+            .reserve_codex_background("codex:", false)
+            .unwrap()
+            .is_none());
+        assert!(a
+            .reserve_codex_background("cc:sonnet", true)
+            .unwrap()
+            .is_none());
         std::mem::drop(permit);
         a.codex_usage.lock().unwrap()["five_hour"]["remaining"] = json!(10);
         assert!(a.reserve_codex_background("codex:", true).is_err());
         a.codex_usage.lock().unwrap()["five_hour"]["remaining"] = json!(80);
-        assert!(a.reserve_codex_background("codex:", true).unwrap().is_some());
+        assert!(a
+            .reserve_codex_background("codex:", true)
+            .unwrap()
+            .is_some());
     }
 
     #[test]

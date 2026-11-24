@@ -506,7 +506,9 @@ impl Db {
         };
         let mut value: Value =
             serde_json::from_str(&raw).map_err(|_| rusqlite::Error::InvalidQuery)?;
-        let until = value["until"].as_i64().ok_or(rusqlite::Error::InvalidQuery)?;
+        let until = value["until"]
+            .as_i64()
+            .ok_or(rusqlite::Error::InvalidQuery)?;
         if !matches!(value["kind"].as_str(), Some("quota" | "network")) {
             return Err(rusqlite::Error::InvalidQuery);
         }
@@ -1945,8 +1947,7 @@ mod provider_cooldown_tests {
             ProviderAdmission::Blocked
         ));
         let ready = at + 30_000;
-        let ProviderAdmission::Probe(first) =
-            db.provider_admission("codex", ready, 1000).unwrap()
+        let ProviderAdmission::Probe(first) = db.provider_admission("codex", ready, 1000).unwrap()
         else {
             panic!("expected recovery probe");
         };
@@ -1963,16 +1964,21 @@ mod provider_cooldown_tests {
         else {
             panic!("expected expired lease to recover");
         };
-        assert!(!db.finish_provider_probe("codex", &first, ready + 1001, true).unwrap());
+        assert!(!db
+            .finish_provider_probe("codex", &first, ready + 1001, true)
+            .unwrap());
         db.provider_failure("codex", "quota", ready + 1001).unwrap();
-        assert!(!db.finish_provider_probe("codex", &second, ready + 1002, true).unwrap());
+        assert!(!db
+            .finish_provider_probe("codex", &second, ready + 1002, true)
+            .unwrap());
         let next = ready + 61_001;
-        let ProviderAdmission::Probe(third) =
-            db.provider_admission("codex", next, 1000).unwrap()
+        let ProviderAdmission::Probe(third) = db.provider_admission("codex", next, 1000).unwrap()
         else {
             panic!("expected probe after new cooldown");
         };
-        assert!(db.finish_provider_probe("codex", &third, next + 1, true).unwrap());
+        assert!(db
+            .finish_provider_probe("codex", &third, next + 1, true)
+            .unwrap());
         assert!(matches!(
             db.provider_admission("codex", next + 2, 1000).unwrap(),
             ProviderAdmission::Ready
