@@ -3,6 +3,53 @@ mod t {
     use super::*;
 
     #[test]
+    fn review_publication_requires_original_open_pr_and_exact_head(){
+        let source="a".repeat(40);
+        let candidate="b".repeat(40);
+        let mut pr=json!({"state":"open","head":{"repo":{"full_name":"o/r"},"ref":"fix","sha":source}});
+        assert!(review_publish_target_matches(&pr,"o/r","fix",&source,&candidate));
+        pr["head"]["sha"]=json!(candidate);
+        assert!(review_publish_target_matches(&pr,"o/r","fix",&source,&candidate));
+        pr["head"]["sha"]=json!("c".repeat(40));
+        assert!(!review_publish_target_matches(&pr,"o/r","fix",&source,&candidate));
+        pr["head"]["sha"]=json!(source);
+        assert!(!review_publish_target_matches(&pr,"other/r","fix",&source,&candidate));
+        assert!(!review_publish_target_matches(&pr,"o/r","other",&source,&candidate));
+        pr["state"]=json!("closed");
+        assert!(!review_publish_target_matches(&pr,"o/r","fix",&source,&candidate));
+    }
+
+    #[test]
+    fn review_checkout_matches_bound_head_including_steward_and_legacy(){
+        let head="a".repeat(40);
+        let other="b".repeat(40);
+        let mut j=Job::of(json!({"kind":"review","d":{"source_head":head}}));
+        assert!(check_review_checkout(&j,&head).is_ok());
+        assert!(check_review_checkout(&j,&other).is_err());
+        j.d["steward_head"]=json!(other);
+        assert!(check_review_checkout(&j,&head).is_err());
+        j.d=json!({"steward_head":head});
+        assert!(check_review_checkout(&j,&head).is_ok());
+        j.d=json!({});
+        assert!(check_review_checkout(&j,&other).is_ok());
+        j.d=json!({"source_head":"invalid"});
+        assert!(check_review_checkout(&j,&other).is_err());
+    }
+
+    #[test]
+    fn watcher_rebase_requires_its_observed_head(){
+        let head="a".repeat(40);
+        let other="b".repeat(40);
+        let mut j=Job::of(json!({"kind":"rebase","d":{"watcher_observed_head":head}}));
+        assert!(check_review_checkout(&j,&head).is_ok());
+        assert!(check_review_checkout(&j,&other).is_err());
+        j.d["watcher_observed_head"]=Value::Null;
+        assert!(check_review_checkout(&j,&head).is_err());
+        j.d=json!({});
+        assert!(check_review_checkout(&j,&other).is_ok());
+    }
+
+    #[test]
     fn zero_repo_pr_limits_mean_unlimited() {
         assert!(!repo_limit_reached(178, 20, 0, 0));
         assert!(!repo_limit_reached(178, 20, 0, 25));
@@ -25,8 +72,8 @@ mod t {
         let fix=json!({"st":"ready","kind":"fix","manual_priority":0,"d":{"issue_priority":3}});
         let other=json!({"st":"ready","kind":"fix","d":{"issue_priority":1}});
         let review=json!({"st":"ready","kind":"review"});
-        assert!(pick_rank(&fix)<pick_rank(&other));
-        assert!(pick_rank(&review)<pick_rank(&fix));
+        assert!(pick_rank(&fix, 0)<pick_rank(&other, 0));
+        assert!(pick_rank(&review, 0)<pick_rank(&fix, 0));
     }
 
     #[test]
@@ -72,14 +119,41 @@ mod t {
     }
 
     #[test]
+    fn hunter_requires_complete_evidence_not_just_a_title() {
+        assert!(hunter_findings(&json!({"finds":[]})).unwrap().is_empty());
+        assert!(hunter_findings(&Value::Null).is_err());
+        assert!(hunter_findings(&json!({"finds":[{"title":"Bug","where":"src/x.rs","desc":"Reproduce"}]})).is_err());
+        let valid=json!({"title":"Bug","where":"src/x.rs","desc":"Reproduce","proof":"test failure"});
+        assert_eq!(hunter_findings(&json!({"finds":[valid.clone()]})).unwrap().len(),1);
+        assert!(hunter_findings(&json!({"finds":[valid.clone(),valid]})).is_err());
+    }
+
+    #[test]
+    fn aging_promotes_automatic_fixes_only_and_never_crosses_critical_priority() {
+        let at=1+4*86_400_000;
+        let mut row=json!({"kind":"fix","st":"ready","t0":1,"d":{"issue_priority":3}});
+        assert_eq!(pick_rank(&row,1).2,3);
+        assert_eq!(pick_rank(&row,1+86_400_000).2,2);
+        assert_eq!(pick_rank(&row,at).2,1);
+        row["manual_priority"]=json!(3);
+        assert_eq!(pick_rank(&row,at).2,3);
+        row["manual_priority"]=Value::Null;
+        row["d"]["issue_priority"]=json!(0);
+        assert_eq!(pick_rank(&row,at).2,0);
+        row["d"]["issue_priority"]=json!(3);
+        row["kind"]=json!("hunt");
+        assert_eq!(pick_rank(&row,at).2,3);
+    }
+
+    #[test]
     fn ready_fixes_precede_new_hunts_and_rebases() {
         let fix = json!({"id":1,"kind":"fix","st":"ready","prio":-0.5,"d":{}});
         let hunt = json!({"id":2,"kind":"hunt","st":"ready","prio":99.0,"d":{}});
         let rebase = json!({"id":3,"kind":"rebase","st":"ready","prio":-1.0,"d":{}});
         let submit = json!({"id":4,"kind":"fix","st":"submit","prio":0.0,"d":{}});
-        assert!(pick_rank(&fix) < pick_rank(&hunt));
-        assert!(pick_rank(&fix) < pick_rank(&rebase));
-        assert!(pick_rank(&submit) < pick_rank(&fix));
+        assert!(pick_rank(&fix, 0) < pick_rank(&hunt, 0));
+        assert!(pick_rank(&fix, 0) < pick_rank(&rebase, 0));
+        assert!(pick_rank(&submit, 0) < pick_rank(&fix, 0));
     }
 
     #[cfg(unix)]
@@ -665,10 +739,10 @@ mod t {
         let fix = json!({"st":"ready", "kind":"fix", "prio":0, "id":2});
         let mergecheck = json!({"st":"ready", "kind":"mergecheck", "prio":0, "id":3});
         let hunt = json!({"st":"ready", "kind":"hunt", "prio":0, "id":1});
-        assert!(pick_rank(&mergecheck) < pick_rank(&fix));
-        assert!(pick_rank(&fix) < pick_rank(&hunt));
+        assert!(pick_rank(&mergecheck, 0) < pick_rank(&fix, 0));
+        assert!(pick_rank(&fix, 0) < pick_rank(&hunt, 0));
         let high_priority_number = json!({"st":"ready", "kind":"fix", "prio":100_000, "id":3});
-        assert!(pick_rank(&high_priority_number) < pick_rank(&hunt));
+        assert!(pick_rank(&high_priority_number, 0) < pick_rank(&hunt, 0));
     }
 
     #[test]

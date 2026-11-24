@@ -13,9 +13,9 @@
     branch_update: "atualização de branch",
   }[kind] || kind || "tarefa");
 
-  const get = async (p) => {
+  const get = async (p, { reloadOnUnauthorized = true } = {}) => {
     const r = await fetch(p, { cache: "no-store" });
-    if (r.status === 401) { location.reload(); throw new Error("login"); }
+    if (r.status === 401) { if (reloadOnUnauthorized) location.reload(); throw new Error("login"); }
     return r.json();
   };
   const post = async (b, p = "/api/act") => {

@@ -461,7 +461,7 @@ fn state(a: &Ax) -> Value {
             "open_fixes": a.db.n("select count(distinct p.repo || '#' || p.num) from jobs j join prs p on p.repo=j.repo and p.num=j.pr where j.kind='fix' and j.st='done' and p.st='open'", pa![]),
             "merged_fixes": a.db.n("select count(distinct p.repo || '#' || p.num) from jobs j join prs p on p.repo=j.repo and p.num=j.pr where j.kind='fix' and j.st='done' and p.st='merged' and coalesce(json_extract(p.d,'$.default_branch'),'')<>'' and json_extract(p.d,'$.base')=json_extract(p.d,'$.default_branch')", pa![])
         },
-        "ops": {"waiting": waiting, "blocked_hunts": blocked_hunts, "paused": paused, "resources": crate::resources::status(a)},
+        "ops": {"waiting": waiting, "blocked_hunts": blocked_hunts, "paused": paused, "resources": crate::resources::status(a), "watcher_outbox": a.db.watcher_outbox_counts().ok()},
         "diag": {"hosts": hosts_diag, "hunt_off": hunt_off, "iss_off": iss_off, "hunt_enabled": hunt_enabled},
         "hs": a.db.all("select id, ln, dk, on_ from hs order by id='local' desc, id", pa![]),
         "rp": a.db.all("select full repo,on_ from rp order by full", pa![]),
@@ -749,6 +749,9 @@ const RPF: &[&str] = &[
     "auto_merge",
     "local_merge",
     "steward_repair",
+    "coderabbit_free_confirmed",
+    "coderabbit_review",
+    "coderabbit_repair",
     "auto_recover_drops",
     "maxo",
     "maxd",
@@ -817,8 +820,13 @@ fn import(a: &Ax, b: &Value) -> Result<String, String> {
         {
             continue;
         }
-        a.db.run("insert into rp(full,t0) values(?,?)", pa![f.clone(), now()]);
+        a.db.run("insert into rp(full,t0,coderabbit_epoch) values(?,?,?)", pa![f.clone(), now(), now()]);
         for k in RPF {
+            // External review requests and autonomous repair must be enabled
+            // explicitly on each installation after importing a backup.
+            if matches!(*k, "coderabbit_free_confirmed" | "coderabbit_review" | "coderabbit_repair") {
+                continue;
+            }
             let v = &r[*k];
             // Impedir que valores numéricos contaminem o idioma persistido.
             if *k == "lang" && !v.is_string() {
@@ -1483,6 +1491,9 @@ fn steward_report(a: &Ax, repo: &str) -> Value {
     if let Some(prs) = report["prs"].as_array_mut() {
         for pr in prs {
             let number = pr["number"].as_i64().unwrap_or(0);
+            pr["coderabbit_previous"] = crate::coderabbit::previous(&a.db, repo, number);
+            pr["coderabbit_request"] = crate::coderabbit::request_history(&a.db, repo, number);
+            pr["coderabbit_findings"] = crate::coderabbit::finding_status(&a.db, repo, number);
             let latest = jobs.iter().find(|j| j["pr"].as_i64() == Some(number));
             pr["recheck"] = latest.map(|job| {
                 let expected_head = job["d"]["expected_head"].as_str().unwrap_or("");
@@ -1701,8 +1712,8 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                     let r = mt["full"].as_str().unwrap_or(&r).to_string();
                     let (c, s) = crate::gh::detect(&r).await;
                     a.db.run(
-                        "insert or ignore into rp(full,ci,setup,mode,t0) values(?,?,?,?,?)",
-                        pa![r.clone(), c.clone(), s.clone(), "ask".to_string(), now()],
+                        "insert or ignore into rp(full,ci,setup,mode,t0,coderabbit_epoch) values(?,?,?,?,?,?)",
+                        pa![r.clone(), c.clone(), s.clone(), "ask".to_string(), now(), now()],
                     );
                     a.sw.notify_one();
                     js(json!({"full": r, "ci": c, "setup": s, "cfg": cfg(a)}))
@@ -1718,6 +1729,9 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                         ("auto_merge", 0),
                         ("local_merge", 0),
                         ("steward_repair", 0),
+                        ("coderabbit_free_confirmed", 0),
+                        ("coderabbit_review", 0),
+                        ("coderabbit_repair", 0),
                         ("auto_recover_drops", 0),
                         ("maxo", 1),
                         ("maxd", 1),
@@ -1747,10 +1761,34 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                                     .or(v.as_i64())
                                     .unwrap_or(0)
                                     .clamp(0, 1);
-                                a.db.run(
-                                    &format!("update rp set {k}=? where full=?"),
-                                    pa![x, r.clone()],
-                                );
+                                if k == "on_" {
+                                    a.db.run(
+                                        "update rp set coderabbit_epoch=coderabbit_epoch + case when on_<>? then 1 else 0 end,on_=? where full=?",
+                                        pa![x, x, r.clone()],
+                                    );
+                                } else if k == "coderabbit_review" {
+                                    let at = now();
+                                    a.db.run(
+                                        "update rp set coderabbit_epoch=coderabbit_epoch + case when coderabbit_review<>? then 1 else 0 end,coderabbit_review_since=case when coderabbit_review<>? and ?=1 and coderabbit_free_confirmed=1 then ? else coderabbit_review_since end,coderabbit_review=? where full=?",
+                                        pa![x, x, x, at, x, r.clone()],
+                                    );
+                                } else if k == "coderabbit_free_confirmed" {
+                                    let at = now();
+                                    a.db.run(
+                                        "update rp set coderabbit_epoch=coderabbit_epoch + case when coderabbit_free_confirmed<>? then 1 else 0 end,coderabbit_review_since=case when coderabbit_free_confirmed<>? and ?=1 and coderabbit_review=1 then ? else coderabbit_review_since end,coderabbit_free_confirmed=? where full=?",
+                                        pa![x, x, x, at, x, r.clone()],
+                                    );
+                                } else if k == "coderabbit_repair" {
+                                    a.db.run(
+                                        "update rp set coderabbit_epoch=coderabbit_epoch + case when coderabbit_repair<>? then 1 else 0 end,coderabbit_repair=? where full=?",
+                                        pa![x, x, r.clone()],
+                                    );
+                                } else {
+                                    a.db.run(
+                                        &format!("update rp set {k}=? where full=?"),
+                                        pa![x, r.clone()],
+                                    );
+                                }
                             }
                             1 => {
                                 let x = v.as_i64().unwrap_or(3).clamp(0, 10000);
@@ -1905,6 +1943,32 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                 Err(e) => js(json!({"ok": false, "m": crate::wk::errm(&e)})),
             }
         }
+        ("POST", "/api/steward/coderabbit") => {
+            let repo = b["repo"].as_str().unwrap_or("");
+            let number = b["number"].as_i64().unwrap_or(0);
+            let head = b["head"].as_str().unwrap_or("");
+            if !crate::coderabbit::valid_scope(repo, number, head) {
+                return er(StatusCode::BAD_REQUEST, "invalid observation scope");
+            }
+            // Limit manual reads to PRs actually present in the current Steward snapshot.
+            let report = a.db.kg(&format!("steward:{repo}"));
+            if !report["prs"].as_array().is_some_and(|rows| rows.iter().any(|pr| {
+                pr["number"].as_i64() == Some(number) && pr["head_sha"] == head
+            })) {
+                return er(StatusCode::CONFLICT, "refresh Steward before observing");
+            }
+            let Ok(ticket) = crate::coderabbit::reserve(&a.db, repo, number) else {
+                return er(StatusCode::CONFLICT, "observation unavailable");
+            };
+            match crate::coderabbit::observe(repo, number, head).await {
+                Ok(value) => match crate::coderabbit::save(&a.db, repo, number, &ticket, &value) {
+                    Ok(true) => js(value),
+                    _ => js(json!({"state":"unavailable","head":head})),
+                },
+                Err(error) if error == crate::coderabbit::RATE_LIMITED => js(json!({"state":"rate_limited","head":head})),
+                Err(_) => js(json!({"state":"unavailable","head":head})),
+            }
+        }
         ("GET", "/api/steward") => js(json!({
             "repos": a.db.all("select full from rp where on_=1 order by full", pa![])
                 .iter()
@@ -1922,6 +1986,60 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                 })
                 .collect::<Vec<Value>>()
         })),
+        ("GET", "/api/watcher-outbox") => {
+            let offset=if qv("offset").is_empty(){0}else{
+                match qv("offset").parse::<i64>(){
+                    Ok(n) if (0..=100_000).contains(&n)=>n,
+                    _=>return er(StatusCode::BAD_REQUEST,"invalid page offset")
+                }
+            };
+            match (a.db.watcher_outbox_page(offset),a.db.watcher_outbox_counts()){
+                (Ok(mut rows),Ok(counts))=>{
+                    let more=rows.len()>50;
+                    rows.truncate(50);
+                    js(json!({"rows":rows,"counts":counts,"offset":offset,"more":more}))
+                },
+                _=>er(StatusCode::INTERNAL_SERVER_ERROR,"outbox inventory unavailable")
+            }
+        },
+        ("POST", "/api/watcher-outbox") => {
+            let Some(id)=b["id"].as_str().filter(|s|s.len()==64 && s.bytes().all(|c|c.is_ascii_hexdigit())) else{
+                return er(StatusCode::BAD_REQUEST,"invalid reply identifier");
+            };
+            match b["action"].as_str(){
+                Some("cancel")=>{
+                    // CAS refuses cancellation once a worker has claimed a send.
+                    match a.db.finish_watcher_reply(id,"cancelled"){
+                        Ok(true)=>{a.say("watcher","owner cancelled a pending reply",None);js(json!({"ok":true,"state":"cancelled"}))},
+                        Ok(false)=>er(StatusCode::CONFLICT,"reply is no longer pending"),
+                        Err(_)=>er(StatusCode::INTERNAL_SERVER_ERROR,"could not cancel reply")
+                    }
+                },
+                Some("verify")=>{
+                    let rows=match a.db.try_all("select repo,num,author,body from watcher_outbox where id=? and state='uncertain'",pa![id.to_string()]){
+                        Ok(rows)=>rows,
+                        Err(_)=>return er(StatusCode::INTERNAL_SERVER_ERROR,"outbox inventory unavailable")
+                    };
+                    let Some(row)=rows.first() else{return er(StatusCode::CONFLICT,"reply is no longer uncertain");};
+                    let (Some(repo),Some(number),Some(author),Some(body))=(row["repo"].as_str(),row["num"].as_i64(),row["author"].as_str(),row["body"].as_str()) else{
+                        return er(StatusCode::INTERNAL_SERVER_ERROR,"invalid stored reply");
+                    };
+                    let comments=match crate::sh::apip_unique(&format!("repos/{repo}/issues/{number}/comments?per_page=100")).await{
+                        Ok(rows)=>rows,
+                        Err(_)=>return er(StatusCode::BAD_GATEWAY,"could not obtain complete GitHub comments")
+                    };
+                    if !crate::wk::reply_confirmed(&comments,author,body){
+                        return js(json!({"ok":true,"state":"uncertain","confirmed":false}));
+                    }
+                    match a.db.finish_watcher_reply(id,"sent"){
+                        Ok(true)=>{a.say("watcher","owner verified reply delivery on GitHub",None);js(json!({"ok":true,"state":"sent","confirmed":true}))},
+                        Ok(false)=>er(StatusCode::CONFLICT,"reply state changed; refresh inventory"),
+                        Err(_)=>er(StatusCode::INTERNAL_SERVER_ERROR,"could not persist confirmation")
+                    }
+                },
+                _=>er(StatusCode::BAD_REQUEST,"unsupported outbox action")
+            }
+        },
         ("GET", "/api/lessons") => match crate::routing::lessons(a) {
             Ok(rows) => js(json!({"lessons":rows})),
             Err(error) => {
