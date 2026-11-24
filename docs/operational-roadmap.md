@@ -7,18 +7,18 @@
 - As issues estão desativadas no fork (GitHub HTTP 410); este ficheiro constitui o backlog versionado. Não declarar uma fase concluída sem evidência.
 
 ## Estado em 24/11/2026
-Base main: 878ef1a45b82319bb912ae567a6cc4956c84ffe4. Release publicada: fork-v0.10.15.
-- PR #47 — encerrada sem merge a pedido do proprietário; a proposta de substituir/desativar a interface dos agentes fica retirada.
-- [ ] PR #48 — cursor de comentários e confirmação transacional; validar falhas de Guard/Watcher e pedidos concorrentes.
-- [ ] PR #49 — melhorias upstream de Docker; validar ciclo real do worker.
-- [ ] PR #51 — Scout sem limite rígido de 500 issues, snapshot SQLite transacional, rejeição de respostas inválidas e adiamento se falhar a consulta de PRs relacionadas. HEAD: 6a705869317bfaecd495bd15e6cd2c5764734142.
-- [ ] PR #48 atualizada: enqueue de revisão e confirmação de comentários na mesma transação; adiamento enquanto existir revisão ativa e teste de rollback. HEAD: 5e463fda574a615fa8a3a4d7f2d64e97bc79939b.
-- [ ] PR #52 — inventário completo do Steward por paginação REST e dupla confirmação de identidade; paginação GraphQL de threads de revisão. HEAD: 93cd93eb9bfa8ee09981d1f3ea3294798908df09.
-- [ ] PR #49 atualizada: fnm v1.39.0 verificado por checksum, seleção de Node por projeto e Node system sem versão definida. HEAD: 8ac1d83ed6f22c2c0508c490a5f57a5a3dc9e891.
-- [ ] PR #48 atualizada: Watcher passa a observar e despertar o Steward, sem iniciar novos auto-merges próprios. HEAD: f5398f64a62ba7b910db4c5d771903ed8c4ceaee. Auditar auto-merges previamente ativados no GitHub.
-- [ ] PR #53 — pausa Claude limitada ao fornecedor em instalações mistas; reserva configurável Codex de 15% para novas tarefas Hunter. HEAD: 3cc348ff72a6a5525eb6eb575fab6b8cdeb4a9d0.
-- [ ] PR #54 — cooldown persistente de falhas dos hosts, prioridades manuais, dependências acíclicas com confirmação de merge local, equilíbrio de fixes de igual prioridade por projeto e diagnóstico API. HEAD: f753ef2e1400bb3b165554d7505e1165687c61e5; base: branch da PR #53. Verificados isoladamente em SQLite os predicados SQL de elegibilidade, ciclos, merge, dependência ausente e deadline. Rust e integração por validar. F05/F10 parcialmente implementadas.
-PRs #48, #49, #51, #52, #53 e #54 em draft, não integradas nem validadas integralmente. O GitHub ainda não apresenta execuções CI para os commits analisados; o ambiente desta sessão não tem Cargo nem resolução DNS para github.com. Nenhuma fase é considerada concluída. F02, F04 e F09 têm implementação parcial. A interface dos agentes permanece intacta. Não há alterações de configuração de modelos. O presente roadmap não representa implementação.
+- Release publicada: fork-v0.10.15; nenhuma nova release ou atualização automática foi publicada.
+- PR #47 — encerrada sem merge a pedido do proprietário; interface dos agentes preservada.
+- PRs #48, #49, #51, #52, #53 e #54 integradas conjuntamente através da PR #55. Merge da main: d453bf72ba9dcf14b5ebc032165680c53f4f1c00. Árvore de código validada: 754be0a217c5139b24faeb19e1ed134ff69ca69c.
+- #48: confirmação transacional de comentários e encaminhamento de novos merges para o Steward.
+- #49: melhorias Docker, fnm e seleção de Node por repositório.
+- #51: paginação Scout e snapshot SQLite transacional.
+- #52: inventário paginado do Steward e paginação de threads de revisão.
+- #53: isolamento do limite Claude em instalações mistas e reserva configurável de quota Codex.
+- #54: cooldown persistente de falhas do host, prioridades manuais, dependências acíclicas, equilíbrio entre projetos e diagnóstico API. Encerrada como redundante após confirmar ancestralidade na main; o GitHub não permitiu alterar a base para main porque não existiam novos commits.
+- QA Linux da árvore integrada: cargo test --locked (225 unitários + 2 integração aprovados, 3 ignorados); node --test (116 aprovados); Python quality/adapters (5 + 29 aprovados); rustfmt, Clippy -D warnings e git diff --check aprovados. Total: 377 testes aprovados.
+- Ainda não há evidência de execução CI no GitHub. Validação real Docker, Windows, Chromium e fornecedores reais pendentes. Nenhuma fase completa do roadmap é declarada concluída só por estes resultados.
+- Interface dos agentes inalterada; não foi ativado Qwen.
 
 ## Fases e critérios de aceitação
 ### F01 / P0 — Integração seletiva upstream
