@@ -43,7 +43,7 @@ create table if not exists coderabbit_findings(repo text not null, number int no
 create index if not exists coderabbit_findings_pr on coderabbit_findings(repo,number,head,state);
 ";
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 pub(crate) fn valid_git_sha(sha: &str) -> bool {
     sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit())
@@ -88,6 +88,11 @@ const LEGACY_COLUMNS: &[(&str, &str, &str)] = &[
         "rp",
         "steward_repair",
         "alter table rp add column steward_repair int default 0",
+    ),
+    (
+        "rp",
+        "steward_activation",
+        "alter table rp add column steward_activation text not null default ''",
     ),
     (
         "rp",
@@ -195,6 +200,22 @@ fn init(c: &mut Connection) -> anyhow::Result<()> {
         after delete on rp
         begin
           delete from kv where substr(k,1,length('coderabbit:observation:' || old.full || '#')) = 'coderabbit:observation:' || old.full || '#';
+        end;
+    ")?;
+    // A fresh opaque token also fences deletion/recreation of a repository.
+    // Existing permissions are preserved, but old jobs have no valid token.
+    tx.execute_batch("
+        update rp set steward_activation=lower(hex(randomblob(16))) where steward_activation='';
+        create trigger if not exists steward_activation_insert
+        after insert on rp
+        begin
+          update rp set steward_activation=lower(hex(randomblob(16))) where id=new.id;
+        end;
+        create trigger if not exists steward_activation_change
+        after update of on_,steward_repair,full on rp
+        when old.on_ is not new.on_ or old.steward_repair is not new.steward_repair or old.full is not new.full
+        begin
+          update rp set steward_activation=lower(hex(randomblob(16))) where id=new.id;
         end;
     ")?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;

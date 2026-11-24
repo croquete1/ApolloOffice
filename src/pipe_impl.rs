@@ -530,10 +530,15 @@ fn automated_review_authorized(db: &crate::db::Db, j: &Job) -> R<()> {
         .map_err(|error| X::E(error.to_string()))?
             == ids.len() as i64
     } else {
+        let activation = j.d["steward_activation"]
+            .as_str()
+            .filter(|token| token.len() == 32 && token.bytes().all(|b| b.is_ascii_hexdigit()))
+            .ok_or_else(|| X::Drop("Missing human review activation; manual review required".into()))?;
         db.try_n(
             "select count(*) from rp where full=? and on_=1 and steward_repair=1
+             and steward_activation=?
              and exists(select 1 from prs where repo=rp.full and num=? and st='open')",
-            pa![j.repo.clone(), number],
+            pa![j.repo.clone(), activation.to_string(), number],
         )
         .map_err(|error| X::E(error.to_string()))?
             == 1

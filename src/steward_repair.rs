@@ -88,10 +88,14 @@ fn admit_review(
     let (repo, number, head) = scope;
     let (rid, since) = review;
     let key = format!("steward:repair:{repo}#{number}:{head}:{rid}");
+    let activation = body["steward_activation"]
+        .as_str()
+        .filter(|token| token.len() == 32 && token.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or(rusqlite::Error::InvalidQuery)?;
     let mut connection = db.0.lock().unwrap();
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let eligible: bool = tx.query_row(
-        "select exists(select 1 from rp where full=?1 and on_=1 and steward_repair=1)
+        "select exists(select 1 from rp where full=?1 and on_=1 and steward_repair=1 and steward_activation=?7)
          and exists(select 1 from prs where repo=?1 and num=?2 and st='open')
          and exists(select 1 from kv,json_each(kv.v,'$.prs') p where kv.k=?3
            and json_extract(p.value,'$.number')=?2
@@ -103,7 +107,7 @@ fn admit_review(
          and not exists(select 1 from jobs where repo=?1 and pr=?2
            and ((kind in ('review','rebase','mergecheck') and st not in ('done','drop'))
                 or (kind='review' and t0>=?6)))",
-        rusqlite::params![repo, number, format!("steward:{repo}"), head, key, since],
+        rusqlite::params![repo, number, format!("steward:{repo}"), head, key, since, activation],
         |row| row.get(0),
     )?;
     if !eligible {
@@ -159,6 +163,16 @@ async fn enqueue(
     if tracked["st"] != "open" {
         return Ok(false);
     }
+    let policy = a
+        .db
+        .try_all(
+            "select steward_activation from rp where full=? and on_=1 and steward_repair=1",
+            pa![repo.to_string()],
+        )
+        .map_err(|error| error.to_string())?;
+    let Some(activation) = policy.first().and_then(|row| row["steward_activation"].as_str()) else {
+        return Ok(false);
+    };
     let detail = ghj(&["api", &format!("repos/{repo}/pulls/{number}")], 45).await?;
     let Some(head) = detail["head"]["sha"].as_str() else {
         return Ok(false);
@@ -240,6 +254,7 @@ async fn enqueue(
         "head": repo,
         "test_cmd": test_cmd,
         "steward_review_id": rid,
+        "steward_activation": activation,
         "steward_head": head,
         "source_head": head
     });
@@ -355,7 +370,6 @@ mod tests {
         let db = crate::db::Db::mem();
         let repo = "o/r";
         let head = "0123456789012345678901234567890123456789";
-        let body = json!({"source_head":head,"steward_head":head});
         db.run(
             "insert into rp(full,on_,steward_repair) values('o/r',1,1)",
             vec![],
@@ -364,24 +378,28 @@ mod tests {
             "insert into prs(repo,num,st,d) values('o/r',1,'open','{}')",
             vec![],
         );
-        let admit = || admit_review(&db, (repo, 1, head), (91, 0), "PR", "url", &body);
-        assert!(!admit().unwrap());
+        let policy = db.one("select steward_activation from rp", vec![]).unwrap();
+        let mut body = json!({"source_head":head,"steward_head":head,"steward_activation":policy["steward_activation"]});
+        let admit = |body: &Value| admit_review(&db, (repo, 1, head), (91, 0), "PR", "url", body);
+        assert!(!admit(&body).unwrap());
         db.ks("steward:o/r", &json!({"prs":[{"number":1,"head_sha":head,"state":"revisao_pendente","overlaps":[2],"possible_duplicates":[]}]}));
-        assert!(!admit().unwrap());
+        assert!(!admit(&body).unwrap());
         db.ks("steward:o/r", &json!({"prs":[{"number":1,"head_sha":head,"state":"revisao_pendente","overlaps":[],"possible_duplicates":[]}]}));
         db.run("update rp set steward_repair=0", vec![]);
-        assert!(!admit().unwrap());
+        assert!(!admit(&body).unwrap());
         db.run("update rp set steward_repair=1", vec![]);
+        assert!(!admit(&body).unwrap());
+        body["steward_activation"] = db.one("select steward_activation from rp", vec![]).unwrap()["steward_activation"].clone();
         db.0.lock().unwrap().execute_batch("create trigger fail_repair_ledger before insert on kv begin select raise(abort,'ledger failure'); end;").unwrap();
-        assert!(admit().is_err());
+        assert!(admit(&body).is_err());
         assert_eq!(db.n("select count(*) from jobs", vec![]), 0);
         db.0.lock()
             .unwrap()
             .execute_batch("drop trigger fail_repair_ledger")
             .unwrap();
-        assert!(admit().unwrap());
+        assert!(admit(&body).unwrap());
         db.run("update jobs set st='done'", vec![]);
-        assert!(!admit().unwrap());
+        assert!(!admit(&body).unwrap());
         assert_eq!(db.n("select count(*) from jobs", vec![]), 1);
         assert!(!db
             .kg(&format!("steward:repair:{repo}#1:{head}:91"))

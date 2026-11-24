@@ -33,8 +33,19 @@ mod t {
         db.run("update rp set coderabbit_repair=1,coderabbit_epoch=6", vec![]);
         assert!(automated_review_authorized(&db, &job).is_err());
         job.d = json!({"steward_head":head,"steward_review_id":91});
+        assert!(automated_review_authorized(&db, &job).is_err());
+        let policy = db.one("select steward_activation from rp", vec![]).unwrap();
+        job.d["steward_activation"] = policy["steward_activation"].clone();
         assert!(automated_review_authorized(&db, &job).is_ok());
         db.run("update rp set steward_repair=0", vec![]);
+        assert!(automated_review_authorized(&db, &job).is_err());
+        db.run("update rp set steward_repair=1", vec![]);
+        assert!(automated_review_authorized(&db, &job).is_err());
+        job.d["steward_activation"] =
+            db.one("select steward_activation from rp", vec![]).unwrap()["steward_activation"].clone();
+        assert!(automated_review_authorized(&db, &job).is_ok());
+        db.run("delete from rp", vec![]);
+        db.run("insert into rp(full,on_,steward_repair) values('o/r',1,1)", vec![]);
         assert!(automated_review_authorized(&db, &job).is_err());
         job.d = json!({});
         assert!(automated_review_authorized(&db, &job).is_ok());
