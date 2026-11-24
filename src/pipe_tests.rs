@@ -37,6 +37,19 @@ mod t {
     }
 
     #[test]
+    fn watcher_rebase_requires_its_observed_head(){
+        let head="a".repeat(40);
+        let other="b".repeat(40);
+        let mut j=Job::of(json!({"kind":"rebase","d":{"watcher_observed_head":head}}));
+        assert!(check_review_checkout(&j,&head).is_ok());
+        assert!(check_review_checkout(&j,&other).is_err());
+        j.d["watcher_observed_head"]=Value::Null;
+        assert!(check_review_checkout(&j,&head).is_err());
+        j.d=json!({});
+        assert!(check_review_checkout(&j,&other).is_ok());
+    }
+
+    #[test]
     fn zero_repo_pr_limits_mean_unlimited() {
         assert!(!repo_limit_reached(178, 20, 0, 0));
         assert!(!repo_limit_reached(178, 20, 0, 25));
