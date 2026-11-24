@@ -116,6 +116,22 @@ fn init(c: &mut Connection) -> anyhow::Result<()> {
             tx.execute(sql, [])?;
         }
     }
+    // Invalidate observation tickets and remove historical metadata on activation
+    // changes or removal, atomically with the repository mutation. Exact prefix,
+    // not LIKE: repository names may contain wildcard characters.
+    tx.execute_batch("
+        create trigger if not exists coderabbit_repo_activation
+        after update of on_,full on rp
+        when old.on_ is not new.on_ or old.full is not new.full
+        begin
+          delete from kv where substr(k,1,length('coderabbit:observation:' || old.full || '#')) = 'coderabbit:observation:' || old.full || '#';
+        end;
+        create trigger if not exists coderabbit_repo_removed
+        after delete on rp
+        begin
+          delete from kv where substr(k,1,length('coderabbit:observation:' || old.full || '#')) = 'coderabbit:observation:' || old.full || '#';
+        end;
+    ")?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
     Ok(())
