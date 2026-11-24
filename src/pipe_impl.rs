@@ -1335,8 +1335,8 @@ async fn verify(a: &Ax, j: &mut Job, f: &Value) -> R<String> {
     crate::quality::check(a, j).await
 }
 
-fn try_slot(a: &Ax, h: &str) -> bool {
-    let cap = ho(a,h).map(|x|x.ci).unwrap_or(1) as usize;
+fn try_slot(a: &Ax, h: &str, restartable: bool) -> bool {
+    let cap = crate::resources::ci_capacity(a,h,ho(a,h).map(|x|x.ci).unwrap_or(1),restartable) as usize;
     let mut slots=a.sem.lock().unwrap();
     let n=slots.entry(h.to_string()).or_insert(0);
     if *n>=cap {return false;}
@@ -1345,7 +1345,7 @@ fn try_slot(a: &Ax, h: &str) -> bool {
 }
 
 async fn slot(a: &Ax, h: &str) {
-    while !try_slot(a,h) { sl(5000).await; }
+    while !try_slot(a,h,false) { sl(5000).await; }
 }
 
 fn verified_checkpoint(j: &Job) -> bool {
@@ -1428,7 +1428,7 @@ async fn ci_with_policy(a: &Ax, j: &mut Job, allow_defer:bool) -> R<String> {
         // The candidate is committed and can be rechecked. Do not keep the
         // lane while another build occupies all CI slots.
         a.db.jset(j.id,&[("st",json!("ci"))]);
-        if !try_slot(a,&j.h()) { return Err(X::Defer("CI capacity unavailable".into())); }
+        if !try_slot(a,&j.h(),true) { return Err(X::Defer("CI capacity unavailable or resource pressure".into())); }
     } else {
         slot(a,&j.h()).await;
     }
