@@ -1539,10 +1539,16 @@ async fn watch_pr(a:&Ax,p:Value,me:&str,
         }
         let hd = format!("{}/{}", v["headRepositoryOwner"]["login"].as_str().unwrap_or(""), v["headRepository"]["name"].as_str().unwrap_or(""));
         let hrn = v["headRefName"].as_str().unwrap_or("").to_string();
-        if v["mergeable"] == "CONFLICTING" && v["headRepositoryOwner"]["login"].as_str() == Some(me) && a.db.n("select count(*) from jobs where repo=? and pr=? and kind='rebase' and (st not in ('done','drop') or t1>?)", pa![r.clone(), n, now() - 86_400_000]) == 0 {
-            a.db.jnew(&r, n, "rebase", v["title"].as_str().unwrap_or(""), v["url"].as_str().unwrap_or(""), "ready", &format!("merge conflict with {}", v["baseRefName"].as_str().unwrap_or("")), json!({"branch": hrn, "head": hd, "test_cmd": p["d"]["test_cmd"]}), Some(n), -1.0);
-            a.flow("watcher", "fixer", "rebase");
-            a.say("watcher", &format!("{tag} has a merge conflict, sent to rebase"), None);
+        if v["mergeable"] == "CONFLICTING" && v["headRepositoryOwner"]["login"].as_str() == Some(me) {
+            let request=json!({
+                "title":v["title"],"url":v["url"],
+                "why":format!("merge conflict with {}",v["baseRefName"].as_str().unwrap_or("")),
+                "data":{"branch":hrn,"head":hd,"test_cmd":p["d"]["test_cmd"]}
+            });
+            if a.db.queue_watcher_rebase(&r,n,&up,&source_head,&request).map_err(|e|X::E(e.to_string()))?{
+                a.flow("watcher","fixer","rebase");
+                a.say("watcher",&format!("{tag} has a merge conflict, sent to rebase"),None);
+            }
         }
         observe_auto_merge(a, &r, n, &v, &p["d"], me)?;
         if !has_pending && p["d"]["comment_seen_at"].as_str() == Some(up.as_str()) && p["d"]["watcher_head"]==source_head && p["d"]["seen"].as_bool().unwrap_or(false) {
