@@ -56,3 +56,12 @@ test("processing and skipped reviews are advisory, not approvals",async()=>{
     assert.equal(f.status.textContent,label+" · não equivale a aprovação");
   }
 });
+
+test("rate limit and capacity do not appear as completed reviews",async()=>{
+  for(const [state,label] of [["rate_limited","Limite de consultas GitHub atingido; tente mais tarde"],["busy","Capacidade de consulta ocupada; tente mais tarde"]]){
+    const f=fixture({head:"abc",state});
+    await f.button.onclick();
+    assert.equal(f.status.textContent,label+" · não equivale a aprovação");
+    assert.equal(f.button.disabled,false);
+  }
+});
