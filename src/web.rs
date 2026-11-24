@@ -1483,6 +1483,7 @@ fn steward_report(a: &Ax, repo: &str) -> Value {
     if let Some(prs) = report["prs"].as_array_mut() {
         for pr in prs {
             let number = pr["number"].as_i64().unwrap_or(0);
+            pr["coderabbit_previous"] = crate::coderabbit::previous(&a.db, repo, number);
             let latest = jobs.iter().find(|j| j["pr"].as_i64() == Some(number));
             pr["recheck"] = latest.map(|job| {
                 let expected_head = job["d"]["expected_head"].as_str().unwrap_or("");
@@ -1909,12 +1910,24 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
             let repo = b["repo"].as_str().unwrap_or("");
             let number = b["number"].as_i64().unwrap_or(0);
             let head = b["head"].as_str().unwrap_or("");
-            if !crate::coderabbit::valid_repo(repo)
-                || a.db.n("select count(*) from rp where full=? and on_=1", pa![repo.to_string()]) != 1 {
-                return er(StatusCode::BAD_REQUEST, "repository not enabled");
+            if !crate::coderabbit::valid_scope(repo, number, head) {
+                return er(StatusCode::BAD_REQUEST, "invalid observation scope");
             }
+            // Limit manual reads to PRs actually present in the current Steward snapshot.
+            let report = a.db.kg(&format!("steward:{repo}"));
+            if !report["prs"].as_array().is_some_and(|rows| rows.iter().any(|pr| {
+                pr["number"].as_i64() == Some(number) && pr["head_sha"] == head
+            })) {
+                return er(StatusCode::CONFLICT, "refresh Steward before observing");
+            }
+            let Ok(ticket) = crate::coderabbit::reserve(&a.db, repo, number) else {
+                return er(StatusCode::CONFLICT, "observation unavailable");
+            };
             match crate::coderabbit::observe(repo, number, head).await {
-                Ok(value) => js(value),
+                Ok(value) => match crate::coderabbit::save(&a.db, repo, number, ticket, &value) {
+                    Ok(true) => js(value),
+                    _ => js(json!({"state":"unavailable","head":head})),
+                },
                 Err(_) => js(json!({"state":"unavailable","head":head})),
             }
         }
