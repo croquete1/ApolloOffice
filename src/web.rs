@@ -46,6 +46,26 @@ fn wipe_office_data(db: &crate::db::Db) -> rusqlite::Result<()> {
     Ok(())
 }
 
+// Preserve prerequisite evidence required by jobs that may still execute.
+fn clear_job_history(db: &crate::db::Db) -> rusqlite::Result<()> {
+    let mut c = db.0.lock().unwrap();
+    let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    tx.execute_batch(
+        "delete from jobs where st in ('done','drop') and not exists(
+           select 1 from job_dependencies dep join jobs dependent on dependent.id=dep.job
+           where dep.prerequisite=jobs.id and dependent.st not in ('done','drop'));
+         delete from job_schedule where job not in (select id from jobs);
+         delete from job_dependencies where job not in (select id from jobs);
+         delete from fix_attempts where job not in (select id from jobs);
+         delete from kv where k glob 'lesson_exposure:*' and not exists(
+           select 1 from fix_attempts f where kv.k=printf('lesson_exposure:%lld:%lld:%lld',f.id,f.job,f.started));
+         delete from ev where j is null or j not in (select id from jobs);",
+    )?;
+    tx.commit()?;
+    crate::app::chg();
+    Ok(())
+}
+
 fn remove_repository(db: &crate::db::Db, repo: &str) -> rusqlite::Result<()> {
     let mut c = db.0.lock().unwrap();
     let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -2215,20 +2235,10 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                     a.say("scout", "signed out everywhere", None);
                 }
                 "history" => {
-                    a.db.run("delete from jobs where st in ('done','drop')", pa![]);
-                    a.db.run(
-                        "delete from fix_attempts where job not in (select id from jobs)",
-                        pa![],
-                    );
-                    a.db.run(
-                        "delete from kv where k glob 'lesson_exposure:*' and not exists(select 1 from fix_attempts f where kv.k=printf('lesson_exposure:%lld:%lld:%lld',f.id,f.job,f.started))",
-                        pa![],
-                    );
-                    a.db.run(
-                        "delete from ev where j is null or j not in (select id from jobs)",
-                        pa![],
-                    );
-                    a.say("scout", "job history cleared", None);
+                    if clear_job_history(&a.db).is_err() {
+                        return er(StatusCode::CONFLICT, "job history was not cleared");
+                    }
+                    a.say("scout", "job history cleared; active prerequisites retained", None);
                 }
                 "reset" => {
                     for k in ["set", "hold", "man"] {
@@ -2625,6 +2635,33 @@ mod t {
         assert_eq!(snapshot["byRepo"][0]["repo"], "o/r");
         assert!(!snapshot.to_string().contains("private command"));
         assert!(!snapshot.to_string().contains("private result"));
+    }
+
+    #[test]
+    fn history_cleanup_preserves_active_dependencies_and_rolls_back() {
+        let db = crate::db::Db::mem();
+        db.0.lock().unwrap().execute_batch(
+            "insert into jobs(id,repo,st,pr) values(1,'o/r','done',1),(2,'o/r','ready',null),(3,'o/r','done',3);
+             insert into prs(repo,num,st) values('o/r',1,'merged');
+             insert into job_dependencies(job,prerequisite) values(2,1);
+             insert into job_schedule(job) values(1),(2),(3);
+             create trigger fail_history before delete on job_schedule begin select raise(abort,'injected'); end;",
+        ).unwrap();
+        assert!(clear_job_history(&db).is_err());
+        assert_eq!(db.n("select count(*) from jobs", pa![]), 3);
+        db.0.lock()
+            .unwrap()
+            .execute_batch("drop trigger fail_history")
+            .unwrap();
+        clear_job_history(&db).unwrap();
+        assert_eq!(db.n("select count(*) from jobs", pa![]), 2);
+        assert_eq!(db.n("select count(*) from job_schedule", pa![]), 2);
+        assert!(db.schedule_eligible(2, "o/r", now()).unwrap());
+        db.run("update jobs set st='done' where id=2", pa![]);
+        clear_job_history(&db).unwrap();
+        assert_eq!(db.n("select count(*) from jobs", pa![]), 0);
+        assert_eq!(db.n("select count(*) from job_dependencies", pa![]), 0);
+        assert_eq!(db.n("select count(*) from job_schedule", pa![]), 0);
     }
 
     #[test]
