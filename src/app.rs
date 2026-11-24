@@ -180,6 +180,7 @@ pub fn dset() -> Value {
         "tokday": 0,
         "budday": 0,
         "codex_hunt_reserve_percent": 15,
+        "resource_profile": "manual",
         "ntfy": "",
         "discord": "",
         "updates": false,

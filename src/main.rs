@@ -13,6 +13,7 @@ mod ntf;
 mod pipe;
 mod prov;
 mod quality;
+mod resources;
 mod routing;
 mod sh;
 mod star;
