@@ -509,7 +509,9 @@ fn review_command_inventory(rows: &[Value]) -> Vec<Value> {
                 return None;
             }
             let automatic_head = body
-                .strip_prefix("@coderabbitai review\n\n<!-- apollo-office-coderabbit-review:v1 head=")
+                .strip_prefix(
+                    "@coderabbitai review\n\n<!-- apollo-office-coderabbit-review:v1 head=",
+                )
                 .and_then(|tail| tail.strip_suffix(" -->"))
                 .filter(|head| valid_sha(head));
             Some(json!({"id":row["id"],"automatic_head":automatic_head}))
@@ -1958,12 +1960,19 @@ mod tests {
     fn manual_review_commands_block_automatic_requests() {
         let db = crate::db::Db::mem();
         let repo = "croquete1/ApolloOffice";
-        let inventory = review_command_inventory(&[json!({"id":1,"body":"  @CodeRabbitAI  review"})]);
+        let inventory =
+            review_command_inventory(&[json!({"id":1,"body":"  @CodeRabbitAI  review"})]);
         assert!(!commands_allow_request(
-            &db, repo, 67, &json!({"review_commands":inventory})
+            &db,
+            repo,
+            67,
+            &json!({"review_commands":inventory})
         ));
         assert!(commands_allow_request(
-            &db, repo, 67, &json!({"review_commands":[]})
+            &db,
+            repo,
+            67,
+            &json!({"review_commands":[]})
         ));
         let automatic = format!(
             "@coderabbitai review\n\n<!-- apollo-office-coderabbit-review:v1 head={HEAD} -->"
