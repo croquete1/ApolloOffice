@@ -2143,6 +2143,10 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                         pa![],
                     );
                     a.db.run(
+                        "delete from kv where k glob 'lesson_exposure:*' and not exists(select 1 from fix_attempts f where kv.k=printf('lesson_exposure:%lld:%lld:%lld',f.id,f.job,f.started))",
+                        pa![],
+                    );
+                    a.db.run(
                         "delete from ev where j is null or j not in (select id from jobs)",
                         pa![],
                     );
@@ -2864,6 +2868,46 @@ mod t {
         for invalid in ["", "pt", "pt-BR", "en-US", "../pt-PT"] {
             assert_eq!(pr_lang(invalid), "en");
         }
+    }
+
+    #[test]
+    fn lesson_metrics_distinguish_missing_exposure_and_completed_first_attempts() {
+        let db = crate::db::Db::mem();
+        let at = now();
+        for (id, outcome, gate) in [
+            (1, "accepted", ""),
+            (2, "rejected", "review"),
+            (3, "failed", "verification"),
+            (4, "accepted", ""),
+        ] {
+            let job = db.jnew("o/r", id, "fix", "test", "", "done", "", json!({}), None, 0.0);
+            db.run(
+                "insert into fix_attempts(id,job,attempt,model,started,finished,outcome,gate) values(?,?,?,?,?,?,?,?)",
+                pa![id,job,if id==4 {2} else {1}, "cc:sonnet".to_string(),at,at+1,outcome.to_string(),gate.to_string()],
+            );
+            if id != 3 {
+                db.ks(
+                    &format!("lesson_exposure:{id}:{job}:{at}"),
+                    &json!({"included":id==1}),
+                );
+            }
+        }
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::env::temp_dir(),
+            47304,
+            "apollo-office".into(),
+        ));
+        let report = costs(&a);
+        let rows = report["lesson_exposure_metrics"].as_array().unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0]["exposure"], "included");
+        assert_eq!(rows[0]["accepted"], 1);
+        assert_eq!(rows[1]["exposure"], "not_included");
+        assert_eq!(rows[1]["review_rejections"], 1);
+        assert_eq!(rows[2]["exposure"], "unknown");
+        assert_eq!(rows[2]["verification_failures"], 1);
+        assert!(rows.iter().all(|r| r["samples"] == 1));
     }
 
     #[test]
