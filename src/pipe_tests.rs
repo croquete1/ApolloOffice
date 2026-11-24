@@ -3,6 +3,23 @@ mod t {
     use super::*;
 
     #[test]
+    fn review_publication_requires_original_open_pr_and_exact_head(){
+        let source="a".repeat(40);
+        let candidate="b".repeat(40);
+        let mut pr=json!({"state":"open","head":{"repo":{"full_name":"o/r"},"ref":"fix","sha":source}});
+        assert!(review_publish_target_matches(&pr,"o/r","fix",&source,&candidate));
+        pr["head"]["sha"]=json!(candidate);
+        assert!(review_publish_target_matches(&pr,"o/r","fix",&source,&candidate));
+        pr["head"]["sha"]=json!("c".repeat(40));
+        assert!(!review_publish_target_matches(&pr,"o/r","fix",&source,&candidate));
+        pr["head"]["sha"]=json!(source);
+        assert!(!review_publish_target_matches(&pr,"other/r","fix",&source,&candidate));
+        assert!(!review_publish_target_matches(&pr,"o/r","other",&source,&candidate));
+        pr["state"]=json!("closed");
+        assert!(!review_publish_target_matches(&pr,"o/r","fix",&source,&candidate));
+    }
+
+    #[test]
     fn review_checkout_matches_bound_head_including_steward_and_legacy(){
         let head="a".repeat(40);
         let other="b".repeat(40);

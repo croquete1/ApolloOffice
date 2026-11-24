@@ -582,6 +582,13 @@ fn check_review_checkout(j:&Job,actual:&str)->R<()>{
     Ok(())
 }
 
+fn review_publish_target_matches(pr:&Value,repo:&str,branch:&str,source:&str,candidate:&str)->bool{
+    pr["state"]=="open" && pr["head"]["repo"]["full_name"].as_str()==Some(repo)
+        && pr["head"]["ref"].as_str()==Some(branch)
+        && crate::db::valid_git_sha(source) && crate::db::valid_git_sha(candidate)
+        && pr["head"]["sha"].as_str().is_some_and(|sha|sha==source || sha==candidate)
+}
+
 async fn prep(a: &Ax, j: &mut Job) -> R<()> {
     crate::net::need_once(a, &[&j.h(), "gh"]).await?;
     if j.d["rp"].as_bool().unwrap_or(false) {
@@ -3589,6 +3596,14 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
     )
     .await
     .unwrap_or_default());
+    if let Some(source)=review_bound_head(j)?{
+        let number=j.pr.filter(|n|*n>0).ok_or_else(||X::Drop("review has no original PR number".into()))?;
+        let remote=ghj(&["api",&format!("repos/{}/pulls/{number}",j.repo)],60).await.map_err(X::E)?;
+        if !review_publish_target_matches(&remote,&hr,&br,source,&sha)
+            || remote["head"]["sha"].as_str()!=Some(rem.as_str()){
+            return drop("review publication target changed; no push; manual review required");
+        }
+    }
     if rem != sha {
         let fo = if j.kind == "rebase" || j.kind == "review" {
             format!("--force-with-lease=refs/heads/{br}:{}", j.s("old"))
