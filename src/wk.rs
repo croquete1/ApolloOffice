@@ -29,7 +29,9 @@ fn twin_batches(
     for candidate in candidates {
         let size = candidate.context.len().saturating_add(2);
         if bug.len().saturating_add(size) > budget {
-            return Err(X::Lim("Vet: duplicate context exceeds safe batch budget".into()));
+            return Err(X::Lim(
+                "Vet: duplicate context exceeds safe batch budget".into(),
+            ));
         }
         if used.saturating_add(size) > budget {
             batches.push(std::mem::take(&mut batch));
@@ -745,7 +747,11 @@ async fn vet1(a: &Ax, id: i64) -> R<()> {
                         crate::sh::head(x["body"].as_str().unwrap_or(""), 3000)
                     ),
                 );
-                candidates.push(TwinCandidate { context, row: x, pr: true });
+                candidates.push(TwinCandidate {
+                    context,
+                    row: x,
+                    pr: true,
+                });
             }
             for x in ot {
                 let context = wrap(
@@ -755,12 +761,21 @@ async fn vet1(a: &Ax, id: i64) -> R<()> {
                         x["number"],
                         x["title"].as_str().unwrap_or(""),
                         crate::sh::head(
-                            &x["body"].as_str().unwrap_or("").split_whitespace().collect::<Vec<_>>().join(" "),
+                            &x["body"]
+                                .as_str()
+                                .unwrap_or("")
+                                .split_whitespace()
+                                .collect::<Vec<_>>()
+                                .join(" "),
                             400
                         )
                     ),
                 );
-                candidates.push(TwinCandidate { context, row: x, pr: true });
+                candidates.push(TwinCandidate {
+                    context,
+                    row: x,
+                    pr: true,
+                });
             }
             for x in of {
                 let context = wrap(
@@ -769,14 +784,26 @@ async fn vet1(a: &Ax, id: i64) -> R<()> {
                         "Office find {}: {}\nwhere: {}\n{}",
                         x["id"],
                         x["d"]["title"].as_str().unwrap_or(""),
-                        x["d"]["hunt"]["where"].as_str().or(x["d"]["ext"]["where"].as_str()).unwrap_or(""),
+                        x["d"]["hunt"]["where"]
+                            .as_str()
+                            .or(x["d"]["ext"]["where"].as_str())
+                            .unwrap_or(""),
                         crate::sh::head(
-                            &x["d"]["body"].as_str().unwrap_or("").split_whitespace().collect::<Vec<_>>().join(" "),
+                            &x["d"]["body"]
+                                .as_str()
+                                .unwrap_or("")
+                                .split_whitespace()
+                                .collect::<Vec<_>>()
+                                .join(" "),
                             600
                         )
                     ),
                 );
-                candidates.push(TwinCandidate { context, row: x, pr: false });
+                candidates.push(TwinCandidate {
+                    context,
+                    row: x,
+                    pr: false,
+                });
             }
             let batches = twin_batches(&bug, candidates, 64_000)?;
             for batch in batches {
@@ -2762,7 +2789,11 @@ mod twin_verdict_tests {
         let batches = twin_batches("bug", (1..=101).map(candidate).collect(), 23).unwrap();
         assert_eq!(batches.len(), 51);
         assert_eq!(
-            batches.iter().flatten().map(|x| x.row["id"].as_i64().unwrap()).collect::<Vec<_>>(),
+            batches
+                .iter()
+                .flatten()
+                .map(|x| x.row["id"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
             (1..=101).collect::<Vec<_>>()
         );
         assert!(twin_batches("bug", vec![candidate(1)], 12).is_err());
