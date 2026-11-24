@@ -703,6 +703,14 @@ mod t {
             47300,
             PathBuf::from("/tmp/apollo-vet-test/apollo-office"),
         ));
+        a.db.run(
+            "insert into jobs(id,st) values(42,'vet'),(43,'drop')",
+            crate::pa![],
+        );
+        a.lv.lock().unwrap().o.man = true;
+        assert!(!crate::wk::admit_vet(&a, 42));
+        a.lv.lock().unwrap().o.man = false;
+        assert!(!crate::wk::admit_vet(&a, 43));
         assert!(crate::wk::admit_vet(&a, 42));
         assert!(!idle(&a));
         assert!(!reserve_install(&a, false));

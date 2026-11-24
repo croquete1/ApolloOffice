@@ -1056,7 +1056,13 @@ async fn vet1(a: &Ax, id: i64) -> R<()> {
 /// Admits Vet work under the same shutdown barrier as other workers.
 pub(crate) fn admit_vet(a: &Ax, id: i64) -> bool {
     let _transition = a.update_transition.lock().unwrap();
-    if a.drain.load(std::sync::atomic::Ordering::SeqCst) {
+    if a.drain.load(std::sync::atomic::Ordering::SeqCst)
+        || a.hold("vet")
+        || !matches!(
+            a.db.try_n("select count(*) from jobs where id=? and st='vet'", pa![id]),
+            Ok(1)
+        )
+    {
         return false;
     }
     a.vtk.lock().unwrap().insert(id)

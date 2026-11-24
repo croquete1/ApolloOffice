@@ -29,7 +29,10 @@ test("failure diagnostics exclude intentional drops without hiding execution fai
   assert.match(query, /coalesce\(why,''\) not in \('dropped by the owner','repository removed'\)/);
   assert.match(query, /order by t1 desc limit 80/);
   assert.doesNotMatch(query, /json_extract\(d,'\$\.failure\.stage'\) is not null/);
-  assert.match(web, /"why", json!\("dropped by the owner"\)/);
+  const transition = web.slice(web.indexOf("fn owner_job_transition("), web.indexOf("fn remove_repository("));
+  assert.match(transition, /update jobs set st='drop',why='dropped by the owner'/);
+  assert.match(transition, /tx\.commit\(\)\?/);
+  assert.match(web, /fn owner_transitions_refuse_stale_approval_and_rollback_on_failure\(/);
   assert.match(web, /why='repository removed'/);
 });
 
