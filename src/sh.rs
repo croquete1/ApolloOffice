@@ -1076,10 +1076,8 @@ mod t {
     #[cfg(windows)]
     #[tokio::test]
     async fn batch_wrapper_preserves_rest_query_arguments() {
-        let script = std::env::temp_dir().join(format!(
-            "apollo-batch-query-{}.cmd",
-            rand::random::<u64>()
-        ));
+        let script =
+            std::env::temp_dir().join(format!("apollo-batch-query-{}.cmd", rand::random::<u64>()));
         std::fs::write(&script, "@echo off\r\necho %1\r\n").unwrap();
         let endpoint = "repos/o/r/issues?state=open&sort=created&per_page=100";
         let output = cmd(script.to_str().unwrap(), &[endpoint.to_string()])
