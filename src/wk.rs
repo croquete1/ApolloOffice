@@ -4,7 +4,7 @@ use crate::db::{now, Job};
 use crate::net::need;
 use crate::pa;
 use crate::pipe::{bl, qn, rp};
-use crate::sh::{apip_unique, gh, gh_input, ghj};
+use crate::sh::{apip_unique, gh_input, ghj};
 use regex::Regex;
 use serde_json::{json, Value};
 use std::future::Future;
