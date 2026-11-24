@@ -1563,6 +1563,7 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':10,'output_tok
         (a, id, dd, repo)
     }
 
+    #[cfg(unix)]
     const RED_FAIL: &str = "source ./add.sh\n[ \"$(add 2 3)\" = 5 ] && echo 'ok 1 - sum' || { echo 'not ok 1 - sum'; exit 1; }\n";
 
     #[cfg(unix)]

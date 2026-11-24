@@ -1,4 +1,4 @@
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub static CLI_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 use crate::app::{sl, Ax, Rn, R, X};
 use crate::sh::{run, tool, Rq};

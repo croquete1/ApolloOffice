@@ -2280,6 +2280,47 @@ mod watcher_storage_failure_tests {
     }
 
     #[test]
+    fn concurrent_connections_admit_exactly_one_review() {
+        let path = std::env::temp_dir().join(format!("apollo-db-race-{}", rand::random::<u64>()));
+        std::fs::create_dir(&path).unwrap();
+        let file = path.join("state.db");
+        {
+            let db = Db::open(&file).unwrap();
+            seed(&db);
+            let other = Db::open(&file).unwrap();
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let results = std::thread::scope(|scope| {
+                let gate = barrier.clone();
+                let first_db = &db;
+                let first = scope.spawn(move || {
+                    gate.wait();
+                    first_db.queue_review_and_ack("o/r", 1, "t", &["r1".into()], &request())
+                });
+                let second = scope.spawn(|| {
+                    barrier.wait();
+                    other.queue_review_and_ack("o/r", 1, "t", &["r1".into()], &request())
+                });
+                [
+                    first.join().unwrap().unwrap(),
+                    second.join().unwrap().unwrap(),
+                ]
+            });
+            assert_eq!(results.into_iter().filter(|value| *value).count(), 1);
+            assert_eq!(db.n("select count(*) from jobs", vec![]), 1);
+            assert_eq!(db.n("select count(*) from cm", vec![]), 1);
+            assert_eq!(db.n("select count(*) from watcher_outbox", vec![]), 1);
+            assert_eq!(
+                db.n(
+                    "select count(*) from watcher_inbox where state='done'",
+                    vec![]
+                ),
+                1
+            );
+        }
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
     fn full_database_does_not_consume_review_receipt() {
         let db = Db::mem();
         seed(&db);
