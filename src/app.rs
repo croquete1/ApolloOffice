@@ -181,6 +181,7 @@ pub fn dset() -> Value {
         "budday": 0,
         "codex_hunt_reserve_percent": 15,
         "resource_profile": "manual",
+        "adaptive_routing": false,
         "ntfy": "",
         "discord": "",
         "updates": false,

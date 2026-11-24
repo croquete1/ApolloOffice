@@ -583,6 +583,7 @@ fn costs(a: &Ax) -> Value {
         "repos": a.db.all("select repo, sum(case when sub=0 then usd end) usd, sum(case when sub=1 then usd end) val, count(distinct job) jobs from cost where t>=? and repo<>'' group by repo order by 2 desc", pa![t30]),
         "stats": st,
         "fixer_metrics": fm,
+        "first_pass_by_repo": a.db.try_all("select j.repo,f.model,count(*) samples,sum(f.outcome='accepted') accepted,avg(f.elapsed_ms) avg_ms from fix_attempts f join jobs j on j.id=f.job where j.kind='fix' and f.attempt=1 and f.finished is not null and f.outcome in ('accepted','rejected','failed') and f.started>=? group by j.repo,f.model order by j.repo,f.model",pa![now()-90*86_400_000]).ok(),
         "hints": hints(&rows),
         "budday": a.set()["budday"],
         "px": a.set()["px"],
@@ -633,6 +634,9 @@ fn sets(a: &Ax, b: &Value) {
                 }
             }
         }
+    }
+    if let Some(x) = b["adaptive_routing"].as_bool() {
+        s["adaptive_routing"] = json!(x);
     }
     if let Some(x) = b["big"].as_bool() {
         s["big"] = json!(x);
@@ -1541,7 +1545,7 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
             let id: i64 = qv("id").parse().unwrap_or(0);
             match a.db.one("select * from jobs where id=?", pa![id]) {
                 Some(j) => js(
-                    json!({"id": j["id"], "repo": j["repo"], "num": j["num"], "kind": j["kind"], "work_class": work_class(&j), "title": j["title"], "url": j["url"], "st": j["st"], "why": j["why"], "schedule": a.db.one("select manual_priority,retry_after,retry_reason from job_schedule where job=?",pa![id]), "schedule_editable": j["st"]=="ready" && j["kind"]=="fix" && j["d"]["rs"]!=true && j["d"]["rp"]!=true && !a.lk.lock().unwrap().contains(&id), "dependencies": a.db.all("select d.prerequisite,j.st,p.st pr_state from job_dependencies d left join jobs j on j.id=d.prerequisite left join prs p on p.repo=j.repo and p.num=j.pr where d.job=? order by d.prerequisite",pa![id]), "failure": j["d"]["failure"], "pt": j["d"]["pt"], "pb": j["d"]["pb"], "df": j["d"]["df"], "proof": j["d"]["proof"], "known": j["d"]["known"], "h": j["d"]["h"], "ext": j["d"]["ext"]["src"], "cost": a.db.one("select sum(case when sub=0 then usd end) usd, sum(case when sub=1 then usd end) val, sum(tin+tcw+tcr) ti, sum(tout) tou, count(*) n from cost where job=?", pa![id]), "ev": a.db.all("select t,w,m from ev where j=? order by id desc limit 80", pa![id])}),
+                    json!({"id": j["id"], "repo": j["repo"], "num": j["num"], "kind": j["kind"], "work_class": work_class(&j), "title": j["title"], "url": j["url"], "st": j["st"], "why": j["why"], "schedule": a.db.one("select manual_priority,retry_after,retry_reason from job_schedule where job=?",pa![id]), "adaptive_route": j["d"]["adaptive_route"], "schedule_editable": j["st"]=="ready" && j["kind"]=="fix" && j["d"]["rs"]!=true && j["d"]["rp"]!=true && !a.lk.lock().unwrap().contains(&id), "dependencies": a.db.all("select d.prerequisite,j.st,p.st pr_state from job_dependencies d left join jobs j on j.id=d.prerequisite left join prs p on p.repo=j.repo and p.num=j.pr where d.job=? order by d.prerequisite",pa![id]), "failure": j["d"]["failure"], "pt": j["d"]["pt"], "pb": j["d"]["pb"], "df": j["d"]["df"], "proof": j["d"]["proof"], "known": j["d"]["known"], "h": j["d"]["h"], "ext": j["d"]["ext"]["src"], "cost": a.db.one("select sum(case when sub=0 then usd end) usd, sum(case when sub=1 then usd end) val, sum(tin+tcw+tcr) ti, sum(tout) tou, count(*) n from cost where job=?", pa![id]), "ev": a.db.all("select t,w,m from ev where j=? order by id desc limit 80", pa![id])}),
                 ),
                 None => er(StatusCode::NOT_FOUND, "no such job"),
             }

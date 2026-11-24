@@ -388,6 +388,7 @@
       </div></div></div>
       <div data-tab="gen" class="sec"><h4>Sign in</h4><div class="box">${cfg.google ? `<div class="ck"><b class="ok2">Google</b> ${esc(cfg.google)} can sign in.</div><div class="acts"><button type="button" class="dng" id="gu">Disconnect Google</button></div>` : `<div class="ck">Sign in with a one-time link from <code>apollo-office login-link</code>, or connect a Google account.</div><div class="acts"><button type="button" id="gl">Connect Google account</button></div>`}</div></div>
       <div data-tab="gen" class="sec"><h4>Work</h4><div class="box"><div class="fm" style="margin:0">
+        <label>Encaminhamento adaptativo</label>${tg("adaptive_routing", s.adaptive_routing, "Selecionar Fixer por disponibilidade e histórico")}<div class="hint">Opcional: apenas modelos de subscrição explicitamente definidos em Fixer e Big, distintos do Reviewer. Sem modelos locais nem novas rotas pagas. Mantém o modo staged e free-first.</div>
         <label>Perfil de recursos</label><select name="resource_profile">${[["manual","Manual"],["economic","Económico"],["balanced","Equilibrado"],["performance","Desempenho"],["night","Noturno"]].map(([id,label])=>`<option value="${id}" ${(s.resource_profile || "manual")===id?"selected":""}>${label}</option>`).join("")}</select><div class="hint">Os perfis limitam apenas novas tarefas; nunca interrompem trabalho ativo. Manual mantém os limites existentes. Noturno limita a uma lane por máquina e desativa novas pesquisas.</div>
         <label>Reserva de quota Codex (%)</label><input type="number" name="codex_hunt_reserve_percent" min="0" max="100" step="1" value="${Number.isFinite(s.codex_hunt_reserve_percent)?s.codex_hunt_reserve_percent:15}"><div class="hint">Abaixo deste valor, novas pesquisas Codex aguardam. Não afeta tarefas em execução.</div>
         <label>Hunters</label><input type="number" name="hunters" min="0" max="12" value="${s.hunters}"><div class="hint">How many bug hunts may run at once (only in repos with hunting on).</div>
@@ -502,7 +503,7 @@
         const r = await post({ id: e.dataset.key, key: e.value.trim() }, "/api/prov");
         if (r.error) { $("sbar").hidden = false; $("sm").className = "bad2"; $("sm").textContent = r.error; return; }
       }
-      const r = await post({ wh: { on: v.whon, from: v.whf, to: v.wht }, hunters: v.hunters, resource_profile: v.resource_profile, codex_hunt_reserve_percent: v.codex_hunt_reserve_percent, tokday: v.tokday, ntfy: v.ntfy, discord: v.discord, auto: v.auto, updates: v.updates, ollama: v.ollama, octx: v.octx, cckc: v.cckc, test }, "/api/set");
+      const r = await post({ wh: { on: v.whon, from: v.whf, to: v.wht }, hunters: v.hunters, adaptive_routing: v.adaptive_routing, resource_profile: v.resource_profile, codex_hunt_reserve_percent: v.codex_hunt_reserve_percent, tokday: v.tokday, ntfy: v.ntfy, discord: v.discord, auto: v.auto, updates: v.updates, ollama: v.ollama, octx: v.octx, cckc: v.cckc, test }, "/api/set");
       if (r.error) { $("sbar").hidden = false; $("sm").className = "bad2"; $("sm").textContent = r.error; return; }
       await settings();
       const sb = $("sbar");
@@ -631,6 +632,7 @@
       const output = f.output && f.output !== message ? `<pre>${esc(f.output)}</pre>` : "";
       return `<div class="sec dz"><h4>Diagnóstico técnico</h4><div class="box"><div class="hint">${esc(details)}</div>${message ? `<pre>${esc(message)}</pre>` : ""}${output}</div></div>`;
     })() : "";
+    const adaptiveRoute = j.adaptive_route?.model ? `<div class="sec"><h4>Último encaminhamento adaptativo</h4><div class="box"><div>${esc(j.adaptive_route.model)} · ${esc(j.adaptive_route.reason || "—")}</div><div class="hint">Modelo previsto: ${esc(j.adaptive_route.preferred || "—")} · Reviewer: ${esc(j.adaptive_route.reviewer || "—")}</div>${(j.adaptive_route.samples || []).map(r=>`<div class="hint">${esc(r.model)} · ${esc(r.accepted)}/${esc(r.attempts)} primeiras tentativas aprovadas</div>`).join("")}</div></div>` : "";
     const dependencies = Array.isArray(j.dependencies) ? j.dependencies : [];
     const schedule = j.schedule || {};
     const scheduleHtml = `<div class="sec"><h4>Agendamento</h4><div class="box">
@@ -664,6 +666,7 @@
     B.innerHTML = `<div class="sec"><div class="box"><div class="hd2"><b>${esc(j.title)}</b><span class="pill">${esc(j.st)}</span></div><div class="msg">${esc(j.repo)} ${esc(tag)} · ${esc(work)}${j.h ? " · " + esc(j.h) : ""}\n${esc(j.why || "")}</div>${cs}
       <div class="acts">${j.url ? `<button data-u="${esc(j.url)}">Open on GitHub</button>` : ""}${!["done", "drop"].includes(j.st) ? `<button class="dng" data-d="${id}">Drop</button>` : ""}${j.st === "drop" && j.kind === "fix" ? `<button data-rq="${id}" ${window.AO.retryStates?.get(id)?.pending ? "disabled" : ""}>Try again</button>` : ""}</div><div class="msg ${retry?.error ? "bad2" : ""}" data-requeue-message="${id}" aria-live="polite">${esc(retry?.error || "")}</div></div></div>
       ${scheduleHtml}
+      ${adaptiveRoute}
       ${failure}
       ${j.df ? `<div class="sec"><h4>Diff</h4>${dview(j.df)}</div>` : ""}
       <div class="sec"><h4>Log</h4><div class="log">${ev || `<div class="empty">nothing yet</div>`}</div></div>`;

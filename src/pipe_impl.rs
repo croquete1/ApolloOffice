@@ -2714,6 +2714,18 @@ async fn fix(a: &Ax, j: &mut Job, fb0: String, k0: u64) -> R<Value> {
         } else {
             primary.clone()
         };
+        let md = if !st && !route_on {
+            match crate::routing::adaptive_fixer(a,j,&md,c,k)? {
+                Some(decision) => {
+                    let selected=decision["model"].as_str().ok_or_else(|| X::E("adaptive route missing model".into()))?.to_string();
+                    a.say("fixer",&format!("adaptive route: {selected} ({})",decision["reason"].as_str().unwrap_or("unknown")),Some(j.id));
+                    j.d["adaptive_route"]=decision;
+                    a.db.jd(j);
+                    selected
+                }
+                None=>md
+            }
+        } else { md };
         let (attempt_id, attempt_started) = fix_attempt_start(a, j, k + 1, &md);
         crate::routing::event(a, Some(j.id), "fixer", k as usize, &md, &fb);
         let js = if st {
