@@ -39,6 +39,27 @@ fn valid_twin_verdict(
     find > 0 && pr == 0 && finds.iter().any(|row| row["id"] == find)
 }
 
+const GUARD_UNREADABLE: &str = "Guard gave no readable verdict";
+
+fn guard_unreadable(error: &X) -> bool {
+    matches!(error, X::E(message) if message == GUARD_UNREADABLE)
+}
+
+fn combine_guard_halves(left: R<Value>, right: R<Value>) -> R<Value> {
+    match (left, right) {
+        (Ok(mut left), Ok(right)) => {
+            for (key, value) in right.as_object().cloned().unwrap_or_default() {
+                left[key] = value;
+            }
+            Ok(left)
+        }
+        (Ok(value), Err(error)) | (Err(error), Ok(value)) if guard_unreadable(&error) => {
+            Ok(value)
+        }
+        (Err(error), _) | (_, Err(error)) => Err(error),
+    }
+}
+
 fn guard1<'a>(
     a: &'a Ax,
     b: Vec<(String, String)>,
@@ -66,12 +87,12 @@ fn guard1<'a>(
         }
         if b.len() > 1 && d < 3 {
             let h = b.len() / 2;
-            let mut l = guard1(a, b[..h].to_vec(), job, d + 1).await?;
-            let r = guard1(a, b[h..].to_vec(), job, d + 1).await?;
-            for (k, v) in r.as_object().cloned().unwrap_or_default() {
-                l[k] = v;
+            let left = guard1(a, b[..h].to_vec(), job, d + 1).await;
+            if left.as_ref().err().is_some_and(|error| !guard_unreadable(error)) {
+                return left;
             }
-            return Ok(l);
+            let right = guard1(a, b[h..].to_vec(), job, d + 1).await;
+            return combine_guard_halves(left, right);
         }
         a.say(
             "guard",
@@ -82,21 +103,65 @@ fn guard1<'a>(
             ),
             job,
         );
-        Err(X::E("Guard gave no readable verdict".into()))
+        Err(X::E(GUARD_UNREADABLE.into()))
     })
 }
 
-pub async fn guard(a: &Ax, xs: Vec<(String, String)>, from: &str, job: Option<i64>) -> R<Value> {
+async fn guard_batches(
+    a: &Ax,
+    xs: Vec<(String, String)>,
+    from: &str,
+    job: Option<i64>,
+    partial: bool,
+) -> R<Value> {
     let mut r = json!({});
     for c in xs.chunks(10) {
         a.flow(from, "guard", "check");
-        let v = guard1(a, c.to_vec(), job, 0).await?;
+        let v = match guard1(a, c.to_vec(), job, 0).await {
+            Ok(value) => value,
+            Err(error) if partial && guard_unreadable(&error) => continue,
+            Err(error) => return Err(error),
+        };
+        if !partial && c.iter().any(|(id, _)| !v[id]["inj"].is_boolean()) {
+            return Err(X::E(GUARD_UNREADABLE.into()));
+        }
         for (k, x) in v.as_object().cloned().unwrap_or_default() {
             r[k] = x;
         }
     }
     a.st("guard", "idle", None, "");
     Ok(r)
+}
+
+pub async fn guard(a: &Ax, xs: Vec<(String, String)>, from: &str, job: Option<i64>) -> R<Value> {
+    guard_batches(a, xs, from, job, false).await
+}
+
+// CodeRabbit routing treats missing verdicts as unavailable, never as approval.
+pub(crate) async fn guard_partial(
+    a: &Ax,
+    xs: Vec<(String, String)>,
+    from: &str,
+    job: Option<i64>,
+) -> R<Value> {
+    guard_batches(a, xs, from, job, true).await
+}
+
+#[cfg(test)]
+#[test]
+fn guard_partial_merge_preserves_only_valid_verdicts() {
+    let valid = json!({"second":{"inj":false,"why":"safe"}});
+    let merged = combine_guard_halves(Err(X::E(GUARD_UNREADABLE.into())), Ok(valid.clone())).unwrap();
+    assert_eq!(merged, valid);
+    assert!(merged["first"].is_null());
+    assert!(combine_guard_halves(
+        Ok(valid.clone()),
+        Err(X::E("transport failed".into()))
+    ).is_err());
+    assert!(combine_guard_halves(
+        Err(X::E(GUARD_UNREADABLE.into())),
+        Err(X::E(GUARD_UNREADABLE.into()))
+    ).is_err());
 }
 
 pub fn errm(e: &X) -> String {
