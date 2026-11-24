@@ -26,6 +26,7 @@ create table if not exists tok(day text, w text, tin int default 0, tout int def
 create table if not exists seen(repo text, num int, upd text, primary key(repo, num));
 create table if not exists cm(id text primary key, t int);
 create table if not exists watcher_inbox(repo text not null,num integer not null,head text not null,comment_id text not null,snapshot text not null,state text not null check(state in ('received','done','superseded')),received_at integer not null,updated_at integer not null,primary key(repo,num,head,comment_id));
+create table if not exists watcher_retry(repo text not null,num integer not null,head text not null,snapshot text not null,attempts integer not null,next_attempt_at integer not null,primary key(repo,num));
 create index if not exists watcher_inbox_pending on watcher_inbox(repo,num,state,updated_at);
 create table if not exists watcher_outbox(id text primary key, repo text not null, num int not null, author text not null, body text not null, state text not null check(state in ('pending','uncertain','sent','cancelled')), created int not null, updated int not null);
 create index if not exists watcher_outbox_pending on watcher_outbox(state,updated);
@@ -570,10 +571,37 @@ impl Db {
         Ok(())
     }
 
+    /// Pending receipts override the normal timestamp/age polling shortcut.
+    pub fn has_pending_review(&self,repo:&str,number:i64)->rusqlite::Result<bool>{
+        Ok(self.try_n("select exists(select 1 from watcher_inbox where repo=? and num=? and state='received')",crate::pa![repo.to_string(),number])?==1)
+    }
+
+    /// Reserve a retry window before any provider call. A process crash consumes
+    /// an attempt instead of causing an immediate repeat. New snapshots reset the
+    /// counter; repeated failures back off from ten minutes to one hour.
+    pub fn claim_review_attempt(&self,repo:&str,number:i64,updated:&str,head:&str,at:i64)->rusqlite::Result<bool>{
+        let mut c=self.0.lock().unwrap();
+        let tx=c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if !Self::review_snapshot_matches(&tx,repo,number,updated,head)?{
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let changed=tx.execute("insert into watcher_retry(repo,num,head,snapshot,attempts,next_attempt_at)
+            values(?,?,?,?,1,?+600000)
+            on conflict(repo,num) do update set
+              head=excluded.head,snapshot=excluded.snapshot,
+              attempts=case when watcher_retry.head<>excluded.head or watcher_retry.snapshot<>excluded.snapshot then 1 else min(watcher_retry.attempts+1,4) end,
+              next_attempt_at=excluded.next_attempt_at-600000+case when watcher_retry.head<>excluded.head or watcher_retry.snapshot<>excluded.snapshot then 600000 else min(3600000,600000*(1 << min(watcher_retry.attempts,3))) end
+            where watcher_retry.head<>excluded.head or watcher_retry.snapshot<>excluded.snapshot or watcher_retry.next_attempt_at<=excluded.next_attempt_at-600000",
+            rusqlite::params![repo,number,head,updated,at])?;
+        tx.commit()?;
+        Ok(changed==1)
+    }
+
     fn finish_review_inbox(tx:&rusqlite::Transaction<'_>,repo:&str,number:i64,head:&str,ids:&[String])->rusqlite::Result<()> {
         for id in ids {
             tx.execute("update watcher_inbox set state='done',updated_at=? where repo=? and num=? and head=? and comment_id=? and state='received'",rusqlite::params![now(),repo,number,head,id])?;
         }
+        tx.execute("delete from watcher_retry where repo=? and num=? and head=? and not exists(select 1 from watcher_inbox where repo=? and num=? and head=? and state='received')",rusqlite::params![repo,number,head,repo,number,head])?;
         Ok(())
     }
 
@@ -1364,5 +1392,30 @@ mod watcher_inbox_tests {
         assert!(db.ack_pr_comments_with_reply("o/r",1,"t",HEAD,&ids,&Value::Null).is_err());
         db.ack_pr_comments_with_reply("o/r",1,"t2",next,&ids,&Value::Null).unwrap();
         assert_eq!(db.n("select count(*) from watcher_inbox where state='done'",vec![]),1);
+    }
+}
+
+#[cfg(test)]
+mod watcher_retry_tests {
+    use super::*;
+    #[test]
+    fn retry_window_is_persistent_and_snapshot_scoped() {
+        let db=Db::mem();
+        let head="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        db.run("insert into prs(repo,num,st,upd,d) values('o/r',1,'open','t',?)",crate::pa![json!({"watcher_head":head}).to_string()]);
+        let ids=vec!["r1".to_string()];
+        db.receive_review_batch("o/r",1,"t",head,&ids).unwrap();
+        assert!(db.has_pending_review("o/r",1).unwrap());
+        assert!(db.claim_review_attempt("o/r",1,"t",head,0).unwrap());
+        assert!(!db.claim_review_attempt("o/r",1,"t",head,599999).unwrap());
+        assert!(db.claim_review_attempt("o/r",1,"t",head,600000).unwrap());
+        assert!(!db.claim_review_attempt("o/r",1,"t",head,1799999).unwrap());
+        assert!(db.claim_review_attempt("o/r",1,"t",head,1800000).unwrap());
+        db.run("update prs set upd='t2' where repo='o/r' and num=1",vec![]);
+        assert!(db.claim_review_attempt("o/r",1,"t2",head,1800001).unwrap());
+        assert!(db.claim_review_attempt("o/r",1,"t",head,1800002).is_err());
+        db.ack_pr_comments_with_reply("o/r",1,"t2",head,&ids,&Value::Null).unwrap();
+        assert!(!db.has_pending_review("o/r",1).unwrap());
+        assert_eq!(db.n("select count(*) from watcher_retry",vec![]),0);
     }
 }
