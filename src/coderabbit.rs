@@ -492,6 +492,48 @@ fn matches_pr(pr: &Value, repo: &str, number: i64, head: &str) -> bool {
             .is_some_and(|s| chrono::DateTime::parse_from_rfc3339(s).is_ok())
 }
 
+fn review_command_inventory(rows: &[Value]) -> Vec<Value> {
+    rows.iter()
+        .filter_map(|row| {
+            let body = row["body"].as_str()?;
+            let command = body.lines().any(|line| {
+                let mut words = line.split_whitespace();
+                words
+                    .next()
+                    .is_some_and(|word| word.eq_ignore_ascii_case("@coderabbitai"))
+                    && words
+                        .next()
+                        .is_some_and(|word| word.eq_ignore_ascii_case("review"))
+            });
+            if !command {
+                return None;
+            }
+            let automatic_head = body
+                .strip_prefix("@coderabbitai review\n\n<!-- apollo-office-coderabbit-review:v1 head=")
+                .and_then(|tail| tail.strip_suffix(" -->"))
+                .filter(|head| valid_sha(head));
+            Some(json!({"id":row["id"],"automatic_head":automatic_head}))
+        })
+        .collect()
+}
+
+fn commands_allow_request(db: &crate::db::Db, repo: &str, number: i64, state: &Value) -> bool {
+    state["review_commands"].as_array().is_some_and(|commands| {
+        commands.iter().all(|command| {
+            let Some(id) = command["id"].as_i64().filter(|id| *id > 0) else {
+                return false;
+            };
+            let Some(head) = command["automatic_head"].as_str().filter(|sha| valid_sha(sha)) else {
+                return false;
+            };
+            db.n(
+                "select count(*) from coderabbit_requests where repo=? and number=? and head=? and status='sent' and comment_id=?",
+                crate::pa![repo.to_string(), number, head.to_string(), id],
+            ) == 1
+        })
+    })
+}
+
 pub(crate) async fn observe(repo: &str, number: i64, head: &str) -> Result<Value, String> {
     if !valid_repo(repo) || number <= 0 || !valid_sha(head) {
         return Err("Invalid review observation scope".into());
@@ -550,6 +592,7 @@ pub(crate) async fn observe(repo: &str, number: i64, head: &str) -> Result<Value
     }
     let mut result = classify(&rows, &reviews, head);
     result["finding_count"] = json!(findings(&line_comments, head).len());
+    result["review_commands"] = json!(review_command_inventory(&rows));
     Ok(result)
 }
 
@@ -1069,7 +1112,10 @@ pub(crate) async fn request_reviews(a: &crate::app::Ax, repo: &str, listed: &[Va
         };
         // Do not duplicate a manual request or retry an already covered/uncertain review.
         match observe(repo, number, head).await {
-            Ok(state) if matches!(state["state"].as_str(), Some("not_observed" | "stale")) => {}
+            Ok(state)
+                if matches!(state["state"].as_str(), Some("not_observed" | "stale"))
+                    && commands_allow_request(&a.db, repo, number, &state) => {}
+
             _ => continue,
         }
         if !reserve_request(&a.db, repo, number, head, activation, created).unwrap_or(false) {
@@ -1132,6 +1178,7 @@ pub(crate) async fn request_reviews(a: &crate::app::Ax, repo: &str, listed: &[Va
         let _ = final_repository;
         if fresh["head"]["sha"] != head
             || fresh["updated_at"] != detail["updated_at"]
+            || fresh["comments"] != detail["comments"]
             || eligible_creation(&fresh, activation.1) != Some(created)
         {
             let _ = finish_request(
@@ -1905,6 +1952,30 @@ mod tests {
         assert!(!reserve_request(&db, repo, 67, HEAD, current, 150).unwrap());
         assert!(reserve_request(&db, repo, 67, HEAD, current, 250).unwrap());
         assert!(request_is_current(&db, repo, 67, HEAD));
+    }
+
+    #[test]
+    fn manual_review_commands_block_automatic_requests() {
+        let db = crate::db::Db::mem();
+        let repo = "croquete1/ApolloOffice";
+        let inventory = review_command_inventory(&[json!({"id":1,"body":"  @CodeRabbitAI  review"})]);
+        assert!(!commands_allow_request(
+            &db, repo, 67, &json!({"review_commands":inventory})
+        ));
+        assert!(commands_allow_request(
+            &db, repo, 67, &json!({"review_commands":[]})
+        ));
+        let automatic = format!(
+            "@coderabbitai review\n\n<!-- apollo-office-coderabbit-review:v1 head={HEAD} -->"
+        );
+        let state = json!({"review_commands":review_command_inventory(&[json!({"id":2,"body":automatic})])});
+        assert!(!commands_allow_request(&db, repo, 67, &state));
+        db.0.lock().unwrap().execute(
+            "insert into coderabbit_requests(repo,number,head,status,requested_at,activation,comment_id) values(?,67,?,'sent',100,1,2)",
+            rusqlite::params![repo, HEAD],
+        ).unwrap();
+        assert!(commands_allow_request(&db, repo, 67, &state));
+        assert!(!commands_allow_request(&db, repo, 68, &state));
     }
 
     #[test]
