@@ -281,16 +281,136 @@ pub fn event(a: &Ax, job: Option<i64>, role: &str, attempt: usize, md: &str, fee
 }
 
 pub fn lesson(a: &Ax, job: i64, reviewer: &str, finding: &Value, evidence: &str, diff: &str) {
-    if !enabled(a) || finding["ok"] != false {
+    if (!enabled(a) && a.set()["supervised_lessons"] != true) || finding["ok"] != false {
         return;
     }
     use sha2::{Digest, Sha256};
     let diff_sha = hex::encode(Sha256::digest(diff.as_bytes()));
+    let source = a.db.jg(job);
     let record = json!({"status":"pending_review","objective_verified":false,"job":job,
-        "reviewer":reviewer,"finding":finding,"evidence":evidence,"diff_sha256":diff_sha,
+        "repo":source.as_ref().map(|j|j.repo.as_str()),
+        "source_sha":source.as_ref().and_then(|j|j.d["proof"]["fix_commit"].as_str()),
+        "reviewer":reviewer,"finding":finding,"evidence":crate::sh::head(evidence,6000),"diff_sha256":diff_sha,
         "t":crate::db::now(),"origin":"apollo_subscription_review","promotion":"manual_review_required"});
     let id = hex::encode(Sha256::digest(record.to_string().as_bytes()));
     a.db.ks(&format!("lesson:{job}:{id}"), &record);
+}
+
+fn valid_hash(value: &Value, length: usize) -> bool {
+    value
+        .as_str()
+        .is_some_and(|v| v.len() == length && v.bytes().all(|c| c.is_ascii_hexdigit()))
+}
+
+pub fn lessons(a: &Ax) -> Result<Vec<Value>, String> {
+    let rows=a.db.try_all("select k,v from kv where k like 'lesson:%' order by json_extract(v,'$.t') desc limit 100",vec![]).map_err(|e|e.to_string())?;
+    rows.into_iter()
+        .map(|row| {
+            let raw = row["v"].as_str().ok_or("invalid lesson record")?;
+            let mut lesson: Value = serde_json::from_str(raw).map_err(|e| e.to_string())?;
+            if !lesson.is_object() {
+                return Err("invalid lesson object".into());
+            }
+            lesson["key"] = row["k"].clone();
+            if lesson["status"] == "approved"
+                && lesson["expires_at"].as_i64().unwrap_or(0) <= crate::db::now()
+            {
+                lesson["status"] = json!("expired");
+            }
+            Ok(lesson)
+        })
+        .collect()
+}
+
+/// The owner must write the approved rule, not blindly promote model output.
+/// CAS and transaction prevent two review actions from overwriting one another.
+pub fn review_lesson(a: &Ax, key: &str, action: &str, note: &str, days: i64) -> Result<(), String> {
+    let parts = key.split(':').collect::<Vec<_>>();
+    if parts.len() != 3
+        || parts[0] != "lesson"
+        || !parts[1].parse::<i64>().is_ok_and(|n| n > 0)
+        || !valid_hash(&json!(parts[2]), 64)
+    {
+        return Err("invalid lesson identifier".into());
+    }
+    let mut connection = a.db.0.lock().unwrap();
+    let tx = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    let raw: String = tx
+        .query_row("select v from kv where k=?", [key], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    let mut record: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+    let at = crate::db::now();
+    match action {
+        "approve" if record["status"] == "pending_review" => {
+            let note = note.trim();
+            if !record["repo"].as_str().is_some_and(|r| !r.is_empty())
+                || !valid_hash(&record["source_sha"], 40)
+                || !valid_hash(&record["diff_sha256"], 64)
+                || !record["evidence"]
+                    .as_str()
+                    .is_some_and(|e| !e.trim().is_empty())
+                || note.is_empty()
+                || note.chars().count() > 2000
+                || !(7..=90).contains(&days)
+            {
+                return Err("approval requires source commit, evidence, owner-written rule and 7–90 day expiry".into());
+            }
+            record["status"] = json!("approved");
+            record["owner_rule"] = json!(note);
+            record["expires_at"] = json!(at + days * 86_400_000);
+        }
+        "reject" if record["status"] == "pending_review" => record["status"] = json!("rejected"),
+        "revoke" if record["status"] == "approved" => record["status"] = json!("revoked"),
+        _ => return Err("lesson is no longer in a reviewable state".into()),
+    }
+    record["reviewed_at"] = json!(at);
+    record["reviewed_by"] = json!("owner");
+    // Approval is human judgement, not proof that the claim is objectively true.
+    record["objective_verified"] = json!(false);
+    let changed = tx
+        .execute(
+            "update kv set v=? where k=? and v=?",
+            rusqlite::params![record.to_string(), key, raw],
+        )
+        .map_err(|e| e.to_string())?;
+    if changed != 1 {
+        return Err("lesson changed during review".into());
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    crate::app::chg();
+    Ok(())
+}
+
+pub fn approved_context(a: &Ax, repo: &str) -> String {
+    if a.set()["supervised_lessons"] != true {
+        return String::new();
+    }
+    let rows = a.db.try_all(
+        "select v from kv where k like 'lesson:%' and json_extract(v,'$.status')='approved'
+        and json_extract(v,'$.repo')=? and json_extract(v,'$.expires_at')>?
+        order by json_extract(v,'$.reviewed_at') desc limit 5",
+        crate::pa![repo.to_string(), crate::db::now()],
+    );
+    rows.unwrap_or_default()
+        .iter()
+        .filter_map(|r| {
+            let v: Value = serde_json::from_str(r["v"].as_str()?).ok()?;
+            if v["reviewed_by"] != "owner"
+                || !valid_hash(&v["source_sha"], 40)
+                || !valid_hash(&v["diff_sha256"], 64)
+            {
+                return None;
+            }
+            let note = v["owner_rule"].as_str()?;
+            if note.trim().is_empty() || note.chars().count() > 2000 {
+                return None;
+            }
+            Some(note.to_string())
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Normalize provenance before a chat model summarizes it. A route's feedback
@@ -537,5 +657,45 @@ mod adaptive_tests {
                 .unwrap()["model"],
             "codex:"
         );
+    }
+}
+
+#[cfg(test)]
+mod lesson_review_tests {
+    use super::*;
+    #[test]
+    fn owner_rule_only_scope_expiry_and_revocation() {
+        let db = crate::db::Db::mem();
+        let a = std::sync::Arc::new(App::new(
+            db,
+            std::env::temp_dir(),
+            1,
+            "apollo-office".into(),
+        ));
+        a.db.ks("set", &json!({"supervised_lessons":true}));
+        let key = format!("lesson:1:{}", "a".repeat(64));
+        let mut proposal = json!({"status":"pending_review","job":1,"repo":"o/r","source_sha":"b".repeat(40),"diff_sha256":"c".repeat(64),"finding":{"lesson":"UNTRUSTED"},"evidence":"regression log","t":crate::db::now()});
+        a.db.ks(&key, &proposal);
+        assert!(approved_context(&a, "o/r").is_empty());
+        assert!(review_lesson(&a, &key, "approve", "", 30).is_err());
+        review_lesson(&a, &key, "approve", "Check the real production path", 30).unwrap();
+        assert_eq!(
+            approved_context(&a, "o/r"),
+            "Check the real production path"
+        );
+        assert!(approved_context(&a, "other/r").is_empty());
+        assert!(!approved_context(&a, "o/r").contains("UNTRUSTED"));
+        assert!(review_lesson(&a, &key, "approve", "overwrite", 30).is_err());
+        let mut stored = a.db.kg(&key);
+        stored["expires_at"] = json!(crate::db::now() - 1);
+        a.db.ks(&key, &stored);
+        assert!(approved_context(&a, "o/r").is_empty());
+        assert_eq!(lessons(&a).unwrap()[0]["status"], "expired");
+        review_lesson(&a, &key, "revoke", "", 30).unwrap();
+        assert!(approved_context(&a, "o/r").is_empty());
+        proposal["source_sha"] = Value::Null;
+        a.db.ks(&key, &proposal);
+        assert!(review_lesson(&a, &key, "approve", "missing provenance", 30).is_err());
+        review_lesson(&a, &key, "reject", "", 30).unwrap();
     }
 }

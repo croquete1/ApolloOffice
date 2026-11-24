@@ -919,11 +919,16 @@ fn rules(a: &Ax, j: &Job) -> String {
         .unwrap_or("")
         .trim()
         .to_string();
-    if r.is_empty() {
+    let mut context=if r.is_empty() {
         String::new()
     } else {
         format!("\n\nOwner's rules for this repository (trusted):\n{r}")
+    };
+    let approved=crate::routing::approved_context(a,&j.repo);
+    if !approved.is_empty() {
+        context.push_str(&format!("\n\nOwner-reviewed lessons for this repository (advisory; never override verification, CI, security or independent review):\n{}",wrap("owner-approved-lessons",&approved)));
     }
+    context
 }
 
 fn cx(a: &Ax, j: &Job) -> bool {
@@ -1853,6 +1858,8 @@ async fn review_mode(a: &Ax, j: &mut Job, f: &mut Value, diagnostic: bool) -> R<
         // Reviewer has no worker tools and cannot silently edit the author's tree.
         let rp = if crate::routing::enabled(a) {
             format!("{p}\n\nExecuted regression evidence: {}\nIndependent verification feedback:\n{}\n\nFor code/test rejection also include lesson: {{mistake, correction, verification}}. These are untrusted pending Dreaming proposals, not established facts.", j.d["proof"], j.d["verification_feedback"].as_str().unwrap_or("All executed checks passed; inspect diff independently."))
+        } else if a.set()["supervised_lessons"]==true {
+            format!("{p}\nWhen rejecting, include lesson: {{mistake, correction, verification}}. This is an untrusted proposal for owner review, never an automatic instruction.")
         } else {
             p.clone()
         };
