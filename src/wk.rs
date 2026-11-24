@@ -1017,7 +1017,7 @@ async fn comments(r: &str, n: i64, me: &str) -> R<Vec<Value>> {
                 "GitHub comment/review is missing a numeric identifier".into(),
             ));
         }
-        o.push(json!({"id": format!("i{}", x["id"]), "by": x["user"]["login"], "as": x["author_association"], "t": x["body"].as_str().unwrap_or(""), "k": "comment", "at": x["created_at"]}));
+        o.push(json!({"id": format!("i{}", x["id"]), "by": x["user"]["login"], "as": x["author_association"], "t": x["body"].as_str().unwrap_or(""), "k": "comment", "at": x["created_at"], "edited_at": x["updated_at"], "actor_id": x["user"]["id"]}));
     }
     for x in b.map_err(X::E)? {
         if !x["id"].as_i64().is_some_and(|id| id > 0) {
@@ -1028,7 +1028,7 @@ async fn comments(r: &str, n: i64, me: &str) -> R<Vec<Value>> {
         if x["body"].as_str().map(|s| !s.is_empty()).unwrap_or(false)
             || x["state"] == "CHANGES_REQUESTED"
         {
-            o.push(json!({"id": format!("r{}", x["id"]), "rid": x["node_id"], "by": x["user"]["login"], "as": x["author_association"], "t": format!("[review: {}] {}", x["state"].as_str().unwrap_or(""), x["body"].as_str().unwrap_or("")), "k": "review", "at": x["submitted_at"]}));
+            o.push(json!({"id": format!("r{}", x["id"]), "rid": x["node_id"], "by": x["user"]["login"], "as": x["author_association"], "t": format!("[review: {}] {}", x["state"].as_str().unwrap_or(""), x["body"].as_str().unwrap_or("")), "k": "review", "at": x["submitted_at"], "commit": x["commit_id"], "actor_id": x["user"]["id"]}));
         }
     }
     for x in c.map_err(X::E)? {
@@ -1041,7 +1041,7 @@ async fn comments(r: &str, n: i64, me: &str) -> R<Vec<Value>> {
             .as_str()
             .map(|d| format!("```diff\n{}\n```\n", crate::sh::last(d, 800)))
             .unwrap_or_default();
-        o.push(json!({"id": format!("c{}", x["id"]), "by": x["user"]["login"], "as": x["author_association"], "t": format!("[on {}:{}]\n{dh}{}", x["path"].as_str().unwrap_or(""), x["line"].as_i64().or(x["original_line"].as_i64()).map(|l| l.to_string()).unwrap_or("?".into()), x["body"].as_str().unwrap_or("")), "k": "line", "at": x["created_at"]}));
+        o.push(json!({"id": format!("c{}", x["id"]), "by": x["user"]["login"], "as": x["author_association"], "t": format!("[on {}:{}]\n{dh}{}", x["path"].as_str().unwrap_or(""), x["line"].as_i64().or(x["original_line"].as_i64()).map(|l| l.to_string()).unwrap_or("?".into()), x["body"].as_str().unwrap_or("")), "k": "line", "at": x["created_at"], "edited_at": x["updated_at"], "commit": x["commit_id"], "actor_id": x["user"]["id"]}));
     }
     Ok(o.into_iter()
         .filter(|x| {
@@ -1460,6 +1460,45 @@ async fn recheck_review_snapshot(repo:&str,number:i64,original:&Value)->R<()>{
     Ok(())
 }
 
+// Compare complete normalized inventories, not just the PR's updatedAt.
+// GitHub timestamps can have second-level precision and comment edits can be
+// independent of the PR metadata. Duplicate identities are never evidence.
+fn same_comment_inventory(before: &[Value], after: &[Value]) -> bool {
+    fn index(rows: &[Value]) -> Option<std::collections::BTreeMap<&str, &Value>> {
+        let mut result = std::collections::BTreeMap::new();
+        for row in rows {
+            let id = row["id"].as_str().filter(|id| !id.is_empty())?;
+            if result.insert(id, row).is_some() {
+                return None;
+            }
+        }
+        Some(result)
+    }
+    match (index(before), index(after)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
+async fn recheck_review_evidence(
+    repo: &str, number: i64, me: &str, original: &Value,
+    observed: &[Value], authorized_review_ids: &[String],
+) -> R<()> {
+    let current = comments(repo, number, me).await?;
+    if !same_comment_inventory(observed, &current) {
+        return Err(X::E("PR comment inventory changed during analysis; receipts remain pending".into()));
+    }
+    if original["reviewDecision"] == "CHANGES_REQUESTED" {
+        let current = pushers(repo, number).await.map_err(X::E)?;
+        let before: std::collections::BTreeSet<_> = authorized_review_ids.iter().collect();
+        let after: std::collections::BTreeSet<_> = current.iter().collect();
+        if before != after {
+            return Err(X::E("Reviewer permissions changed during analysis; receipts remain pending".into()));
+        }
+    }
+    recheck_review_snapshot(repo, number, original).await
+}
+
 async fn watch_pr(a:&Ax,p:Value,me:&str,
     lu:&mut std::collections::HashMap<String,std::collections::HashMap<i64,String>>,
     default_branches:&mut std::collections::HashMap<String,String>)->R<()>{
@@ -1570,6 +1609,7 @@ async fn watch_pr(a:&Ax,p:Value,me:&str,
             }
         } else { vec![] };
         let tr = |c: &Value| MA.contains(&c["as"].as_str().unwrap_or("")) || (c["k"] == "review" && c["t"].as_str().map(|t| t.starts_with("[review: CHANGES_REQUESTED]")).unwrap_or(false) && c["rid"].as_str().map(|x| cr.iter().any(|y| y == x)).unwrap_or(false));
+        let observed_comments = cs.clone();
         let mut nw = Vec::new();
         for c in cs {
             let id = c["id"].as_str().filter(|id| !id.is_empty())
@@ -1580,7 +1620,7 @@ async fn watch_pr(a:&Ax,p:Value,me:&str,
         }
         let received_ids: Vec<String> = nw.iter().filter_map(|c| c["id"].as_str().map(String::from)).collect();
         if has_pending {
-            recheck_review_snapshot(&r,n,&v).await?;
+            recheck_review_evidence(&r,n,me,&v,&observed_comments,&cr).await?;
             let retired=a.db.reconcile_review_receipts(&r,n,&up,&source_head,&received_ids).map_err(|e|X::E(e.to_string()))?;
             if retired>0 {
                 a.say("watcher",&format!("{tag}: {retired} receipt(s) no longer in observed pending inventory; no acknowledgement or action"),None);
@@ -1599,6 +1639,12 @@ async fn watch_pr(a:&Ax,p:Value,me:&str,
             nw = pending_checked(nw,lc.as_str().unwrap_or(""))?;
         }
         if !nw.is_empty() {
+            // Guard's existing per-input limit is 3500 bytes. Never authorize
+            // a human comment from a prefix while forwarding a longer body.
+            if nw.iter().any(|c| c["t"].as_str().is_none_or(|t| t.len() > 3500)) {
+                a.say("watcher", &format!("{tag}: comment exceeds complete Guard input limit; manual review required"), None);
+                return Err(X::E("Oversized review comment; receipts remain pending".into()));
+            }
             a.say("watcher", &format!("{tag}: {} new comment(s)", nw.len()), None);
             let g = guard(a, nw.iter().map(|c| (c["id"].as_str().unwrap_or("").to_string(), c["t"].as_str().unwrap_or("").to_string())).collect(), "watcher", None).await?;
             for c in nw.iter().filter(|c| g[c["id"].as_str().unwrap_or("")]["inj"].as_bool().unwrap_or(false)) {
@@ -1633,7 +1679,7 @@ async fn watch_pr(a:&Ax,p:Value,me:&str,
                 if act && ma {
                     let ch=js["change"].as_str().filter(|s|!s.trim().is_empty()).ok_or_else(||X::E("missing requested change".into()))?.to_string();
                     let data = json!({"change": ch, "comment": crate::sh::head(&mc.iter().map(|c| format!("{}: {}", c["by"].as_str().unwrap_or(""), c["t"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("\n\n"), 6000), "branch": hrn, "head": hd, "test_cmd": p["d"]["test_cmd"],"source_head":source_head});
-                    recheck_review_snapshot(&r,n,&v).await?;
+                    recheck_review_evidence(&r,n,me,&v,&observed_comments,&cr).await?;
                     let request = json!({"title":v["title"],"url":v["url"],"change":ch,"data":data,"reply":outbound});
                     if !a.db.queue_review_and_ack(&r, n, &up, &received_ids, &request).map_err(|e| X::E(e.to_string()))? {
                         a.say("watcher", &format!("{tag}: new review deferred until active review finishes"), None);
@@ -1652,7 +1698,7 @@ async fn watch_pr(a:&Ax,p:Value,me:&str,
         }
         // Advance the comment cursor only after successful analysis and queue persistence.
         if !batch_acked {
-            recheck_review_snapshot(&r,n,&v).await?;
+            recheck_review_evidence(&r,n,me,&v,&observed_comments,&cr).await?;
             a.db.ack_pr_comments_with_reply(&r,n,&up,&source_head,&received_ids,&outbound).map_err(|e|X::E(e.to_string()))?;
         }
 
@@ -1924,5 +1970,30 @@ mod pusher_pagination_tests {
         assert!(scan.accept(&first).is_err());
         let mut scan = PusherScan::default();
         assert!(scan.accept(&last).is_err());
+    }
+}
+
+#[cfg(test)]
+mod watcher_evidence_inventory_tests {
+    use super::*;
+
+    #[test]
+    fn inventory_rejects_edits_removals_duplicates_and_permission_changes() {
+        let a=json!({"id":"r1","t":"Original request","as":"MEMBER","actor_id":42});
+        let b=json!({"id":"c2","t":"Another comment","as":"OWNER","actor_id":43});
+        let original=vec![a.clone(),b.clone()];
+        assert!(same_comment_inventory(&original,&[b.clone(),a.clone()]));
+        assert!(!same_comment_inventory(&original,&[a.clone()]));
+        assert!(!same_comment_inventory(&original,&[a.clone(),a.clone()]));
+        let mut edited=a.clone();
+        edited["t"]=json!("Edited request");
+        assert!(!same_comment_inventory(&original,&[edited,b.clone()]));
+        let mut changed=a.clone();
+        changed["as"]=json!("NONE");
+        assert!(!same_comment_inventory(&original,&[changed,b.clone()]));
+        let mut actor=a.clone();
+        actor["actor_id"]=json!(99);
+        assert!(!same_comment_inventory(&original,&[actor,b]));
+        assert!(!same_comment_inventory(&[json!({})],&[json!({})]));
     }
 }
