@@ -648,18 +648,25 @@
   const logRows = (events) => events.map(e =>
     `<div><span class="tm">${esc(new Date(e.t).toLocaleTimeString("en-GB", {hour:"2-digit",minute:"2-digit"}))}</span><span>${esc(e.w)}</span><span>${esc(e.m)}</span></div>`
   ).join("");
+  const normalizeJobEvents = (value) => Array.isArray(value) ? value.filter(e => e && typeof e === "object") : [];
+  const jobLogWorkerOptions = (events, selected = "") => {
+    const workers = [...new Set([...events.map(e => e.w), selected].filter(w => typeof w === "string" && w))].sort();
+    return '<option value="">Todos</option>' + workers.map(w => `<option value="${esc(w)}">${esc(w)}</option>`).join("");
+  };
   const jobLogPanel = (events) => {
-    const workers = [...new Set(events.map(e=>e.w).filter(w=>typeof w==="string" && w))].sort();
     return `<div class="sec"><h4>Registo de atividade</h4><div class="fm">
-      <label for="jobLogWorker">Agente</label><select id="jobLogWorker"><option value="">Todos</option>${workers.map(w=>`<option value="${esc(w)}">${esc(w)}</option>`).join("")}</select>
+      <label for="jobLogWorker">Agente</label><select id="jobLogWorker">${jobLogWorkerOptions(events)}</select>
       <label for="jobLogSearch">Pesquisar mensagens</label><input type="search" id="jobLogSearch" placeholder="Pesquisar no registo">
       <label class="ck"><input type="checkbox" id="jobLogWrap" checked> Quebrar linhas</label>
+      <div class="acts"><button type="button" id="jobLogRefresh">Atualizar registo</button></div>
+      <div class="hint" id="jobLogStatus" role="status"></div>
       <div class="hint" id="jobLogCount" aria-live="polite"></div></div>
       <div class="log" id="jobLogRows"></div></div>`;
   };
-  const bindJobLogs = (events) => {
+  const bindJobLogs = (events, loadEvents) => {
     const worker = $("jobLogWorker"), search = $("jobLogSearch"), wrap = $("jobLogWrap");
     const rows = $("jobLogRows"), count = $("jobLogCount");
+    const refresh = $("jobLogRefresh"), status = $("jobLogStatus");
     const render = () => {
       const matching = filterJobLogs(events, worker.value, search.value);
       rows.innerHTML = logRows(matching) || '<div class="empty">Sem mensagens correspondentes.</div>';
@@ -667,6 +674,24 @@
       count.textContent = matching.length + " de " + events.length + " mensagens recebidas";
     };
     worker.onchange = render; search.oninput = render; wrap.onchange = render;
+    refresh.onclick = async () => {
+      if (refresh.disabled) return;
+      refresh.disabled = true;
+      status.textContent = "A atualizar…";
+      try {
+        const next = await loadEvents();
+        if ($("jobLogRows") !== rows) return;
+        if (!Array.isArray(next)) throw new Error("Registo indisponível");
+        events = normalizeJobEvents(next);
+        const selected = worker.value;
+        worker.innerHTML = jobLogWorkerOptions(events, selected);
+        worker.value = selected;
+        render();
+        status.textContent = "Registo atualizado.";
+      } catch {
+        if ($("jobLogRows") === rows) status.textContent = "Não foi possível atualizar. Mantido o último registo recebido.";
+      } finally { refresh.disabled = false; }
+    };
     render();
   };
 
@@ -702,7 +727,12 @@
       </div></div>`;
     const retry = window.AO.retryStates?.get(id);
     const cs = j.cost && j.cost.n ? `<div class="msg">Cost: ${j.cost.usd != null ? usd(j.cost.usd) + " API" : ""}${j.cost.usd != null && j.cost.val != null ? " · " : ""}${j.cost.val != null ? usd(j.cost.val) + " login value" : ""}${j.cost.usd == null && j.cost.val == null ? "unknown" : ""} · ${Math.round((j.cost.ti || 0) / 1000)}k in, ${Math.round((j.cost.tou || 0) / 1000)}k out</div>` : "";
-    const events = Array.isArray(j.ev) ? j.ev.filter(e=>e && typeof e==="object") : [];
+    const events = normalizeJobEvents(j.ev);
+    const loadEvents = async () => {
+      const next = await get("/api/job?id=" + id);
+      if (!next || next.error || dr.hidden || cur !== "job" || jid !== id) throw new Error("Registo indisponível");
+      return next.ev;
+    };
     const logs = jobLogPanel(events);
     if (j.st === "approve") {
       B.innerHTML = `<div class="sec"><div class="box"><div class="hd2"><b>${esc(j.repo)}${j.num ? " #" + j.num : j.ext ? " (reported by " + esc(j.ext) + ")" : " (found by Hunter)"}</b>${j.url ? `<a class="a" href="#" data-u="${esc(j.url)}">${j.num ? "open issue" : "open repository"}</a>` : ""}</div><div class="msg">Tipo: ${esc(work)} · Built and tested on ${esc(j.h || "")}. Nothing is on GitHub yet.</div>${cs}</div></div>
@@ -711,7 +741,7 @@
       <div class="sec"><h4>Diff</h4>${dview(j.df)}</div>
       <div class="acts"><button class="pri" id="ba">Submit pull request</button><button class="dng" id="bd">Drop</button></div><div class="msg" id="jm"></div>
       ${logs}`;
-      bindJobLogs(events);
+      bindJobLogs(events, loadEvents);
       $("ba").onclick = async () => {
         busy($("ba"), true, "Submitting…");
         const r = await post({ a: "approve", id, pt: $("pt").value, pb: $("pb").value });
@@ -731,7 +761,7 @@
       ${failure}
       ${j.df ? `<div class="sec"><h4>Diff</h4>${dview(j.df)}</div>` : ""}
       ${logs}`;
-    bindJobLogs(events);
+    bindJobLogs(events, loadEvents);
     const scheduling = $("jobSchedule");
     if (scheduling) scheduling.onsubmit = async (event) => {
       event.preventDefault();
