@@ -2651,14 +2651,20 @@ mod t {
         let db = crate::db::Db::mem();
         db.run("insert into rp(full) values('o/r')", pa![]);
         let head = "a".repeat(40);
-        db.ks("steward:o/r", &json!({"prs":[{"number":1,"head_sha":head}]}));
+        db.ks(
+            "steward:o/r",
+            &json!({"prs":[{"number":1,"head_sha":head}]}),
+        );
         let a = std::sync::Arc::new(crate::app::App::new(
             db,
             std::env::temp_dir(),
             1,
             "x".into(),
         ));
-        let _permits = crate::coderabbit::OBSERVATIONS.acquire_many(2).await.unwrap();
+        let _permits = crate::coderabbit::OBSERVATIONS
+            .acquire_many(2)
+            .await
+            .unwrap();
         let response = api(
             &a,
             &Method::POST,
