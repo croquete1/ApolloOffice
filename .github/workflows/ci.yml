@@ -17,6 +17,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: rustfmt, clippy
@@ -41,3 +43,21 @@ jobs:
         run: |
           python3 -m unittest discover -s quality -p 'test_*.py'
           python3 -m unittest discover -s adapters/opencode -p 'test_*.py'
+
+      - name: Real Docker worker lifecycle (isolated hosted runner)
+        if: runner.os == 'Linux'
+        timeout-minutes: 35
+        env:
+          APOLLO_OFFICE_CONTAINER: apollo-ci-${{ github.run_id }}-${{ github.run_attempt }}
+          APOLLO_OFFICE_REAL_DOCKER: "1"
+        run: |
+          set -euo pipefail
+          name="$APOLLO_OFFICE_CONTAINER"
+          [[ "$name" =~ ^apollo-ci-[0-9]+-[0-9]+$ ]]
+          cleanup() {
+            docker unpause "$name" >/dev/null 2>&1 || true
+            docker rm -f "$name" >/dev/null 2>&1 || true
+            docker volume rm "$name-work" "$name-cargo" "$name-npm-downloads" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          cargo test --locked real_docker_worker_lifecycle -- --ignored --nocapture
