@@ -144,6 +144,12 @@ Estas PRs estão em draft e **não estão integradas**. A main funcional continu
 - Reconciliados cinco ficheiros de código com mudanças de vários drafts (db.rs, pipe_impl.rs, pipe_tests.rs, p.js, web.rs) por aplicação dos hunks com verificação de contexto e contagens, sem descartar inserções independentes. YAML idêntico; ambos os históricos documentais preservados. Os outros ficheiros utilizam os blobs originais dos HEADs.
 - Lote isolado de integração; nenhuma fase encerrada. CI, Rust, navegador e revisão independente exigidos antes de merge. Acesso Git direto falhou por DNS; cargo/rustc/rustfmt ausentes no runtime desta sessão. Sem pedidos adicionais de CodeRabbit, sem serviços pagos e sem alteração da main.
  
+## Validação inicial do lote #78 (24/11/2026)
+- Commit de integração 1feb1d510e4cd42f1e60542586da4052223dc746: 25 ficheiros, 7 HEADs preservados como pais adicionais; GitHub compare confirmou ahead, behind=0, e PR draft mergeable=true. Sem merge na main.
+- QA executado nesta sessão: sintaxe V8 de ui/p.js e ui/o.js PASS; 15/15 casos dos quatro ficheiros de regressão (logs, recursos, outbox, CodeRabbit) PASS usando o código combinado em V8 isolado com substitutos de imports Node/VM/DOM/transportes; não equivale à suite Node nativa. Cinco verificações Python SQLite executadas sobre tabelas/triggers relevantes copiados do db.rs combinado PASS (defaults OFF, fecho sem ack indevido, rollback, isolamento CodeRabbit, reabertura idempotente). Não é a suite Rust.
+- Correção adicional 9afce33dcb9ffe3a72924cfd4b012e14f1829597: recusar encaminhamento de finding cujo payload escapado completo exceda o limite de 3500 bytes do Guard. Fingerprint versionado obriga nova análise de evidência anteriormente guardada sem job. Lote Fixer limitado a blocos completos até 16000 bytes; só IDs efetivamente incluídos passam a queued, os demais permanecem guardados. Verifica também número da PR no relatório Steward. Teste Rust escrito, não executado. Findings demasiado longos ficam disponíveis apenas no GitHub, sem tarefa automática. Não foi alterada a interface dos agentes.
+- CodeRabbit #78 apresentou revisão ignorada (auto review OFF). Não pedir revisão adicional sem confirmar faturação OSS. Ambiente sem cargo/rustc/rustfmt e sem resolução DNS GitHub; validar compilação, Clippy, suite integral, CI e revisão independente antes de integrar. A existência do lote não encerra as 17 fases.
+ 
 ## Balanço por fase
 | Fase | Estado | Falta |
 |---|---|---|
