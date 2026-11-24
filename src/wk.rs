@@ -10,6 +10,30 @@ use serde_json::{json, Value};
 use std::future::Future;
 use std::pin::Pin;
 
+// A model may suggest a duplicate, but cannot invent its target.
+fn valid_twin_verdict(verdict: &Value, related: &[Value], other: &[Value], finds: &[Value]) -> bool {
+    let (Some(dup), Some(pr), Some(find)) = (
+        verdict["dup"].as_bool(),
+        verdict["pr"].as_i64(),
+        verdict["find"].as_i64(),
+    ) else {
+        return false;
+    };
+    if !verdict["why"]
+        .as_str()
+        .is_some_and(|why| !why.trim().is_empty())
+    {
+        return false;
+    }
+    if !dup {
+        return pr == 0 && find == 0;
+    }
+    if pr > 0 && find == 0 {
+        return related.iter().chain(other).any(|row| row["number"] == pr);
+    }
+    find > 0 && pr == 0 && finds.iter().any(|row| row["id"] == find)
+}
+
 fn guard1<'a>(
     a: &'a Ax,
     b: Vec<(String, String)>,
@@ -676,7 +700,10 @@ async fn vet1(a: &Ax, id: i64) -> R<()> {
             o.job = Some(id);
             o.ef = Some("low");
             let (_, dj) = ask(a, o).await?;
-            if dj["dup"].as_bool().unwrap_or(false) {
+            if !valid_twin_verdict(&dj, &h, &ot, &of) {
+                return Err(X::E("Vet returned an invalid duplicate target".into()));
+            }
+            if dj["dup"] == true {
                 let w = if dj["find"].as_i64().unwrap_or(0) > 0 {
                     format!(
                         "same bug as office find #{} ({})",
@@ -2621,5 +2648,24 @@ mod watcher_evidence_inventory_tests {
         actor["actor_id"] = json!(99);
         assert!(!same_comment_inventory(&original, &[actor, b]));
         assert!(!same_comment_inventory(&[json!({})], &[json!({})]));
+    }
+}
+
+#[cfg(test)]
+mod twin_verdict_tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_verdict_requires_an_observed_target() {
+        let prs = [json!({"number":12})];
+        let finds = [json!({"id":4})];
+        let verdict = |dup, pr, find| json!({"dup":dup,"pr":pr,"find":find,"why":"same cause"});
+        assert!(valid_twin_verdict(&verdict(true, 12, 0), &prs, &[], &finds));
+        assert!(valid_twin_verdict(&verdict(true, 0, 4), &prs, &[], &finds));
+        assert!(valid_twin_verdict(&verdict(false, 0, 0), &prs, &[], &finds));
+        assert!(!valid_twin_verdict(&verdict(true, 99, 0), &prs, &[], &finds));
+        assert!(!valid_twin_verdict(&verdict(true, 12, 4), &prs, &[], &finds));
+        assert!(!valid_twin_verdict(&verdict(true, 0, 0), &prs, &[], &finds));
+        assert!(!valid_twin_verdict(&json!({}), &prs, &[], &finds));
     }
 }
