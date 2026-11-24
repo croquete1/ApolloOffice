@@ -4616,7 +4616,10 @@ pub(crate) fn admit(a: &Ax, repo: &str, host: &str, id: i64) -> bool {
     {
         return false;
     }
-    if !matches!(a.db.schedule_eligible(id, repo, now()), Ok(true))
+    if !matches!(
+        a.db.try_n("select count(*) from rp where full=?", pa![repo.to_string()]),
+        Ok(1)
+    ) || !matches!(a.db.schedule_eligible(id, repo, now()), Ok(true))
         || !deferred_checkout_available(a,repo,host,id)
         || crate::ai::rbud(a,Some(id)).is_some() {
         return false;

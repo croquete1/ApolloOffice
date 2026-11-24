@@ -641,6 +641,7 @@ mod t {
             47300,
             PathBuf::from("/tmp/apollo-drain-test/apollo-office"),
         ));
+        a.db.run("insert or ignore into rp(full) values('sample/repo')", crate::pa![]);
         a.db.run(
             "insert into jobs(id,repo,kind,st) values(42,'sample/repo','fix','ready')",
             crate::pa![],
@@ -674,6 +675,7 @@ mod t {
         assert!(request_drain(&a));
         cancel_watcher_drain(&a);
         assert!(!a.drain.load(std::sync::atomic::Ordering::SeqCst));
+        a.db.run("insert or ignore into rp(full) values('sample/repo')", crate::pa![]);
         a.db.run(
             "insert into jobs(id,repo,kind,st) values(42,'sample/repo','fix','ready')",
             crate::pa![],

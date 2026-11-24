@@ -3,6 +3,23 @@ mod t {
     use super::*;
 
     #[test]
+    fn removed_repository_cannot_admit_stale_submission() {
+        let db = crate::db::Db::mem();
+        db.run(
+            "insert into jobs(id,repo,kind,st) values(1,'o/r','fix','submit')",
+            pa![],
+        );
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::env::temp_dir(),
+            1,
+            "x".into(),
+        ));
+        assert!(!admit(&a, "o/r", "local", 1));
+        assert!(a.lk.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn cancellation_state_is_strict_and_database_errors_defer_work() {
         let db = crate::db::Db::mem();
         let a = std::sync::Arc::new(crate::app::App::new(
@@ -547,6 +564,7 @@ mod t {
     #[tokio::test]
     async fn a_blocked_hunt_cannot_be_admitted_and_active_hunts_do_not_overlap() {
         let db = crate::db::Db::mem();
+        db.run("insert into rp(full) values('o/r')", pa![]);
         let first = db.jnew(
             "o/r",
             0,
@@ -615,6 +633,7 @@ mod t {
     #[tokio::test]
     async fn unblocked_ready_hunt_cannot_exceed_the_active_hunter_cap() {
         let db = crate::db::Db::mem();
+        db.run("insert into rp(full) values('o/blocked'),('o/healthy')", pa![]);
         db.ks("set", &json!({"hunters": 1}));
         db.run("insert into hs(id,ln,dk,on_) values('local',2,0,1)", pa![]);
         let blocked_id = db.jnew(
@@ -739,6 +758,7 @@ mod t {
     #[tokio::test]
     async fn idle_cache_cleanup_blocks_admission_and_releases_on_drop() {
         let db = crate::db::Db::mem();
+        db.run("insert into rp(full) values('o/r')", pa![]);
         db.run(
             "insert into hs(id,ln,dk,on_) values('worker1',1,1,1)",
             pa![],
@@ -786,6 +806,7 @@ mod t {
     #[test]
     fn cache_maintenance_serializes_aliases_of_the_same_docker_target() {
         let db = crate::db::Db::mem();
+        db.run("insert into rp(full) values('o/r')", pa![]);
         db.run(
             "insert into hs(id,ssh,ln,dk,on_) values('alias-a','worker@example',1,1,1)",
             pa![],
