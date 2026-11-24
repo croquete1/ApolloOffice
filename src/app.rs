@@ -686,9 +686,15 @@ mod quota_reservation_tests {
         let a = Arc::new(App::new(Db::mem(), std::env::temp_dir(), 1, "x".into()));
         let t = now();
         *a.codex_usage.lock().unwrap() = json!({"status":"ok","updated_at":t,"five_hour":{"remaining":10,"resets_at":t/1000+3600}});
-        a.db.ks("set", &json!({"md":{"hunter":"codex:","fixer":"cc:sonnet"}}));
+        a.db.ks(
+            "set",
+            &json!({"md":{"hunter":"codex:","fixer":"cc:sonnet"}}),
+        );
         assert!(a.hunter_quota_blocked());
-        a.db.ks("set",&json!({"adaptive_support_routing":true,"md":{"hunter":"codex:","fixer":"cc:sonnet"}}));
+        a.db.ks(
+            "set",
+            &json!({"adaptive_support_routing":true,"md":{"hunter":"codex:","fixer":"cc:sonnet"}}),
+        );
         assert!(!a.hunter_quota_blocked());
         a.db.provider_failure("cc", "network", t).unwrap();
         assert!(a.hunter_quota_blocked());
