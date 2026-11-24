@@ -1698,6 +1698,40 @@ mod strict_db_tests {
     }
 
     #[test]
+    fn steward_activation_persists_and_rotates_only_on_policy_changes() {
+        let mut c = Connection::open_in_memory().unwrap();
+        init(&mut c).unwrap();
+        c.execute("insert into rp(full,on_,steward_repair) values('o/r',1,1)", [])
+            .unwrap();
+        fn token(c: &Connection) -> String {
+            c.query_row("select steward_activation from rp", [], |r| r.get(0))
+                .unwrap()
+        }
+        let first = token(&c);
+        assert_eq!(first.len(), 32);
+        init(&mut c).unwrap();
+        assert_eq!(token(&c), first);
+        c.execute("update rp set steward_repair=1,on_=1", [])
+            .unwrap();
+        assert_eq!(token(&c), first);
+        c.execute("update rp set on_=0", []).unwrap();
+        let disabled = token(&c);
+        assert_ne!(disabled, first);
+        c.execute("update rp set on_=1", []).unwrap();
+        let enabled = token(&c);
+        assert_ne!(enabled, disabled);
+        assert_ne!(enabled, first);
+        c.execute("update rp set full='o/renamed'", []).unwrap();
+        let renamed = token(&c);
+        assert_ne!(renamed, enabled);
+        c.execute("delete from rp", []).unwrap();
+        c.execute("insert into rp(full,on_,steward_repair) values('o/r',1,1)", [])
+            .unwrap();
+        assert_ne!(token(&c), first);
+        assert_ne!(token(&c), renamed);
+    }
+
+    #[test]
     fn strict_reads_distinguish_zero_empty_and_failed_queries() {
         let db = Db::mem();
         assert_eq!(db.try_n("select count(*) from jobs", vec![]).unwrap(), 0);
