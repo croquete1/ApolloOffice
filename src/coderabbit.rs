@@ -105,6 +105,47 @@ pub(crate) async fn observe(repo: &str, number: i64, head: &str) -> Result<Value
     Ok(classify(&rows, head))
 }
 
+// Reuse the versioned database's existing KV table; one bounded record per PR.
+// A durable ticket prevents a slower concurrent read from replacing a newer one.
+const RESERVE: &str = "insert into kv(k,v)
+    select ?1,json_object('generation',1) where exists(select 1 from rp where full=?2 and on_=1)
+    on conflict(k) do update set v=json_set(kv.v,'$.generation',json_extract(kv.v,'$.generation')+1)
+    returning json_extract(v,'$.generation')";
+const SAVE: &str = "update kv set v=json_set(v,'$.observation',json(?3),'$.checked_at',?4)
+    where k=?1 and json_extract(v,'$.generation')=?2
+    and exists(select 1 from rp where full=?5 and on_=1)";
+
+fn observation_key(repo: &str, number: i64) -> String {
+    format!("coderabbit:observation:{repo}#{number}")
+}
+
+pub(crate) fn reserve(db: &crate::db::Db, repo: &str, number: i64) -> rusqlite::Result<i64> {
+    let c = db.0.lock().unwrap();
+    c.query_row(RESERVE, rusqlite::params![observation_key(repo, number), repo], |r| r.get(0))
+}
+
+pub(crate) fn save(db: &crate::db::Db, repo: &str, number: i64, ticket: i64, value: &Value) -> rusqlite::Result<bool> {
+    let c = db.0.lock().unwrap();
+    let changed = c.execute(SAVE, rusqlite::params![
+        observation_key(repo, number), ticket, value.to_string(), crate::db::now(), repo
+    ])?;
+    Ok(changed == 1)
+}
+
+pub(crate) fn previous(db: &crate::db::Db, repo: &str, number: i64) -> Value {
+    // Display-only historical data; never used in scheduling or merge decisions.
+    let row = db.kg(&observation_key(repo, number));
+    let value = &row["observation"];
+    if !value.is_object() || row["checked_at"].as_i64().is_none() {
+        return Value::Null;
+    }
+    json!({"observation":value,"checked_at":row["checked_at"]})
+}
+
+pub(crate) fn valid_scope(repo: &str, number: i64, head: &str) -> bool {
+    valid_repo(repo) && number > 0 && valid_sha(head)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,6 +179,25 @@ mod tests {
         skipped["updated_at"] = json!("2026-11-24T12:23:00Z");
         skipped["body"] = json!("<!-- coderabbit-ai-generated:v1 -->\n<!-- This is an auto-generated comment: summarize by coderabbit.ai -->\nReview skipped");
         assert_eq!(classify(&[row(HEAD), skipped], HEAD)["state"], "unknown");
+    }
+    #[test]
+    fn durable_ticket_and_history_are_scoped() {
+        let db = crate::db::Db::mem();
+        let repo = "croquete1/ApolloOffice";
+        db.0.lock().unwrap().execute("insert into rp(full,on_) values(?,1)", [repo]).unwrap();
+        let first = reserve(&db, repo, 67).unwrap();
+        let second = reserve(&db, repo, 67).unwrap();
+        assert_eq!(second, first + 1);
+        let value = classify(&[row(HEAD)], HEAD);
+        assert!(!save(&db, repo, 67, first, &value).unwrap());
+        assert!(save(&db, repo, 67, second, &value).unwrap());
+        assert_eq!(previous(&db, repo, 67)["observation"], value);
+        assert!(previous(&db, repo, 68).is_null());
+        let third = reserve(&db, repo, 67).unwrap();
+        assert_eq!(previous(&db, repo, 67)["observation"], value);
+        db.0.lock().unwrap().execute("update rp set on_=0 where full=?", [repo]).unwrap();
+        assert!(!save(&db, repo, 67, third, &value).unwrap());
+        assert!(reserve(&db, repo, 67).is_err());
     }
     #[test]
     fn repository_and_pr_scope_are_strict() {
