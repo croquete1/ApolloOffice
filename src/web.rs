@@ -66,6 +66,54 @@ fn clear_job_history(db: &crate::db::Db) -> rusqlite::Result<()> {
     Ok(())
 }
 
+// The caller serializes owner actions with worker admission.
+fn owner_job_transition(
+    db: &crate::db::Db,
+    id: i64,
+    approve: bool,
+    b: &Value,
+) -> rusqlite::Result<()> {
+    let mut c = db.0.lock().unwrap();
+    let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let (st, raw): (String, String) =
+        tx.query_row("select st,d from jobs where id=?", [id], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?;
+    if approve {
+        if st != "approve" {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        let mut d: Value = serde_json::from_str(&raw)
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        if !d.is_object() {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        for k in ["pt", "pb"] {
+            if let Some(t) = b[k].as_str().filter(|s| !s.trim().is_empty()) {
+                d[k] = json!(t.trim());
+            }
+        }
+        d["ap"] = json!(true);
+        tx.execute(
+            "update jobs set st='submit',why='approved, submitting',d=?,t1=? where id=?",
+            rusqlite::params![d.to_string(), now(), id],
+        )?;
+    } else if matches!(st.as_str(), "ready" | "vet" | "approve" | "park") {
+        tx.execute(
+            "update jobs set st='drop',why='dropped by the owner',t1=? where id=?",
+            rusqlite::params![now(), id],
+        )?;
+    } else if !matches!(st.as_str(), "done" | "drop") {
+        tx.execute(
+            "insert into kv(k,v) values(?,'true') on conflict(k) do update set v='true'",
+            [format!("kill:{id}")],
+        )?;
+    }
+    tx.commit()?;
+    crate::app::chg();
+    Ok(())
+}
+
 fn remove_repository(db: &crate::db::Db, repo: &str) -> rusqlite::Result<()> {
     let mut c = db.0.lock().unwrap();
     let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -1866,42 +1914,19 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                         x.hold = on;
                     }
                 }
-                "drop" => {
-                    if let Some(j) = a.db.jg(id) {
-                        if ["ready", "vet", "approve"].contains(&j.st.as_str()) {
-                            a.db.jset(
-                                id,
-                                &[
-                                    ("st", json!("drop")),
-                                    ("why", json!("dropped by the owner")),
-                                ],
-                            );
-                        } else if !["done", "drop"].contains(&j.st.as_str()) {
-                            a.db.ks(&format!("kill:{id}"), &json!(true));
-                        }
+                "drop" | "approve" => {
+                    let _transition = a.update_transition.lock().unwrap();
+                    if a.drain.load(std::sync::atomic::Ordering::SeqCst) {
+                        return er(StatusCode::CONFLICT, "update is in progress");
                     }
-                }
-                "approve" => {
-                    if let Some(mut j) = a.db.jg(id) {
-                        if j.st != "approve" {
-                            return er(StatusCode::CONFLICT, "job is not waiting for approval");
-                        }
-                        if let Some(t) = b["pt"].as_str().filter(|s| !s.trim().is_empty()) {
-                            j.d["pt"] = json!(t.trim());
-                        }
-                        if let Some(t) = b["pb"].as_str().filter(|s| !s.trim().is_empty()) {
-                            j.d["pb"] = json!(t.trim());
-                        }
-                        j.d["ap"] = json!(true);
-                        a.db.jset(
-                            id,
-                            &[
-                                ("st", json!("submit")),
-                                ("why", json!("approved, submitting")),
-                                ("d", j.d),
-                            ],
-                        );
+                    let approve = b["a"] == "approve";
+                    if a.vtk.lock().unwrap().contains(&id) {
+                        return er(StatusCode::CONFLICT, "Vet is processing this job");
                     }
+                    if owner_job_transition(&a.db, id, approve, &b).is_err() {
+                        return er(StatusCode::CONFLICT, "job transition was not saved");
+                    }
+                    a.sw.notify_one();
                 }
                 "requeue" => match crate::drop_recovery::retry_manual(a, id).await {
                     Ok(true) => {}
@@ -2724,6 +2749,35 @@ mod t {
             ),
             1
         );
+    }
+
+    #[test]
+    fn owner_transitions_refuse_stale_approval_and_rollback_on_failure() {
+        let db = crate::db::Db::mem();
+        db.0.lock().unwrap().execute_batch(
+            "insert into jobs(id,st,d) values(1,'approve','{\"h\":\"local\"}'),(2,'park','{}'),(3,'fix','{}');
+             create trigger fail_owner before update on jobs begin select raise(abort,'injected'); end;",
+        ).unwrap();
+        assert!(owner_job_transition(&db, 1, true, &json!({"pt":"title"})).is_err());
+        assert_eq!(db.jg(1).unwrap().st, "approve");
+        assert!(owner_job_transition(&db, 2, false, &json!({})).is_err());
+        assert_eq!(db.jg(2).unwrap().st, "park");
+        db.0.lock()
+            .unwrap()
+            .execute_batch("drop trigger fail_owner")
+            .unwrap();
+        owner_job_transition(&db, 1, true, &json!({"pt":"title"})).unwrap();
+        let j = db.jg(1).unwrap();
+        assert_eq!(j.st, "submit");
+        assert_eq!(j.d["h"], "local");
+        assert_eq!(j.d["pt"], "title");
+        assert_eq!(j.d["ap"], true);
+        assert!(owner_job_transition(&db, 1, true, &json!({})).is_err());
+        owner_job_transition(&db, 2, false, &json!({})).unwrap();
+        assert_eq!(db.jg(2).unwrap().st, "drop");
+        owner_job_transition(&db, 3, false, &json!({})).unwrap();
+        assert_eq!(db.kg("kill:3"), json!(true));
+        assert!(owner_job_transition(&db, 999, false, &json!({})).is_err());
     }
 
     #[tokio::test]
