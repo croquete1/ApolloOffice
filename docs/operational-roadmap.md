@@ -1,17 +1,17 @@
 # ApolloOffice — Roadmap operacional (24/11/2026)
 
 ## Requisitos do proprietário
-- Eliminar o escritório virtual animado, sem substituir por outro cenário. Manter painel operacional, agentes, filas, PRs, logs e métricas.
+- Preservar integralmente a interface atual dos agentes, incluindo canvas pixelizado, personagens, disposição, cores, animações e interações existentes, até autorização expressa para a alterar. Não substituir por grelha, novo cenário ou outra apresentação. Melhorar apenas os restantes módulos operacionais sem interferir com essa interface.
 - Qwen não está em utilização. Não selecionar, iniciar, instalar ou exigir Qwen/Ollama no plano de trabalho. Manter compatibilidade opcional existente; apenas usar modelos e fornecedores explicitamente configurados pelo proprietário.
 - Implementar todas as melhorias da auditoria incrementalmente, preservando autorização, revisão independente, provas RED/GREEN, CI, atualização assinada e configurações.
 - As issues estão desativadas no fork (GitHub HTTP 410); este ficheiro constitui o backlog versionado. Não declarar uma fase concluída sem evidência.
 
 ## Estado em 24/11/2026
 Base main: 878ef1a45b82319bb912ae567a6cc4956c84ffe4. Release publicada: fork-v0.10.15.
-- [ ] PR #47 — painel operacional por omissão, canvas desativado; validar e eliminar código legado residual.
+- PR #47 — encerrada sem merge a pedido do proprietário; a proposta de substituir/desativar a interface dos agentes fica retirada.
 - [ ] PR #48 — cursor de comentários e confirmação transacional; validar falhas de Guard/Watcher e pedidos concorrentes.
 - [ ] PR #49 — melhorias upstream de Docker; validar ciclo real do worker.
-Todas em draft, não integradas nem validadas. O presente roadmap não representa implementação.
+PRs #48 e #49 em draft, não integradas nem validadas. O presente roadmap não representa implementação.
 
 ## Fases e critérios de aceitação
 ### F01 / P0 — Integração seletiva upstream
@@ -76,9 +76,9 @@ Todas em draft, não integradas nem validadas. O presente roadmap não represent
 - [ ] Económico, equilibrado, desempenho, noturno; limites explícitos, sem ativar Qwen, sem ultrapassar orçamento. Testar transições e reinício.
 
 ### F15 / P2 — Dashboard operacional
-- [ ] Validar #47 em desktop/mobile, eliminar virtual room e resíduos de desenho/animações sem perder fallback, acessibilidade, navegação e ações dos agentes.
+- [ ] Manter a interface atual dos agentes visual e funcionalmente inalterada. Validar regressão desktop/mobile, canvas, disposição, personagens, animações, navegação e ações; não integrar a PR #47.
 - [ ] Apresentar próxima tarefa elegível, dependências, bloqueios, quota, cooldown, razões de seleção, histórico e tempos por fase, com dados reais ou desconhecidos.
-- [ ] Não adicionar personagem, cenário, animação do escritório nem outra vista semelhante.
+- [ ] Não redesenhar, remover, ocultar ou substituir a interface existente dos agentes. Não adicionar novas personagens, cenários ou animações sem autorização expressa.
 
 ### F16 / P2 — Métricas e validação
 - [ ] Produtividade por repo/modelo, primeira passagem, tempo por fase, taxa de merge e custo por correção validada; distinguir contagens e amostras. Comparar baseline e resultados medidos.
