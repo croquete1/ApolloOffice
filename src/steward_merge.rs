@@ -247,38 +247,90 @@ fn ci_verified(checks: &Value, status: &Value) -> bool {
         || (status["state"] == "success" && contexts.iter().all(|r| r["state"] == "success"))
 }
 
+// Missing, repeated or unresolved threads never authorize a merge.
+#[derive(Default)]
+struct ThreadScan {
+    ids: std::collections::BTreeSet<String>,
+    cursors: std::collections::BTreeSet<String>,
+    total: Option<u64>,
+}
+
+impl ThreadScan {
+    fn accept(&mut self, threads: &Value) -> Result<Option<String>, &'static str> {
+        let total = threads["totalCount"]
+            .as_u64()
+            .ok_or("missing thread count")?;
+        if self.total.is_some_and(|previous| previous != total) {
+            return Err("thread count changed during pagination");
+        }
+        self.total = Some(total);
+        let nodes = threads["nodes"]
+            .as_array()
+            .ok_or("missing review threads")?;
+        for node in nodes {
+            let id = node["id"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .ok_or("missing thread id")?;
+            if node["isResolved"] != true || !self.ids.insert(id.to_string()) {
+                return Err("unresolved, invalid or repeated review thread");
+            }
+        }
+        match threads["pageInfo"]["hasNextPage"].as_bool() {
+            Some(false) if self.ids.len() as u64 == total => Ok(None),
+            Some(true) if !nodes.is_empty() && (self.ids.len() as u64) < total => {
+                let cursor = threads["pageInfo"]["endCursor"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .ok_or("missing thread cursor")?;
+                if !self.cursors.insert(cursor.to_string()) {
+                    return Err("repeated thread cursor");
+                }
+                Ok(Some(cursor.to_string()))
+            }
+            _ => Err("incomplete thread inventory"),
+        }
+    }
+}
+
 async fn review_threads_resolved(repo: &str, number: i64) -> Result<bool, String> {
     let Some((owner, name)) = repo.split_once('/') else {
         return Ok(false);
     };
-    let query = r#"query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved}pageInfo{hasNextPage}}}}}"#;
-    let data = ghj(
-        &[
+    let query = r#"query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){totalCount nodes{id isResolved} pageInfo{hasNextPage endCursor}}}}}"#;
+    let query_arg = format!("query={query}");
+    let owner_arg = format!("owner={owner}");
+    let name_arg = format!("name={name}");
+    let number_arg = format!("number={number}");
+    let mut scan = ThreadScan::default();
+    let mut cursor: Option<String> = None;
+    loop {
+        let mut args = vec![
             "api",
             "graphql",
             "-f",
-            &format!("query={query}"),
+            &query_arg,
             "-F",
-            &format!("owner={owner}"),
+            &owner_arg,
             "-F",
-            &format!("name={name}"),
+            &name_arg,
             "-F",
-            &format!("number={number}"),
-        ],
-        45,
-    )
-    .await?;
-    if !data["errors"].is_null() {
-        return Ok(false);
+            &number_arg,
+        ];
+        let cursor_arg = cursor.as_ref().map(|value| format!("cursor={value}"));
+        if let Some(value) = cursor_arg.as_deref() {
+            args.extend(["-f", value]);
+        }
+        let data = ghj(&args, 45).await?;
+        if !data["errors"].is_null() {
+            return Ok(false);
+        }
+        match scan.accept(&data["data"]["repository"]["pullRequest"]["reviewThreads"]) {
+            Ok(Some(next)) => cursor = Some(next),
+            Ok(None) => return Ok(true),
+            Err(_) => return Ok(false),
+        }
     }
-    let threads = &data["data"]["repository"]["pullRequest"]["reviewThreads"];
-    let Some(nodes) = threads["nodes"].as_array() else {
-        return Ok(false);
-    };
-    if threads["pageInfo"]["hasNextPage"] != false {
-        return Ok(false);
-    }
-    Ok(nodes.iter().all(|n| n["isResolved"] == true))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1526,5 +1578,39 @@ mod tests {
             }]}),
             &status
         ));
+    }
+}
+
+#[cfg(test)]
+mod thread_pagination_tests {
+    use super::*;
+
+    fn page(start: u64, end: u64, total: u64, next: bool, cursor: &str) -> Value {
+        json!({"totalCount":total,"nodes":(start..end).map(|n| json!({"id":n.to_string(),"isResolved":true})).collect::<Vec<_>>(),
+            "pageInfo":{"hasNextPage":next,"endCursor":cursor}})
+    }
+
+    #[test]
+    fn resolved_threads_can_span_multiple_pages() {
+        let mut scan = ThreadScan::default();
+        assert_eq!(
+            scan.accept(&page(0, 100, 101, true, "next")),
+            Ok(Some("next".into()))
+        );
+        assert_eq!(scan.accept(&page(100, 101, 101, false, "end")), Ok(None));
+    }
+
+    #[test]
+    fn unresolved_duplicate_or_incomplete_threads_block_merge() {
+        let mut scan = ThreadScan::default();
+        scan.accept(&page(0, 100, 101, true, "next")).unwrap();
+        let mut unresolved = page(100, 101, 101, false, "end");
+        unresolved["nodes"][0]["isResolved"] = json!(false);
+        assert!(scan.accept(&unresolved).is_err());
+        assert!(scan.accept(&page(99, 100, 101, false, "end")).is_err());
+        assert!(ThreadScan::default()
+            .accept(&page(0, 1, 2, false, "end"))
+            .is_err());
+        assert!(ThreadScan::default().accept(&json!({})).is_err());
     }
 }

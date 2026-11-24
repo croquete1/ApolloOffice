@@ -1529,7 +1529,7 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
             let id: i64 = qv("id").parse().unwrap_or(0);
             match a.db.one("select * from jobs where id=?", pa![id]) {
                 Some(j) => js(
-                    json!({"id": j["id"], "repo": j["repo"], "num": j["num"], "kind": j["kind"], "work_class": work_class(&j), "title": j["title"], "url": j["url"], "st": j["st"], "why": j["why"], "failure": j["d"]["failure"], "pt": j["d"]["pt"], "pb": j["d"]["pb"], "df": j["d"]["df"], "proof": j["d"]["proof"], "known": j["d"]["known"], "h": j["d"]["h"], "ext": j["d"]["ext"]["src"], "cost": a.db.one("select sum(case when sub=0 then usd end) usd, sum(case when sub=1 then usd end) val, sum(tin+tcw+tcr) ti, sum(tout) tou, count(*) n from cost where job=?", pa![id]), "ev": a.db.all("select t,w,m from ev where j=? order by id desc limit 80", pa![id])}),
+                    json!({"id": j["id"], "repo": j["repo"], "num": j["num"], "kind": j["kind"], "work_class": work_class(&j), "title": j["title"], "url": j["url"], "st": j["st"], "why": j["why"], "schedule": a.db.one("select manual_priority,retry_after,retry_reason from job_schedule where job=?",pa![id]), "dependencies": a.db.all("select d.prerequisite,j.st,p.st pr_state from job_dependencies d left join jobs j on j.id=d.prerequisite left join prs p on p.repo=j.repo and p.num=j.pr where d.job=? order by d.prerequisite",pa![id]), "failure": j["d"]["failure"], "pt": j["d"]["pt"], "pb": j["d"]["pb"], "df": j["d"]["df"], "proof": j["d"]["proof"], "known": j["d"]["known"], "h": j["d"]["h"], "ext": j["d"]["ext"]["src"], "cost": a.db.one("select sum(case when sub=0 then usd end) usd, sum(case when sub=1 then usd end) val, sum(tin+tcw+tcr) ti, sum(tout) tou, count(*) n from cost where job=?", pa![id]), "ev": a.db.all("select t,w,m from ev where j=? order by id desc limit 80", pa![id])}),
                 ),
                 None => er(StatusCode::NOT_FOUND, "no such job"),
             }
@@ -1537,6 +1537,46 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
         ("POST", "/api/act") => {
             let id = b["id"].as_i64().unwrap_or(0);
             match b["a"].as_str().unwrap_or("") {
+                "schedule" => {
+                    let priority = if b["priority"].is_null() {
+                        None
+                    } else {
+                        match b["priority"].as_i64().filter(|p| (0..=3).contains(p)) {
+                            Some(p) => Some(p),
+                            None => {
+                                return er(StatusCode::BAD_REQUEST, "priority must be 0–3 or null")
+                            }
+                        }
+                    };
+                    let Some(dependencies) = b["dependencies"].as_array().and_then(|rows| {
+                        rows.iter().map(Value::as_i64).collect::<Option<Vec<_>>>()
+                    }) else {
+                        return er(
+                            StatusCode::BAD_REQUEST,
+                            "dependencies must be an array of job ids",
+                        );
+                    };
+                    let result = {
+                        let _transition = a.update_transition.lock().unwrap();
+                        if a.lk.lock().unwrap().contains(&id)
+                            || a.drain.load(std::sync::atomic::Ordering::SeqCst)
+                        {
+                            return er(
+                                StatusCode::CONFLICT,
+                                "job already assigned or office draining",
+                            );
+                        }
+                        a.db.set_job_schedule(id, priority, &dependencies)
+                    };
+                    if let Err(error) = result {
+                        eprintln!("job schedule {id}: {error}");
+                        return er(
+                            StatusCode::CONFLICT,
+                            "invalid job, dependencies, cycle, or scheduling database unavailable",
+                        );
+                    }
+                    a.sw.notify_one();
+                }
                 "reset-hunt" => {
                     let repo = b["repo"].as_str().unwrap_or("");
                     if a.db.n(

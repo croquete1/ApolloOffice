@@ -608,10 +608,18 @@ mod t {
             47300,
             PathBuf::from("/tmp/apollo-drain-test/apollo-office"),
         ));
+        a.db.run(
+            "insert into jobs(id,repo,kind,st) values(42,'sample/repo','fix','ready')",
+            crate::pa![],
+        );
         assert!(crate::pipe::admit(&a, "sample/repo", "local", 42));
         assert!(request_drain(&a));
         assert!(!reserve_install(&a, false));
         assert!(a.drain.load(std::sync::atomic::Ordering::SeqCst));
+        a.db.run(
+            "insert into jobs(id,repo,kind,st) values(43,'other/repo','fix','ready')",
+            crate::pa![],
+        );
         assert!(!crate::pipe::admit(&a, "other/repo", "local", 43));
         a.act.lock().unwrap().clear();
         a.lk.lock().unwrap().clear();
@@ -633,6 +641,10 @@ mod t {
         assert!(request_drain(&a));
         cancel_watcher_drain(&a);
         assert!(!a.drain.load(std::sync::atomic::Ordering::SeqCst));
+        a.db.run(
+            "insert into jobs(id,repo,kind,st) values(42,'sample/repo','fix','ready')",
+            crate::pa![],
+        );
         assert!(crate::pipe::admit(&a, "sample/repo", "local", 42));
     }
 

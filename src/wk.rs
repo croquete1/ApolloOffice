@@ -78,13 +78,6 @@ pub fn errm(e: &X) -> String {
     }
 }
 
-// Bound intake while recording whether the GitHub listing was truncated.
-const ISSUE_SCAN_LIMIT: usize = 500;
-
-fn issue_scan_truncated(count: usize) -> bool {
-    count >= ISSUE_SCAN_LIMIT
-}
-
 fn issue_priority(issue: &Value) -> i64 {
     issue["labels"]
         .as_array()
@@ -161,55 +154,14 @@ async fn scout1(a: &Ax) -> R<()> {
         let capacity = b > 0 && qn(a, &r, "'vet','ready'") < 4 * b;
         a.held("scout").await;
         a.st("scout", "work", None, "");
-        let issue_limit = ISSUE_SCAN_LIMIT.to_string();
-        let is = ghj(
-            &[
-                "issue",
-                "list",
-                "-R",
-                &r,
-                "--state",
-                "open",
-                "--limit",
-                &issue_limit,
-                "--json",
-                "number,title,body,author,createdAt,updatedAt,labels,assignees,url",
-            ],
-            120,
-        )
-        .await;
-        let is = match is {
-            Ok(value) => match value.as_array() {
-                Some(items) => items.clone(),
-                None => {
-                    let previous = a.db.kg(&format!("iscan:{r}"));
-                    a.db.ks(
-                        &format!("iscan:{r}"),
-                        &json!({
-                            "at": previous["at"],
-                            "count": previous["count"],
-                            "limit": ISSUE_SCAN_LIMIT,
-                            "truncated": previous["truncated"].as_bool().unwrap_or(false),
-                            "error": "GitHub devolveu uma lista de issues inválida",
-                            "error_at": now(),
-                        }),
-                    );
-                    continue;
-                }
-            },
+        let is = match crate::gh::open_issues(&r).await {
+            Ok(items) => items,
             Err(error) => {
                 let previous = a.db.kg(&format!("iscan:{r}"));
-                a.db.ks(
-                    &format!("iscan:{r}"),
-                    &json!({
-                        "at": previous["at"],
-                        "count": previous["count"],
-                        "limit": ISSUE_SCAN_LIMIT,
-                        "truncated": previous["truncated"].as_bool().unwrap_or(false),
-                        "error": crate::sh::head(&error, 300),
-                        "error_at": now(),
-                    }),
-                );
+                a.db.ks(&format!("iscan:{r}"), &json!({
+                    "at":previous["at"],"count":previous["count"],"limit":previous["limit"],
+                    "truncated":previous["truncated"],"error":crate::sh::head(&error,300),"error_at":now()
+                }));
                 a.say(
                     "scout",
                     &format!("{r}: não foi possível atualizar os issues do GitHub"),
@@ -218,57 +170,14 @@ async fn scout1(a: &Ax) -> R<()> {
                 continue;
             }
         };
-        let scan_at = now();
-        let truncated = issue_scan_truncated(is.len());
-        for issue in &is {
-            let number = issue["number"].as_i64().unwrap_or(0);
-            if number <= 0 {
-                continue;
-            }
-            let labels: Vec<String> = issue["labels"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|label| label["name"].as_str().map(String::from))
-                .collect();
-            let assignees: Vec<String> = issue["assignees"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|assignee| assignee["login"].as_str().map(String::from))
-                .collect();
-            a.db.run(
-                "insert into github_issues(repo,num,title,url,author,updated,labels,assignees,seen_at,is_open,skip_reason) values(?,?,?,?,?,?,?,?,?,1,'') on conflict(repo,num) do update set title=excluded.title,url=excluded.url,author=excluded.author,labels=excluded.labels,assignees=excluded.assignees,seen_at=excluded.seen_at,is_open=1,skip_reason=case when github_issues.updated<>excluded.updated then '' else github_issues.skip_reason end,updated=excluded.updated",
-                pa![
-                    r.clone(),
-                    number,
-                    issue["title"].as_str().unwrap_or("").to_string(),
-                    issue["url"].as_str().unwrap_or("").to_string(),
-                    issue["author"]["login"].as_str().unwrap_or("").to_string(),
-                    issue["updatedAt"].as_str().unwrap_or("").to_string(),
-                    json!(labels).to_string(),
-                    json!(assignees).to_string(),
-                    scan_at,
-                ],
+        if let Err(error) = a.db.replace_issue_snapshot(&r, &is, now()) {
+            a.say(
+                "scout",
+                &format!("{r}: falha ao guardar snapshot de issues: {error}"),
+                None,
             );
+            continue;
         }
-        if !truncated {
-            a.db.run(
-                "update github_issues set is_open=0 where repo=? and seen_at<? and is_open=1",
-                pa![r.clone(), scan_at],
-            );
-        }
-        a.db.ks(
-            &format!("iscan:{r}"),
-            &json!({
-                "at": scan_at,
-                "count": is.len(),
-                "limit": ISSUE_SCAN_LIMIT,
-                "truncated": truncated,
-                "error": null,
-                "error_at": null,
-            }),
-        );
         if !capacity || cooling_down {
             continue;
         }
@@ -304,10 +213,8 @@ async fn scout1(a: &Ax) -> R<()> {
                 if previous["st"] != "drop" {
                     continue;
                 }
-                let data = previous["d"]
-                    .as_str()
-                    .and_then(|value| serde_json::from_str::<Value>(value).ok())
-                    .unwrap_or_else(|| json!({}));
+                // Db::all already decodes the job's JSON column.
+                let data = previous["d"].clone();
                 if !changed_since_drop(&up, previous["t0"].as_i64().unwrap_or(0), &data) {
                     continue;
                 }
@@ -354,11 +261,21 @@ async fn scout1(a: &Ax) -> R<()> {
         let mut nk = vec![];
         for i in nw {
             let n = i["number"].as_i64().unwrap_or(0);
-            if crate::gh::refs(&r, n)
-                .await
-                .map(|x| !crate::gh::live(x).is_empty())
-                .unwrap_or(false)
-            {
+            let related = match crate::gh::refs(&r, n).await {
+                Ok(refs) => !crate::gh::live(refs).is_empty(),
+                Err(error) => {
+                    a.say(
+                        "scout",
+                        &format!(
+                            "{r}#{n}: falha ao verificar PRs relacionadas: {}",
+                            crate::sh::head(&error, 180)
+                        ),
+                        None,
+                    );
+                    continue;
+                }
+            };
+            if related {
                 let reason = "Já existe um pull request relacionado com este issue";
                 a.db.run(
                     "insert into seen(repo,num,upd,why) values(?,?,?,?) on conflict do update set upd=excluded.upd,why=excluded.why",
@@ -1348,178 +1265,62 @@ fn auto_merge_blocker(pr: &Value, job: &Job, saved: &Value, me: &str) -> Option<
     None
 }
 
-fn save_auto_merge_state(
-    a: &Ax,
-    repo: &str,
-    number: i64,
-    mut data: Value,
-    status: &str,
-    reason: &str,
-    head: &str,
-) {
-    if !data.is_object() {
-        data = json!({});
-    }
-    let changed = data["merge_status"].as_str() != Some(status)
-        || data["merge_reason"].as_str() != Some(reason)
-        || data["merge_state_head"].as_str() != Some(head);
-    data["merge_status"] = json!(status);
-    data["merge_reason"] = json!(reason);
-    data["merge_state_head"] = json!(head);
-    a.db.run(
-        "update prs set d=? where repo=? and num=?",
-        pa![data.to_string(), repo.to_string(), number],
-    );
-    if changed {
-        a.say("watcher", &format!("{repo}#{number}: {reason}"), None);
-    }
-}
-
-async fn try_auto_merge(
+// Watcher is an observer. Only the Steward may initiate new merges.
+fn observe_auto_merge(
     a: &Ax,
     repo: &str,
     number: i64,
     pr: &Value,
     saved: &Value,
     me: &str,
-) -> R<bool> {
-    if saved["auto_merge"].as_bool() != Some(true) {
-        return Ok(false);
+) -> R<()> {
+    if saved["auto_merge"] != true {
+        return Ok(());
     }
-    let head = pr["headRefOid"].as_str().unwrap_or("").to_string();
-    let Some(job_id) = saved["job"].as_i64() else {
-        save_auto_merge_state(
-            a,
-            repo,
-            number,
-            saved.clone(),
+    let head = pr["headRefOid"].as_str().unwrap_or("");
+    let repo_enabled = a.db.n(
+        "select auto_merge from rp where full=? and on_=1",
+        pa![repo.to_string()],
+    ) == 1;
+    let (status, reason) = if !repo_enabled {
+        (
             "blocked",
-            "Apollo Office job evidence is missing.",
-            &head,
-        );
-        return Ok(false);
-    };
-    let Some(job) = a.db.jg(job_id) else {
-        save_auto_merge_state(
-            a,
-            repo,
-            number,
-            saved.clone(),
-            "blocked",
-            "Apollo Office job evidence is no longer available.",
-            &head,
-        );
-        return Ok(false);
-    };
-    if let Some(reason) = auto_merge_blocker(pr, &job, saved, me) {
-        save_auto_merge_state(a, repo, number, saved.clone(), "waiting", reason, &head);
-        return Ok(false);
-    }
-    if saved["merge_enabled_head"].as_str() == Some(&head) {
-        return Ok(false);
-    }
-    let recent_attempt = saved["merge_attempt_head"].as_str() == Some(&head)
-        && saved["merge_attempt_at"]
-            .as_i64()
-            .map(|t| now() - t < 30 * 60_000)
-            .unwrap_or(false);
-    if recent_attempt {
-        return Ok(false);
-    }
-
-    let mut data = saved.clone();
-    data["merge_attempt_head"] = json!(head);
-    data["merge_attempt_at"] = json!(now());
-    a.db.run(
-        "update prs set d=? where repo=? and num=?",
-        pa![data.to_string(), repo.to_string(), number],
-    );
-    match gh(
-        &[
-            "pr",
-            "merge",
-            &number.to_string(),
-            "-R",
-            repo,
-            "--auto",
-            "--squash",
-            "--match-head-commit",
-            &head,
-        ],
-        120,
-    )
-    .await
-    {
-        Ok(_) => {
-            data["merge_enabled_head"] = json!(head);
-            save_auto_merge_state(
-                a,
-                repo,
-                number,
-                data,
-                "enabled",
-                "All observed checks passed; GitHub auto-merge is enabled.",
-                &head,
-            );
-            let fresh = ghj(
-                &[
-                    "pr",
-                    "view",
-                    &number.to_string(),
-                    "-R",
-                    repo,
-                    "--json",
-                    "state,mergedAt,updatedAt,title,url",
-                ],
-                60,
-            )
-            .await
-            .map_err(X::E)?;
-            if fresh["mergedAt"].is_string() || fresh["state"] == "MERGED" {
-                let updated = fresh["updatedAt"].as_str().unwrap_or("").to_string();
-                let merged = fresh["mergedAt"].as_str().map(String::from);
-                a.db.run(
-                    "update prs set st='merged', title=?, upd=?, merged=? where repo=? and num=?",
-                    pa![
-                        fresh["title"].as_str().unwrap_or("").to_string(),
-                        updated,
-                        merged,
-                        repo.to_string(),
-                        number
-                    ],
-                );
-                a.note(
-                    "Merged",
-                    &format!(
-                        "{repo}#{number} {}\n{}",
-                        fresh["title"].as_str().unwrap_or(""),
-                        fresh["url"].as_str().unwrap_or("")
-                    ),
-                    3,
-                );
-                a.flow("watcher", "submit", "merged");
-                a.say(
-                    "watcher",
-                    &format!("{repo}#{number} merged after all GitHub checks passed"),
-                    None,
-                );
-                a.db.ks("lm", &json!({"repo": repo, "num": number, "title": fresh["title"], "url": fresh["url"], "t": now()}));
-                a.db.ks(&format!("wm:{repo}#{number}"), &json!(now()));
-                late(a, repo, number, me, &fresh).await?;
-                return Ok(true);
-            }
+            "Repository automatic merge is disabled; no new merge requested.",
+        )
+    } else if saved["merge_enabled_head"].as_str() == Some(head) && !head.is_empty() {
+        (
+            "enabled",
+            "GitHub auto-merge was previously enabled; monitoring existing request.",
+        )
+    } else if let Some(job) = saved["job"].as_i64().and_then(|id| a.db.jg(id)) {
+        match auto_merge_blocker(pr, &job, saved, me) {
+            Some(reason) => ("waiting", reason),
+            None => (
+                "waiting",
+                "Local evidence observed; awaiting independent PR Steward gates.",
+            ),
         }
-        Err(error) => {
-            let reason = "GitHub did not enable auto-merge; see the watcher log.";
-            save_auto_merge_state(a, repo, number, data, "blocked", reason, &head);
-            a.say(
-                "watcher",
-                &format!("{repo}#{number}: {}", crate::sh::head(&error, 240)),
-                None,
-            );
+    } else {
+        ("blocked", "Apollo Office job evidence is unavailable.")
+    };
+    let changed = saved["merge_status"].as_str() != Some(status)
+        || saved["merge_reason"].as_str() != Some(reason)
+        || saved["merge_state_head"].as_str() != Some(head);
+    if changed {
+        // Update only diagnostic fields, never overwrite the comment cursor or
+        // other metadata persisted by concurrent reconciliation.
+        if a.db.run(
+            "update prs set d=json_set(d,'$.merge_status',?,'$.merge_reason',?,'$.merge_state_head',?) where repo=? and num=?",
+            pa![status.to_string(),reason.to_string(),head.to_string(),repo.to_string(),number],
+        ) < 0 {
+            return Err(X::E("Could not persist Watcher merge diagnosis".into()));
+        }
+        a.say("watcher", &format!("{repo}#{number}: {reason}"), None);
+        if repo_enabled {
+            a.steward_wake.notify_one();
         }
     }
-    Ok(false)
+    Ok(())
 }
 
 async fn watch1(a: &Ax) -> R<()> {
@@ -1611,10 +1412,8 @@ async fn watch1(a: &Ax) -> R<()> {
             a.flow("watcher", "fixer", "rebase");
             a.say("watcher", &format!("{tag} has a merge conflict, sent to rebase"), None);
         }
-        if p["d"]["auto_merge"].as_bool() == Some(true) && try_auto_merge(a, &r, n, &v, &p["d"], &me).await? {
-            continue;
-        }
-        if p["upd"].as_str() == Some(up.as_str()) && p["d"]["seen"].as_bool().unwrap_or(false) {
+        observe_auto_merge(a, &r, n, &v, &p["d"], &me)?;
+        if p["d"]["comment_seen_at"].as_str() == Some(up.as_str()) && p["d"]["seen"].as_bool().unwrap_or(false) {
             continue;
         }
         let first = !p["d"]["seen"].as_bool().unwrap_or(false);
@@ -1627,19 +1426,19 @@ async fn watch1(a: &Ax) -> R<()> {
         };
         let cr: Vec<String> = if v["reviewDecision"] == "CHANGES_REQUESTED" { pushers(&r, n).await } else { vec![] };
         let tr = |c: &Value| MA.contains(&c["as"].as_str().unwrap_or("")) || (c["k"] == "review" && c["t"].as_str().map(|t| t.starts_with("[review: CHANGES_REQUESTED]")).unwrap_or(false) && c["rid"].as_str().map(|x| cr.iter().any(|y| y == x)).unwrap_or(false));
-        let mut nw: Vec<Value> = cs.into_iter().filter(|c| a.db.n("select count(*) from cm where id=? or id=?", pa![format!("{r}:{}", c["id"].as_str().unwrap_or("")), c["id"].as_str().unwrap_or("").to_string()]) == 0).collect();
-        for c in &nw {
-            a.db.run("insert or ignore into cm(id,t) values(?,?)", pa![format!("{r}:{}", c["id"].as_str().unwrap_or("")), now()]);
+        let mut nw = Vec::new();
+        for c in cs {
+            let id = c["id"].as_str().filter(|id| !id.is_empty())
+                .ok_or_else(|| X::E("PR comment has no identifier".into()))?;
+            if !a.db.comment_acknowledged(&r, id).map_err(|e| X::E(e.to_string()))? {
+                nw.push(c);
+            }
         }
+        let received_ids: Vec<String> = nw.iter().filter_map(|c| c["id"].as_str().map(String::from)).collect();
+        let mut batch_acked = false;
         if first && !nw.is_empty() {
             let lc = ghj(&["pr", "view", &n.to_string(), "-R", &r, "--json", "commits", "--jq", ".commits[-1].committedDate"], 60).await.ok().and_then(|x| x.as_str().map(String::from)).unwrap_or_default();
             nw = pending(nw, &lc);
-        }
-        if first {
-            let mut d = a.db.one("select d from prs where repo=? and num=?", pa![r.clone(), n]).map(|row| row["d"].clone()).unwrap_or_else(|| p["d"].clone());
-            if !d.is_object() { d = json!({}); }
-            d["seen"] = json!(true);
-            a.db.run("update prs set d=? where repo=? and num=?", pa![d.to_string(), r.clone(), n]);
         }
         if !nw.is_empty() {
             a.say("watcher", &format!("{tag}: {} new comment(s)", nw.len()), None);
@@ -1652,14 +1451,36 @@ async fn watch1(a: &Ax) -> R<()> {
                 let mc: Vec<&Value> = okc.iter().filter(|c| tr(c)).cloned().collect();
                 let ma = !mc.is_empty();
                 let src: &Vec<&Value> = if ma { &mc } else { &okc };
-                let pv = ghj(&["pr", "view", &n.to_string(), "-R", &r, "--json", "body,files"], 60).await.unwrap_or(Value::Null);
+                let pv = ghj(&["pr", "view", &n.to_string(), "-R", &r, "--json", "body,files"], 60).await.map_err(X::E)?;
+                if !pv["files"].is_array() {
+                    return Err(X::E("PR file list is unavailable".into()));
+                }
                 let fl = pv["files"].as_array().map(|x| x.iter().filter_map(|f| f["path"].as_str()).collect::<Vec<_>>().join("\n")).unwrap_or_default();
                 let pr = format!("PR {tag}: {}\n\n{}\n\n{}\n\n{}", v["title"].as_str().unwrap_or(""), wrap("description", &crate::sh::head(pv["body"].as_str().unwrap_or(""), 4000)), wrap("files", &crate::sh::head(&fl, 2000)), src.iter().map(|c| wrap(c["id"].as_str().unwrap_or(""), &format!("{} by {} ({})\n\n{}", c["k"].as_str().unwrap_or(""), c["by"].as_str().unwrap_or(""), c["as"].as_str().unwrap_or(""), crate::sh::head(c["t"].as_str().unwrap_or(""), 4000)))).collect::<Vec<_>>().join("\n\n"));
                 let mut o = Ask::new("watcher", a.md("watcher"), P("watcher"), pr);
                 o.ef = Some("low");
                 let (_, js) = ask(a, o).await?;
+                if !js["act"].is_boolean() {
+                    return Err(X::E("Watcher gave no readable action verdict".into()));
+                }
                 let by = okc.iter().filter_map(|c| c["by"].as_str()).collect::<Vec<_>>().join(", ");
                 let act = js["act"].as_bool().unwrap_or(false);
+                if act && ma {
+                    let ch = js["change"].as_str().unwrap_or("").to_string();
+                    let data = json!({"change": ch, "comment": crate::sh::head(&mc.iter().map(|c| format!("{}: {}", c["by"].as_str().unwrap_or(""), c["t"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("\n\n"), 6000), "branch": hrn, "head": hd, "test_cmd": p["d"]["test_cmd"]});
+                    let request = json!({"title":v["title"],"url":v["url"],"change":ch,"data":data});
+                    if !a.db.queue_review_and_ack(&r, n, &up, &received_ids, &request).map_err(|e| X::E(e.to_string()))? {
+                        a.say("watcher", &format!("{tag}: new review deferred until active review finishes"), None);
+                        continue;
+                    }
+                    batch_acked = true;
+                    a.flow("watcher", "fixer", "review");
+                    a.say("watcher", &format!("{tag}: change requested by {by}, sent to Fixer"), None);
+                    a.note("Change requested", &format!("{tag} ({by}): {ch}\n\nDraft reply:\n{}\n{}", js["draft"].as_str().unwrap_or("-"), v["url"].as_str().unwrap_or("")), 4);
+                } else {
+                    a.say("watcher", &format!("{tag}: {by} commented{}", if act && !ma { " (not a maintainer, not applied)" } else { "" }), None);
+                    a.note(&format!("Comment on {tag}"), &format!("{by}: {}\n\nDraft reply:\n{}\n{}", crate::sh::head(okc.last().and_then(|c| c["t"].as_str()).unwrap_or(""), 600), js["draft"].as_str().unwrap_or("-"), v["url"].as_str().unwrap_or("")), 3);
+                }
                 let rp = js["reply"].as_str().unwrap_or("").trim().to_string();
                 let wk = format!("wr:{tag}");
                 if ma && !rp.is_empty() && a.db.kg(&wk).as_i64().map(|t| now() - t > 86_400_000).unwrap_or(true) {
@@ -1671,17 +1492,11 @@ async fn watch1(a: &Ax) -> R<()> {
                         Err(e) => a.say("watcher", &format!("{tag}: reply failed: {e}"), None),
                     }
                 }
-                if act && ma && a.db.n("select count(*) from jobs where repo=? and pr=? and kind='review' and st not in ('done','drop')", pa![r.clone(), n]) == 0 {
-                    let ch = js["change"].as_str().unwrap_or("").to_string();
-                    a.db.jnew(&r, n, "review", v["title"].as_str().unwrap_or(""), v["url"].as_str().unwrap_or(""), "ready", &ch, json!({"change": ch, "comment": crate::sh::head(&mc.iter().map(|c| format!("{}: {}", c["by"].as_str().unwrap_or(""), c["t"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("\n\n"), 6000), "branch": hrn, "head": hd, "test_cmd": p["d"]["test_cmd"]}), Some(n), -1.0);
-                    a.flow("watcher", "fixer", "review");
-                    a.say("watcher", &format!("{tag}: change requested by {by}, sent to Fixer"), None);
-                    a.note("Change requested", &format!("{tag} ({by}): {ch}\n\nDraft reply:\n{}\n{}", js["draft"].as_str().unwrap_or("-"), v["url"].as_str().unwrap_or("")), 4);
-                } else {
-                    a.say("watcher", &format!("{tag}: {by} commented{}", if act && !ma { " (not a maintainer, not applied)" } else { "" }), None);
-                    a.note(&format!("Comment on {tag}"), &format!("{by}: {}\n\nDraft reply:\n{}\n{}", crate::sh::head(okc.last().and_then(|c| c["t"].as_str()).unwrap_or(""), 600), js["draft"].as_str().unwrap_or("-"), v["url"].as_str().unwrap_or("")), 3);
-                }
             }
+        }
+        // Advance the comment cursor only after successful analysis and queue persistence.
+        if !batch_acked {
+            a.db.ack_pr_comments(&r, n, &up, &received_ids).map_err(|e| X::E(e.to_string()))?;
         }
     }
     a.st("watcher", "idle", None, "");
@@ -1714,14 +1529,6 @@ mod t {
         vet_classification(&mut feature, false);
         assert_eq!(feature["opt"], false);
         assert_eq!(feature["feat"], true);
-    }
-
-    #[test]
-    fn issue_scan_covers_backlog_and_reports_the_limit_boundary() {
-        assert_eq!(ISSUE_SCAN_LIMIT, 500);
-        assert!(!issue_scan_truncated(280));
-        assert!(!issue_scan_truncated(ISSUE_SCAN_LIMIT - 1));
-        assert!(issue_scan_truncated(ISSUE_SCAN_LIMIT));
     }
 
     #[test]

@@ -17,6 +17,19 @@ mod t {
     }
 
     #[test]
+    fn host_retry_backoff_is_bounded_and_manual_priority_preserves_phase_order() {
+        assert_eq!(host_retry_delay(1),30_000);
+        assert_eq!(host_retry_delay(2),60_000);
+        assert_eq!(host_retry_delay(5),480_000);
+        assert_eq!(host_retry_delay(20),480_000);
+        let fix=json!({"st":"ready","kind":"fix","manual_priority":0,"d":{"issue_priority":3}});
+        let other=json!({"st":"ready","kind":"fix","d":{"issue_priority":1}});
+        let review=json!({"st":"ready","kind":"review"});
+        assert!(pick_rank(&fix)<pick_rank(&other));
+        assert!(pick_rank(&review)<pick_rank(&fix));
+    }
+
+    #[test]
     fn ready_fixes_precede_new_hunts_and_rebases() {
         let fix = json!({"id":1,"kind":"fix","st":"ready","prio":-0.5,"d":{}});
         let hunt = json!({"id":2,"kind":"hunt","st":"ready","prio":99.0,"d":{}});
