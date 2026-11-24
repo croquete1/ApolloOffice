@@ -352,12 +352,19 @@ pub fn idle(a: &Ax) -> bool {
     if !a.vtk.lock().unwrap().is_empty() {
         return false;
     }
+    if !a.cache_maintenance.lock().unwrap().is_empty() {
+        return false;
+    }
     // A queued 'submit' row may be retried after a machine error. Only
     // admitted work (act/lk) can prevent shutdown in that state.
-    a.db.n(
-        "select count(*) from jobs where st in ('hunt','repro','fix','ci','review','gate')",
-        crate::pa![],
-    ) == 0
+    // A failed inventory read is not proof that the office is idle.
+    matches!(
+        a.db.try_n(
+            "select count(*) from jobs where st in ('hunt','repro','fix','ci','review','gate')",
+            crate::pa![],
+        ),
+        Ok(0)
+    )
 }
 
 /// Requires the explicit Pause office switch for manual installation.
@@ -597,6 +604,32 @@ mod t {
         a.lv.lock().unwrap().o.man = true;
         assert!(manually_paused(&a));
         assert!(idle(&a));
+    }
+
+    #[test]
+    fn maintenance_and_database_failure_block_idle_and_restart() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            PathBuf::from("/tmp/apollo-idle-failure-test"),
+            47300,
+            PathBuf::from("/tmp/apollo-idle-failure-test/apollo-office"),
+        ));
+        a.lv.lock().unwrap().o.man = true;
+        assert!(idle(&a));
+        a.cache_maintenance.lock().unwrap().insert("test".into());
+        assert!(!idle(&a));
+        assert!(!reserve_install(&a, true));
+        a.cache_maintenance.lock().unwrap().clear();
+        assert!(idle(&a));
+        a.db.0
+            .lock()
+            .unwrap()
+            .execute_batch("drop table jobs")
+            .unwrap();
+        assert!(!idle(&a));
+        assert!(!reserve_install(&a, true));
+        assert!(!a.drain.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!*a.restart.lock().unwrap());
     }
 
     #[test]
