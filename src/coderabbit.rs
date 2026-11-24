@@ -16,6 +16,7 @@ const MAX_BYTES: usize = 4 * 1024 * 1024;
 const MAX_FINDING_BODY: usize = 6_000;
 const MAX_REQUESTS_PER_HOUR: i64 = 3;
 const MAX_REQUESTS_PER_PR: i64 = 2;
+const CANCELLED_RETRY_MS: i64 = 300_000;
 const MAX_FIX_CYCLES_PER_PR: i64 = 2;
 pub(crate) static OBSERVATIONS: Semaphore = Semaphore::const_new(2);
 
@@ -696,16 +697,21 @@ fn reserve_request(
         |r| r.get(0),
     )?;
     let per_pr: i64 = tx.query_row(
-        "select count(*) from coderabbit_requests where repo=? and number=?",
+        "select count(*) from coderabbit_requests where repo=? and number=? and status<>'cancelled'",
         rusqlite::params![repo, number],
         |r| r.get(0),
     )?;
-    if enabled != 1 || recent >= MAX_REQUESTS_PER_HOUR || per_pr >= MAX_REQUESTS_PER_PR {
+    let blocked: bool = tx.query_row(
+        "select exists(select 1 from coderabbit_requests where repo=?1 and number=?2 and (status in ('sending','uncertain') or (status='sent' and head=?3) or (status='cancelled' and requested_at>?4)))",
+        rusqlite::params![repo, number, head, crate::db::now() - CANCELLED_RETRY_MS],
+        |r| r.get(0),
+    )?;
+    if enabled != 1 || recent >= MAX_REQUESTS_PER_HOUR || per_pr >= MAX_REQUESTS_PER_PR || blocked {
         tx.commit()?;
         return Ok(false);
     }
     let changed = tx.execute(
-        "insert or ignore into coderabbit_requests(repo,number,head,status,requested_at,activation) select full,?,?,'sending',?,coderabbit_epoch from rp where full=? and on_=1 and coderabbit_review=1 and coderabbit_free_confirmed=1",
+        "insert into coderabbit_requests(repo,number,head,status,requested_at,activation) select full,?,?,'sending',?,coderabbit_epoch from rp where full=? and on_=1 and coderabbit_review=1 and coderabbit_free_confirmed=1 on conflict(repo,number,head) do update set status='sending',requested_at=excluded.requested_at,activation=excluded.activation,comment_id=null,error='' where coderabbit_requests.status='cancelled'",
         rusqlite::params![number, head, crate::db::now(), repo],
     )?;
     tx.commit()?;
@@ -731,10 +737,11 @@ pub(crate) fn finish_request(
     if !matches!(status, "sent" | "uncertain" | "cancelled") {
         return Err(rusqlite::Error::InvalidQuery);
     }
-    let changed = db.ch(
-        "update coderabbit_requests set status=?,comment_id=?,error=? where repo=? and number=? and head=? and status='sending'",
-        crate::pa![status.to_string(), comment_id, crate::sh::head(error, 240), repo.to_string(), number, head.to_string()],
-    );
+    let c = db.0.lock().unwrap();
+    let changed = c.execute(
+        "update coderabbit_requests set status=?1,comment_id=?2,error=?3,requested_at=case when ?1='cancelled' then ?7 else requested_at end where repo=?4 and number=?5 and head=?6 and status='sending'",
+        rusqlite::params![status, comment_id, crate::sh::head(error, 240), repo, number, head, crate::db::now()],
+    )?;
     Ok(changed == 1)
 }
 
@@ -1035,15 +1042,13 @@ pub(crate) fn finding_status(db: &crate::db::Db, repo: &str, number: i64) -> Val
 }
 
 fn request_followup_allowed(db: &crate::db::Db, repo: &str, number: i64, head: &str) -> bool {
-    let rows = db.all(
-        "select head,status from coderabbit_requests where repo=? and number=? order by requested_at desc limit 2",
-        crate::pa![repo.to_string(), number],
-    );
-    match rows.as_slice() {
-        [] => true,
-        [latest] if latest["status"] == "sent" && latest["head"] != head => true,
-        _ => false,
-    }
+    let c = db.0.lock().unwrap();
+    c.query_row(
+        "select count(*) < ?4 and not exists(select 1 from coderabbit_requests where repo=?1 and number=?2 and (status in ('sending','uncertain') or (status='sent' and head=?3) or (status='cancelled' and requested_at>?5))) from coderabbit_requests where repo=?1 and number=?2 and status<>'cancelled'",
+        rusqlite::params![repo, number, head, MAX_REQUESTS_PER_PR, crate::db::now() - CANCELLED_RETRY_MS],
+        |row| row.get::<_, bool>(0),
+    )
+    .unwrap_or(false)
 }
 
 fn own_public_pr(pr: &Value, repo: &str, number: i64, head: &str, me: &str) -> bool {
@@ -2030,6 +2035,27 @@ mod tests {
         );
         assert_eq!(request_history(&db, repo, 67)["attempts"], 2);
     }
+    #[test]
+    fn cancelled_requests_retry_only_after_cooldown_and_uncertain_never_retries() {
+        let db = crate::db::Db::mem();
+        let repo = "croquete1/ApolloOffice";
+        db.0.lock().unwrap().execute("insert into rp(full,on_,coderabbit_review,coderabbit_free_confirmed,coderabbit_review_since) values(?,1,1,1,100)", [repo]).unwrap();
+        assert!(reserve_test_request(&db, repo, 67, HEAD).unwrap());
+        assert!(finish_request(&db, repo, 67, HEAD, "cancelled", None, "before POST").unwrap());
+        assert!(!request_followup_allowed(&db, repo, 67, OLD));
+        assert!(!reserve_test_request(&db, repo, 67, HEAD).unwrap());
+        db.0.lock().unwrap().execute(
+            "update coderabbit_requests set requested_at=? where repo=? and number=67",
+            rusqlite::params![crate::db::now() - CANCELLED_RETRY_MS - 1, repo],
+        ).unwrap();
+        assert!(request_followup_allowed(&db, repo, 67, HEAD));
+        assert!(reserve_test_request(&db, repo, 67, HEAD).unwrap());
+        assert!(finish_request(&db, repo, 67, HEAD, "uncertain", None, "POST uncertain").unwrap());
+        assert!(!request_followup_allowed(&db, repo, 67, OLD));
+        assert!(!reserve_test_request(&db, repo, 67, OLD).unwrap());
+        assert!(!reserve_test_request(&db, repo, 67, HEAD).unwrap());
+    }
+
     #[test]
     fn global_review_request_limit_counts_uncertain_requests() {
         let db = crate::db::Db::mem();
