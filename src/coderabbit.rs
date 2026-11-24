@@ -603,20 +603,38 @@ pub(crate) fn valid_scope(repo: &str, number: i64, head: &str) -> bool {
     valid_repo(repo) && number > 0 && valid_sha(head)
 }
 
-pub(crate) fn reserve_request(
+fn request_activation(db: &crate::db::Db, repo: &str) -> Option<(i64, i64)> {
+    let row = db.one(
+        "select coderabbit_epoch,coderabbit_review_since from rp where full=? and on_=1 and coderabbit_review=1 and coderabbit_free_confirmed=1",
+        crate::pa![repo.to_string()],
+    )?;
+    let since = row["coderabbit_review_since"].as_i64()?;
+    (since > 0).then_some((row["coderabbit_epoch"].as_i64()?, since))
+}
+
+fn eligible_creation(pr: &Value, since: i64) -> Option<i64> {
+    let created = chrono::DateTime::parse_from_rfc3339(pr["created_at"].as_str()?)
+        .ok()?
+        .timestamp_millis();
+    (since > 0 && created >= since).then_some(created)
+}
+
+fn reserve_request(
     db: &crate::db::Db,
     repo: &str,
     number: i64,
     head: &str,
+    activation: (i64, i64),
+    created: i64,
 ) -> rusqlite::Result<bool> {
-    if !valid_scope(repo, number, head) {
+    if !valid_scope(repo, number, head) || activation.1 <= 0 || created < activation.1 {
         return Ok(false);
     }
     let mut c = db.0.lock().unwrap();
     let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let enabled: i64 = tx.query_row(
-        "select count(*) from rp where full=? and on_=1 and coderabbit_review=1 and coderabbit_free_confirmed=1",
-        rusqlite::params![repo],
+        "select count(*) from rp where full=? and on_=1 and coderabbit_review=1 and coderabbit_free_confirmed=1 and coderabbit_epoch=? and coderabbit_review_since=?",
+        rusqlite::params![repo, activation.0, activation.1],
         |r| r.get(0),
     )?;
     let recent: i64 = tx.query_row(
@@ -1011,13 +1029,9 @@ pub(crate) async fn request_reviews(a: &crate::app::Ax, repo: &str, listed: &[Va
     if me.is_empty() {
         return;
     }
-    let enabled_since = a.db.n(
-        "select coderabbit_review_since from rp where full=? and on_=1 and coderabbit_review=1 and coderabbit_free_confirmed=1",
-        crate::pa![repo.to_string()],
-    );
-    if enabled_since <= 0 {
+    let Some(activation) = request_activation(&a.db, repo) else {
         return;
-    }
+    };
     for row in listed {
         if a.hold("watcher") || row["isDraft"] != false {
             continue;
@@ -1042,26 +1056,15 @@ pub(crate) async fn request_reviews(a: &crate::app::Ax, repo: &str, listed: &[Va
             Ok(detail) if own_public_pr(&detail, repo, number, head, &me) => detail,
             _ => continue,
         };
-        let attempts = a.db.n(
-            "select count(*) from coderabbit_requests where repo=? and number=?",
-            crate::pa![repo.to_string(), number],
-        );
-        if attempts == 0 {
-            let created = detail["created_at"]
-                .as_str()
-                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-                .map(|value| value.timestamp_millis())
-                .unwrap_or(i64::MAX);
-            if created < enabled_since {
-                continue;
-            }
-        }
+        let Some(created) = eligible_creation(&detail, activation.1) else {
+            continue;
+        };
         // Do not duplicate a manual request or retry an already covered/uncertain review.
         match observe(repo, number, head).await {
             Ok(state) if matches!(state["state"].as_str(), Some("not_observed" | "stale")) => {}
             _ => continue,
         }
-        if !reserve_request(&a.db, repo, number, head).unwrap_or(false) {
+        if !reserve_request(&a.db, repo, number, head, activation, created).unwrap_or(false) {
             continue;
         }
         if !request_is_current(&a.db, repo, number, head) {
@@ -1119,7 +1122,10 @@ pub(crate) async fn request_reviews(a: &crate::app::Ax, repo: &str, listed: &[Va
             }
         };
         let _ = final_repository;
-        if fresh["head"]["sha"] != head || fresh["updated_at"] != detail["updated_at"] {
+        if fresh["head"]["sha"] != head
+            || fresh["updated_at"] != detail["updated_at"]
+            || eligible_creation(&fresh, activation.1) != Some(created)
+        {
             let _ = finish_request(
                 &a.db,
                 repo,
@@ -1820,19 +1826,59 @@ mod tests {
             .unwrap();
         assert!(!save(&db, repo, 67, &ticket, &json!({"state":"observed_current"})).unwrap());
     }
+    fn reserve_test_request(
+        db: &crate::db::Db,
+        repo: &str,
+        number: i64,
+        head: &str,
+    ) -> rusqlite::Result<bool> {
+        let Some(activation) = request_activation(db, repo) else {
+            return Ok(false);
+        };
+        reserve_request(db, repo, number, head, activation, activation.1)
+    }
+
+    #[test]
+    fn request_creation_requires_valid_timestamp_after_activation() {
+        let pr = json!({"created_at":"2026-01-01T00:00:00Z"});
+        let at = 1_767_225_600_000;
+        assert_eq!(eligible_creation(&pr, at), Some(at));
+        assert_eq!(eligible_creation(&pr, at + 1), None);
+        assert_eq!(eligible_creation(&json!({}), at), None);
+        assert_eq!(eligible_creation(&json!({"created_at":"invalid"}), at), None);
+    }
+
+    #[test]
+    fn request_reservation_rejects_changed_activation() {
+        let db = crate::db::Db::mem();
+        let repo = "croquete1/ApolloOffice";
+        db.0.lock().unwrap().execute(
+            "insert into rp(full,on_,coderabbit_review,coderabbit_free_confirmed,coderabbit_epoch,coderabbit_review_since) values(?,1,1,1,3,100)", [repo],
+        ).unwrap();
+        let old = request_activation(&db, repo).unwrap();
+        db.0.lock().unwrap().execute(
+            "update rp set coderabbit_epoch=5,coderabbit_review_since=200 where full=?", [repo],
+        ).unwrap();
+        assert!(!reserve_request(&db, repo, 67, HEAD, old, 250).unwrap());
+        let current = request_activation(&db, repo).unwrap();
+        assert!(!reserve_request(&db, repo, 67, HEAD, current, 150).unwrap());
+        assert!(reserve_request(&db, repo, 67, HEAD, current, 250).unwrap());
+        assert!(request_is_current(&db, repo, 67, HEAD));
+    }
+
     #[test]
     fn review_requests_are_opt_in_deduplicated_and_capped() {
         let db = crate::db::Db::mem();
         let repo = "croquete1/ApolloOffice";
         db.0.lock().unwrap().execute(
-            "insert into rp(full,on_,coderabbit_review,coderabbit_free_confirmed,coderabbit_epoch) values(?,1,0,0,1)", [repo],
+            "insert into rp(full,on_,coderabbit_review,coderabbit_free_confirmed,coderabbit_epoch,coderabbit_review_since) values(?,1,0,0,1,100)", [repo],
         ).unwrap();
-        assert!(!reserve_request(&db, repo, 67, HEAD).unwrap());
+        assert!(!reserve_test_request(&db, repo, 67, HEAD).unwrap());
         db.0.lock()
             .unwrap()
             .execute("update rp set coderabbit_review=1 where full=?", [repo])
             .unwrap();
-        assert!(!reserve_request(&db, repo, 67, HEAD).unwrap());
+        assert!(!reserve_test_request(&db, repo, 67, HEAD).unwrap());
         db.0.lock()
             .unwrap()
             .execute(
@@ -1840,9 +1886,9 @@ mod tests {
                 [repo],
             )
             .unwrap();
-        assert!(reserve_request(&db, repo, 67, HEAD).unwrap());
+        assert!(reserve_test_request(&db, repo, 67, HEAD).unwrap());
         assert!(request_is_current(&db, repo, 67, HEAD));
-        assert!(!reserve_request(&db, repo, 67, HEAD).unwrap());
+        assert!(!reserve_test_request(&db, repo, 67, HEAD).unwrap());
         assert!(finish_request(&db, repo, 67, HEAD, "sent", Some(456), "").unwrap());
         assert!(request_followup_allowed(&db, repo, 67, OLD));
         db.0.lock()
@@ -1856,9 +1902,9 @@ mod tests {
             )
             .unwrap();
         assert!(request_followup_allowed(&db, repo, 67, OLD));
-        assert!(reserve_request(&db, repo, 67, OLD).unwrap());
+        assert!(reserve_test_request(&db, repo, 67, OLD).unwrap());
         assert!(
-            !reserve_request(&db, repo, 67, "0123456789012345678901234567890123456789").unwrap()
+            !reserve_test_request(&db, repo, 67, "0123456789012345678901234567890123456789").unwrap()
         );
         assert_eq!(request_history(&db, repo, 67)["attempts"], 2);
     }
@@ -1866,11 +1912,11 @@ mod tests {
     fn global_review_request_limit_counts_uncertain_requests() {
         let db = crate::db::Db::mem();
         let repo = "croquete1/ApolloOffice";
-        db.0.lock().unwrap().execute("insert into rp(full,on_,coderabbit_review,coderabbit_free_confirmed) values(?,1,1,1)", [repo]).unwrap();
-        assert!(reserve_request(&db, repo, 67, HEAD).unwrap());
-        assert!(reserve_request(&db, repo, 68, OLD).unwrap());
+        db.0.lock().unwrap().execute("insert into rp(full,on_,coderabbit_review,coderabbit_free_confirmed,coderabbit_review_since) values(?,1,1,1,100)", [repo]).unwrap();
+        assert!(reserve_test_request(&db, repo, 67, HEAD).unwrap());
+        assert!(reserve_test_request(&db, repo, 68, OLD).unwrap());
         assert!(
-            reserve_request(&db, repo, 69, "0123456789012345678901234567890123456789").unwrap()
+            reserve_test_request(&db, repo, 69, "0123456789012345678901234567890123456789").unwrap()
         );
         assert!(finish_request(
             &db,
@@ -1883,15 +1929,15 @@ mod tests {
         )
         .unwrap());
         assert!(
-            !reserve_request(&db, repo, 70, "abcdefabcdefabcdefabcdefabcdefabcdefabcd").unwrap()
+            !reserve_test_request(&db, repo, 70, "abcdefabcdefabcdefabcdefabcdefabcdefabcd").unwrap()
         );
     }
     #[test]
     fn review_request_epoch_invalidates_an_in_flight_post() {
         let db = crate::db::Db::mem();
         let repo = "croquete1/ApolloOffice";
-        db.0.lock().unwrap().execute("insert into rp(full,on_,coderabbit_review,coderabbit_free_confirmed,coderabbit_epoch) values(?,1,1,1,3)", [repo]).unwrap();
-        assert!(reserve_request(&db, repo, 67, HEAD).unwrap());
+        db.0.lock().unwrap().execute("insert into rp(full,on_,coderabbit_review,coderabbit_free_confirmed,coderabbit_epoch,coderabbit_review_since) values(?,1,1,1,3,100)", [repo]).unwrap();
+        assert!(reserve_test_request(&db, repo, 67, HEAD).unwrap());
         assert!(request_is_current(&db, repo, 67, HEAD));
         db.0.lock()
             .unwrap()
@@ -1914,9 +1960,9 @@ mod tests {
         let db = crate::db::Db::mem();
         let repo = "croquete1/ApolloOffice";
         db.0.lock().unwrap().execute(
-            "insert into rp(full,on_,coderabbit_review,coderabbit_free_confirmed,coderabbit_epoch) values(?,1,1,1,3)", [repo],
+            "insert into rp(full,on_,coderabbit_review,coderabbit_free_confirmed,coderabbit_epoch,coderabbit_review_since) values(?,1,1,1,3,100)", [repo],
         ).unwrap();
-        assert!(reserve_request(&db, repo, 67, HEAD).unwrap());
+        assert!(reserve_test_request(&db, repo, 67, HEAD).unwrap());
         assert!(request_is_current(&db, repo, 67, HEAD));
         db.0.lock()
             .unwrap()
@@ -1926,7 +1972,7 @@ mod tests {
             )
             .unwrap();
         assert!(!request_is_current(&db, repo, 67, HEAD));
-        assert!(!reserve_request(&db, repo, 68, OLD).unwrap());
+        assert!(!reserve_test_request(&db, repo, 68, OLD).unwrap());
     }
     #[test]
     fn guarded_findings_queue_once_and_keep_normal_review_provenance() {
