@@ -2044,10 +2044,13 @@ mod tests {
         assert!(finish_request(&db, repo, 67, HEAD, "cancelled", None, "before POST").unwrap());
         assert!(!request_followup_allowed(&db, repo, 67, OLD));
         assert!(!reserve_test_request(&db, repo, 67, HEAD).unwrap());
-        db.0.lock().unwrap().execute(
-            "update coderabbit_requests set requested_at=? where repo=? and number=67",
-            rusqlite::params![crate::db::now() - CANCELLED_RETRY_MS - 1, repo],
-        ).unwrap();
+        db.0.lock()
+            .unwrap()
+            .execute(
+                "update coderabbit_requests set requested_at=? where repo=? and number=67",
+                rusqlite::params![crate::db::now() - CANCELLED_RETRY_MS - 1, repo],
+            )
+            .unwrap();
         assert!(request_followup_allowed(&db, repo, 67, HEAD));
         assert!(reserve_test_request(&db, repo, 67, HEAD).unwrap());
         assert!(finish_request(&db, repo, 67, HEAD, "uncertain", None, "POST uncertain").unwrap());
