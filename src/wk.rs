@@ -11,7 +11,12 @@ use std::future::Future;
 use std::pin::Pin;
 
 // A model may suggest a duplicate, but cannot invent its target.
-fn valid_twin_verdict(verdict: &Value, related: &[Value], other: &[Value], finds: &[Value]) -> bool {
+fn valid_twin_verdict(
+    verdict: &Value,
+    related: &[Value],
+    other: &[Value],
+    finds: &[Value],
+) -> bool {
     let (Some(dup), Some(pr), Some(find)) = (
         verdict["dup"].as_bool(),
         verdict["pr"].as_i64(),
@@ -2663,8 +2668,18 @@ mod twin_verdict_tests {
         assert!(valid_twin_verdict(&verdict(true, 12, 0), &prs, &[], &finds));
         assert!(valid_twin_verdict(&verdict(true, 0, 4), &prs, &[], &finds));
         assert!(valid_twin_verdict(&verdict(false, 0, 0), &prs, &[], &finds));
-        assert!(!valid_twin_verdict(&verdict(true, 99, 0), &prs, &[], &finds));
-        assert!(!valid_twin_verdict(&verdict(true, 12, 4), &prs, &[], &finds));
+        assert!(!valid_twin_verdict(
+            &verdict(true, 99, 0),
+            &prs,
+            &[],
+            &finds
+        ));
+        assert!(!valid_twin_verdict(
+            &verdict(true, 12, 4),
+            &prs,
+            &[],
+            &finds
+        ));
         assert!(!valid_twin_verdict(&verdict(true, 0, 0), &prs, &[], &finds));
         assert!(!valid_twin_verdict(&json!({}), &prs, &[], &finds));
     }
