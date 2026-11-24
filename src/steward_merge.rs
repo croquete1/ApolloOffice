@@ -522,7 +522,7 @@ impl MergePermit {
     /// Acquires a merge permit only if a binary update has not begun draining.
     fn acquire(app: &Ax, repo: &str) -> Option<Self> {
         let _transition = app.update_transition.lock().ok()?;
-        if app.drain.load(std::sync::atomic::Ordering::SeqCst) {
+        if app.drain.load(std::sync::atomic::Ordering::SeqCst) || app.hold("watcher") {
             return None;
         }
         let mut active = app.merge_in_progress.lock().ok()?;
@@ -1277,6 +1277,9 @@ mod tests {
             47301,
             "apollo-office".into(),
         ));
+        a.lv.lock().unwrap().o.man = true;
+        assert!(MergePermit::acquire(&a, "croquete1/repo-e2e").is_none());
+        a.lv.lock().unwrap().o.man = false;
         let permit = MergePermit::acquire(&a, "croquete1/repo-e2e").unwrap();
         let other = a.clone();
         let denied = std::thread::spawn(move || {
