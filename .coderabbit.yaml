@@ -1,0 +1,32 @@
+# yaml-language-server: $schema=https://www.coderabbit.ai/integrations/schema.v2.json
+# Advisory reviews for this public repository. Billing is controlled in CodeRabbit, not here.
+language: "en-US"
+reviews:
+  profile: "assertive"
+  request_changes_workflow: false
+  auto_review:
+    enabled: false
+    auto_incremental_review: false
+    drafts: true
+  path_instructions:
+    - path: "src/**"
+      instructions: |
+        Prioritize reproducible correctness and security defects, especially authorization,
+        SQLite transaction boundaries, concurrency, restart recovery, and GitHub HEAD races.
+        Never recommend bypassing independent review, approval, CI, signed updates, or quota gates.
+        Flag paid provider fallback, implicit Qwen activation, and exposure of credentials.
+        Distinguish observed defects from hypotheses. Request regression evidence.
+    - path: "ui/**"
+      instructions: |
+        Preserve the existing agent canvas, characters, animation, layout and interactions.
+        Review operational drawers for access control, escaping, stale responses,
+        accessibility, mobile behavior and preservation of unsaved form data.
+    - path: "quality/**"
+      instructions: |
+        Require realistic regression coverage for the changed behavior.
+        Distinguish isolated mock tests from native suites and production verification.
+        Flag tests that weaken assertions or merely duplicate implementation logic.
+    - path: "docs/**"
+      instructions: |
+        Check that completed work, test results, commit SHAs and unresolved blockers
+        are supported by evidence. Do not equate an AI review with successful CI.
