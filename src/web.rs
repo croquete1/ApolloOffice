@@ -2403,7 +2403,8 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                 if a.db.run(
                     "insert into kv(k,v) values('api',?) on conflict(k) do update set v=excluded.v",
                     pa![json!({"h": th(&t), "t0": now()}).to_string()],
-                ) < 0 {
+                ) < 0
+                {
                     return er(StatusCode::CONFLICT, "token was not saved");
                 }
                 a.say("scout", "new API token created", None);
