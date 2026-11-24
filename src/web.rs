@@ -3372,7 +3372,10 @@ mod t {
         assert_eq!(a.db.n("select count(*) from rp", pa![]), 1);
         assert_eq!(a.db.n("select count(*) from hs where on_=0", pa![]), 1);
         assert_eq!(
-            a.db.n("select coderabbit_review + coderabbit_free_confirmed from rp", pa![]),
+            a.db.n(
+                "select coderabbit_review + coderabbit_free_confirmed from rp",
+                pa![]
+            ),
             0
         );
     }
