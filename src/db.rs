@@ -181,12 +181,14 @@ fn init(c: &mut Connection) -> anyhow::Result<()> {
             |r| r.get(0),
         )?;
         if !autoincrement {
-            let columns: i64 = tx.query_row(
-                "select count(*) from pragma_table_info('jobs')",
-                [],
-                |r| r.get(0),
-            )?;
-            anyhow::ensure!(columns == 13, "unexpected legacy jobs schema; backup required");
+            let columns: i64 =
+                tx.query_row("select count(*) from pragma_table_info('jobs')", [], |r| {
+                    r.get(0)
+                })?;
+            anyhow::ensure!(
+                columns == 13,
+                "unexpected legacy jobs schema; backup required"
+            );
             tx.execute_batch(
                 "create table jobs_v5(id integer primary key autoincrement, repo text, num int, kind text default 'fix', title text, url text, st text, why text default '', d text default '{}', pr int, prio real default 0, t0 int, t1 int);
                  insert into jobs_v5(id,repo,num,kind,title,url,st,why,d,pr,prio,t0,t1)
