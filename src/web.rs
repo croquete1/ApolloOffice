@@ -136,19 +136,19 @@ fn save_repo_settings(db: &crate::db::Db, repo: &str, b: &Value) -> rusqlite::Re
                     .clamp(0, 1);
                 if k == "on_" {
                     tx.execute(
-                        "update rp set coderabbit_epoch=coderabbit_epoch + case when on_<>? then 1 else 0 end,on_=? where full=?",
-                        rusqlite::params![x, x, repo],
+                        "update rp set coderabbit_epoch=coderabbit_epoch + case when on_<>?1 then 1 else 0 end,coderabbit_review_since=case when on_<>?1 and ?1=1 and coderabbit_review=1 and coderabbit_free_confirmed=1 then ?2 else coderabbit_review_since end,on_=?1 where full=?3",
+                        rusqlite::params![x, now(), repo],
                     )?;
                 } else if k == "coderabbit_review" {
                     let at = now();
                     tx.execute(
-                        "update rp set coderabbit_epoch=coderabbit_epoch + case when coderabbit_review<>? then 1 else 0 end,coderabbit_review_since=case when coderabbit_review<>? and ?=1 and coderabbit_free_confirmed=1 then ? else coderabbit_review_since end,coderabbit_review=? where full=?",
+                        "update rp set coderabbit_epoch=coderabbit_epoch + case when coderabbit_review<>? then 1 else 0 end,coderabbit_review_since=case when coderabbit_review<>? and ?=1 and on_=1 and coderabbit_free_confirmed=1 then ? else coderabbit_review_since end,coderabbit_review=? where full=?",
                         rusqlite::params![x, x, x, at, x, repo],
                     )?;
                 } else if k == "coderabbit_free_confirmed" {
                     let at = now();
                     tx.execute(
-                        "update rp set coderabbit_epoch=coderabbit_epoch + case when coderabbit_free_confirmed<>? then 1 else 0 end,coderabbit_review_since=case when coderabbit_free_confirmed<>? and ?=1 and coderabbit_review=1 then ? else coderabbit_review_since end,coderabbit_free_confirmed=? where full=?",
+                        "update rp set coderabbit_epoch=coderabbit_epoch + case when coderabbit_free_confirmed<>? then 1 else 0 end,coderabbit_review_since=case when coderabbit_free_confirmed<>? and ?=1 and on_=1 and coderabbit_review=1 then ? else coderabbit_review_since end,coderabbit_free_confirmed=? where full=?",
                         rusqlite::params![x, x, x, at, x, repo],
                     )?;
                 } else if k == "coderabbit_repair" {
@@ -2762,6 +2762,29 @@ mod t {
         let value: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value["state"], "busy");
         assert_eq!(value["head"], head);
+    }
+
+    #[test]
+    fn repository_reactivation_starts_new_review_eligibility_window() {
+        let db = crate::db::Db::mem();
+        db.run(
+            "insert into rp(full,on_,coderabbit_review,coderabbit_free_confirmed,coderabbit_review_since) values('o/r',1,1,1,100)",
+            pa![],
+        );
+        save_repo_settings(&db, "o/r", &json!({"on_":false})).unwrap();
+        let row = db.one("select * from rp where full='o/r'", pa![]).unwrap();
+        assert_eq!(row["coderabbit_review_since"], 100);
+        let before = now();
+        save_repo_settings(&db, "o/r", &json!({"on_":true})).unwrap();
+        let row = db.one("select * from rp where full='o/r'", pa![]).unwrap();
+        assert!(row["coderabbit_review_since"].as_i64().unwrap() >= before);
+        save_repo_settings(&db, "o/r", &json!({"on_":true})).unwrap();
+        let unchanged = db.one("select * from rp where full='o/r'", pa![]).unwrap();
+        assert_eq!(
+            row["coderabbit_review_since"],
+            unchanged["coderabbit_review_since"]
+        );
+        assert_eq!(row["coderabbit_epoch"], unchanged["coderabbit_epoch"]);
     }
 
     #[test]
