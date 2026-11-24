@@ -1342,6 +1342,56 @@ mod t {
         assert_eq!(resumed.c, 0, "{}", resumed.all());
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires disposable loopback SSH server"]
+    async fn real_ssh_worker_transport() {
+        assert_eq!(
+            std::env::var("APOLLO_OFFICE_REAL_SSH").as_deref(),
+            Ok("1")
+        );
+        let db = crate::db::Db::mem();
+        db.run(
+            "insert into hs(id,ssh,dk,on_,ln,ci) values('ssh-ci','apollo-ci-ssh',0,1,1,1)",
+            pa![],
+        );
+        let a = std::sync::Arc::new(App::new(
+            db,
+            std::env::temp_dir(),
+            1,
+            "apollo-office".into(),
+        ));
+        let host = ho(&a, "ssh-ci").unwrap();
+        assert!(std::env::var_os("SSH_AUTH_SOCK").is_some());
+        assert!(std::env::var_os("APOLLO_FIXTURE_API_KEY").is_some());
+        let probe = hraw(
+            &host,
+            "set -e; test -z \"$SSH_AUTH_SOCK\"; test -z \"$APOLLO_FIXTURE_API_KEY\"; printf '%s' ssh-ok",
+            30,
+        )
+        .await;
+        assert_eq!(probe.c, 0, "{}", probe.all());
+        assert_eq!(probe.o, "ssh-ok");
+        let streamed = hx(
+            &a,
+            "ssh-ci",
+            &format!(": '{}'\nprintf '%s' stream-ok", "a".repeat(200_000)),
+            60,
+        )
+        .await;
+        assert_eq!(streamed.c, 0, "{}", streamed.all());
+        assert_eq!(streamed.o, "stream-ok");
+        let failed = hx(
+            &a,
+            "ssh-ci",
+            "printf '%s' fixture-error >&2; exit 23",
+            30,
+        )
+        .await;
+        assert_eq!(failed.c, 23, "{}", failed.all());
+        assert!(failed.e.contains("fixture-error"));
+    }
+
     #[test]
     fn docker_cpu_cap_respects_daemon_ceiling() {
         assert_eq!(cap_docker_cpu(16, Some(12), 0), 12);
