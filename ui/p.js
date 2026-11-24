@@ -639,6 +639,37 @@
   };
   A.health = health;
 
+  // Task drawer logs only: no changes to the agent canvas or its activity feed.
+  const filterJobLogs = (events, worker, query) => {
+    const needle = String(query || "").trim().toLowerCase();
+    return events.filter(e => (!worker || e.w === worker) &&
+      (!needle || String(e.m ?? "").toLowerCase().includes(needle)));
+  };
+  const logRows = (events) => events.map(e =>
+    `<div><span class="tm">${esc(new Date(e.t).toLocaleTimeString("en-GB", {hour:"2-digit",minute:"2-digit"}))}</span><span>${esc(e.w)}</span><span>${esc(e.m)}</span></div>`
+  ).join("");
+  const jobLogPanel = (events) => {
+    const workers = [...new Set(events.map(e=>e.w).filter(w=>typeof w==="string" && w))].sort();
+    return `<div class="sec"><h4>Registo de atividade</h4><div class="fm">
+      <label for="jobLogWorker">Agente</label><select id="jobLogWorker"><option value="">Todos</option>${workers.map(w=>`<option value="${esc(w)}">${esc(w)}</option>`).join("")}</select>
+      <label for="jobLogSearch">Pesquisar mensagens</label><input type="search" id="jobLogSearch" placeholder="Pesquisar no registo">
+      <label class="ck"><input type="checkbox" id="jobLogWrap" checked> Quebrar linhas</label>
+      <div class="hint" id="jobLogCount" aria-live="polite"></div></div>
+      <div class="log" id="jobLogRows"></div></div>`;
+  };
+  const bindJobLogs = (events) => {
+    const worker = $("jobLogWorker"), search = $("jobLogSearch"), wrap = $("jobLogWrap");
+    const rows = $("jobLogRows"), count = $("jobLogCount");
+    const render = () => {
+      const matching = filterJobLogs(events, worker.value, search.value);
+      rows.innerHTML = logRows(matching) || '<div class="empty">Sem mensagens correspondentes.</div>';
+      rows.classList.toggle("job-log-nowrap", !wrap.checked);
+      count.textContent = matching.length + " de " + events.length + " mensagens recebidas";
+    };
+    worker.onchange = render; search.oninput = render; wrap.onchange = render;
+    render();
+  };
+
   const job = async (id) => {
     const j = await get("/api/job?id=" + id);
     if (j.error) return;
@@ -671,14 +702,16 @@
       </div></div>`;
     const retry = window.AO.retryStates?.get(id);
     const cs = j.cost && j.cost.n ? `<div class="msg">Cost: ${j.cost.usd != null ? usd(j.cost.usd) + " API" : ""}${j.cost.usd != null && j.cost.val != null ? " · " : ""}${j.cost.val != null ? usd(j.cost.val) + " login value" : ""}${j.cost.usd == null && j.cost.val == null ? "unknown" : ""} · ${Math.round((j.cost.ti || 0) / 1000)}k in, ${Math.round((j.cost.tou || 0) / 1000)}k out</div>` : "";
-    const ev = (j.ev || []).map((e) => `<div><span class="tm">${new Date(e.t).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}</span><span>${esc(e.w)}</span><span>${esc(e.m)}</span></div>`).join("");
+    const events = Array.isArray(j.ev) ? j.ev.filter(e=>e && typeof e==="object") : [];
+    const logs = jobLogPanel(events);
     if (j.st === "approve") {
       B.innerHTML = `<div class="sec"><div class="box"><div class="hd2"><b>${esc(j.repo)}${j.num ? " #" + j.num : j.ext ? " (reported by " + esc(j.ext) + ")" : " (found by Hunter)"}</b>${j.url ? `<a class="a" href="#" data-u="${esc(j.url)}">${j.num ? "open issue" : "open repository"}</a>` : ""}</div><div class="msg">Tipo: ${esc(work)} · Built and tested on ${esc(j.h || "")}. Nothing is on GitHub yet.</div>${cs}</div></div>
       <div class="sec"><h4>Pull request</h4><input type="text" id="pt" value="${esc(j.pt || j.title)}"><textarea id="pb" style="min-height:220px;margin-top:8px">${esc(j.pb || "")}</textarea></div>
       ${j.proof ? `<div class="sec"><h4>Proof</h4><pre class="df">${esc((j.proof.a || "") + "\n\n" + (j.proof.b || ""))}</pre></div>` : ""}
       <div class="sec"><h4>Diff</h4>${dview(j.df)}</div>
       <div class="acts"><button class="pri" id="ba">Submit pull request</button><button class="dng" id="bd">Drop</button></div><div class="msg" id="jm"></div>
-      <div class="sec" style="margin-top:20px"><h4>Log</h4><div class="log">${ev}</div></div>`;
+      ${logs}`;
+      bindJobLogs(events);
       $("ba").onclick = async () => {
         busy($("ba"), true, "Submitting…");
         const r = await post({ a: "approve", id, pt: $("pt").value, pb: $("pb").value });
@@ -697,7 +730,8 @@
       ${adaptiveRoute}
       ${failure}
       ${j.df ? `<div class="sec"><h4>Diff</h4>${dview(j.df)}</div>` : ""}
-      <div class="sec"><h4>Log</h4><div class="log">${ev || `<div class="empty">nothing yet</div>`}</div></div>`;
+      ${logs}`;
+    bindJobLogs(events);
     const scheduling = $("jobSchedule");
     if (scheduling) scheduling.onsubmit = async (event) => {
       event.preventDefault();
