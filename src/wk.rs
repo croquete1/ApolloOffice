@@ -1483,9 +1483,10 @@ async fn watch_pr(a:&Ax,p:Value,me:&str,
             a.db.ks(&wk,&json!(now()));
             return Ok(());
         }
+        let has_pending = a.db.has_pending_review(&r,n).map_err(|e|X::E(e.to_string()))?;
         let ag = p["upd"].as_str().and_then(|u| chrono::DateTime::parse_from_rfc3339(u).ok()).map(|u| now() - u.timestamp_millis()).unwrap_or(0);
         let gap = if ag > 14 * 86_400_000 { 6 * 3_600_000 } else if ag > 7 * 86_400_000 { 3_600_000 } else { 0 };
-        if gap > 0 {
+        if gap > 0 && !has_pending {
             let sk = format!("ws:{r}#{n}");
             if !lu.contains_key(&r) {
                 let m: std::collections::HashMap<i64, String> = ghj(&["pr", "list", "-R", &r, "--state", "open", "--author", "@me", "--limit", "1000", "--json", "number,updatedAt"], 120).await.ok().and_then(|v| v.as_array().cloned()).unwrap_or_default().iter().map(|x| (x["number"].as_i64().unwrap_or(0), x["updatedAt"].as_str().unwrap_or("").to_string())).collect();
@@ -1544,7 +1545,7 @@ async fn watch_pr(a:&Ax,p:Value,me:&str,
             a.say("watcher", &format!("{tag} has a merge conflict, sent to rebase"), None);
         }
         observe_auto_merge(a, &r, n, &v, &p["d"], me)?;
-        if p["d"]["comment_seen_at"].as_str() == Some(up.as_str()) && p["d"]["watcher_head"]==source_head && p["d"]["seen"].as_bool().unwrap_or(false) {
+        if !has_pending && p["d"]["comment_seen_at"].as_str() == Some(up.as_str()) && p["d"]["watcher_head"]==source_head && p["d"]["seen"].as_bool().unwrap_or(false) {
             a.db.ks(&format!("ws:{tag}"),&json!(now()));
             return Ok(());
         }
@@ -1573,6 +1574,11 @@ async fn watch_pr(a:&Ax,p:Value,me:&str,
         }
         let received_ids: Vec<String> = nw.iter().filter_map(|c| c["id"].as_str().map(String::from)).collect();
         a.db.receive_review_batch(&r,n,&up,&source_head,&received_ids).map_err(|e|X::E(e.to_string()))?;
+        if !received_ids.is_empty() || a.db.has_pending_review(&r,n).map_err(|e|X::E(e.to_string()))? {
+            if !a.db.claim_review_attempt(&r,n,&up,&source_head,now()).map_err(|e|X::E(e.to_string()))? {
+                return Ok(());
+            }
+        }
         let mut batch_acked = false;
         let mut outbound=Value::Null;
         if first && !nw.is_empty() {
