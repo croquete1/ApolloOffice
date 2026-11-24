@@ -1444,6 +1444,11 @@ fn pending_checked(cs:Vec<Value>,last:&str)->R<Vec<Value>>{
 fn same_review_snapshot(original:&Value,fresh:&Value)->bool{
     original["state"]=="OPEN" && fresh["state"]=="OPEN"
         && original["headRefOid"].as_str().is_some_and(crate::db::valid_git_sha)
+        && original["updatedAt"].as_str().and_then(issue_updated_at).is_some()
+        && original["headRefName"].as_str().is_some_and(|s|!s.trim().is_empty())
+        && original["baseRefName"].as_str().is_some_and(|s|!s.trim().is_empty())
+        && original["headRepositoryOwner"]["login"].as_str().is_some_and(|s|!s.trim().is_empty())
+        && original["headRepository"]["name"].as_str().is_some_and(|s|!s.trim().is_empty())
         && ["headRefOid","updatedAt","headRefName","headRepositoryOwner","headRepository","baseRefName","reviewDecision"].iter().all(|key|original[*key]==fresh[*key])
 }
 
