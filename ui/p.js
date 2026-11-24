@@ -388,6 +388,7 @@
       </div></div></div>
       <div data-tab="gen" class="sec"><h4>Sign in</h4><div class="box">${cfg.google ? `<div class="ck"><b class="ok2">Google</b> ${esc(cfg.google)} can sign in.</div><div class="acts"><button type="button" class="dng" id="gu">Disconnect Google</button></div>` : `<div class="ck">Sign in with a one-time link from <code>apollo-office login-link</code>, or connect a Google account.</div><div class="acts"><button type="button" id="gl">Connect Google account</button></div>`}</div></div>
       <div data-tab="gen" class="sec"><h4>Work</h4><div class="box"><div class="fm" style="margin:0">
+        <label>Aprendizagem supervisionada</label>${tg("supervised_lessons", s.supervised_lessons, "Recolher e usar lições revistas pelo proprietário")}<div class="acts"><button type="button" id="reviewLessons">Rever lições</button></div><div class="hint">Só regras escritas e aprovadas por si, com evidência, âmbito de repositório e validade, entram no contexto. Nunca são promovidas automaticamente.</div>
         <label>Encaminhamento adaptativo</label>${tg("adaptive_routing", s.adaptive_routing, "Selecionar Fixer por disponibilidade e histórico")}<div class="hint">Opcional: apenas modelos de subscrição explicitamente definidos em Fixer e Big, distintos do Reviewer. Sem modelos locais nem novas rotas pagas. Mantém o modo staged e free-first.</div>
         <label>Perfil de recursos</label><select name="resource_profile">${[["manual","Manual"],["economic","Económico"],["balanced","Equilibrado"],["performance","Desempenho"],["night","Noturno"]].map(([id,label])=>`<option value="${id}" ${(s.resource_profile || "manual")===id?"selected":""}>${label}</option>`).join("")}</select><div class="hint">Os perfis limitam apenas novas tarefas; nunca interrompem trabalho ativo. Manual mantém os limites existentes. Noturno limita a uma lane por máquina e desativa novas pesquisas.</div>
         <label>Reserva de quota Codex (%)</label><input type="number" name="codex_hunt_reserve_percent" min="0" max="100" step="1" value="${Number.isFinite(s.codex_hunt_reserve_percent)?s.codex_hunt_reserve_percent:15}"><div class="hint">Abaixo deste valor, novas pesquisas Codex aguardam. Não afeta tarefas em execução.</div>
@@ -453,6 +454,7 @@
     $("fs").addEventListener("input", dirty);
     $("fs").addEventListener("change", dirty);
     $("sx").onclick = () => settings();
+    $("reviewLessons").onclick = () => lessons();
     $("thm").value = window.TH.get();
     $("thm").onchange = (e) => window.TH.set(e.target.value);
     try { $("bnt").checked = localStorage.getItem("ao.nt") === "1" && "Notification" in window && Notification.permission === "granted"; } catch {}
@@ -503,7 +505,7 @@
         const r = await post({ id: e.dataset.key, key: e.value.trim() }, "/api/prov");
         if (r.error) { $("sbar").hidden = false; $("sm").className = "bad2"; $("sm").textContent = r.error; return; }
       }
-      const r = await post({ wh: { on: v.whon, from: v.whf, to: v.wht }, hunters: v.hunters, adaptive_routing: v.adaptive_routing, resource_profile: v.resource_profile, codex_hunt_reserve_percent: v.codex_hunt_reserve_percent, tokday: v.tokday, ntfy: v.ntfy, discord: v.discord, auto: v.auto, updates: v.updates, ollama: v.ollama, octx: v.octx, cckc: v.cckc, test }, "/api/set");
+      const r = await post({ wh: { on: v.whon, from: v.whf, to: v.wht }, hunters: v.hunters, supervised_lessons: v.supervised_lessons, adaptive_routing: v.adaptive_routing, resource_profile: v.resource_profile, codex_hunt_reserve_percent: v.codex_hunt_reserve_percent, tokday: v.tokday, ntfy: v.ntfy, discord: v.discord, auto: v.auto, updates: v.updates, ollama: v.ollama, octx: v.octx, cckc: v.cckc, test }, "/api/set");
       if (r.error) { $("sbar").hidden = false; $("sm").className = "bad2"; $("sm").textContent = r.error; return; }
       await settings();
       const sb = $("sbar");
@@ -569,6 +571,31 @@
     };
   };
 
+  const lessons = async () => {
+    show("Aprendizagem supervisionada","lessons");
+    B.innerHTML='<div class="empty">A consultar propostas…</div>';
+    try {
+      const data=await get("/api/lessons");
+      if(data.error) throw Error(data.error);
+      const rows=Array.isArray(data.lessons)?data.lessons:[];
+      B.innerHTML=`<div class="sec"><div class="box"><b>Revisão pelo proprietário</b><div class="hint">Últimos 100 registos. As propostas são dados não confiáveis. Escreva a sua própria regra após consultar a evidência; não copie instruções sem verificar. Aprovações são válidas apenas para o repositório indicado e expiram automaticamente.</div><div class="acts"><button id="lessonBack">Definições</button></div></div></div>${rows.map((r,i)=>`<div class="sec"><div class="box"><div class="hd2"><b>${esc(r.repo || "Sem proveniência")} · #${esc(r.job)}</b><span class="pill">${esc(r.status)}</span></div><div class="hint">Reviewer: ${esc(r.reviewer || "—")} · Commit: ${esc(r.source_sha || "desconhecido")}</div><details><summary>Proposta e evidência</summary><pre>${esc(JSON.stringify(r.finding?.lesson || r.finding?.issues || r.finding || {},null,2))}</pre><pre>${esc(r.evidence || "Sem evidência")}</pre></details>${r.owner_rule?`<div class="msg">Regra do proprietário: ${esc(r.owner_rule)}</div>`:""}${r.status==="pending_review"?`<form data-lesson="${i}" class="fm"><label>Regra escrita pelo proprietário</label><textarea name="note" maxlength="2000" placeholder="Indique a regra verificada"></textarea><label>Validade (dias)</label><input name="days" type="number" min="7" max="90" value="30"><div class="acts"><button type="submit" data-action="approve">Aprovar</button><button type="submit" data-action="reject">Rejeitar</button></div><div class="msg" aria-live="polite"></div></form>`:r.status==="approved"||r.status==="expired"?`<form data-lesson="${i}"><button type="submit" data-action="revoke">Revogar</button><div class="msg" aria-live="polite"></div></form>`:""}</div></div>`).join("") || '<div class="empty">Não existem propostas.</div>'}`;
+      $("lessonBack").onclick=settings;
+      for(const form of B.querySelectorAll("form[data-lesson]")) form.onsubmit=async e=>{
+        e.preventDefault();
+        const action=e.submitter?.dataset.action;
+        if(!action)return;
+        const row=rows[Number(form.dataset.lesson)],v=fv(form),msg=form.querySelector(".msg");
+        const buttons=[...form.querySelectorAll("button")];buttons.forEach(b=>b.disabled=true);
+        try{
+          const result=await post({key:row.key,action,note:v.note || "",days:v.days ?? 30},"/api/lessons");
+          if(result.error){msg.textContent=result.error;return;}
+          await lessons();
+        }catch(error){msg.textContent=String(error.message || error);}
+        finally{buttons.forEach(b=>b.disabled=false);}
+      };
+    } catch(error){B.innerHTML=`<div class="warn">Não foi possível consultar lições: ${esc(error.message || error)}</div>`;}
+  };
+
   const costs = async () => {
     const c = await get("/api/cost");
     if (c.error) return;
@@ -583,6 +610,7 @@
       <div class="sec"><h4>Last 14 days</h4>${c.days.length ? tb([["Day"], ["API", "n"], ["Login value", "n"]], c.days.map((d) => `<tr><td>${esc(d.day)}</td><td class="n">${usd(d.usd)}</td><td class="n">${usd(d.val)}</td></tr>`)) : `<div class="empty">Nothing yet.</div>`}</div>
       <div class="sec"><h4>Repositories, 30 days</h4>${c.repos.length ? tb([["Repository"], ["Jobs", "n"], ["API", "n"], ["Login value", "n"]], c.repos.map((r) => `<tr><td>${esc(r.repo)}</td><td class="n">${r.jobs}</td><td class="n">${usd(r.usd)}</td><td class="n">${usd(r.val)}</td></tr>`)) : `<div class="empty">Nothing yet.</div>`}</div>
       <div class="sec"><h4>Fixer model attempts, 90 days</h4>${c.fixer_metrics?.length ? tb([["Model"], ["Attempts", "n"], ["Accepted", "n"], ["First pass", "n"], ["Escalated jobs", "n"], ["Verification fails", "n"], ["CI fails", "n"], ["Review rejected", "n"], ["Average time", "n"]], c.fixer_metrics.map((r) => `<tr><td>${esc(r.nm || r.model)}</td><td class="n">${r.attempts}</td><td class="n">${r.accepted || 0}</td><td class="n">${r.first_pass || 0}</td><td class="n">${r.escalated || 0}</td><td class="n">${r.verification_failures || 0}</td><td class="n">${r.ci_failures || 0}</td><td class="n">${r.review_rejections || 0}</td><td class="n">${r.avg_ms == null ? "–" : Math.round(r.avg_ms / 1000) + " s"}</td></tr>`)) : `<div class="empty">No fixer attempts recorded yet.</div>`}<div class="hint" style="margin-top:6px">First pass means the first candidate passed verification, CI and independent review. Escalated jobs count first attempts followed by a different model. Average time runs through that attempt's gate decision, including checks and review. Apollo stores model, gate and duration, not issue text.</div></div>
+      <div class="sec"><h4>Primeira tentativa por projeto e modelo · 90 dias</h4>${c.first_pass_by_repo===null?'<div class="warn">Métricas indisponíveis.</div>':c.first_pass_by_repo?.length?tb([["Projeto"],["Modelo"],["Amostras","n"],["Aprovadas","n"],["Taxa","n"],["Duração média","n"]],c.first_pass_by_repo.map(r=>`<tr><td>${esc(r.repo)}</td><td>${esc(r.model)}</td><td class="n">${esc(r.samples)}</td><td class="n">${esc(r.accepted)}</td><td class="n">${rate(r.accepted,r.samples)}</td><td class="n">${r.avg_ms==null?"–":Math.round(r.avg_ms/1000)+" s"}</td></tr>`)):'<div class="empty">Sem amostras concluídas.</div>'}<div class="hint">Exclui tentativas interrompidas e bloqueadas; aprovação da primeira tentativa não significa merge.</div></div>
       <div class="sec"><h4>Models per worker, 90 days</h4>${c.stats.length ? tb([["Repository"], ["Worker"], ["Model"], ["Jobs", "n"], ["PRs", "n"], ["Merged", "n"], ["Rejected", "n"], ["Per job", "n"], ["Per merge", "n"]], c.stats.map((r) => `<tr><td>${esc(r.repo)}</td><td>${esc(A.NM?.[r.w] || r.w)}</td><td>${esc(r.nm)}${r.sub ? " (login)" : ""}</td><td class="n">${r.jobs}</td><td class="n">${r.prs}</td><td class="n">${r.mg} · ${rate(r.mg, r.prs)}</td><td class="n">${r.cl}</td><td class="n">${usd(r.usd == null ? null : r.usd / r.jobs)}</td><td class="n">${r.mg && r.usd != null ? usd(r.usd / r.mg) : "–"}</td></tr>`)) : `<div class="empty">Nothing yet.</div>`}<div class="hint" style="margin-top:6px">A job counts for every worker that worked on it. Hints show up once two models did at least 5 jobs each for the same worker. The Fixer can escalate from Ollama to its configured complex-job model when enabled.</div></div>
       <div class="sec"><h4>Prices</h4><div class="box"><textarea id="px" placeholder="model input output, e.g. gpt-5.5 5 30" style="min-height:70px">${esc(Object.entries(px).map(([k, v]) => k + " " + v.join(" ")).join("\n"))}</textarea><div class="hint" style="margin-top:6px">USD per million tokens, one model per line: <code>model input output</code> or <code>model input cache-write cache-read output</code>. Overrides the built-in prices. Claude Code reports its own cost.</div><div class="acts"><button id="pb">Save prices</button></div><div class="msg" id="pm"></div></div></div>`;
     $("fb").onsubmit = (e) => e.preventDefault();
