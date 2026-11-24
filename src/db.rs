@@ -720,6 +720,39 @@ impl Db {
         Ok(())
     }
 
+    /// Admit a Watcher rebase only against the observed open PR, and serialize
+    /// admission with review and mergecheck jobs in the same SQLite transaction.
+    pub fn queue_watcher_rebase(
+        &self,repo:&str,number:i64,updated:&str,head:&str,request:&Value
+    )->rusqlite::Result<bool>{
+        let mut c=self.0.lock().unwrap();
+        let tx=c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if !Self::review_snapshot_matches(&tx,repo,number,updated,head)?{
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let active:bool=tx.query_row(
+            "select exists(select 1 from jobs where repo=? and pr=? and ((kind in ('review','rebase','mergecheck') and st not in ('done','drop')) or (kind='rebase' and t1>?)))",
+            rusqlite::params![repo,number,now()-86_400_000],|r|r.get(0))?;
+        if active{return Ok(false);}
+        let title=request["title"].as_str().ok_or(rusqlite::Error::InvalidQuery)?;
+        let url=request["url"].as_str().ok_or(rusqlite::Error::InvalidQuery)?;
+        let why=request["why"].as_str().filter(|s|!s.trim().is_empty()).ok_or(rusqlite::Error::InvalidQuery)?;
+        let mut data=request["data"].as_object().cloned().ok_or(rusqlite::Error::InvalidQuery)?;
+        for key in ["branch","head"] {
+            if !data.get(key).and_then(Value::as_str).is_some_and(|s|!s.trim().is_empty()){
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+        }
+        data.insert("watcher_observed_head".into(),json!(head));
+        data.insert("watcher_observed_at".into(),json!(updated));
+        let t=now();
+        tx.execute("insert into jobs(repo,num,kind,title,url,st,why,d,pr,prio,t0,t1) values(?,?,'rebase',?,?,'ready',?,?,?,-1.0,?,?)",
+            rusqlite::params![repo,number,title,url,why,json!(data).to_string(),number,t,t])?;
+        tx.commit()?;
+        crate::app::chg();
+        Ok(true)
+    }
+
     /// Queue a review and acknowledge its source comments in the same transaction.
     /// If another review is active, do not acknowledge the batch: retry it later.
     pub fn queue_review_and_ack(
@@ -1495,5 +1528,27 @@ mod watcher_receipt_lifecycle_tests {
         assert_eq!(db.n("select count(*) from watcher_inbox where state='received'",vec![]),2);
         db.run("delete from prs where repo='o/r' and num=1",vec![]);
         assert_eq!(db.n("select count(*) from watcher_inbox where state='superseded'",vec![]),2);
+    }
+}
+
+#[cfg(test)]
+mod watcher_rebase_admission_tests {
+    use super::*;
+    const HEAD:&str="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    #[test]
+    fn rebase_admission_respects_snapshot_and_other_pr_operations(){
+        let db=Db::mem();
+        db.run("insert into prs(repo,num,st,upd,d) values('o/r',1,'open','t',?)",crate::pa![json!({"watcher_head":HEAD}).to_string()]);
+        let request=json!({"title":"PR","url":"https://github.com/o/r/pull/1","why":"conflict","data":{"branch":"fix","head":"o/r"}});
+        assert!(db.queue_watcher_rebase("o/r",1,"wrong",HEAD,&request).is_err());
+        let job=db.jnew("o/r",1,"review","PR","url","ready","review",json!({}),Some(1),-1.0);
+        assert!(!db.queue_watcher_rebase("o/r",1,"t",HEAD,&request).unwrap());
+        db.run("update jobs set st='done' where id=?",crate::pa![job]);
+        assert!(db.queue_watcher_rebase("o/r",1,"t",HEAD,&request).unwrap());
+        assert!(!db.queue_watcher_rebase("o/r",1,"t",HEAD,&request).unwrap());
+        let row=db.one("select * from jobs where kind='rebase'",vec![]).unwrap();
+        assert_eq!(row["d"]["watcher_observed_head"],HEAD);
+        db.run("update jobs set st='done' where kind='rebase'",vec![]);
+        assert!(!db.queue_watcher_rebase("o/r",1,"t",HEAD,&request).unwrap());
     }
 }
