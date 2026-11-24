@@ -85,6 +85,7 @@ Estas PRs estão em draft e **não estão integradas**. A main funcional continu
 | F14 | Implementação base integrada (#56) | Teste de persistência/reinício, perfis em máquinas reais e limites de CI |
 | F15 | Parcial (#56/#58/#59) | Próxima tarefa elegível, diagnóstico central de todos os bloqueios, histórico de etapas |
 | F16 | Parcial (#58/#59) | Tempo por fase e custo/merge com dados completos, baseline comparável, QA real Docker/Windows/providers, release assinada |
+| F17 | Em desenvolvimento (#76/#77) | Elegibilidade OSS e faturação efetivamente verificadas; limites de quota globais; validação Rust/CI/CodeRabbit; integração funcional e segurança ponta-a-ponta |
 
 Nenhuma fase completa é declarada encerrada sem cumprir todos os critérios abaixo. A última bateria automatizada tem 395 aprovações, não a soma de execuções repetidas.
 
@@ -162,3 +163,22 @@ Nenhuma fase completa é declarada encerrada sem cumprir todos os critérios aba
 
 ## Sequência
 Integrar PRs apenas após revisão e testes, uma fase de cada vez. Não ativar Qwen. Não alterar main ou instalação em produção sem evidência. Atualizar este ficheiro com PR, SHA e resultado dos testes de cada fase.
+
+## F17 / P1 — CodeRabbit OSS e correções consultivas
+
+### Estado observado em 24/11/2026
+- Antes desta atualização, #76 estava aberta e em draft (HEAD `c298b22fb058e272ed728248c589e97e4305a261`) e #77 estava aberta e em draft (HEAD `88d61323c139ff51ed2839fa852990790aa93de3`). Main mantém `2e8d1a14e9468fcaa600291b9926cd0a1a52a606`; nenhuma destas alterações está integrada.
+- CodeRabbit apresenta `Advanced Monthly Trial`, com fim indicado em 08/12/2026 e mensagem de passagem para Free sem cobrança. Produtos de consumo adicional (reviews por ficheiro, Deep Scan e CodeRabbit Agent) aparecem desligados; a página de faturas não mostra lançamentos. A elegibilidade OSS após o trial não está confirmada; não pedir novas revisões nem ativar pedidos automáticos até a conta mostrar claramente o plano gratuito elegível.
+- Definições guardadas para o repositório: `Assertive`, `pt-PT`, auto review OFF, incremental review OFF, drafts ON e review status ON. `.coderabbit.yaml` fixa também `request_changes_workflow: false`. Autofix e produtos pagos permanecem desligados. A inclusão de cada ferramenta de segurança no plano gratuito não está comprovada.
+- A instalação GitHub do CodeRabbit está em `Only select repositories`, com apenas `croquete1/ApolloOffice` selecionado; o repositório é público. A instalação lista leitura de metadados/ações/discussões e escrita em checks, código, statuses, issues, PRs e workflows. Não foram concedidos nem removidos acessos. Embora o painel CodeRabbit liste 42 registos (incluindo 29 com metadados privados), a instalação GitHub consultada não tem nenhum repositório privado selecionado; não remover acessos sem nova confirmação do proprietário.
+- Implementação em #77, ainda não validada nem integrada: toggles por repositório desligados por omissão; atestação explícita separada de Free OSS como pré-condição de pedidos; comentários via GitHub, apenas PR pública própria e monitorizada; deduplicação repo/PR/SHA; limite local de 3 pedidos/hora e 2 por PR (não representa a quota global da conta); persistência SQLite e reconciliação sem reenvio quando o resultado é incerto.
+- Findings atuais do bot são filtrados por identidade numérica/login/tipo, HEAD e thread aberta. O Guard verifica texto externo delimitado; só depois o Fixer existente recebe as hipóteses. Os gates de testes/CI e Reviewer independente permanecem obrigatórios. O Steward já bloqueia merges quando existe qualquer thread de revisão não resolvida; CodeRabbit nunca aprova nem ganha autoridade de merge.
+- Nenhum pedido CodeRabbit foi emitido nesta etapa, pois a conta continua em trial e não há prova de elegibilidade OSS gratuita permanente. Na árvore de trabalho preparada para a PR, `node --test` passou 122/122, `python3 -m unittest discover -s quality -p 'test_*.py'` passou 5/5, `python3 -m unittest discover -s adapters/opencode -p 'test_*.py'` passou 29/29 e `node --check ui/p.js`/`git diff --check` passaram. O smoke de Chromium não pôde arrancar por restrições de socket do ambiente. Cargo, rustc e rustfmt não estão instalados, por isso Rustfmt, Clippy, testes Rust e Release aguardam o CI existente; resultado CI pendente após atualização da PR.
+
+### Critérios de aceitação
+- [ ] Confirmar no painel CodeRabbit que ApolloOffice está elegível no Free OSS após o trial e que pay-as-you-go, produtos pagos e autofix estão desligados; conservar evidência verificável. Sem confirmação, manter os dois toggles de pedido em OFF.
+- [ ] Validar configuração por repositório (`pt-PT`, Assertive, auto/incremental OFF, drafts/status ON, request changes OFF) e confirmar no GitHub que só o ApolloOffice está selecionado. Não expandir acesso a privados.
+- [ ] Rever e testar a implementação em #77: ativação individual e atestação de elegibilidade; quota/deduplicação; inventários paginados completos; identidade e HEAD; persistência/reinício; Guard/Fixer, testes pós-fix e uma revisão CodeRabbit de seguimento, com ciclos limitados.
+- [ ] Testar instruções maliciosas em comentários, edição/resolução durante Guard, alterações de HEAD, API incompleta/rate limit e reinício entre pedido e confirmação. Falhar fechado quando a evidência estiver incompleta.
+- [ ] Manter auto review e incremental OFF no CodeRabbit; não usar CodeRabbit Agent, autofix, APIs pagas, Qwen ou novos GitHub Actions. Manter comentários consultivos, testes, Reviewer independente e gates de merge como autoridade.
+- [ ] Obter e registar o resultado do CI da PR #77 atualizada, incluindo Rustfmt, Clippy, testes Rust, Node, Python, integração, Chromium e Release. Só considerar merge após resultados publicados, revisão independente e revisão CodeRabbit comprovadamente gratuita; nunca fazer merge a partir de um comentário do bot.

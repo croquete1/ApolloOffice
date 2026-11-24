@@ -10,7 +10,7 @@ const SCH: &str = "
 create table if not exists kv(k text primary key, v text);
 create table if not exists ses(id text primary key, exp int);
 create table if not exists lnk(c text primary key, exp int);
-create table if not exists rp(id integer primary key, full text unique, iss int default 1, hunt int default 0, ci text default '', setup text default '', rules text default '', mode text default 'ask', merge int default 1, maxo int default 3, maxd int default 5, ai int default 1, on_ int default 1, t0 int);
+create table if not exists rp(id integer primary key, full text unique, iss int default 1, hunt int default 0, ci text default '', setup text default '', rules text default '', mode text default 'ask', merge int default 1, maxo int default 3, maxd int default 5, ai int default 1, on_ int default 1, t0 int, coderabbit_review int default 0, coderabbit_repair int default 0, coderabbit_epoch int default 0, coderabbit_review_since int default 0, coderabbit_free_confirmed int default 0);
 create table if not exists hs(id text primary key, ssh text default '', dk int default 0, ln int default 1, ci int default 1, gb int default 50, raw int default 0, on_ int default 1, t0 int);
 create table if not exists jobs(id integer primary key, repo text, num int, kind text default 'fix', title text, url text, st text, why text default '', d text default '{}', pr int, prio real default 0, t0 int, t1 int);
 create index if not exists jobs_st on jobs(st);
@@ -31,6 +31,10 @@ create index if not exists cost_job on cost(job);
 create table if not exists fix_attempts(id integer primary key, job int not null, attempt int not null, model text not null, started int not null, finished int, elapsed_ms int, outcome text not null default 'running', gate text not null default '');
 create index if not exists fix_attempts_started on fix_attempts(started);
 create index if not exists fix_attempts_job on fix_attempts(job, attempt);
+create table if not exists coderabbit_requests(repo text not null, number int not null, head text not null, status text not null, requested_at int not null, activation int not null, comment_id int, error text default '', primary key(repo,number,head));
+create index if not exists coderabbit_requests_recent on coderabbit_requests(requested_at,status);
+create table if not exists coderabbit_findings(repo text not null, number int not null, comment_id int not null, review_id int not null, head text not null, state text not null, severity text not null, body_hash text not null, activation int not null, job int, created_at int not null, updated_at int not null, primary key(repo,number,comment_id,head));
+create index if not exists coderabbit_findings_pr on coderabbit_findings(repo,number,head,state);
 ";
 
 const SCHEMA_VERSION: i64 = 1;
@@ -84,6 +88,31 @@ const LEGACY_COLUMNS: &[(&str, &str, &str)] = &[
         "rp",
         "steward_close",
         "alter table rp add column steward_close int default 0",
+    ),
+    (
+        "rp",
+        "coderabbit_review",
+        "alter table rp add column coderabbit_review int default 0",
+    ),
+    (
+        "rp",
+        "coderabbit_repair",
+        "alter table rp add column coderabbit_repair int default 0",
+    ),
+    (
+        "rp",
+        "coderabbit_epoch",
+        "alter table rp add column coderabbit_epoch int default 0",
+    ),
+    (
+        "rp",
+        "coderabbit_review_since",
+        "alter table rp add column coderabbit_review_since int default 0",
+    ),
+    (
+        "rp",
+        "coderabbit_free_confirmed",
+        "alter table rp add column coderabbit_free_confirmed int default 0",
     ),
     (
         "rp",
@@ -1014,14 +1043,14 @@ mod strict_db_tests {
         c.execute_batch("create table rp(id integer primary key, full text, auto_merge int default 0); insert into rp(full,auto_merge) values('o/r',1)").unwrap();
         init(&mut c).unwrap();
         init(&mut c).unwrap();
-        let values: (i64, i64, i64) = c
+        let values: (i64, i64, i64, i64, i64, i64) = c
             .query_row(
-                "select auto_merge,steward_repair,local_merge from rp where full='o/r'",
+                "select auto_merge,steward_repair,local_merge,coderabbit_review,coderabbit_repair,coderabbit_free_confirmed from rp where full='o/r'",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
             )
             .unwrap();
-        assert_eq!(values, (1, 0, 0));
+        assert_eq!(values, (1, 0, 0, 0, 0, 0));
         let version: i64 = c
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();

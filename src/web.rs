@@ -749,6 +749,9 @@ const RPF: &[&str] = &[
     "auto_merge",
     "local_merge",
     "steward_repair",
+    "coderabbit_free_confirmed",
+    "coderabbit_review",
+    "coderabbit_repair",
     "auto_recover_drops",
     "maxo",
     "maxd",
@@ -817,8 +820,13 @@ fn import(a: &Ax, b: &Value) -> Result<String, String> {
         {
             continue;
         }
-        a.db.run("insert into rp(full,t0) values(?,?)", pa![f.clone(), now()]);
+        a.db.run("insert into rp(full,t0,coderabbit_epoch) values(?,?,?)", pa![f.clone(), now(), now()]);
         for k in RPF {
+            // External review requests and autonomous repair must be enabled
+            // explicitly on each installation after importing a backup.
+            if matches!(*k, "coderabbit_free_confirmed" | "coderabbit_review" | "coderabbit_repair") {
+                continue;
+            }
             let v = &r[*k];
             // Impedir que valores numéricos contaminem o idioma persistido.
             if *k == "lang" && !v.is_string() {
@@ -1484,6 +1492,8 @@ fn steward_report(a: &Ax, repo: &str) -> Value {
         for pr in prs {
             let number = pr["number"].as_i64().unwrap_or(0);
             pr["coderabbit_previous"] = crate::coderabbit::previous(&a.db, repo, number);
+            pr["coderabbit_request"] = crate::coderabbit::request_history(&a.db, repo, number);
+            pr["coderabbit_findings"] = crate::coderabbit::finding_status(&a.db, repo, number);
             let latest = jobs.iter().find(|j| j["pr"].as_i64() == Some(number));
             pr["recheck"] = latest.map(|job| {
                 let expected_head = job["d"]["expected_head"].as_str().unwrap_or("");
@@ -1702,8 +1712,8 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                     let r = mt["full"].as_str().unwrap_or(&r).to_string();
                     let (c, s) = crate::gh::detect(&r).await;
                     a.db.run(
-                        "insert or ignore into rp(full,ci,setup,mode,t0) values(?,?,?,?,?)",
-                        pa![r.clone(), c.clone(), s.clone(), "ask".to_string(), now()],
+                        "insert or ignore into rp(full,ci,setup,mode,t0,coderabbit_epoch) values(?,?,?,?,?,?)",
+                        pa![r.clone(), c.clone(), s.clone(), "ask".to_string(), now(), now()],
                     );
                     a.sw.notify_one();
                     js(json!({"full": r, "ci": c, "setup": s, "cfg": cfg(a)}))
@@ -1719,6 +1729,9 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                         ("auto_merge", 0),
                         ("local_merge", 0),
                         ("steward_repair", 0),
+                        ("coderabbit_free_confirmed", 0),
+                        ("coderabbit_review", 0),
+                        ("coderabbit_repair", 0),
                         ("auto_recover_drops", 0),
                         ("maxo", 1),
                         ("maxd", 1),
@@ -1748,10 +1761,34 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                                     .or(v.as_i64())
                                     .unwrap_or(0)
                                     .clamp(0, 1);
-                                a.db.run(
-                                    &format!("update rp set {k}=? where full=?"),
-                                    pa![x, r.clone()],
-                                );
+                                if k == "on_" {
+                                    a.db.run(
+                                        "update rp set coderabbit_epoch=coderabbit_epoch + case when on_<>? then 1 else 0 end,on_=? where full=?",
+                                        pa![x, x, r.clone()],
+                                    );
+                                } else if k == "coderabbit_review" {
+                                    let at = now();
+                                    a.db.run(
+                                        "update rp set coderabbit_epoch=coderabbit_epoch + case when coderabbit_review<>? then 1 else 0 end,coderabbit_review_since=case when coderabbit_review<>? and ?=1 and coderabbit_free_confirmed=1 then ? else coderabbit_review_since end,coderabbit_review=? where full=?",
+                                        pa![x, x, x, at, x, r.clone()],
+                                    );
+                                } else if k == "coderabbit_free_confirmed" {
+                                    let at = now();
+                                    a.db.run(
+                                        "update rp set coderabbit_epoch=coderabbit_epoch + case when coderabbit_free_confirmed<>? then 1 else 0 end,coderabbit_review_since=case when coderabbit_free_confirmed<>? and ?=1 and coderabbit_review=1 then ? else coderabbit_review_since end,coderabbit_free_confirmed=? where full=?",
+                                        pa![x, x, x, at, x, r.clone()],
+                                    );
+                                } else if k == "coderabbit_repair" {
+                                    a.db.run(
+                                        "update rp set coderabbit_epoch=coderabbit_epoch + case when coderabbit_repair<>? then 1 else 0 end,coderabbit_repair=? where full=?",
+                                        pa![x, x, r.clone()],
+                                    );
+                                } else {
+                                    a.db.run(
+                                        &format!("update rp set {k}=? where full=?"),
+                                        pa![x, r.clone()],
+                                    );
+                                }
                             }
                             1 => {
                                 let x = v.as_i64().unwrap_or(3).clamp(0, 10000);
@@ -1920,9 +1957,6 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
             })) {
                 return er(StatusCode::CONFLICT, "refresh Steward before observing");
             }
-            let Ok(_permit) = crate::coderabbit::OBSERVATIONS.try_acquire() else {
-                return js(json!({"state":"busy","head":head}));
-            };
             let Ok(ticket) = crate::coderabbit::reserve(&a.db, repo, number) else {
                 return er(StatusCode::CONFLICT, "observation unavailable");
             };
