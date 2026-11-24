@@ -1012,9 +1012,19 @@ async fn comments(r: &str, n: i64, me: &str) -> R<Vec<Value>> {
     let (a, b, c) = tokio::join!(apip(&u1), apip(&u2), apip(&u3));
     let mut o = vec![];
     for x in a.map_err(X::E)? {
+        if !x["id"].as_i64().is_some_and(|id| id > 0) {
+            return Err(X::E(
+                "GitHub comment/review is missing a numeric identifier".into(),
+            ));
+        }
         o.push(json!({"id": format!("i{}", x["id"]), "by": x["user"]["login"], "as": x["author_association"], "t": x["body"].as_str().unwrap_or(""), "k": "comment", "at": x["created_at"]}));
     }
     for x in b.map_err(X::E)? {
+        if !x["id"].as_i64().is_some_and(|id| id > 0) {
+            return Err(X::E(
+                "GitHub comment/review is missing a numeric identifier".into(),
+            ));
+        }
         if x["body"].as_str().map(|s| !s.is_empty()).unwrap_or(false)
             || x["state"] == "CHANGES_REQUESTED"
         {
@@ -1022,6 +1032,11 @@ async fn comments(r: &str, n: i64, me: &str) -> R<Vec<Value>> {
         }
     }
     for x in c.map_err(X::E)? {
+        if !x["id"].as_i64().is_some_and(|id| id > 0) {
+            return Err(X::E(
+                "GitHub comment/review is missing a numeric identifier".into(),
+            ));
+        }
         let dh = x["diff_hunk"]
             .as_str()
             .map(|d| format!("```diff\n{}\n```\n", crate::sh::last(d, 800)))
@@ -1060,25 +1075,31 @@ async fn pushers(r: &str, n: i64) -> Vec<String> {
 
 async fn late(a: &Ax, r: &str, n: i64, me: &str, v: &Value) -> R<()> {
     let tag = format!("{r}#{n}");
+    let updated = v["updatedAt"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| X::E("missing merged PR update timestamp".into()))?;
+    let mut ids = Vec::new();
     let mut nw: Vec<Value> = vec![];
     for c in comments(r, n, me).await? {
-        let id = c["id"].as_str().unwrap_or("").to_string();
-        if a.db.n(
-            "select count(*) from cm where id=? or id=?",
-            pa![format!("{r}:{id}"), id.clone()],
-        ) > 0
+        let id = c["id"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| X::E("missing comment id".into()))?;
+        if a.db
+            .comment_acknowledged(r, id)
+            .map_err(|e| X::E(e.to_string()))?
         {
             continue;
         }
-        a.db.run(
-            "insert or ignore into cm(id,t) values(?,?)",
-            pa![format!("{r}:{id}"), now()],
-        );
+        ids.push(id.to_string());
         if MA.contains(&c["as"].as_str().unwrap_or("")) {
             nw.push(c);
         }
     }
     if nw.is_empty() {
+        a.db.ack_pr_comments(r, n, updated, &ids)
+            .map_err(|e| X::E(e.to_string()))?;
         return Ok(());
     }
     let g = guard(
@@ -1104,6 +1125,8 @@ async fn late(a: &Ax, r: &str, n: i64, me: &str, v: &Value) -> R<()> {
         })
         .collect();
     if ok.is_empty() {
+        a.db.ack_pr_comments(r, n, updated, &ids)
+            .map_err(|e| X::E(e.to_string()))?;
         return Ok(());
     }
     let cs = ok
@@ -1131,24 +1154,34 @@ async fn late(a: &Ax, r: &str, n: i64, me: &str, v: &Value) -> R<()> {
         .filter_map(|c| c["by"].as_str())
         .collect::<Vec<_>>()
         .join(", ");
-    if !js["act"].as_bool().unwrap_or(false) {
+    let act = js["act"]
+        .as_bool()
+        .ok_or_else(|| X::E("Watcher gave no readable follow-up verdict".into()))?;
+    if !act {
+        a.db.ack_pr_comments(r, n, updated, &ids)
+            .map_err(|e| X::E(e.to_string()))?;
         return Ok(());
     }
-    let ch = js["change"].as_str().unwrap_or("").to_string();
+    let ch = js["change"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| X::E("missing follow-up change".into()))?
+        .to_string();
     let ti = format!("Follow-up to #{n}: {}", v["title"].as_str().unwrap_or(""));
     let body = format!("{ch}\n\nRequested after #{n} was merged ({}). Open a new pull request from the default branch that references #{n}.\n\nMaintainer comment:\n{}", v["url"].as_str().unwrap_or(""), crate::sh::head(&ok.iter().map(|c| format!("{}: {}", c["by"].as_str().unwrap_or(""), c["t"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("\n\n"), 6000));
-    a.db.jnew(
-        r,
-        0,
-        "fix",
-        &ti,
-        v["url"].as_str().unwrap_or(""),
-        "vet",
-        &format!("follow-up requested by {by} after merge"),
-        json!({"title": ti, "body": body, "after": n}),
-        None,
-        -1.0,
-    );
+    let request = json!({"title":ti,"body":body,"url":v["url"],"why":format!("follow-up requested by {by} after merge")});
+    if !a
+        .db
+        .queue_followup_and_ack(r, n, updated, &ids, &request)
+        .map_err(|e| X::E(e.to_string()))?
+    {
+        a.say(
+            "watcher",
+            &format!("{tag}: follow-up remains pending until previous work completes"),
+            None,
+        );
+        return Ok(());
+    }
     a.say(
         "watcher",
         &format!("{tag}: {by} asked for a follow-up after merge, sent to Vet"),
@@ -1350,8 +1383,10 @@ async fn watch1(a: &Ax) -> R<()> {
             d["base"] = v["baseRefName"].clone();
             d["default_branch"] = json!(default_branch);
             a.db.run("update prs set upd=?,d=? where repo=? and num=?", pa![up.clone(), d.to_string(), r.clone(), n]);
-            if p["upd"].as_str() != Some(up.as_str()) {
-                late(a, &r, n, &me, &v).await?;
+            if p["d"]["comment_seen_at"].as_str() != Some(up.as_str()) {
+                if let Err(error)=late(a,&r,n,&me,&v).await {
+                    a.say("watcher",&format!("{r}#{n}: follow-up pending: {}",errm(&error)),None);
+                }
             }
             continue;
         }
@@ -1397,7 +1432,9 @@ async fn watch1(a: &Ax) -> R<()> {
             a.say("watcher", &format!("{tag} merged"), None);
             a.db.ks("lm", &json!({"repo": r, "num": n, "title": v["title"], "url": v["url"], "t": now()}));
             a.db.ks(&format!("wm:{tag}"), &json!(now()));
-            late(a, &r, n, &me, &v).await?;
+            if let Err(error)=late(a,&r,n,&me,&v).await {
+                a.say("watcher",&format!("{tag}: follow-up pending: {}",errm(&error)),None);
+            }
             continue;
         }
         if st == "closed" {

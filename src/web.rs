@@ -1826,8 +1826,17 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                         return er(StatusCode::BAD_REQUEST, "without Docker the workers run repository code directly on this machine; confirm that first");
                     }
                     let no = crate::sh::head(b["no"].as_str().unwrap_or("").trim(), 2000);
-                    a.db.run("insert into hs(id,ssh,dk,ln,ci,gb,raw,on_,t0,no,cpu) values(?,?,?,?,?,?,?,?,?,?,?) on conflict(id) do update set ssh=excluded.ssh, dk=excluded.dk, ln=excluded.ln, ci=excluded.ci, gb=excluded.gb, raw=excluded.raw, on_=excluded.on_, no=excluded.no, cpu=excluded.cpu", pa![id.clone(), ssh, dk as i64, b["ln"].as_i64().unwrap_or(1).clamp(1, 8), b["ci"].as_i64().unwrap_or(1).clamp(1, 8), b["gb"].as_i64().unwrap_or(50).clamp(5, 10000), (!dk) as i64, b["on"].as_bool().unwrap_or(true) as i64, now(), no, b["cpu"].as_i64().unwrap_or(0).clamp(0, 256)]);
-                    a.db.kd(&format!("up:{id}"));
+                    {
+                        let _transition = a.update_transition.lock().unwrap();
+                        if a.drain.load(std::sync::atomic::Ordering::SeqCst)
+                            || !a.act.lock().unwrap().is_empty()
+                            || !a.cache_maintenance.lock().unwrap().is_empty()
+                        {
+                            return er(StatusCode::CONFLICT,"wait until active workers and maintenance finish before changing machines");
+                        }
+                        if a.db.run("insert into hs(id,ssh,dk,ln,ci,gb,raw,on_,t0,no,cpu) values(?,?,?,?,?,?,?,?,?,?,?) on conflict(id) do update set ssh=excluded.ssh, dk=excluded.dk, ln=excluded.ln, ci=excluded.ci, gb=excluded.gb, raw=excluded.raw, on_=excluded.on_, no=excluded.no, cpu=excluded.cpu", pa![id.clone(), ssh, dk as i64, b["ln"].as_i64().unwrap_or(1).clamp(1, 8), b["ci"].as_i64().unwrap_or(1).clamp(1, 8), b["gb"].as_i64().unwrap_or(50).clamp(5, 10000), (!dk) as i64, b["on"].as_bool().unwrap_or(true) as i64, now(), no, b["cpu"].as_i64().unwrap_or(0).clamp(0, 256)]) < 0 { return er(StatusCode::INTERNAL_SERVER_ERROR,"could not save machine"); }
+                        a.db.kd(&format!("up:{id}"));
+                    }
                     match crate::sh::ensure(a, &id).await {
                         Ok(()) => {
                             if dk {
@@ -1840,7 +1849,21 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                     }
                 }
                 "del" => {
-                    a.db.run("delete from hs where id=?", pa![id.clone()]);
+                    {
+                        let _transition = a.update_transition.lock().unwrap();
+                        if a.drain.load(std::sync::atomic::Ordering::SeqCst)
+                            || !a.act.lock().unwrap().is_empty()
+                            || !a.cache_maintenance.lock().unwrap().is_empty()
+                        {
+                            return er(StatusCode::CONFLICT,"wait until active workers and maintenance finish before removing machines");
+                        }
+                        if a.db.run("delete from hs where id=?", pa![id.clone()]) < 0 {
+                            return er(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "could not remove machine",
+                            );
+                        }
+                    }
                     js(cfg(a))
                 }
                 _ => er(StatusCode::BAD_REQUEST, "unknown op"),

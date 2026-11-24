@@ -435,6 +435,7 @@ async fn cc(a: &Ax, o: Ask) -> R<(String, Value)> {
             ln: Some(&ln),
             keep: false,
             strip_provider_secrets: crate::routing::enabled(a),
+            strip_worker_secrets: false,
         },
     )
     .await;

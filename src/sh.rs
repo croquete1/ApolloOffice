@@ -138,6 +138,7 @@ pub struct Rq<'a> {
     pub ln: Option<&'a (dyn Fn(&str) + Send + Sync)>,
     pub keep: bool,
     pub strip_provider_secrets: bool,
+    pub strip_worker_secrets: bool,
 }
 
 impl<'a> Default for Rq<'a> {
@@ -151,8 +152,39 @@ impl<'a> Default for Rq<'a> {
             ln: None,
             keep: false,
             strip_provider_secrets: false,
+            strip_worker_secrets: false,
         }
     }
+}
+
+fn worker_secret(name: &str) -> bool {
+    let name = name.to_ascii_uppercase();
+    matches!(
+        name.as_str(),
+        "GH_TOKEN"
+            | "GITHUB_TOKEN"
+            | "GH_ENTERPRISE_TOKEN"
+            | "GITHUB_ENTERPRISE_TOKEN"
+            | "SSH_AUTH_SOCK"
+            | "SSH_AGENT_PID"
+            | "GIT_ASKPASS"
+            | "SSH_ASKPASS"
+            | "AWS_ACCESS_KEY_ID"
+            | "AWS_SECRET_ACCESS_KEY"
+            | "AWS_SESSION_TOKEN"
+            | "AZURE_CLIENT_SECRET"
+            | "GOOGLE_APPLICATION_CREDENTIALS"
+            | "NPM_TOKEN"
+            | "NODE_AUTH_TOKEN"
+            | "CARGO_REGISTRY_TOKEN"
+            | "DOCKER_AUTH_CONFIG"
+            | "DATABASE_URL"
+            | "SUPABASE_SERVICE_ROLE_KEY"
+    ) || name.starts_with("GIT_CONFIG_")
+        || name.ends_with("_API_KEY")
+        || name.ends_with("_ACCESS_TOKEN")
+        || name.ends_with("_AUTH_TOKEN")
+        || name.ends_with("_CLIENT_SECRET")
 }
 
 pub async fn run(p: &str, a: &[String], r: Rq<'_>) -> Out {
@@ -173,6 +205,13 @@ pub async fn run(p: &str, a: &[String], r: Rq<'_>) -> Out {
                 || name.starts_with("MIGRATION_PROVIDER_")
                 || name == "ANTHROPIC_AUTH_TOKEN"
             {
+                c.env_remove(&k);
+            }
+        }
+    }
+    if r.strip_worker_secrets {
+        for (k, _) in std::env::vars_os() {
+            if worker_secret(&k.to_string_lossy()) {
                 c.env_remove(&k);
             }
         }
@@ -474,6 +513,12 @@ fn sshv(h: &Ho) -> Vec<String> {
         "ServerAliveCountMax=4".into(),
         "-o".into(),
         "BatchMode=yes".into(),
+        "-o".into(),
+        "ForwardAgent=no".into(),
+        "-o".into(),
+        "ForwardX11=no".into(),
+        "-o".into(),
+        "ClearAllForwardings=yes".into(),
     ];
     if cfg!(unix) {
         if let Some(d) = std::env::var_os("APOLLO_OFFICE_SSH_CONTROL_DIR")
@@ -490,6 +535,7 @@ fn sshv(h: &Ho) -> Vec<String> {
             ]);
         }
     }
+    v.push("--".into());
     v.push(h.ssh.clone());
     v
 }
@@ -517,6 +563,7 @@ pub async fn hraw(h: &Ho, s: &str, t: u64) -> Out {
                 i: Some(i),
                 t,
                 strip_provider_secrets: true,
+                strip_worker_secrets: true,
                 ..Default::default()
             },
         )
@@ -614,6 +661,7 @@ async fn hxo(
             ln,
             keep,
             strip_provider_secrets: true,
+            strip_worker_secrets: h.ssh.is_empty(),
             ..Default::default()
         },
     )
@@ -794,6 +842,9 @@ pub async fn orph(a: &Ax, id: &str) {
     if !h.dk {
         return;
     }
+    let Some(_reservation) = crate::pipe::IdleCacheGuard::claim(a, id) else {
+        return;
+    };
     let b = hb(a, &h);
     let r = hx(a, id, &format!("n=0; for p in $(pgrep -f \"{b}/\"); do [ \"$p\" = $$ ] || {{ kill -9 \"$p\" 2>/dev/null && n=$((n+1)); }}; done; echo $n"), 60).await;
     let n = r.o.trim().parse::<i64>().unwrap_or(0);
@@ -826,6 +877,9 @@ pub async fn ensure(a: &Ax, id: &str) -> Result<(), String> {
             Err(format!("{}{}", r.o, r.e).trim().chars().take(300).collect())
         };
     }
+    let Some(_reservation) = crate::pipe::IdleCacheGuard::claim(a, id) else {
+        return Err("worker busy or undergoing maintenance; no container changes applied".into());
+    };
     let probe = hraw(
         &h,
         "getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 4; docker info --format '{{.NCPU}}' 2>/dev/null || echo 0",
@@ -1349,5 +1403,27 @@ mod tests {
         )
         .await;
         assert!(o.o.contains("[exit 124]"), "{}", o.all());
+    }
+}
+
+#[cfg(test)]
+mod worker_boundary_tests {
+    use super::*;
+    #[test]
+    fn known_worker_secrets_are_removed_without_stripping_path() {
+        for name in [
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "ssh_auth_sock",
+            "AWS_SECRET_ACCESS_KEY",
+            "GIT_CONFIG_COUNT",
+            "NPM_TOKEN",
+            "DATABASE_URL",
+            "EXAMPLE_API_KEY",
+        ] {
+            assert!(worker_secret(name), "{name}");
+        }
+        assert!(!worker_secret("PATH"));
+        assert!(!worker_secret("HOME"));
     }
 }
