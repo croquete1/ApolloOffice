@@ -2458,7 +2458,9 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                 }
             }
             "unlink" => {
-                a.db.kd("google");
+                if a.db.run("delete from kv where k='google'", pa![]) < 0 {
+                    return er(StatusCode::CONFLICT, "Google account was not unlinked");
+                }
                 js(cfg(a))
             }
             _ => er(StatusCode::BAD_REQUEST, "unknown op"),
@@ -2575,7 +2577,12 @@ pub async fn h(State(a): State<Ax>, req: Request<Body>) -> Response<Body> {
         }
         return match crate::goog::back(&a, &qv("code"), &qv("state")).await {
             Ok((md, sub, em)) if md == "link" => {
-                crate::goog::link(&a, &sub, &em);
+                if crate::goog::link(&a, &sub, &em).is_err() {
+                    return er(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Google account was not saved",
+                    );
+                }
                 a.say(
                     "scout",
                     &format!("Google account {em} connected for sign-in"),
@@ -2587,12 +2594,16 @@ pub async fn h(State(a): State<Ax>, req: Request<Body>) -> Response<Body> {
                 if !crate::goog::ok(&a, &sub) {
                     return page(&format!("<b>{}</b> is not the Google account connected to this ApolloOffice. <a href='/'>Back</a>", esc(&em)));
                 }
-                let s = hex::encode(rand::random::<[u8; 32]>());
-                a.db.run("delete from ses where exp<?", pa![now()]);
-                a.db.run(
-                    "insert into ses(id,exp) values(?,?)",
-                    pa![s.clone(), now() + 30 * 86_400_000],
-                );
+                let s = match crate::goog::session(&a.db, &sub) {
+                    Ok(Some(s)) => s,
+                    Ok(None) => {
+                        return er(
+                            StatusCode::UNAUTHORIZED,
+                            "Google account is no longer linked",
+                        )
+                    }
+                    Err(_) => return er(StatusCode::SERVICE_UNAVAILABLE, "session was not saved"),
+                };
                 Response::builder().status(StatusCode::OK).header("content-type", "text/html; charset=utf-8").header("cache-control", "no-store").header("set-cookie", format!("ao={s}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}", 30 * 86400)).body(Body::from(format!("{LP}<meta http-equiv=refresh content='0;url=/'><p>Signed in as {}.</p></div>", esc(&em)))).unwrap()
             }
             Err(e) => page(&format!("{} <a href='/'>Back</a>", esc(&e))),
