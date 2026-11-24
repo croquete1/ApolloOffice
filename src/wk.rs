@@ -1455,7 +1455,7 @@ async fn watch_pr(a:&Ax,p:Value,me:&str,
             let v = ghj(&["pr", "view", &n.to_string(), "-R", &r, "--json", "updatedAt,title,url,baseRefName"], 60).await.map_err(X::E)?;
             let up = valid_pr_timestamp(&v)?;
             let base = valid_pr_base(&v)?;
-            if a.db.run("update prs set upd=?, d=json_set(d,'$.base',?,'$.default_branch',?) where repo=? and num=? and st='merged'", pa![up.clone(), base, default_branch.clone(), r.clone(), n]) < 0 {
+            if a.db.ch("update prs set upd=?, d=json_set(d,'$.base',?,'$.default_branch',?) where repo=? and num=? and st='merged' and upd is ?", pa![up.clone(), base, default_branch.clone(), r.clone(), n,p["upd"].as_str().map(String::from)]) != 1 {
                 return Err(X::E("could not persist merged PR metadata".into()));
             }
             if p["d"]["comment_seen_at"].as_str() != Some(up.as_str()) {
@@ -1472,11 +1472,10 @@ async fn watch_pr(a:&Ax,p:Value,me:&str,
                 let m: std::collections::HashMap<i64, String> = ghj(&["pr", "list", "-R", &r, "--state", "open", "--author", "@me", "--limit", "1000", "--json", "number,updatedAt"], 120).await.ok().and_then(|v| v.as_array().cloned()).unwrap_or_default().iter().map(|x| (x["number"].as_i64().unwrap_or(0), x["updatedAt"].as_str().unwrap_or("").to_string())).collect();
                 lu.insert(r.clone(), m);
             }
-            let ch = lu.get(&r).and_then(|m| m.get(&n)).map(|u| Some(u.as_str()) != p["upd"].as_str()).unwrap_or(false);
+            let ch = lu.get(&r).and_then(|m| m.get(&n)).map(|u| Some(u.as_str()) != p["upd"].as_str()).unwrap_or(true);
             if !ch && a.db.kg(&sk).as_i64().map(|t| now() - t < gap).unwrap_or(false) {
                 return Ok(());
             }
-            a.db.ks(&sk, &json!(now()));
         }
         let fields = if p["d"]["auto_merge"].as_bool() == Some(true) {
             "state,mergedAt,updatedAt,title,url,mergeable,headRefName,headRepositoryOwner,headRepository,baseRefName,reviewDecision,isDraft,headRefOid,statusCheckRollup"
@@ -1498,7 +1497,7 @@ async fn watch_pr(a:&Ax,p:Value,me:&str,
             Some("CLOSED") if v["mergedAt"].is_null()=> "closed",
             _=>return Err(X::E("invalid PR state or merge timestamp".into())),
         };
-        if a.db.run("update prs set st=?,title=?,upd=?,merged=?,d=json_set(d,'$.base',?,'$.default_branch',?) where repo=? and num=? and st='open'",pa![st.to_string(),v["title"].as_str().unwrap_or("").to_string(),up.clone(),v["mergedAt"].as_str().map(String::from),base,default_branch.clone(),r.clone(),n])<0 {
+        if a.db.ch("update prs set st=?,title=?,upd=?,merged=?,d=json_set(d,'$.base',?,'$.default_branch',?) where repo=? and num=? and st='open' and upd is ?",pa![st.to_string(),v["title"].as_str().unwrap_or("").to_string(),up.clone(),v["mergedAt"].as_str().map(String::from),base,default_branch.clone(),r.clone(),n,p["upd"].as_str().map(String::from)])!=1 {
             return Err(X::E("could not persist PR metadata".into()));
         }
         let tag = format!("{r}#{n}");
@@ -1507,10 +1506,8 @@ async fn watch_pr(a:&Ax,p:Value,me:&str,
             a.flow("watcher", "submit", "merged");
             a.say("watcher", &format!("{tag} merged"), None);
             a.db.ks("lm", &json!({"repo": r, "num": n, "title": v["title"], "url": v["url"], "t": now()}));
-            a.db.ks(&format!("wm:{tag}"), &json!(now()));
-            if let Err(error)=late(a,&r,n,me,&v).await {
-                a.say("watcher",&format!("{tag}: follow-up pending: {}",errm(&error)),None);
-            }
+            late(a,&r,n,me,&v).await?;
+            a.db.ks(&format!("wm:{tag}"),&json!(now()));
             return Ok(());
         }
         if st == "closed" {
@@ -1527,6 +1524,7 @@ async fn watch_pr(a:&Ax,p:Value,me:&str,
         }
         observe_auto_merge(a, &r, n, &v, &p["d"], me)?;
         if p["d"]["comment_seen_at"].as_str() == Some(up.as_str()) && p["d"]["seen"].as_bool().unwrap_or(false) {
+            a.db.ks(&format!("ws:{tag}"),&json!(now()));
             return Ok(());
         }
         let first = !p["d"]["seen"].as_bool().unwrap_or(false);
@@ -1617,6 +1615,7 @@ async fn watch_pr(a:&Ax,p:Value,me:&str,
             a.db.ack_pr_comments(&r, n, &up, &received_ids).map_err(|e| X::E(e.to_string()))?;
         }
 
+    a.db.ks(&format!("ws:{tag}"),&json!(now()));
     Ok(())
 }
 
