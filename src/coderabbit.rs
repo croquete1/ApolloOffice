@@ -10,8 +10,8 @@ use tokio::sync::Semaphore;
 
 const BOT_ID: u64 = 136622811;
 const COVERAGE: &str = "<!-- final_review_risk_coverage:";
-const PAGE_SIZE: usize = 10;
-const MAX_PAGES: usize = 20;
+const PAGE_SIZE: usize = 50;
+const MAX_PAGES: usize = 4;
 const MAX_BYTES: usize = 4 * 1024 * 1024;
 const MAX_FINDING_BODY: usize = 6_000;
 const MAX_REQUESTS_PER_HOUR: i64 = 3;
@@ -27,6 +27,7 @@ const API: &str = "https://api.github.com";
 const LOCAL_REQUEST_LIMIT: usize = 40;
 const REQUEST_WINDOW: Duration = Duration::from_secs(3600);
 pub(crate) const RATE_LIMITED: &str = "public GitHub request budget unavailable";
+pub(crate) const OBSERVATION_BUSY: &str = "CodeRabbit observation capacity busy";
 
 #[derive(Default)]
 struct RequestBudget {
@@ -354,6 +355,15 @@ fn classify(rows: &[Value], reviews: &[Value], head: &str) -> Value {
         let Some(id) = review["id"].as_u64().filter(|n| *n > 0) else {
             continue;
         };
+        if let Some((old, _, signal, surface)) = latest.as_mut()
+            && &at == old
+            && *surface == 1
+        {
+            if signal["state"] != "skipped" && signal["state"] != "pending" {
+                *signal = json!({"state":"unknown","head":head});
+            }
+            continue;
+        }
         if latest
             .as_ref()
             .is_none_or(|(old, old_id, _, _)| (&at, id) > (old, *old_id))
@@ -488,7 +498,7 @@ pub(crate) async fn observe(repo: &str, number: i64, head: &str) -> Result<Value
     }
     let _permit = OBSERVATIONS
         .try_acquire()
-        .map_err(|_| "CodeRabbit observation capacity busy")?;
+        .map_err(|_| OBSERVATION_BUSY)?;
     // The only remote operations are GitHub reads. Never call CodeRabbit's API or
     // request a review, and refuse private/unknown repositories.
     let client = public_client()?;
@@ -1367,13 +1377,15 @@ pub(crate) async fn route_findings(
             "low" => 3,
             _ => 4,
         });
-        candidates.truncate(20);
         if candidates.is_empty() {
             continue;
         }
         let mut guarded = Vec::new();
         let mut to_guard = Vec::new();
         for finding in candidates {
+            if guarded.len() + to_guard.len() >= 20 {
+                break;
+            }
             let state = match reserve_finding(&a.db, repo, number, head, &finding) {
                 Ok(state) => state,
                 Err(_) => continue,
@@ -1624,6 +1636,26 @@ mod tests {
             "skipped"
         );
     }
+    #[test]
+    fn equal_timestamp_across_surfaces_does_not_establish_coverage() {
+        let mut summary = row(HEAD);
+        let at = summary["updated_at"].as_str().unwrap().to_owned();
+        let current = review(999, HEAD, &at);
+        assert_eq!(
+            classify(std::slice::from_ref(&summary), std::slice::from_ref(&current), HEAD)["state"],
+            "unknown"
+        );
+        summary["body"] = json!("<!-- coderabbit-ai-generated:v1 -->\n<!-- This is an auto-generated comment: summarize by coderabbit.ai -->\n<!-- This is an auto-generated comment: skip review by coderabbit.ai -->");
+        assert_eq!(classify(&[summary], &[current], HEAD)["state"], "skipped");
+    }
+
+    #[test]
+    fn observation_page_budget_covers_three_bounded_inventories() {
+        assert_eq!(PAGE_SIZE * MAX_PAGES, 200);
+        let requests = 4 + 2 * (180 / PAGE_SIZE + 1) + 1;
+        assert!(requests <= LOCAL_REQUEST_LIMIT);
+    }
+
     #[test]
     fn inline_findings_require_exact_bot_head_and_valid_location() {
         let finding = json!({"id":7,"pull_request_review_id":8,"commit_id":HEAD,"path":"src/lib.rs","line":19,"position":1,
