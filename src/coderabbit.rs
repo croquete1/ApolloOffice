@@ -904,7 +904,7 @@ fn queue_findings(
         |r| r.get(0),
     )?;
     let cycles: i64 = tx.query_row(
-        "select count(*) from jobs where repo=? and pr=? and kind='review' and json_extract(d,'$.coderabbit_source')='coderabbit'",
+        "select coalesce((select cycles from coderabbit_cycles where repo=? and number=?),0)",
         rusqlite::params![repo, number],
         |r| r.get(0),
     )?;
@@ -2152,6 +2152,30 @@ mod tests {
         assert_eq!(row["state"], "queued");
         assert_eq!(row["job"], job["id"]);
     }
+    #[test]
+    fn repair_cycle_limit_survives_history_cleanup() {
+        let db = crate::db::Db::mem();
+        let repo = "croquete1/ApolloOffice";
+        let c = db.0.lock().unwrap();
+        for _ in 0..2 {
+            c.execute(
+                "insert into jobs(repo,num,kind,st,d,pr) values(?,67,'review','done',?,67)",
+                rusqlite::params![repo, json!({"coderabbit_source":"coderabbit"}).to_string()],
+            )
+            .unwrap();
+            c.execute("delete from jobs where st in ('done','drop')", [])
+                .unwrap();
+        }
+        let cycles: i64 = c
+            .query_row(
+                "select cycles from coderabbit_cycles where repo=? and number=67",
+                [repo],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cycles, MAX_FIX_CYCLES_PER_PR);
+    }
+
     #[test]
     fn edited_findings_must_pass_guard_again_and_activation_races_fail_closed() {
         let db = crate::db::Db::mem();
