@@ -646,6 +646,23 @@ mod provider_limit_tests {
 mod quota_reservation_tests {
     use super::*;
     #[test]
+    fn codex_background_slot_preserves_foreground_and_other_providers() {
+        let a = App::new(Db::mem(), std::env::temp_dir(), 1, "x".into());
+        let t = now();
+        *a.codex_usage.lock().unwrap() = json!({"status":"ok","updated_at":t,"five_hour":{"remaining":80,"resets_at":t/1000+3600}});
+        let permit = a.reserve_codex_background("codex:", true).unwrap();
+        assert!(permit.is_some());
+        assert!(a.reserve_codex_background("codex:", true).is_err());
+        assert!(a.reserve_codex_background("codex:", false).unwrap().is_none());
+        assert!(a.reserve_codex_background("cc:sonnet", true).unwrap().is_none());
+        drop(permit);
+        a.codex_usage.lock().unwrap()["five_hour"]["remaining"] = json!(10);
+        assert!(a.reserve_codex_background("codex:", true).is_err());
+        a.codex_usage.lock().unwrap()["five_hour"]["remaining"] = json!(80);
+        assert!(a.reserve_codex_background("codex:", true).unwrap().is_some());
+    }
+
+    #[test]
     fn codex_reserve_and_exhaustion_distinguish_priority_and_staleness() {
         let a = App::new(Db::mem(), std::env::temp_dir(), 1, "x".into());
         let t = now();
