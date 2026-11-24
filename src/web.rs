@@ -1905,6 +1905,19 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                 Err(e) => js(json!({"ok": false, "m": crate::wk::errm(&e)})),
             }
         }
+        ("POST", "/api/steward/coderabbit") => {
+            let repo = b["repo"].as_str().unwrap_or("");
+            let number = b["number"].as_i64().unwrap_or(0);
+            let head = b["head"].as_str().unwrap_or("");
+            if !crate::coderabbit::valid_repo(repo)
+                || a.db.n("select count(*) from rp where full=? and on_=1", pa![repo.to_string()]) != 1 {
+                return er(StatusCode::BAD_REQUEST, "repository not enabled");
+            }
+            match crate::coderabbit::observe(repo, number, head).await {
+                Ok(value) => js(value),
+                Err(_) => js(json!({"state":"unavailable","head":head})),
+            }
+        }
         ("GET", "/api/steward") => js(json!({
             "repos": a.db.all("select full from rp where on_=1 order by full", pa![])
                 .iter()
