@@ -158,14 +158,29 @@ impl<'a> Default for Rq<'a> {
 }
 
 fn worker_secret(name: &str) -> bool {
-    let name=name.to_ascii_uppercase();
-    matches!(name.as_str(),
-        "GH_TOKEN"|"GITHUB_TOKEN"|"GH_ENTERPRISE_TOKEN"|"GITHUB_ENTERPRISE_TOKEN"|
-        "SSH_AUTH_SOCK"|"SSH_AGENT_PID"|"GIT_ASKPASS"|"SSH_ASKPASS"|
-        "AWS_ACCESS_KEY_ID"|"AWS_SECRET_ACCESS_KEY"|"AWS_SESSION_TOKEN"|
-        "AZURE_CLIENT_SECRET"|"GOOGLE_APPLICATION_CREDENTIALS"|"NPM_TOKEN"|"NODE_AUTH_TOKEN"|
-        "CARGO_REGISTRY_TOKEN"|"DOCKER_AUTH_CONFIG"|"DATABASE_URL"|"SUPABASE_SERVICE_ROLE_KEY")
-        || name.starts_with("GIT_CONFIG_")
+    let name = name.to_ascii_uppercase();
+    matches!(
+        name.as_str(),
+        "GH_TOKEN"
+            | "GITHUB_TOKEN"
+            | "GH_ENTERPRISE_TOKEN"
+            | "GITHUB_ENTERPRISE_TOKEN"
+            | "SSH_AUTH_SOCK"
+            | "SSH_AGENT_PID"
+            | "GIT_ASKPASS"
+            | "SSH_ASKPASS"
+            | "AWS_ACCESS_KEY_ID"
+            | "AWS_SECRET_ACCESS_KEY"
+            | "AWS_SESSION_TOKEN"
+            | "AZURE_CLIENT_SECRET"
+            | "GOOGLE_APPLICATION_CREDENTIALS"
+            | "NPM_TOKEN"
+            | "NODE_AUTH_TOKEN"
+            | "CARGO_REGISTRY_TOKEN"
+            | "DOCKER_AUTH_CONFIG"
+            | "DATABASE_URL"
+            | "SUPABASE_SERVICE_ROLE_KEY"
+    ) || name.starts_with("GIT_CONFIG_")
         || name.ends_with("_API_KEY")
         || name.ends_with("_ACCESS_TOKEN")
         || name.ends_with("_AUTH_TOKEN")
@@ -196,7 +211,9 @@ pub async fn run(p: &str, a: &[String], r: Rq<'_>) -> Out {
     }
     if r.strip_worker_secrets {
         for (k, _) in std::env::vars_os() {
-            if worker_secret(&k.to_string_lossy()) { c.env_remove(&k); }
+            if worker_secret(&k.to_string_lossy()) {
+                c.env_remove(&k);
+            }
         }
     }
     for k in &r.rm {
@@ -825,7 +842,9 @@ pub async fn orph(a: &Ax, id: &str) {
     if !h.dk {
         return;
     }
-    let Some(_reservation)=crate::pipe::IdleCacheGuard::claim(a,id) else { return; };
+    let Some(_reservation) = crate::pipe::IdleCacheGuard::claim(a, id) else {
+        return;
+    };
     let b = hb(a, &h);
     let r = hx(a, id, &format!("n=0; for p in $(pgrep -f \"{b}/\"); do [ \"$p\" = $$ ] || {{ kill -9 \"$p\" 2>/dev/null && n=$((n+1)); }}; done; echo $n"), 60).await;
     let n = r.o.trim().parse::<i64>().unwrap_or(0);
@@ -858,7 +877,7 @@ pub async fn ensure(a: &Ax, id: &str) -> Result<(), String> {
             Err(format!("{}{}", r.o, r.e).trim().chars().take(300).collect())
         };
     }
-    let Some(_reservation)=crate::pipe::IdleCacheGuard::claim(a,id) else {
+    let Some(_reservation) = crate::pipe::IdleCacheGuard::claim(a, id) else {
         return Err("worker busy or undergoing maintenance; no container changes applied".into());
     };
     let probe = hraw(
@@ -1392,8 +1411,17 @@ mod worker_boundary_tests {
     use super::*;
     #[test]
     fn known_worker_secrets_are_removed_without_stripping_path() {
-        for name in ["GH_TOKEN","GITHUB_TOKEN","ssh_auth_sock","AWS_SECRET_ACCESS_KEY","GIT_CONFIG_COUNT","NPM_TOKEN","DATABASE_URL","EXAMPLE_API_KEY"] {
-            assert!(worker_secret(name),"{name}");
+        for name in [
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "ssh_auth_sock",
+            "AWS_SECRET_ACCESS_KEY",
+            "GIT_CONFIG_COUNT",
+            "NPM_TOKEN",
+            "DATABASE_URL",
+            "EXAMPLE_API_KEY",
+        ] {
+            assert!(worker_secret(name), "{name}");
         }
         assert!(!worker_secret("PATH"));
         assert!(!worker_secret("HOME"));
