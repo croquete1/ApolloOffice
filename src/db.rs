@@ -33,7 +33,7 @@ create index if not exists fix_attempts_started on fix_attempts(started);
 create index if not exists fix_attempts_job on fix_attempts(job, attempt);
 create table if not exists coderabbit_requests(repo text not null, number int not null, head text not null, status text not null, requested_at int not null, activation int not null, comment_id int, error text default '', primary key(repo,number,head));
 create index if not exists coderabbit_requests_recent on coderabbit_requests(requested_at,status);
-create table if not exists coderabbit_findings(repo text not null, number int not null, comment_id int not null, review_id int not null, head text not null, state text not null, severity text not null, body_hash text not null, activation int not null, job int, created_at int not null, updated_at int not null, primary key(repo,number,comment_id,head));
+create table if not exists coderabbit_findings(repo text not null, number int not null, comment_id int not null, review_id int not null, head text not null, state text not null, severity text not null, body_hash text not null, activation int not null, job int, created_at int not null, updated_at int not null, guard_ticket text, primary key(repo,number,comment_id,head));
 create index if not exists coderabbit_findings_pr on coderabbit_findings(repo,number,head,state);
 ";
 
@@ -119,6 +119,7 @@ const LEGACY_COLUMNS: &[(&str, &str, &str)] = &[
         "auto_recover_drops",
         "alter table rp add column auto_recover_drops int default 0",
     ),
+    ("coderabbit_findings", "guard_ticket", "alter table coderabbit_findings add column guard_ticket text"),
     (
         "seen",
         "why",
