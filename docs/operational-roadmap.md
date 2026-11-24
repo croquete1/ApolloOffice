@@ -28,27 +28,33 @@
 - Interface dos agentes preservada; alterações UI restritas a definições, detalhes de tarefa, aprendizagem e custos. Não ativado Qwen. Perfis Manual, routing adaptativo OFF e aprendizagem supervisionada OFF mantêm comportamento preexistente até opção do proprietário. Nenhuma release nova.
 - Windows, Docker real, fornecedores reais, testes interativos específicos dos novos formulários e impacto medido das lições continuam pendentes. Smoke Chromium existente usa estado sintético, não equivale a validação de produção.
 
+## Terceira entrega — 24/11/2026
+- [x] PR #61 — pedidos de seguimento pós-merge com admissão/ack transacionais, replays idempotentes, pendência quando outro follow-up está ativo, cursor não avançado em falha de análise; proteção de manutenção Docker e limpeza de órfãos com reserva idle; impedir reconfiguração de hosts durante trabalho; remover variáveis conhecidas de credenciais de workers locais e desativar forwarding SSH. Merge 251450818141d4f56477e72e4aba75edae9437d5. QA: 387 testes aprovados, fmt/Clippy/diff check. F02/F12 parciais; não constitui fronteira de segurança por repo nem isolamento de credenciais em hosts raw/SSH.
+- [x] PR #62 — espera diferida persistente em fronteiras seguras de rede e capacidade CI para candidatos verificados, validação de SHA e nova execução da prova na retoma, reserva de checkout por alias, manutenção de aprovação e gate explícito de proprietário para fixes em modo ask também após recovery; limites por repo fail-closed e bloqueio antes de admissão. CI após rebase no gate mantém espera não diferível para não permitir publicação sem testes. Merge 2ab59a2a082d28ea25da0c0de7428ca793a028f1. QA: 390 testes aprovados, fmt/Clippy/diff check. F04/F05/F10 parciais: esperas durante chamadas de fornecedores, fases sem checkpoint seguro e simulação completa de recuperação ainda pendentes.
+- [x] PR #63 — inventários paginados de check-runs, status combinado, revisões/comentários e permissões GraphQL de revisores; falha fechada perante contagem inconsistente, IDs duplicados, páginas incompletas, erro GraphQL ou cursor repetido. Bloqueio de renomeações de ficheiros sensíveis; limite conservador de tamanho de PR preservado. Merge 621d1e8372994745105777a1f8bb45f54c0c3395. QA final: 395 testes aprovados (243 Rust unitários + 2 integração + 116 JavaScript + 34 Python), 3 Rust ignorados, fmt, Clippy -D warnings e diff check aprovados. Árvore testada b17695d9fca2190058ac048a82604fbb92f6b934 idêntica à integrada. F03/F09 parciais; API real com várias páginas e sync incremental ainda por validar/implementar.
+- Interface dos agentes e configuração dos modelos inalteradas. Sem ativação Qwen e sem nova release. Browser validado na segunda entrega, não repetido nesta etapa sem alterações UI; Windows, Docker/SSH real e fornecedores reais continuam pendentes.
+
 ## Balanço por fase
 | Fase | Estado | Falta |
 |---|---|---|
 | F01 | Parcial (#49) | Validação Docker/fnm em workers reais, logs upstream, ciclo de vida sem interrupções |
-| F02 | Parcial (#48) | Inbox durável completa, deduplicação por PR/HEAD/review, falhas e recuperação end-to-end |
-| F03 | Parcial (#48/#52) | Unificar revisão/rebase/recheck e preservar autorizações; testes concorrentes reais |
-| F04 | Parcial (#51/#57) | Converter restantes decisões críticas; SQLITE_BUSY, disco cheio, recuperação e limites por repo |
-| F05 | Parcial (#54) | Checkpoints/retoma para rede, fornecedores, CI e quotas; libertação de lanes em todas as esperas |
+| F02 | Parcial (#48/#61) | Inbox/outbox duráveis, isolamento de falhas nas PRs abertas, deduplicação por PR/HEAD/review e recuperação end-to-end |
+| F03 | Parcial (#48/#52/#63) | Unificar revisão/rebase/recheck e preservar autorizações; testes concorrentes reais |
+| F04 | Parcial (#51/#57/#62) | Converter restantes decisões críticas; SQLITE_BUSY, disco cheio, recuperação e limites por repo |
+| F05 | Parcial (#54/#62) | Retoma de chamadas de fornecedores/quotas e fases sem checkpoint seguro, CI após rebase e recuperação end-to-end |
 | F06 | Parcial (#53/#58) | Cooldowns persistentes de todos os fornecedores, circuit breakers, fallback por papel |
 | F07 | Parcial (#53/#56) | Previsão/reserva concorrente por prioridade e otimizações; limites durante execução |
 | F08 | Parcial (#58) | Adaptar outros papéis, custo/complexidade calibrados, validação com providers reais |
-| F09 | Parcial (#51/#52) | Sync incremental, reconciliação sob mutações, restantes páginas de comentários/reviews/checks/files |
-| F10 | Parcial (#54/#56) | Aging, causa comum e agrupamento, prevenção de sobreposições, validação remota de dependências |
+| F09 | Parcial (#51/#52/#63) | Sync incremental, reconciliação sob mutações e validação de múltiplas páginas reais; limite conservador de ficheiros mantido |
+| F10 | Parcial (#54/#56/#62) | Aging, causa comum e agrupamento, prevenção de sobreposições, validação remota de dependências |
 | F11 | Parcial (#56) | GPU/VRAM, CI dinâmico, prioridade processos e validação sob pressão real |
-| F12 | Pendente | Isolamento reforçado por confiança, checkouts/segredos/caches executáveis; Docker/SSH real |
+| F12 | Parcial (#61/#62) | Isolamento efetivo por confiança/repo, segredos remotos, checkouts/caches executáveis e testes Docker/SSH reais |
 | F13 | Parcial (#59) | Medir eficácia real e validar fluxos interativos e expiração após reinício |
 | F14 | Implementação base integrada (#56) | Teste de persistência/reinício, perfis em máquinas reais e limites de CI |
 | F15 | Parcial (#56/#58/#59) | Próxima tarefa elegível, diagnóstico central de todos os bloqueios, histórico de etapas |
 | F16 | Parcial (#58/#59) | Tempo por fase e custo/merge com dados completos, baseline comparável, QA real Docker/Windows/providers, release assinada |
 
-Nenhuma fase completa é declarada encerrada sem cumprir todos os critérios abaixo. A última bateria automatizada tem 385 aprovações, não a soma de execuções repetidas.
+Nenhuma fase completa é declarada encerrada sem cumprir todos os critérios abaixo. A última bateria automatizada tem 395 aprovações, não a soma de execuções repetidas.
 
 ## Fases e critérios de aceitação
 ### F01 / P0 — Integração seletiva upstream
