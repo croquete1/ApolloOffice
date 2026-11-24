@@ -80,6 +80,7 @@ pub struct App {
     pub runs: Mutex<HashMap<String, Rn>>,
     pub cache: Mutex<HashMap<String, (i64, Value)>>,
     pub codex_usage: Mutex<Value>,
+    codex_background: tokio::sync::Semaphore,
     pub vtk: Mutex<HashSet<i64>>,
     pub sw: tokio::sync::Notify,
     pub steward_wake: tokio::sync::Notify,
@@ -235,6 +236,7 @@ impl App {
             runs: Mutex::new(HashMap::new()),
             cache: Mutex::new(HashMap::new()),
             codex_usage: Mutex::new(json!({"status":"loading"})),
+            codex_background: tokio::sync::Semaphore::new(1),
             vtk: Mutex::new(HashSet::new()),
             sw: tokio::sync::Notify::new(),
             steward_wake: tokio::sync::Notify::new(),
@@ -514,6 +516,27 @@ impl App {
             .clamp(0.0, 100.0);
         let usage = self.codex_usage.lock().unwrap_or_else(|e| e.into_inner());
         crate::codex_usage::hunt_reserve_reached(&usage, now(), reserve)
+    }
+
+    /// Bound concurrent low-priority calls without pretending to predict tokens.
+    /// Foreground fixes and independent reviews never acquire this permit.
+    pub fn reserve_codex_background(
+        &self,
+        model: &str,
+        low_priority: bool,
+    ) -> R<Option<tokio::sync::SemaphorePermit<'_>>> {
+        if !low_priority || crate::prov::parse(model).0 != "codex" {
+            return Ok(None);
+        }
+        let permit = self.codex_background.try_acquire().map_err(|_| {
+            X::Lim("Codex background slot occupied; capacity reserved for priority work".into())
+        })?;
+        if self.codex_low_priority_blocked(model) {
+            return Err(X::Lim(
+                "Codex quota reserved for fixes and independent reviews".into(),
+            ));
+        }
+        Ok(Some(permit))
     }
 
     pub fn hunter_quota_blocked(&self) -> bool {

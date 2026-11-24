@@ -6,6 +6,12 @@ use std::sync::{Arc, Mutex};
 #[derive(Clone)]
 pub struct Db(pub Arc<Mutex<Connection>>);
 
+pub enum ProviderAdmission {
+    Ready,
+    Probe(String),
+    Blocked,
+}
+
 const SCH: &str = "
 create table if not exists kv(k text primary key, v text);
 create table if not exists ses(id text primary key, exp int);
@@ -476,6 +482,76 @@ impl Db {
         Ok(())
     }
 
+    /// After a cooldown, admit one recovery probe across all DB connections.
+    /// The lease is bounded so an interrupted process cannot block recovery forever.
+    pub fn provider_admission(
+        &self,
+        provider: &str,
+        at: i64,
+        lease_ms: i64,
+    ) -> rusqlite::Result<ProviderAdmission> {
+        if crate::prov::pv(provider).is_none() || !(1..=3_660_000).contains(&lease_ms) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let key = format!("provider:cooldown:{provider}");
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let raw: Option<String> = {
+            let mut stmt = tx.prepare("select v from kv where k=?")?;
+            let mut rows = stmt.query([&key])?;
+            rows.next()?.map(|row| row.get(0)).transpose()?
+        };
+        let Some(raw) = raw else {
+            return Ok(ProviderAdmission::Ready);
+        };
+        let mut value: Value =
+            serde_json::from_str(&raw).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let until = value["until"].as_i64().ok_or(rusqlite::Error::InvalidQuery)?;
+        if !matches!(value["kind"].as_str(), Some("quota" | "network")) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        if until > at || value["probe_until"].as_i64().unwrap_or(0) > at {
+            return Ok(ProviderAdmission::Blocked);
+        }
+        let ticket = hex::encode(rand::random::<[u8; 16]>());
+        value["probe_ticket"] = json!(ticket);
+        value["probe_until"] = json!(at.saturating_add(lease_ms));
+        tx.execute(
+            "update kv set v=? where k=?",
+            rusqlite::params![value.to_string(), key],
+        )?;
+        tx.commit()?;
+        Ok(ProviderAdmission::Probe(ticket))
+    }
+
+    /// A late or expired probe must not clear a newer failure or another probe.
+    pub fn finish_provider_probe(
+        &self,
+        provider: &str,
+        ticket: &str,
+        at: i64,
+        healthy: bool,
+    ) -> rusqlite::Result<bool> {
+        let key = format!("provider:cooldown:{provider}");
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let changed = if healthy {
+            tx.execute(
+                "delete from kv where k=? and json_extract(v,'$.probe_ticket')=? and json_extract(v,'$.probe_until')>?",
+                rusqlite::params![key, ticket, at],
+            )?
+        } else {
+            tx.execute(
+                "update kv set v=json_remove(json_set(v,'$.until',max(json_extract(v,'$.until'),?)),'$.probe_ticket','$.probe_until')
+                 where k=? and json_extract(v,'$.probe_ticket')=? and json_extract(v,'$.probe_until')>?",
+                rusqlite::params![at.saturating_add(30_000), key, ticket, at],
+            )?
+        };
+        tx.commit()?;
+        crate::app::chg();
+        Ok(changed == 1)
+    }
+
     pub fn provider_cooldown(&self, provider: &str, at: i64) -> rusqlite::Result<Option<Value>> {
         let rows = self.try_all(
             "select v from kv where k=?",
@@ -491,6 +567,12 @@ impl Db {
             .ok_or(rusqlite::Error::InvalidQuery)?;
         if !matches!(value["kind"].as_str(), Some("quota" | "network")) {
             return Err(rusqlite::Error::InvalidQuery);
+        }
+        let probe_until = value["probe_until"].as_i64().unwrap_or(0);
+        if probe_until > at && probe_until > until {
+            let mut pending = value;
+            pending["until"] = json!(probe_until);
+            return Ok(Some(pending));
         }
         Ok((until > at).then_some(value))
     }
@@ -1853,6 +1935,50 @@ mod provider_cooldown_tests {
         );
         assert!(db.provider_failure("unknown", "quota", at).is_err());
     }
+    #[test]
+    fn recovery_probe_is_exclusive_and_stale_results_cannot_clear_new_failure() {
+        let db = Db::mem();
+        let at = 100_000;
+        db.provider_failure("codex", "network", at).unwrap();
+        assert!(matches!(
+            db.provider_admission("codex", at, 1000).unwrap(),
+            ProviderAdmission::Blocked
+        ));
+        let ready = at + 30_000;
+        let ProviderAdmission::Probe(first) =
+            db.provider_admission("codex", ready, 1000).unwrap()
+        else {
+            panic!("expected recovery probe");
+        };
+        assert!(matches!(
+            db.provider_admission("codex", ready + 1, 1000).unwrap(),
+            ProviderAdmission::Blocked
+        ));
+        assert!(matches!(
+            db.provider_admission("cc", ready, 1000).unwrap(),
+            ProviderAdmission::Ready
+        ));
+        let ProviderAdmission::Probe(second) =
+            db.provider_admission("codex", ready + 1000, 1000).unwrap()
+        else {
+            panic!("expected expired lease to recover");
+        };
+        assert!(!db.finish_provider_probe("codex", &first, ready + 1001, true).unwrap());
+        db.provider_failure("codex", "quota", ready + 1001).unwrap();
+        assert!(!db.finish_provider_probe("codex", &second, ready + 1002, true).unwrap());
+        let next = ready + 61_001;
+        let ProviderAdmission::Probe(third) =
+            db.provider_admission("codex", next, 1000).unwrap()
+        else {
+            panic!("expected probe after new cooldown");
+        };
+        assert!(db.finish_provider_probe("codex", &third, next + 1, true).unwrap());
+        assert!(matches!(
+            db.provider_admission("codex", next + 2, 1000).unwrap(),
+            ProviderAdmission::Ready
+        ));
+    }
+
     #[test]
     fn corrupt_cooldown_is_not_treated_as_available() {
         let db = Db::mem();

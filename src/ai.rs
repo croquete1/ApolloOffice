@@ -238,11 +238,7 @@ pub async fn ask1(a: &Ax, mut o: Ask) -> R<(String, Value)> {
     let low_priority = o.w == "hunter"
         || (matches!(o.w, "fixer" | "repro")
             && o.job.and_then(|id| a.db.jg(id)).is_some_and(|j| j.opt()));
-    if low_priority && a.codex_low_priority_blocked(&o.md) {
-        return Err(X::Lim(
-            "Codex quota reserved for fixes and independent reviews".into(),
-        ));
-    }
+    let _codex_background = a.reserve_codex_background(&o.md, low_priority)?;
     if crate::routing::enabled(a) && crate::routing::is_free(&o.md) {
         o.t = o.t.min(240);
         o.turns = o.turns.min(24);
@@ -253,6 +249,15 @@ pub async fn ask1(a: &Ax, mut o: Ask) -> R<(String, Value)> {
         r.md = o.md.clone();
     }
     let provider = crate::prov::parse(&o.md).0;
+    let lease_ms = o.t.saturating_mul(1000).saturating_add(60_000).min(3_660_000) as i64;
+    let probe = match a.db.provider_admission(provider, crate::db::now(), lease_ms) {
+        Ok(crate::db::ProviderAdmission::Ready) => None,
+        Ok(crate::db::ProviderAdmission::Probe(ticket)) => Some(ticket),
+        Ok(crate::db::ProviderAdmission::Blocked) => {
+            return Err(X::Lim(format!("{provider} recovery probe or cooldown active")));
+        }
+        Err(error) => return Err(X::E(format!("provider admission ledger unavailable: {error}"))),
+    };
     let result = match provider {
         "cc" => cc(a, o).await,
         "codex" => codex(a, o).await,
@@ -268,6 +273,15 @@ pub async fn ask1(a: &Ax, mut o: Ask) -> R<(String, Value)> {
     if let Some(kind) = kind {
         if let Err(error) = a.db.provider_failure(provider, kind, crate::db::now()) {
             eprintln!("provider cooldown persistence failed: {error}");
+        }
+    } else if let Some(ticket) = probe {
+        if let Err(error) = a.db.finish_provider_probe(
+            provider,
+            &ticket,
+            crate::db::now(),
+            result.is_ok(),
+        ) {
+            eprintln!("provider recovery persistence failed: {error}");
         }
     }
     result
