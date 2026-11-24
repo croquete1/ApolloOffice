@@ -2256,7 +2256,10 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                         if a.drain.load(std::sync::atomic::Ordering::SeqCst) {
                             return er(StatusCode::CONFLICT, "update is in progress");
                         }
-                        if a.db.run("delete from kv where k in ('set','hold','man')", pa![]) < 0 {
+                        if a.db
+                            .run("delete from kv where k in ('set','hold','man')", pa![])
+                            < 0
+                        {
                             return er(StatusCode::CONFLICT, "settings were not reset");
                         }
                         let mut l = a.lv.lock().unwrap();
@@ -2739,8 +2742,7 @@ mod t {
         assert_eq!(a.db.kg("man"), json!(true));
         assert_eq!(a.db.kg("hold"), json!({"fixer":true}));
         assert_eq!(a.db.kg("set"), json!({"hunters":1}));
-        a.db
-            .0
+        a.db.0
             .lock()
             .unwrap()
             .execute_batch("drop trigger fail_reset")
