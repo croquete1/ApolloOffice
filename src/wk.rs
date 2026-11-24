@@ -53,9 +53,7 @@ fn combine_guard_halves(left: R<Value>, right: R<Value>) -> R<Value> {
             }
             Ok(left)
         }
-        (Ok(value), Err(error)) | (Err(error), Ok(value)) if guard_unreadable(&error) => {
-            Ok(value)
-        }
+        (Ok(value), Err(error)) | (Err(error), Ok(value)) if guard_unreadable(&error) => Ok(value),
         (Err(error), _) | (_, Err(error)) => Err(error),
     }
 }
@@ -88,7 +86,11 @@ fn guard1<'a>(
         if b.len() > 1 && d < 3 {
             let h = b.len() / 2;
             let left = guard1(a, b[..h].to_vec(), job, d + 1).await;
-            if left.as_ref().err().is_some_and(|error| !guard_unreadable(error)) {
+            if left
+                .as_ref()
+                .err()
+                .is_some_and(|error| !guard_unreadable(error))
+            {
                 return left;
             }
             let right = guard1(a, b[h..].to_vec(), job, d + 1).await;
@@ -151,17 +153,16 @@ pub(crate) async fn guard_partial(
 #[test]
 fn guard_partial_merge_preserves_only_valid_verdicts() {
     let valid = json!({"second":{"inj":false,"why":"safe"}});
-    let merged = combine_guard_halves(Err(X::E(GUARD_UNREADABLE.into())), Ok(valid.clone())).unwrap();
+    let merged =
+        combine_guard_halves(Err(X::E(GUARD_UNREADABLE.into())), Ok(valid.clone())).unwrap();
     assert_eq!(merged, valid);
     assert!(merged["first"].is_null());
-    assert!(combine_guard_halves(
-        Ok(valid.clone()),
-        Err(X::E("transport failed".into()))
-    ).is_err());
+    assert!(combine_guard_halves(Ok(valid.clone()), Err(X::E("transport failed".into()))).is_err());
     assert!(combine_guard_halves(
         Err(X::E(GUARD_UNREADABLE.into())),
         Err(X::E(GUARD_UNREADABLE.into()))
-    ).is_err());
+    )
+    .is_err());
 }
 
 pub fn errm(e: &X) -> String {
