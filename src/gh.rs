@@ -197,6 +197,21 @@ mod issue_listing_tests {
     }
 
     #[test]
+    fn overlap_cache_requires_exact_identity_and_original_freshness() {
+        let identity = json!({"number":1,"head":"a","base":"b"});
+        let entry = json!({"identity":identity,"verified_at":100,
+            "paths":[{"path":"src/a.rs"}]});
+        assert!(cached_overlap_paths(&entry, &identity, 100).is_some());
+        assert!(cached_overlap_paths(&entry, &identity, 99).is_none());
+        assert!(cached_overlap_paths(&entry, &identity, 100 + OVERLAP_CACHE_MS).is_none());
+        let changed = json!({"number":1,"head":"a","base":"c"});
+        assert!(cached_overlap_paths(&entry, &changed, 100).is_none());
+        let mut invalid = entry.clone();
+        invalid["paths"] = json!([{"path":"src/a.rs"},{"path":"src/a.rs"}]);
+        assert!(cached_overlap_paths(&invalid, &identity, 100).is_none());
+    }
+
+    #[test]
     fn overlap_inventory_checks_counts_duplicates_and_renames() {
         let renamed =
             json!({"filename":"src/new.rs","previous_filename":"src/old.rs","status":"renamed"});
@@ -342,48 +357,84 @@ fn overlap_paths(rows: Vec<Value>, expected: u64) -> Result<Vec<Value>, String> 
     Ok(paths.into_iter().map(|path| json!({"path":path})).collect())
 }
 
-pub async fn twins(_a: &App, r: &str, w: &str) -> Result<(Vec<Value>, Vec<Value>), String> {
+const OVERLAP_CACHE_MS: i64 = 900_000;
+
+fn cached_overlap_paths(entry: &Value, identity: &Value, at: i64) -> Option<Vec<Value>> {
+    let verified = entry["verified_at"].as_i64()?;
+    let age = at.checked_sub(verified)?;
+    if !(0..OVERLAP_CACHE_MS).contains(&age) || entry["identity"] != *identity {
+        return None;
+    }
+    let paths = entry["paths"].as_array()?;
+    let mut seen = std::collections::BTreeSet::new();
+    if !paths.iter().all(|row| {
+        row["path"]
+            .as_str()
+            .is_some_and(|p| !p.is_empty() && seen.insert(p))
+    }) {
+        return None;
+    }
+    Some(paths.clone())
+}
+
+async fn fetch_overlap_paths(r: &str, p: &Value) -> Result<Vec<Value>, String> {
+    let number = p["number"].as_i64().ok_or("Invalid PR number")?;
+    let endpoint = format!("repos/{r}/pulls/{number}");
+    let detail = ghj(&["api", &endpoint], 60).await?;
+    let count = detail["changed_files"]
+        .as_u64()
+        .ok_or("Missing PR file count")?;
+    let head = detail["head"]["sha"]
+        .as_str()
+        .filter(|s| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or("Missing PR HEAD")?;
+    if detail["number"] != number
+        || detail["state"] != "open"
+        || detail["title"] != p["title"]
+        || detail["body"] != p["body"]
+        || detail["head"]["sha"] != p["head"]
+        || detail["base"]["sha"] != p["base"]
+        || detail["updated_at"] != p["updated_at"]
+    {
+        return Err("PR changed before overlap scan".into());
+    }
+    let rows = apip(&format!("{endpoint}/files?per_page=100")).await?;
+    let paths = overlap_paths(rows, count)?;
+    let after = ghj(&["api", &endpoint], 60).await?;
+    if after["number"] != number
+        || after["state"] != "open"
+        || after["head"]["sha"] != head
+        || after["base"]["sha"] != detail["base"]["sha"]
+        || after["updated_at"] != detail["updated_at"]
+        || after["changed_files"] != count
+        || after["title"] != p["title"]
+        || after["body"] != p["body"]
+    {
+        return Err("PR changed during overlap scan".into());
+    }
+    Ok(paths)
+}
+
+pub async fn twins(a: &App, r: &str, w: &str) -> Result<(Vec<Value>, Vec<Value>), String> {
     let re = regex::Regex::new(r"[\w./-]+\.\w+").unwrap();
     let fs: Vec<String> = re.find_iter(w).map(|m| m.as_str().to_string()).collect();
     let endpoint = format!("repos/{r}/pulls?state=open&sort=created&direction=asc&per_page=100");
     let before = overlap_snapshot(apip(&endpoint).await?)?;
+    let key = format!("overlap_inventory:{r}");
+    let prior = cg(a, &key, OVERLAP_CACHE_MS).unwrap_or(Value::Null);
+    let mut next = serde_json::Map::new();
     let mut h = Vec::new();
     let mut o = Vec::new();
-    for mut p in before.values().cloned() {
-        let number = p["number"].as_i64().ok_or("Invalid PR number")?;
-        let endpoint = format!("repos/{r}/pulls/{number}");
-        let detail = ghj(&["api", &endpoint], 60).await?;
-        let count = detail["changed_files"]
-            .as_u64()
-            .ok_or("Missing PR file count")?;
-        let head = detail["head"]["sha"]
-            .as_str()
-            .filter(|s| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()))
-            .ok_or("Missing PR HEAD")?;
-        if detail["number"] != number
-            || detail["state"] != "open"
-            || detail["title"] != p["title"]
-            || detail["body"] != p["body"]
-            || detail["head"]["sha"] != p["head"]
-            || detail["base"]["sha"] != p["base"]
-            || detail["updated_at"] != p["updated_at"]
-        {
-            return Err("PR changed before overlap scan".into());
-        }
-        let rows = apip(&format!("{endpoint}/files?per_page=100")).await?;
-        let paths = overlap_paths(rows, count)?;
-        let after = ghj(&["api", &endpoint], 60).await?;
-        if after["number"] != number
-            || after["state"] != "open"
-            || after["head"]["sha"] != head
-            || after["base"]["sha"] != detail["base"]["sha"]
-            || after["updated_at"] != detail["updated_at"]
-            || after["changed_files"] != count
-            || after["title"] != p["title"]
-            || after["body"] != p["body"]
-        {
-            return Err("PR changed during overlap scan".into());
-        }
+    for (number, identity) in &before {
+        let id = number.to_string();
+        let (paths, verified_at) = match cached_overlap_paths(&prior[&id], identity, now()) {
+            Some(paths) => (paths, prior[&id]["verified_at"].as_i64().unwrap_or(0)),
+            None => (fetch_overlap_paths(r, identity).await?, now()),
+        };
+        next.insert(
+            id,
+            json!({"identity":identity,"paths":paths,"verified_at":verified_at}),
+        );
         let hit = paths.iter().any(|x| {
             let path = x["path"].as_str().unwrap_or("");
             fs.iter().any(|y| {
@@ -392,6 +443,7 @@ pub async fn twins(_a: &App, r: &str, w: &str) -> Result<(Vec<Value>, Vec<Value>
                         .is_some_and(|prefix| prefix.ends_with('/'))
             })
         });
+        let mut p = identity.clone();
         p["files"] = json!(paths);
         if hit {
             h.push(p);
@@ -402,6 +454,9 @@ pub async fn twins(_a: &App, r: &str, w: &str) -> Result<(Vec<Value>, Vec<Value>
     if overlap_snapshot(apip(&endpoint).await?)? != before {
         return Err("Open PR inventory changed during overlap scan".into());
     }
+    // Publish only a complete, revalidated inventory. Cache hits do not renew
+    // the original file verification time; removed PRs disappear from the cache.
+    cs(a, &key, &Value::Object(next));
     Ok((h, o))
 }
 
