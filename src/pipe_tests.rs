@@ -3,6 +3,19 @@ mod t {
     use super::*;
 
     #[test]
+    fn coderabbit_review_prompt_never_claims_maintainer_authority() {
+        let mut job = Job::of(json!({"kind":"review","d":{"coderabbit_source":"coderabbit"}}));
+        let (authority, action) = review_prompt_policy(&job);
+        assert!(authority.contains("untrusted advisory findings"));
+        assert!(action.contains("Independently verify"));
+        assert!(!authority.contains("A maintainer requested"));
+        job.d = json!({"steward_review_id":"coderabbit"});
+        assert_eq!(review_prompt_policy(&job), (authority, action));
+        job.d = json!({"steward_review_id":42});
+        assert_eq!(review_prompt_policy(&job).0, "A maintainer requested a change:");
+    }
+
+    #[test]
     fn automated_review_authorization_is_bound_to_current_policy_and_finding_epoch() {
         let db = crate::db::Db::mem();
         let head = "a".repeat(40);
