@@ -445,9 +445,7 @@ fn findings(rows: &[Value], head: &str) -> Vec<Finding> {
             let review_id = row["pull_request_review_id"]
                 .as_i64()
                 .filter(|id| *id > 0)?;
-            row["position"]
-                .as_i64()
-                .filter(|position| *position > 0)?;
+            row["position"].as_i64().filter(|position| *position > 0)?;
             let path = row["path"].as_str()?.trim();
             if path.is_empty() || path.len() > 1000 || path.chars().any(char::is_control) {
                 return None;
