@@ -968,6 +968,60 @@ pub async fn apip(p: &str) -> Result<Vec<Value>, String> {
     api_pages(&o)
 }
 
+fn unique_ids(rows:&[Value])->Result<(),String>{
+    let mut ids=std::collections::BTreeSet::new();
+    for row in rows{
+        let id=row["id"].as_u64().filter(|id|*id>0).ok_or("missing or invalid paginated row ID")?;
+        if !ids.insert(id){return Err("duplicate paginated row ID; inventory may have changed".into());}
+    }
+    Ok(())
+}
+
+/// For review and comment endpoints with numeric IDs, reject repeated rows.
+pub async fn apip_unique(p:&str)->Result<Vec<Value>,String>{
+    let rows=apip(p).await?;
+    unique_ids(&rows)?;
+    Ok(rows)
+}
+
+/// Counted REST objects (check-runs and combined commit status) have a
+/// different response shape from list endpoints. Every page must agree.
+fn counted_pages(output:&str,field:&str,expected_sha:Option<&str>)->Result<Value,String>{
+    let mut rows=Vec::new();
+    let mut total=None;
+    let mut state=None;
+    let mut pages=0;
+    for page in serde_json::Deserializer::from_str(output).into_iter::<Value>(){
+        let page=page.map_err(|e|format!("gh counted page JSON: {e}"))?;
+        let count=page["total_count"].as_u64().ok_or("missing total_count")?;
+        if total.is_some_and(|prior|prior!=count){return Err("total_count changed during pagination".into());}
+        total=Some(count);
+        if let Some(sha)=expected_sha{
+            if page["sha"]!=sha{return Err("combined status SHA differs from requested SHA".into());}
+            let value=page["state"].as_str().filter(|v|matches!(*v,"success"|"pending"|"failure")).ok_or("invalid combined status")?;
+            if state.as_ref().is_some_and(|prior:&String|prior!=value){return Err("combined status changed during pagination".into());}
+            state=Some(value.to_string());
+        }
+        let items=page[field].as_array().ok_or("missing counted page rows")?;
+        if items.is_empty() && (count!=0 || pages>0){return Err("unexpected empty counted page".into());}
+        rows.extend(items.iter().cloned());
+        pages+=1;
+        if rows.len() as u64>count || rows.len()>10_000{return Err("counted page inventory exceeds safe bounds".into());}
+    }
+    let count=total.ok_or("empty counted page stream")?;
+    unique_ids(&rows)?;
+    if rows.len() as u64!=count{return Err("incomplete counted page inventory".into());}
+    let mut result=serde_json::json!({"total_count":count});
+    result[field]=serde_json::json!(rows);
+    if let Some(value)=state{result["state"]=serde_json::json!(value);}
+    Ok(result)
+}
+
+pub async fn apip_counted(p:&str,field:&str,expected_sha:Option<&str>)->Result<Value,String>{
+    let o=gh(&["api","--paginate","-H","Accept: application/vnd.github+json",p],180).await?;
+    counted_pages(&o,field,expected_sha)
+}
+
 fn api_pages(output: &str) -> Result<Vec<Value>, String> {
     if output.trim().is_empty() {
         return Err("gh paginated response is empty".into());
@@ -1425,5 +1479,29 @@ mod worker_boundary_tests {
         }
         assert!(!worker_secret("PATH"));
         assert!(!worker_secret("HOME"));
+    }
+}
+
+#[cfg(test)]
+mod counted_pagination_tests {
+    use super::*;
+    #[test]
+    fn counted_pages_require_complete_unique_stable_inventory() {
+        let good=r#"{"total_count":2,"check_runs":[{"id":1}]} {"total_count":2,"check_runs":[{"id":2}]}"#;
+        assert_eq!(counted_pages(good,"check_runs",None).unwrap()["check_runs"].as_array().unwrap().len(),2);
+        for bad in [
+            r#"{"total_count":2,"check_runs":[{"id":1}]}"#,
+            r#"{"total_count":2,"check_runs":[{"id":1}]} {"total_count":2,"check_runs":[{"id":1}]}"#,
+            r#"{"total_count":2,"check_runs":[{"id":1}]} {"total_count":3,"check_runs":[{"id":2}]}"#,
+            r#"{"total_count":1,"check_runs":[{}]}"#,
+            ""
+        ]{assert!(counted_pages(bad,"check_runs",None).is_err(),"{bad}");}
+    }
+    #[test]
+    fn combined_status_requires_exact_sha_and_consistent_state() {
+        let good=r#"{"sha":"abc","state":"success","total_count":2,"statuses":[{"id":1,"state":"success"}]} {"sha":"abc","state":"success","total_count":2,"statuses":[{"id":2,"state":"success"}]}"#;
+        assert!(counted_pages(good,"statuses",Some("abc")).is_ok());
+        assert!(counted_pages(good,"statuses",Some("def")).is_err());
+        assert!(counted_pages(&good.replacen("success","failure",1),"statuses",Some("abc")).is_err());
     }
 }

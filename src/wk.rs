@@ -4,7 +4,7 @@ use crate::db::{now, Job};
 use crate::net::need;
 use crate::pa;
 use crate::pipe::{bl, qn, rp};
-use crate::sh::{apip, gh, ghj};
+use crate::sh::{apip_unique, gh, ghj};
 use regex::Regex;
 use serde_json::{json, Value};
 use std::future::Future;
@@ -1009,7 +1009,7 @@ async fn comments(r: &str, n: i64, me: &str) -> R<Vec<Value>> {
         format!("repos/{r}/pulls/{n}/reviews?per_page=100"),
         format!("repos/{r}/pulls/{n}/comments?per_page=100"),
     );
-    let (a, b, c) = tokio::join!(apip(&u1), apip(&u2), apip(&u3));
+    let (a, b, c) = tokio::join!(apip_unique(&u1), apip_unique(&u2), apip_unique(&u3));
     let mut o = vec![];
     for x in a.map_err(X::E)? {
         if !x["id"].as_i64().is_some_and(|id| id > 0) {
@@ -1053,24 +1053,56 @@ async fn comments(r: &str, n: i64, me: &str) -> R<Vec<Value>> {
         .collect())
 }
 
-async fn pushers(r: &str, n: i64) -> Vec<String> {
-    let Some((o, nm)) = r.split_once('/') else {
-        return vec![];
-    };
-    let q = format!("query{{repository(owner:{o:?},name:{nm:?}){{pullRequest(number:{n}){{reviews(last:100,states:CHANGES_REQUESTED){{nodes{{id authorCanPushToRepository}}}}}}}}}}");
-    ghj(&["api", "graphql", "-f", &format!("query={q}")], 60)
-        .await
-        .ok()
-        .and_then(|v| {
-            v["data"]["repository"]["pullRequest"]["reviews"]["nodes"]
-                .as_array()
-                .cloned()
-        })
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|x| x["authorCanPushToRepository"] == true)
-        .filter_map(|x| x["id"].as_str().map(String::from))
-        .collect()
+#[derive(Default)]
+struct PusherScan {
+    ids:std::collections::BTreeSet<String>,
+    pushers:Vec<String>,
+    cursors:std::collections::BTreeSet<String>,
+    total:Option<u64>,
+}
+impl PusherScan {
+    fn accept(&mut self,connection:&Value)->Result<Option<String>,String>{
+        let total=connection["totalCount"].as_u64().ok_or("missing review count")?;
+        if total>10_000 || self.total.is_some_and(|old|old!=total){return Err("review count changed or exceeded safe bounds".into());}
+        self.total=Some(total);
+        let nodes=connection["nodes"].as_array().ok_or("missing review nodes")?;
+        for node in nodes{
+            let id=node["id"].as_str().filter(|s|!s.is_empty()).ok_or("missing review ID")?;
+            if !self.ids.insert(id.to_string()){return Err("repeated review ID".into());}
+            if node["authorCanPushToRepository"].as_bool().ok_or("missing reviewer permission")?{self.pushers.push(id.to_string());}
+        }
+        match connection["pageInfo"]["hasNextPage"].as_bool(){
+            Some(false) if self.ids.len() as u64==total=>Ok(None),
+            Some(true) if !nodes.is_empty()&&(self.ids.len() as u64)<total=>{
+                let cursor=connection["pageInfo"]["endCursor"].as_str().filter(|s|!s.is_empty()).ok_or("missing review cursor")?;
+                if !self.cursors.insert(cursor.to_string()){return Err("repeated review cursor".into());}
+                Ok(Some(cursor.to_string()))
+            }
+            _=>Err("incomplete reviewer permission inventory".into())
+        }
+    }
+}
+
+async fn pushers(r:&str,n:i64)->Result<Vec<String>,String>{
+    let (owner,name)=r.split_once('/').ok_or("invalid repository")?;
+    let query=r#"query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviews(first:100,after:$cursor,states:CHANGES_REQUESTED){totalCount nodes{id authorCanPushToRepository} pageInfo{hasNextPage endCursor}}}}}"#;
+    let query_arg=format!("query={query}");
+    let owner_arg=format!("owner={owner}");
+    let name_arg=format!("name={name}");
+    let number_arg=format!("number={n}");
+    let mut scan=PusherScan::default();
+    let mut cursor:Option<String>=None;
+    loop{
+        let mut args=vec!["api","graphql","-f",&query_arg,"-F",&owner_arg,"-F",&name_arg,"-F",&number_arg];
+        let cursor_arg=cursor.as_ref().map(|v|format!("cursor={v}"));
+        if let Some(v)=cursor_arg.as_deref(){args.extend(["-f",v]);}
+        let data=ghj(&args,45).await?;
+        if !data["errors"].is_null(){return Err("review permission query returned GraphQL errors".into());}
+        match scan.accept(&data["data"]["repository"]["pullRequest"]["reviews"])?{
+            Some(next)=>cursor=Some(next),
+            None=>return Ok(scan.pushers),
+        }
+    }
 }
 
 async fn late(a: &Ax, r: &str, n: i64, me: &str, v: &Value) -> R<()> {
@@ -1461,7 +1493,12 @@ async fn watch1(a: &Ax) -> R<()> {
                 continue;
             }
         };
-        let cr: Vec<String> = if v["reviewDecision"] == "CHANGES_REQUESTED" { pushers(&r, n).await } else { vec![] };
+        let cr: Vec<String> = if v["reviewDecision"] == "CHANGES_REQUESTED" {
+            match pushers(&r,n).await{
+                Ok(ids)=>ids,
+                Err(error)=>{a.say("watcher",&format!("{tag}: reviewer permissions unavailable: {}",crate::sh::head(&error,160)),None);continue;}
+            }
+        } else { vec![] };
         let tr = |c: &Value| MA.contains(&c["as"].as_str().unwrap_or("")) || (c["k"] == "review" && c["t"].as_str().map(|t| t.starts_with("[review: CHANGES_REQUESTED]")).unwrap_or(false) && c["rid"].as_str().map(|x| cr.iter().any(|y| y == x)).unwrap_or(false));
         let mut nw = Vec::new();
         for c in cs {
@@ -1670,5 +1707,24 @@ mod t {
             .unwrap()["merge"],
             1
         );
+    }
+}
+
+#[cfg(test)]
+mod pusher_pagination_tests {
+    use super::*;
+    #[test]
+    fn reviewer_permissions_require_complete_pages() {
+        let first=json!({"totalCount":2,"nodes":[{"id":"r1","authorCanPushToRepository":true}],"pageInfo":{"hasNextPage":true,"endCursor":"next"}});
+        let last=json!({"totalCount":2,"nodes":[{"id":"r2","authorCanPushToRepository":false}],"pageInfo":{"hasNextPage":false}});
+        let mut scan=PusherScan::default();
+        assert_eq!(scan.accept(&first).unwrap().as_deref(),Some("next"));
+        assert!(scan.accept(&last).unwrap().is_none());
+        assert_eq!(scan.pushers,vec!["r1"]);
+        let mut scan=PusherScan::default();
+        scan.accept(&first).unwrap();
+        assert!(scan.accept(&first).is_err());
+        let mut scan=PusherScan::default();
+        assert!(scan.accept(&last).is_err());
     }
 }
