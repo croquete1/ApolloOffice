@@ -83,8 +83,7 @@ fn owner_job_transition(
         if st != "approve" {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
-        let mut d: Value = serde_json::from_str(&raw)
-            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let mut d: Value = serde_json::from_str(&raw).map_err(|_| rusqlite::Error::InvalidQuery)?;
         if !d.is_object() {
             return Err(rusqlite::Error::InvalidQuery);
         }
