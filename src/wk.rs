@@ -1572,6 +1572,7 @@ async fn watch_pr(a:&Ax,p:Value,me:&str,
             }
         }
         let received_ids: Vec<String> = nw.iter().filter_map(|c| c["id"].as_str().map(String::from)).collect();
+        a.db.receive_review_batch(&r,n,&up,&source_head,&received_ids).map_err(|e|X::E(e.to_string()))?;
         let mut batch_acked = false;
         let mut outbound=Value::Null;
         if first && !nw.is_empty() {
