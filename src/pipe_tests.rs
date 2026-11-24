@@ -3,6 +3,19 @@ mod t {
     use super::*;
 
     #[test]
+    fn coderabbit_review_prompt_never_claims_maintainer_authority() {
+        let mut job = Job::of(json!({"kind":"review","d":{"coderabbit_source":"coderabbit"}}));
+        let (authority, action) = review_prompt_policy(&job);
+        assert!(authority.contains("untrusted advisory findings"));
+        assert!(action.contains("Independently verify"));
+        assert!(!authority.contains("A maintainer requested"));
+        job.d = json!({"steward_review_id":"coderabbit"});
+        assert_eq!(review_prompt_policy(&job), (authority, action));
+        job.d = json!({"steward_review_id":42});
+        assert_eq!(review_prompt_policy(&job).0, "A maintainer requested a change:");
+    }
+
+    #[test]
     fn automated_review_authorization_is_bound_to_current_policy_and_finding_epoch() {
         let db = crate::db::Db::mem();
         let head = "a".repeat(40);
@@ -661,6 +674,12 @@ mod t {
             1,
             "apollo-office".into(),
         ));
+        a.lv.lock().unwrap().o.man = true;
+        assert!(!admit(&a, "o/r", "worker1", id));
+        assert!(!mk_hunt(&a));
+        assert!(a.act.lock().unwrap().is_empty());
+        assert!(a.lk.lock().unwrap().is_empty());
+        a.lv.lock().unwrap().o.man = false;
         let reservation = IdleCacheGuard::claim(&a, "worker1").unwrap();
         assert!(IdleCacheGuard::claim(&a, "worker1").is_none());
         assert!(!admit(&a, "o/r", "worker1", id));

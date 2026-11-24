@@ -18,7 +18,7 @@ create table if not exists ses(id text primary key, exp int);
 create table if not exists lnk(c text primary key, exp int);
 create table if not exists rp(id integer primary key, full text unique, iss int default 1, hunt int default 0, ci text default '', setup text default '', rules text default '', mode text default 'ask', merge int default 1, maxo int default 3, maxd int default 5, ai int default 1, on_ int default 1, t0 int, coderabbit_review int default 0, coderabbit_repair int default 0, coderabbit_epoch int default 0, coderabbit_review_since int default 0, coderabbit_free_confirmed int default 0);
 create table if not exists hs(id text primary key, ssh text default '', dk int default 0, ln int default 1, ci int default 1, gb int default 50, raw int default 0, on_ int default 1, t0 int);
-create table if not exists jobs(id integer primary key, repo text, num int, kind text default 'fix', title text, url text, st text, why text default '', d text default '{}', pr int, prio real default 0, t0 int, t1 int);
+create table if not exists jobs(id integer primary key autoincrement, repo text, num int, kind text default 'fix', title text, url text, st text, why text default '', d text default '{}', pr int, prio real default 0, t0 int, t1 int);
 create index if not exists jobs_st on jobs(st);
 create table if not exists job_schedule(job integer primary key, manual_priority integer check(manual_priority between 0 and 3), retry_after integer not null default 0, retry_reason text not null default '', admitted_at integer not null default 0);
 create table if not exists job_dependencies(job integer not null, prerequisite integer not null, primary key(job,prerequisite), check(job<>prerequisite));
@@ -47,9 +47,10 @@ create table if not exists coderabbit_requests(repo text not null, number int no
 create index if not exists coderabbit_requests_recent on coderabbit_requests(requested_at,status);
 create table if not exists coderabbit_findings(repo text not null, number int not null, comment_id int not null, review_id int not null, head text not null, state text not null, severity text not null, body_hash text not null, activation int not null, job int, created_at int not null, updated_at int not null, guard_ticket text, primary key(repo,number,comment_id,head));
 create index if not exists coderabbit_findings_pr on coderabbit_findings(repo,number,head,state);
+create table if not exists coderabbit_cycles(repo text not null, number integer not null, cycles integer not null check(cycles>=0), primary key(repo,number));
 ";
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 5;
 
 pub(crate) fn valid_git_sha(sha: &str) -> bool {
     sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit())
@@ -171,6 +172,48 @@ fn init(c: &mut Connection) -> anyhow::Result<()> {
             tx.execute(sql, [])?;
         }
     }
+    // SQLite may reuse a deleted maximum ROWID without AUTOINCREMENT.
+    // Existing job references must never authorize a different future job.
+    if version < 5 {
+        let autoincrement: bool = tx.query_row(
+            "select instr(upper(sql),'AUTOINCREMENT')>0 from sqlite_master where type='table' and name='jobs'",
+            [],
+            |r| r.get(0),
+        )?;
+        if !autoincrement {
+            let columns: i64 =
+                tx.query_row("select count(*) from pragma_table_info('jobs')", [], |r| {
+                    r.get(0)
+                })?;
+            anyhow::ensure!(
+                columns == 13,
+                "unexpected legacy jobs schema; backup required"
+            );
+            tx.execute_batch(
+                "create table jobs_v5(id integer primary key autoincrement, repo text, num int, kind text default 'fix', title text, url text, st text, why text default '', d text default '{}', pr int, prio real default 0, t0 int, t1 int);
+                 insert into jobs_v5(id,repo,num,kind,title,url,st,why,d,pr,prio,t0,t1)
+                   select id,repo,num,kind,title,url,st,why,d,pr,prio,t0,t1 from jobs;
+                 drop table jobs;
+                 alter table jobs_v5 rename to jobs;
+                 create index jobs_st on jobs(st);
+                 create index jobs_issue_latest on jobs(repo,num,kind,id desc);",
+            )?;
+        }
+        // Include surviving historical references, even when the job is gone.
+        tx.execute_batch(
+            "insert into sqlite_sequence(name,seq)
+               select 'jobs',0 where not exists(select 1 from sqlite_sequence where name='jobs');
+             update sqlite_sequence set seq=max(seq,coalesce((select max(id) from jobs),0),
+               coalesce((select max(job) from job_schedule),0),
+               coalesce((select max(job) from job_dependencies),0),
+               coalesce((select max(prerequisite) from job_dependencies),0),
+               coalesce((select max(job) from coderabbit_findings),0),
+               coalesce((select max(job) from fix_attempts),0),
+               coalesce((select max(job) from cost),0),
+               coalesce((select max(j) from ev),0))
+               where name='jobs';",
+        )?;
+    }
     // A terminal/deleted tracked PR cannot retain executable review receipts.
     // Keep identifiers for audit; never write comment acknowledgements here.
     tx.execute_batch("
@@ -222,6 +265,36 @@ fn init(c: &mut Connection) -> anyhow::Result<()> {
         when old.on_ is not new.on_ or old.steward_repair is not new.steward_repair or old.full is not new.full
         begin
           update rp set steward_activation=lower(hex(randomblob(16))) where id=new.id;
+        end;
+    ")?;
+    // Backfill recoverable history once; a cleared legacy job may only be
+    // visible through its queued findings. Keep the larger observed count.
+    if version < 4 {
+        tx.execute_batch(
+            "
+            insert into coderabbit_cycles(repo,number,cycles)
+            select repo,number,max(n) from (
+                select repo,pr as number,count(*) as n from jobs
+                  where kind='review' and pr>0 and json_valid(d)
+                    and json_extract(d,'$.coderabbit_source')='coderabbit'
+                  group by repo,pr
+                union all
+                select repo,number,count(distinct job) as n from coderabbit_findings
+                  where job is not null group by repo,number
+            ) group by repo,number
+            on conflict(repo,number) do update set cycles=max(cycles,excluded.cycles);
+        ",
+        )?;
+    }
+    // Admission and the counter share the job insertion transaction.
+    tx.execute_batch("
+        create trigger if not exists coderabbit_cycle_admission
+        after insert on jobs
+        when new.kind='review' and new.pr>0 and
+          case when json_valid(new.d) then json_extract(new.d,'$.coderabbit_source')='coderabbit' else 0 end
+        begin
+          insert into coderabbit_cycles(repo,number,cycles) values(new.repo,new.pr,1)
+          on conflict(repo,number) do update set cycles=cycles+1;
         end;
     ")?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -1754,6 +1827,38 @@ mod strict_db_tests {
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn job_identity_migration_preserves_rows_and_never_reuses_historical_ids() {
+        let mut c = Connection::open_in_memory().unwrap();
+        c.execute_batch(&SCH.replace(
+            "jobs(id integer primary key autoincrement",
+            "jobs(id integer primary key",
+        ))
+        .unwrap();
+        c.execute_batch(
+            "pragma user_version=4;
+             insert into jobs(id,repo,st) values(7,'o/r','done');
+             insert into job_schedule(job,manual_priority) values(99,0);
+             insert into job_dependencies(job,prerequisite) values(7,101);",
+        )
+        .unwrap();
+        init(&mut c).unwrap();
+        init(&mut c).unwrap();
+        let repo: String = c
+            .query_row("select repo from jobs where id=7", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(repo, "o/r");
+        c.execute("delete from jobs", []).unwrap();
+        c.execute("insert into jobs(repo,st) values('new/r','ready')", [])
+            .unwrap();
+        let id = c.last_insert_rowid();
+        assert!(id > 101);
+        c.execute("delete from jobs", []).unwrap();
+        c.execute("insert into jobs(repo,st) values('new/r','ready')", [])
+            .unwrap();
+        assert!(c.last_insert_rowid() > id);
     }
 
     #[test]

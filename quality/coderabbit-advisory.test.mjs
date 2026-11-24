@@ -65,3 +65,27 @@ test("rate limit and capacity do not appear as completed reviews",async()=>{
     assert.equal(f.button.disabled,false);
   }
 });
+
+test("repository controls are unique and revocation preserves unsaved settings",()=>{
+  const begin=source.indexOf("  const repos = async");
+  const end=source.indexOf('    if (!diagnostics',begin);
+  assert.ok(begin>=0 && end>begin);
+  const form=source.slice(begin,end);
+  for(const name of ["auto_merge","local_merge","steward_repair","coderabbit_free_confirmed","coderabbit_review","coderabbit_repair","auto_recover_drops"]){
+    assert.equal(form.split('tg("'+name+'",').length,2,name);
+  }
+  const fvStart=source.indexOf("  const fv = ");
+  const fvEnd=source.indexOf("  const usd =",fvStart);
+  const fields=[
+    {name:"coderabbit_free_confirmed",type:"checkbox",checked:false},
+    {name:"coderabbit_review",type:"checkbox",checked:true},
+    {name:"rules",type:"textarea",value:"unsaved edit"}
+  ];
+  const values=runInNewContext(source.slice(fvStart,fvEnd)+"fv(form)",{form:{querySelectorAll:()=>fields}});
+  assert.equal(values.coderabbit_free_confirmed,false);
+  assert.equal(values.coderabbit_review,true);
+  assert.equal(values.rules,"unsaved edit");
+});
+test("finding summaries spanning multiple heads are explicitly historical",()=>{
+  assert.match(source,/Findings CodeRabbit \(histórico de todos os HEADs\):/);
+});

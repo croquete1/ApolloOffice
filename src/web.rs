@@ -13,6 +13,188 @@ use serde_json::{json, Value};
 #[folder = "ui/"]
 struct Ui;
 
+// Keep the authenticated session so the owner can configure the paused office.
+fn wipe_office_data(db: &crate::db::Db) -> rusqlite::Result<()> {
+    let mut c = db.0.lock().unwrap();
+    let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    tx.execute_batch(
+        "delete from job_dependencies;
+         delete from job_schedule;
+         delete from watcher_inbox;
+         delete from watcher_retry;
+         delete from watcher_outbox;
+         delete from github_issues;
+         delete from jobs;
+         delete from ev;
+         delete from prs;
+         delete from cost;
+         delete from fix_attempts;
+         delete from coderabbit_requests;
+         delete from coderabbit_findings;
+         delete from coderabbit_cycles;
+         delete from tok;
+         delete from seen;
+         delete from cm;
+         delete from rp;
+         delete from hs;
+         delete from lnk;
+         delete from kv;
+         insert into kv(k,v) values('man','true');",
+    )?;
+    tx.commit()?;
+    crate::app::chg();
+    Ok(())
+}
+
+// Preserve prerequisite evidence required by jobs that may still execute.
+fn clear_job_history(db: &crate::db::Db) -> rusqlite::Result<()> {
+    let mut c = db.0.lock().unwrap();
+    let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    tx.execute_batch(
+        "delete from jobs where st in ('done','drop') and not exists(
+           select 1 from job_dependencies dep join jobs dependent on dependent.id=dep.job
+           where dep.prerequisite=jobs.id and dependent.st not in ('done','drop'));
+         delete from job_schedule where job not in (select id from jobs);
+         delete from job_dependencies where job not in (select id from jobs);
+         delete from fix_attempts where job not in (select id from jobs);
+         delete from kv where k glob 'lesson_exposure:*' and not exists(
+           select 1 from fix_attempts f where kv.k=printf('lesson_exposure:%lld:%lld:%lld',f.id,f.job,f.started));
+         delete from ev where j is null or j not in (select id from jobs);",
+    )?;
+    tx.commit()?;
+    crate::app::chg();
+    Ok(())
+}
+
+fn remove_repository(db: &crate::db::Db, repo: &str) -> rusqlite::Result<()> {
+    let mut c = db.0.lock().unwrap();
+    let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    tx.execute("delete from rp where full=?", [repo])?;
+    tx.execute(
+        "update jobs set st='drop', why='repository removed' where repo=? and st in ('vet','ready','approve','park')",
+        [repo],
+    )?;
+    tx.commit()?;
+    crate::app::chg();
+    Ok(())
+}
+
+fn save_repo_settings(db: &crate::db::Db, repo: &str, b: &Value) -> rusqlite::Result<()> {
+    let mut c = db.0.lock().unwrap();
+    let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let exists: bool = tx.query_row(
+        "select exists(select 1 from rp where full=?)",
+        [repo],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
+    }
+    for (k, kind) in [
+        ("iss", 0),
+        ("hunt", 0),
+        ("feat", 0),
+        ("nm", 0),
+        ("on_", 0),
+        ("merge", 0),
+        ("auto_merge", 0),
+        ("local_merge", 0),
+        ("steward_repair", 0),
+        ("steward_close", 0),
+        ("coderabbit_free_confirmed", 0),
+        ("coderabbit_review", 0),
+        ("coderabbit_repair", 0),
+        ("auto_recover_drops", 0),
+        ("maxo", 1),
+        ("maxd", 1),
+        ("bud", 3),
+        ("ci", 2),
+        ("setup", 2),
+        ("rules", 2),
+        ("mode", 2),
+        ("lang", 2),
+        ("skl", 2),
+    ] {
+        let v = &b[k];
+        if v.is_null() {
+            continue;
+        }
+        match kind {
+            3 => {
+                let x = v.as_f64().unwrap_or(0.0).clamp(0.0, 100_000.0);
+                tx.execute(
+                    &format!("update rp set {k}=? where full=?"),
+                    rusqlite::params![x, repo],
+                )?;
+            }
+            0 => {
+                let x = v
+                    .as_bool()
+                    .map(|x| x as i64)
+                    .or(v.as_i64())
+                    .unwrap_or(0)
+                    .clamp(0, 1);
+                if k == "on_" {
+                    tx.execute(
+                        "update rp set coderabbit_epoch=coderabbit_epoch + case when on_<>?1 then 1 else 0 end,coderabbit_review_since=case when on_<>?1 and ?1=1 and coderabbit_review=1 and coderabbit_free_confirmed=1 then ?2 else coderabbit_review_since end,on_=?1 where full=?3",
+                        rusqlite::params![x, now(), repo],
+                    )?;
+                } else if k == "coderabbit_review" {
+                    let at = now();
+                    tx.execute(
+                        "update rp set coderabbit_epoch=coderabbit_epoch + case when coderabbit_review<>? then 1 else 0 end,coderabbit_review_since=case when coderabbit_review<>? and ?=1 and on_=1 and coderabbit_free_confirmed=1 then ? else coderabbit_review_since end,coderabbit_review=? where full=?",
+                        rusqlite::params![x, x, x, at, x, repo],
+                    )?;
+                } else if k == "coderabbit_free_confirmed" {
+                    let at = now();
+                    tx.execute(
+                        "update rp set coderabbit_epoch=coderabbit_epoch + case when coderabbit_free_confirmed<>? then 1 else 0 end,coderabbit_review_since=case when coderabbit_free_confirmed<>? and ?=1 and on_=1 and coderabbit_review=1 then ? else coderabbit_review_since end,coderabbit_free_confirmed=? where full=?",
+                        rusqlite::params![x, x, x, at, x, repo],
+                    )?;
+                } else if k == "coderabbit_repair" {
+                    tx.execute(
+                        "update rp set coderabbit_epoch=coderabbit_epoch + case when coderabbit_repair<>? then 1 else 0 end,coderabbit_repair=? where full=?",
+                        rusqlite::params![x, x, repo],
+                    )?;
+                } else {
+                    tx.execute(
+                        &format!("update rp set {k}=? where full=?"),
+                        rusqlite::params![x, repo],
+                    )?;
+                }
+            }
+            1 => {
+                let x = v.as_i64().unwrap_or(3).clamp(0, 10000);
+                tx.execute(
+                    &format!("update rp set {k}=? where full=?"),
+                    rusqlite::params![x, repo],
+                )?;
+            }
+            _ => {
+                let mut s = v.as_str().unwrap_or("").trim().to_string();
+                if k == "mode" && s != "auto" {
+                    s = "ask".into();
+                }
+                if k == "lang" {
+                    s = pr_lang(&s).into();
+                }
+                s = crate::sh::head(&s, 4000);
+                tx.execute(
+                    &format!("update rp set {k}=? where full=?"),
+                    rusqlite::params![s, repo],
+                )?;
+            }
+        }
+    }
+    tx.execute(
+        "delete from kv where k=? or k like ?",
+        rusqlite::params![format!("cired:{repo}"), format!("cired:{repo}@%")],
+    )?;
+    tx.commit()?;
+    crate::app::chg();
+    Ok(())
+}
+
 fn work_class(job: &Value) -> &'static str {
     match job["kind"].as_str().unwrap_or("") {
         "hunt" => "discovered_bug",
@@ -763,6 +945,7 @@ const RPF: &[&str] = &[
     "auto_merge",
     "local_merge",
     "steward_repair",
+    "steward_close",
     "coderabbit_free_confirmed",
     "coderabbit_review",
     "coderabbit_repair",
@@ -774,6 +957,7 @@ const RPF: &[&str] = &[
     "setup",
     "rules",
     "mode",
+    "lang",
     "skl",
 ];
 const HSF: &[&str] = &["id", "ssh", "dk", "ln", "ci", "gb", "raw", "no", "cpu"];
@@ -839,11 +1023,14 @@ fn import(a: &Ax, b: &Value) -> Result<String, String> {
             pa![f.clone(), now(), now()],
         );
         for k in RPF {
-            // External review requests and autonomous repair must be enabled
-            // explicitly on each installation after importing a backup.
+            // External review requests, autonomous repair and automatic closing
+            // must be enabled explicitly on each installation after importing a backup.
             if matches!(
                 *k,
-                "coderabbit_free_confirmed" | "coderabbit_review" | "coderabbit_repair"
+                "coderabbit_free_confirmed"
+                    | "coderabbit_review"
+                    | "coderabbit_repair"
+                    | "steward_close"
             ) {
                 continue;
             }
@@ -1640,8 +1827,14 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                 }
                 "pause" => {
                     let on = b["on"].as_bool().unwrap_or(false);
+                    let _transition = a.update_transition.lock().unwrap();
+                    if a.db.run(
+                        "insert into kv(k,v) values('man',?) on conflict(k) do update set v=excluded.v",
+                        pa![json!(on).to_string()],
+                    ) < 0 {
+                        return er(StatusCode::CONFLICT, "office pause was not saved");
+                    }
                     a.lv.lock().unwrap().o.man = on;
-                    a.db.ks("man", &json!(on));
                     a.say(
                         "scout",
                         if on {
@@ -1731,112 +1924,19 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                     }
                     let r = mt["full"].as_str().unwrap_or(&r).to_string();
                     let (c, s) = crate::gh::detect(&r).await;
-                    a.db.run(
+                    if a.db.run(
                         "insert or ignore into rp(full,ci,setup,mode,t0,coderabbit_epoch) values(?,?,?,?,?,?)",
                         pa![r.clone(), c.clone(), s.clone(), "ask".to_string(), now(), now()],
-                    );
+                    ) < 0 {
+                        return er(StatusCode::CONFLICT, "repository was not added");
+                    }
                     a.sw.notify_one();
                     js(json!({"full": r, "ci": c, "setup": s, "cfg": cfg(a)}))
                 }
                 "set" => {
-                    for (k, kind) in [
-                        ("iss", 0),
-                        ("hunt", 0),
-                        ("feat", 0),
-                        ("nm", 0),
-                        ("on_", 0),
-                        ("merge", 0),
-                        ("auto_merge", 0),
-                        ("local_merge", 0),
-                        ("steward_repair", 0),
-                        ("coderabbit_free_confirmed", 0),
-                        ("coderabbit_review", 0),
-                        ("coderabbit_repair", 0),
-                        ("auto_recover_drops", 0),
-                        ("maxo", 1),
-                        ("maxd", 1),
-                        ("bud", 3),
-                        ("ci", 2),
-                        ("setup", 2),
-                        ("rules", 2),
-                        ("mode", 2),
-                        ("skl", 2),
-                    ] {
-                        let v = &b[k];
-                        if v.is_null() {
-                            continue;
-                        }
-                        match kind {
-                            3 => {
-                                let x = v.as_f64().unwrap_or(0.0).clamp(0.0, 100_000.0);
-                                a.db.run(
-                                    &format!("update rp set {k}=? where full=?"),
-                                    pa![x, r.clone()],
-                                );
-                            }
-                            0 => {
-                                let x = v
-                                    .as_bool()
-                                    .map(|x| x as i64)
-                                    .or(v.as_i64())
-                                    .unwrap_or(0)
-                                    .clamp(0, 1);
-                                if k == "on_" {
-                                    a.db.run(
-                                        "update rp set coderabbit_epoch=coderabbit_epoch + case when on_<>? then 1 else 0 end,on_=? where full=?",
-                                        pa![x, x, r.clone()],
-                                    );
-                                } else if k == "coderabbit_review" {
-                                    let at = now();
-                                    a.db.run(
-                                        "update rp set coderabbit_epoch=coderabbit_epoch + case when coderabbit_review<>? then 1 else 0 end,coderabbit_review_since=case when coderabbit_review<>? and ?=1 and coderabbit_free_confirmed=1 then ? else coderabbit_review_since end,coderabbit_review=? where full=?",
-                                        pa![x, x, x, at, x, r.clone()],
-                                    );
-                                } else if k == "coderabbit_free_confirmed" {
-                                    let at = now();
-                                    a.db.run(
-                                        "update rp set coderabbit_epoch=coderabbit_epoch + case when coderabbit_free_confirmed<>? then 1 else 0 end,coderabbit_review_since=case when coderabbit_free_confirmed<>? and ?=1 and coderabbit_review=1 then ? else coderabbit_review_since end,coderabbit_free_confirmed=? where full=?",
-                                        pa![x, x, x, at, x, r.clone()],
-                                    );
-                                } else if k == "coderabbit_repair" {
-                                    a.db.run(
-                                        "update rp set coderabbit_epoch=coderabbit_epoch + case when coderabbit_repair<>? then 1 else 0 end,coderabbit_repair=? where full=?",
-                                        pa![x, x, r.clone()],
-                                    );
-                                } else {
-                                    a.db.run(
-                                        &format!("update rp set {k}=? where full=?"),
-                                        pa![x, r.clone()],
-                                    );
-                                }
-                            }
-                            1 => {
-                                let x = v.as_i64().unwrap_or(3).clamp(0, 10000);
-                                a.db.run(
-                                    &format!("update rp set {k}=? where full=?"),
-                                    pa![x, r.clone()],
-                                );
-                            }
-                            _ => {
-                                let mut s = v.as_str().unwrap_or("").trim().to_string();
-                                if k == "mode" && s != "auto" {
-                                    s = "ask".into();
-                                }
-                                if k == "lang" {
-                                    s = pr_lang(&s).into();
-                                }
-                                s = crate::sh::head(&s, 4000);
-                                a.db.run(
-                                    &format!("update rp set {k}=? where full=?"),
-                                    pa![s, r.clone()],
-                                );
-                            }
-                        }
+                    if save_repo_settings(&a.db, &r, &b).is_err() {
+                        return er(StatusCode::CONFLICT, "repository settings were not saved");
                     }
-                    a.db.run(
-                        "delete from kv where k=? or k like ?",
-                        pa![format!("cired:{r}"), format!("cired:{r}@%")],
-                    );
                     a.sw.notify_one();
                     a.steward_wake.notify_one();
                     js(cfg(a))
@@ -1846,8 +1946,9 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                     js(json!({"ci": c, "setup": s}))
                 }
                 "del" => {
-                    a.db.run("delete from rp where full=?", pa![r.clone()]);
-                    a.db.run("update jobs set st='drop', why='repository removed' where repo=? and st in ('vet','ready','approve')", pa![r.clone()]);
+                    if remove_repository(&a.db, &r).is_err() {
+                        return er(StatusCode::CONFLICT, "repository was not removed");
+                    }
                     js(cfg(a))
                 }
                 _ => er(StatusCode::BAD_REQUEST, "unknown op"),
@@ -1988,6 +2089,9 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                 },
                 Err(error) if error == crate::coderabbit::RATE_LIMITED => {
                     js(json!({"state":"rate_limited","head":head}))
+                }
+                Err(error) if error == crate::coderabbit::OBSERVATION_BUSY => {
+                    js(json!({"state":"busy","head":head}))
                 }
                 Err(_) => js(json!({"state":"unavailable","head":head})),
             }
@@ -2137,20 +2241,14 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                     a.say("scout", "signed out everywhere", None);
                 }
                 "history" => {
-                    a.db.run("delete from jobs where st in ('done','drop')", pa![]);
-                    a.db.run(
-                        "delete from fix_attempts where job not in (select id from jobs)",
-                        pa![],
+                    if clear_job_history(&a.db).is_err() {
+                        return er(StatusCode::CONFLICT, "job history was not cleared");
+                    }
+                    a.say(
+                        "scout",
+                        "job history cleared; active prerequisites retained",
+                        None,
                     );
-                    a.db.run(
-                        "delete from kv where k glob 'lesson_exposure:*' and not exists(select 1 from fix_attempts f where kv.k=printf('lesson_exposure:%lld:%lld:%lld',f.id,f.job,f.started))",
-                        pa![],
-                    );
-                    a.db.run(
-                        "delete from ev where j is null or j not in (select id from jobs)",
-                        pa![],
-                    );
-                    a.say("scout", "job history cleared", None);
                 }
                 "reset" => {
                     for k in ["set", "hold", "man"] {
@@ -2170,24 +2268,23 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                     if b["sure"].as_str() != Some("delete") {
                         return er(StatusCode::BAD_REQUEST, "type delete to confirm");
                     }
-                    a.lv.lock().unwrap().o.man = true;
-                    for t in [
-                        "jobs",
-                        "ev",
-                        "prs",
-                        "cost",
-                        "fix_attempts",
-                        "tok",
-                        "seen",
-                        "cm",
-                        "rp",
-                        "hs",
-                        "lnk",
-                    ] {
-                        a.db.run(&format!("delete from {t}"), pa![]);
+                    let _transition = a.update_transition.lock().unwrap();
+                    if a.drain.load(std::sync::atomic::Ordering::SeqCst)
+                        || !crate::upd::manually_paused(a)
+                        || !crate::upd::idle(a)
+                        || !a.cache_maintenance.lock().unwrap().is_empty()
+                    {
+                        return er(
+                            StatusCode::CONFLICT,
+                            "pause the office and wait for active work before deleting data",
+                        );
                     }
-                    a.db.run("delete from kv", pa![]);
-                    a.db.ks("man", &json!(true));
+                    if wipe_office_data(&a.db).is_err() {
+                        return er(
+                            StatusCode::CONFLICT,
+                            "data deletion failed; office remains paused",
+                        );
+                    }
                     *a.vk.lock().unwrap() = None;
                     a.say("scout", "all data deleted, the office is paused", None);
                 }
@@ -2558,6 +2655,224 @@ mod t {
         assert_eq!(snapshot["byRepo"][0]["repo"], "o/r");
         assert!(!snapshot.to_string().contains("private command"));
         assert!(!snapshot.to_string().contains("private result"));
+    }
+
+    #[test]
+    fn history_cleanup_preserves_active_dependencies_and_rolls_back() {
+        let db = crate::db::Db::mem();
+        db.0.lock().unwrap().execute_batch(
+            "insert into jobs(id,repo,st,pr) values(1,'o/r','done',1),(2,'o/r','ready',null),(3,'o/r','done',3);
+             insert into prs(repo,num,st) values('o/r',1,'merged');
+             insert into job_dependencies(job,prerequisite) values(2,1);
+             insert into job_schedule(job) values(1),(2),(3);
+             create trigger fail_history before delete on job_schedule begin select raise(abort,'injected'); end;",
+        ).unwrap();
+        assert!(clear_job_history(&db).is_err());
+        assert_eq!(db.n("select count(*) from jobs", pa![]), 3);
+        db.0.lock()
+            .unwrap()
+            .execute_batch("drop trigger fail_history")
+            .unwrap();
+        clear_job_history(&db).unwrap();
+        assert_eq!(db.n("select count(*) from jobs", pa![]), 2);
+        assert_eq!(db.n("select count(*) from job_schedule", pa![]), 2);
+        assert!(db.schedule_eligible(2, "o/r", now()).unwrap());
+        db.run("update jobs set st='done' where id=2", pa![]);
+        clear_job_history(&db).unwrap();
+        assert_eq!(db.n("select count(*) from jobs", pa![]), 0);
+        assert_eq!(db.n("select count(*) from job_dependencies", pa![]), 0);
+        assert_eq!(db.n("select count(*) from job_schedule", pa![]), 0);
+    }
+
+    #[test]
+    fn repository_removal_is_atomic_and_cancels_parked_jobs() {
+        let db = crate::db::Db::mem();
+        db.0.lock().unwrap().execute_batch(
+            "insert into rp(full) values('o/r'),('other/r');
+             insert into jobs(repo,st) values('o/r','ready'),('o/r','park'),('other/r','ready');
+             create trigger fail_drop before update of st on jobs begin select raise(abort,'injected'); end;",
+        ).unwrap();
+        assert!(remove_repository(&db, "o/r").is_err());
+        assert_eq!(db.n("select count(*) from rp", pa![]), 2);
+        assert_eq!(db.n("select count(*) from jobs where st='drop'", pa![]), 0);
+        db.0.lock()
+            .unwrap()
+            .execute_batch("drop trigger fail_drop")
+            .unwrap();
+        remove_repository(&db, "o/r").unwrap();
+        assert_eq!(db.n("select count(*) from rp where full='o/r'", pa![]), 0);
+        assert_eq!(db.n("select count(*) from jobs where st='drop'", pa![]), 2);
+        assert_eq!(
+            db.n(
+                "select count(*) from jobs where repo='other/r' and st='ready'",
+                pa![]
+            ),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn wipe_requires_pause_and_idle_workers() {
+        let db = crate::db::Db::mem();
+        db.run("insert into rp(full) values('o/r')", pa![]);
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::env::temp_dir(),
+            1,
+            "x".into(),
+        ));
+        let request = || {
+            api(
+                &a,
+                &Method::POST,
+                "/api/danger",
+                "",
+                json!({"op":"wipe","sure":"delete"}),
+            )
+        };
+        assert_eq!(request().await.status(), StatusCode::CONFLICT);
+        a.lv.lock().unwrap().o.man = true;
+        a.act.lock().unwrap().insert("o/r local".into());
+        assert_eq!(request().await.status(), StatusCode::CONFLICT);
+        assert_eq!(a.db.n("select count(*) from rp", pa![]), 1);
+        a.act.lock().unwrap().clear();
+        assert_eq!(request().await.status(), StatusCode::OK);
+        assert_eq!(a.db.n("select count(*) from rp", pa![]), 0);
+        assert_eq!(a.db.kg("man"), json!(true));
+    }
+
+    #[test]
+    fn full_wipe_rolls_back_and_does_not_restore_old_coderabbit_history() {
+        let db = crate::db::Db::mem();
+        db.0.lock().unwrap().execute_batch(
+            "insert into rp(full) values('o/r');
+             insert into jobs(id,repo,kind,pr,d) values(7,'o/r','review',1,'{\"coderabbit_source\":\"coderabbit\"}');
+             insert into coderabbit_requests(repo,number,head,status,requested_at,activation) values('o/r',1,'old','sent',1,1);
+             insert into coderabbit_findings(repo,number,comment_id,review_id,head,state,severity,body_hash,activation,job,created_at,updated_at) values('o/r',1,1,1,'old','queued','high','hash',1,7,1,1);
+             insert into job_schedule(job) values(7);
+             insert into watcher_outbox(id,repo,num,author,body,state,created,updated) values('old','o/r',1,'owner','old','pending',1,1);
+             create trigger fail_wipe before delete on coderabbit_requests begin select raise(abort,'injected'); end;",
+        ).unwrap();
+        assert!(wipe_office_data(&db).is_err());
+        assert_eq!(db.n("select count(*) from jobs", pa![]), 1);
+        assert_eq!(db.n("select count(*) from watcher_outbox", pa![]), 1);
+        assert_eq!(db.n("select count(*) from coderabbit_cycles", pa![]), 1);
+        db.0.lock()
+            .unwrap()
+            .execute_batch("drop trigger fail_wipe")
+            .unwrap();
+        wipe_office_data(&db).unwrap();
+        db.run("insert into rp(full) values('o/r')", pa![]);
+        for table in [
+            "jobs",
+            "job_schedule",
+            "watcher_outbox",
+            "coderabbit_requests",
+            "coderabbit_findings",
+            "coderabbit_cycles",
+        ] {
+            assert_eq!(db.n(&format!("select count(*) from {table}"), pa![]), 0);
+        }
+        assert_eq!(db.kg("man"), json!(true));
+    }
+
+    #[tokio::test]
+    async fn coderabbit_route_reports_busy_without_remote_request() {
+        let db = crate::db::Db::mem();
+        db.run("insert into rp(full) values('o/r')", pa![]);
+        let head = "a".repeat(40);
+        db.ks(
+            "steward:o/r",
+            &json!({"prs":[{"number":1,"head_sha":head}]}),
+        );
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::env::temp_dir(),
+            1,
+            "x".into(),
+        ));
+        let _permits = crate::coderabbit::OBSERVATIONS
+            .acquire_many(2)
+            .await
+            .unwrap();
+        let response = api(
+            &a,
+            &Method::POST,
+            "/api/steward/coderabbit",
+            "",
+            json!({"repo":"o/r","number":1,"head":head}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["state"], "busy");
+        assert_eq!(value["head"], head);
+    }
+
+    #[test]
+    fn repository_reactivation_starts_new_review_eligibility_window() {
+        let db = crate::db::Db::mem();
+        db.run(
+            "insert into rp(full,on_,coderabbit_review,coderabbit_free_confirmed,coderabbit_review_since) values('o/r',1,1,1,100)",
+            pa![],
+        );
+        save_repo_settings(&db, "o/r", &json!({"on_":false})).unwrap();
+        let row = db.one("select * from rp where full='o/r'", pa![]).unwrap();
+        assert_eq!(row["coderabbit_review_since"], 100);
+        let before = now();
+        save_repo_settings(&db, "o/r", &json!({"on_":true})).unwrap();
+        let row = db.one("select * from rp where full='o/r'", pa![]).unwrap();
+        assert!(row["coderabbit_review_since"].as_i64().unwrap() >= before);
+        save_repo_settings(&db, "o/r", &json!({"on_":true})).unwrap();
+        let unchanged = db.one("select * from rp where full='o/r'", pa![]).unwrap();
+        assert_eq!(
+            row["coderabbit_review_since"],
+            unchanged["coderabbit_review_since"]
+        );
+        assert_eq!(row["coderabbit_epoch"], unchanged["coderabbit_epoch"]);
+    }
+
+    #[test]
+    fn repo_settings_rollback_preserves_activation_and_confirmation() {
+        let db = crate::db::Db::mem();
+        db.0.lock().unwrap().execute(
+            "insert into rp(full,coderabbit_review,coderabbit_free_confirmed,coderabbit_epoch,coderabbit_review_since) values('o/r',1,1,7,100)",
+            [],
+        ).unwrap();
+        db.0.lock().unwrap().execute_batch(
+            "create trigger fail_review before update of coderabbit_review on rp begin select raise(abort,'injected'); end;",
+        ).unwrap();
+        let changes = json!({"coderabbit_free_confirmed":false,"coderabbit_review":false});
+        assert!(save_repo_settings(&db, "o/r", &changes).is_err());
+        let state = db.one("select * from rp where full='o/r'", pa![]).unwrap();
+        assert_eq!(state["coderabbit_free_confirmed"], 1);
+        assert_eq!(state["coderabbit_review"], 1);
+        assert_eq!(state["coderabbit_epoch"], 7);
+        assert_eq!(state["coderabbit_review_since"], 100);
+        db.0.lock()
+            .unwrap()
+            .execute_batch("drop trigger fail_review")
+            .unwrap();
+        save_repo_settings(&db, "o/r", &changes).unwrap();
+        let state = db.one("select * from rp where full='o/r'", pa![]).unwrap();
+        assert_eq!(state["coderabbit_free_confirmed"], 0);
+        assert_eq!(state["coderabbit_review"], 0);
+        assert_eq!(state["coderabbit_epoch"], 9);
+    }
+
+    #[test]
+    fn repository_language_and_steward_close_are_saved() {
+        let db = crate::db::Db::mem();
+        db.run("insert into rp(full) values('o/r')", pa![]);
+        save_repo_settings(&db, "o/r", &json!({"lang":"pt-PT","steward_close":true})).unwrap();
+        let state = db.one("select * from rp where full='o/r'", pa![]).unwrap();
+        assert_eq!(state["lang"], "pt-PT");
+        assert_eq!(state["steward_close"], 1);
+        save_repo_settings(&db, "o/r", &json!({"lang":"invalid","steward_close":false})).unwrap();
+        let state = db.one("select * from rp where full='o/r'", pa![]).unwrap();
+        assert_eq!(state["lang"], "en");
+        assert_eq!(state["steward_close"], 0);
     }
 
     #[test]

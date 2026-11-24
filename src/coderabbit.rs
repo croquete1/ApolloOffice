@@ -10,12 +10,13 @@ use tokio::sync::Semaphore;
 
 const BOT_ID: u64 = 136622811;
 const COVERAGE: &str = "<!-- final_review_risk_coverage:";
-const PAGE_SIZE: usize = 10;
-const MAX_PAGES: usize = 20;
+const PAGE_SIZE: usize = 50;
+const MAX_PAGES: usize = 4;
 const MAX_BYTES: usize = 4 * 1024 * 1024;
 const MAX_FINDING_BODY: usize = 6_000;
 const MAX_REQUESTS_PER_HOUR: i64 = 3;
 const MAX_REQUESTS_PER_PR: i64 = 2;
+const CANCELLED_RETRY_MS: i64 = 300_000;
 const MAX_FIX_CYCLES_PER_PR: i64 = 2;
 pub(crate) static OBSERVATIONS: Semaphore = Semaphore::const_new(2);
 
@@ -27,6 +28,7 @@ const API: &str = "https://api.github.com";
 const LOCAL_REQUEST_LIMIT: usize = 40;
 const REQUEST_WINDOW: Duration = Duration::from_secs(3600);
 pub(crate) const RATE_LIMITED: &str = "public GitHub request budget unavailable";
+pub(crate) const OBSERVATION_BUSY: &str = "CodeRabbit observation capacity busy";
 
 #[derive(Default)]
 struct RequestBudget {
@@ -354,6 +356,15 @@ fn classify(rows: &[Value], reviews: &[Value], head: &str) -> Value {
         let Some(id) = review["id"].as_u64().filter(|n| *n > 0) else {
             continue;
         };
+        let tied_summary = latest
+            .as_mut()
+            .filter(|(old, _, _, surface)| &at == old && *surface == 1);
+        if let Some((_, _, signal, _)) = tied_summary {
+            if signal["state"] != "skipped" && signal["state"] != "pending" {
+                *signal = json!({"state":"unknown","head":head});
+            }
+            continue;
+        }
         if latest
             .as_ref()
             .is_none_or(|(old, old_id, _, _)| (&at, id) > (old, *old_id))
@@ -482,13 +493,55 @@ fn matches_pr(pr: &Value, repo: &str, number: i64, head: &str) -> bool {
             .is_some_and(|s| chrono::DateTime::parse_from_rfc3339(s).is_ok())
 }
 
+fn review_command_inventory(rows: &[Value]) -> Vec<Value> {
+    rows.iter()
+        .filter_map(|row| {
+            let body = row["body"].as_str()?;
+            let command = body.lines().any(|line| {
+                let mut words = line.split_whitespace();
+                words
+                    .next()
+                    .is_some_and(|word| word.eq_ignore_ascii_case("@coderabbitai"))
+                    && words
+                        .next()
+                        .is_some_and(|word| word.eq_ignore_ascii_case("review"))
+            });
+            if !command {
+                return None;
+            }
+            let automatic_head = body
+                .strip_prefix(
+                    "@coderabbitai review\n\n<!-- apollo-office-coderabbit-review:v1 head=",
+                )
+                .and_then(|tail| tail.strip_suffix(" -->"))
+                .filter(|head| valid_sha(head));
+            Some(json!({"id":row["id"],"automatic_head":automatic_head}))
+        })
+        .collect()
+}
+
+fn commands_allow_request(db: &crate::db::Db, repo: &str, number: i64, state: &Value) -> bool {
+    state["review_commands"].as_array().is_some_and(|commands| {
+        commands.iter().all(|command| {
+            let Some(id) = command["id"].as_i64().filter(|id| *id > 0) else {
+                return false;
+            };
+            let Some(head) = command["automatic_head"].as_str().filter(|sha| valid_sha(sha)) else {
+                return false;
+            };
+            db.n(
+                "select count(*) from coderabbit_requests where repo=? and number=? and head=? and status='sent' and comment_id=?",
+                crate::pa![repo.to_string(), number, head.to_string(), id],
+            ) == 1
+        })
+    })
+}
+
 pub(crate) async fn observe(repo: &str, number: i64, head: &str) -> Result<Value, String> {
     if !valid_repo(repo) || number <= 0 || !valid_sha(head) {
         return Err("Invalid review observation scope".into());
     }
-    let _permit = OBSERVATIONS
-        .try_acquire()
-        .map_err(|_| "CodeRabbit observation capacity busy")?;
+    let _permit = OBSERVATIONS.try_acquire().map_err(|_| OBSERVATION_BUSY)?;
     // The only remote operations are GitHub reads. Never call CodeRabbit's API or
     // request a review, and refuse private/unknown repositories.
     let client = public_client()?;
@@ -542,6 +595,7 @@ pub(crate) async fn observe(repo: &str, number: i64, head: &str) -> Result<Value
     }
     let mut result = classify(&rows, &reviews, head);
     result["finding_count"] = json!(findings(&line_comments, head).len());
+    result["review_commands"] = json!(review_command_inventory(&rows));
     Ok(result)
 }
 
@@ -603,20 +657,38 @@ pub(crate) fn valid_scope(repo: &str, number: i64, head: &str) -> bool {
     valid_repo(repo) && number > 0 && valid_sha(head)
 }
 
-pub(crate) fn reserve_request(
+fn request_activation(db: &crate::db::Db, repo: &str) -> Option<(i64, i64)> {
+    let row = db.one(
+        "select coderabbit_epoch,coderabbit_review_since from rp where full=? and on_=1 and coderabbit_review=1 and coderabbit_free_confirmed=1",
+        crate::pa![repo.to_string()],
+    )?;
+    let since = row["coderabbit_review_since"].as_i64()?;
+    (since > 0).then_some((row["coderabbit_epoch"].as_i64()?, since))
+}
+
+fn eligible_creation(pr: &Value, since: i64) -> Option<i64> {
+    let created = chrono::DateTime::parse_from_rfc3339(pr["created_at"].as_str()?)
+        .ok()?
+        .timestamp_millis();
+    (since > 0 && created >= since).then_some(created)
+}
+
+fn reserve_request(
     db: &crate::db::Db,
     repo: &str,
     number: i64,
     head: &str,
+    activation: (i64, i64),
+    created: i64,
 ) -> rusqlite::Result<bool> {
-    if !valid_scope(repo, number, head) {
+    if !valid_scope(repo, number, head) || activation.1 <= 0 || created < activation.1 {
         return Ok(false);
     }
     let mut c = db.0.lock().unwrap();
     let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let enabled: i64 = tx.query_row(
-        "select count(*) from rp where full=? and on_=1 and coderabbit_review=1 and coderabbit_free_confirmed=1",
-        rusqlite::params![repo],
+        "select count(*) from rp where full=? and on_=1 and coderabbit_review=1 and coderabbit_free_confirmed=1 and coderabbit_epoch=? and coderabbit_review_since=?",
+        rusqlite::params![repo, activation.0, activation.1],
         |r| r.get(0),
     )?;
     let recent: i64 = tx.query_row(
@@ -625,16 +697,21 @@ pub(crate) fn reserve_request(
         |r| r.get(0),
     )?;
     let per_pr: i64 = tx.query_row(
-        "select count(*) from coderabbit_requests where repo=? and number=?",
+        "select count(*) from coderabbit_requests where repo=? and number=? and status<>'cancelled'",
         rusqlite::params![repo, number],
         |r| r.get(0),
     )?;
-    if enabled != 1 || recent >= MAX_REQUESTS_PER_HOUR || per_pr >= MAX_REQUESTS_PER_PR {
+    let blocked: bool = tx.query_row(
+        "select exists(select 1 from coderabbit_requests where repo=?1 and number=?2 and (status in ('sending','uncertain') or (status='sent' and head=?3) or (status='cancelled' and requested_at>?4)))",
+        rusqlite::params![repo, number, head, crate::db::now() - CANCELLED_RETRY_MS],
+        |r| r.get(0),
+    )?;
+    if enabled != 1 || recent >= MAX_REQUESTS_PER_HOUR || per_pr >= MAX_REQUESTS_PER_PR || blocked {
         tx.commit()?;
         return Ok(false);
     }
     let changed = tx.execute(
-        "insert or ignore into coderabbit_requests(repo,number,head,status,requested_at,activation) select full,?,?,'sending',?,coderabbit_epoch from rp where full=? and on_=1 and coderabbit_review=1 and coderabbit_free_confirmed=1",
+        "insert into coderabbit_requests(repo,number,head,status,requested_at,activation) select full,?,?,'sending',?,coderabbit_epoch from rp where full=? and on_=1 and coderabbit_review=1 and coderabbit_free_confirmed=1 on conflict(repo,number,head) do update set status='sending',requested_at=excluded.requested_at,activation=excluded.activation,comment_id=null,error='' where coderabbit_requests.status='cancelled'",
         rusqlite::params![number, head, crate::db::now(), repo],
     )?;
     tx.commit()?;
@@ -660,10 +737,11 @@ pub(crate) fn finish_request(
     if !matches!(status, "sent" | "uncertain" | "cancelled") {
         return Err(rusqlite::Error::InvalidQuery);
     }
-    let changed = db.ch(
-        "update coderabbit_requests set status=?,comment_id=?,error=? where repo=? and number=? and head=? and status='sending'",
-        crate::pa![status.to_string(), comment_id, crate::sh::head(error, 240), repo.to_string(), number, head.to_string()],
-    );
+    let c = db.0.lock().unwrap();
+    let changed = c.execute(
+        "update coderabbit_requests set status=?1,comment_id=?2,error=?3,requested_at=case when ?1='cancelled' then ?7 else requested_at end where repo=?4 and number=?5 and head=?6 and status='sending'",
+        rusqlite::params![status, comment_id, crate::sh::head(error, 240), repo, number, head, crate::db::now()],
+    )?;
     Ok(changed == 1)
 }
 
@@ -878,7 +956,7 @@ fn queue_findings(
         |r| r.get(0),
     )?;
     let cycles: i64 = tx.query_row(
-        "select count(*) from jobs where repo=? and pr=? and kind='review' and json_extract(d,'$.coderabbit_source')='coderabbit'",
+        "select coalesce((select cycles from coderabbit_cycles where repo=? and number=?),0)",
         rusqlite::params![repo, number],
         |r| r.get(0),
     )?;
@@ -964,15 +1042,13 @@ pub(crate) fn finding_status(db: &crate::db::Db, repo: &str, number: i64) -> Val
 }
 
 fn request_followup_allowed(db: &crate::db::Db, repo: &str, number: i64, head: &str) -> bool {
-    let rows = db.all(
-        "select head,status from coderabbit_requests where repo=? and number=? order by requested_at desc limit 2",
-        crate::pa![repo.to_string(), number],
-    );
-    match rows.as_slice() {
-        [] => true,
-        [latest] if latest["status"] == "sent" && latest["head"] != head => true,
-        _ => false,
-    }
+    let c = db.0.lock().unwrap();
+    c.query_row(
+        "select count(*) < ?4 and not exists(select 1 from coderabbit_requests where repo=?1 and number=?2 and (status in ('sending','uncertain') or (status='sent' and head=?3) or (status='cancelled' and requested_at>?5))) from coderabbit_requests where repo=?1 and number=?2 and status<>'cancelled'",
+        rusqlite::params![repo, number, head, MAX_REQUESTS_PER_PR, crate::db::now() - CANCELLED_RETRY_MS],
+        |row| row.get::<_, bool>(0),
+    )
+    .unwrap_or(false)
 }
 
 fn own_public_pr(pr: &Value, repo: &str, number: i64, head: &str, me: &str) -> bool {
@@ -1011,13 +1087,9 @@ pub(crate) async fn request_reviews(a: &crate::app::Ax, repo: &str, listed: &[Va
     if me.is_empty() {
         return;
     }
-    let enabled_since = a.db.n(
-        "select coderabbit_review_since from rp where full=? and on_=1 and coderabbit_review=1 and coderabbit_free_confirmed=1",
-        crate::pa![repo.to_string()],
-    );
-    if enabled_since <= 0 {
+    let Some(activation) = request_activation(&a.db, repo) else {
         return;
-    }
+    };
     for row in listed {
         if a.hold("watcher") || row["isDraft"] != false {
             continue;
@@ -1042,26 +1114,18 @@ pub(crate) async fn request_reviews(a: &crate::app::Ax, repo: &str, listed: &[Va
             Ok(detail) if own_public_pr(&detail, repo, number, head, &me) => detail,
             _ => continue,
         };
-        let attempts = a.db.n(
-            "select count(*) from coderabbit_requests where repo=? and number=?",
-            crate::pa![repo.to_string(), number],
-        );
-        if attempts == 0 {
-            let created = detail["created_at"]
-                .as_str()
-                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-                .map(|value| value.timestamp_millis())
-                .unwrap_or(i64::MAX);
-            if created < enabled_since {
-                continue;
-            }
-        }
+        let Some(created) = eligible_creation(&detail, activation.1) else {
+            continue;
+        };
         // Do not duplicate a manual request or retry an already covered/uncertain review.
         match observe(repo, number, head).await {
-            Ok(state) if matches!(state["state"].as_str(), Some("not_observed" | "stale")) => {}
+            Ok(state)
+                if matches!(state["state"].as_str(), Some("not_observed" | "stale"))
+                    && commands_allow_request(&a.db, repo, number, &state) => {}
+
             _ => continue,
         }
-        if !reserve_request(&a.db, repo, number, head).unwrap_or(false) {
+        if !reserve_request(&a.db, repo, number, head, activation, created).unwrap_or(false) {
             continue;
         }
         if !request_is_current(&a.db, repo, number, head) {
@@ -1119,7 +1183,11 @@ pub(crate) async fn request_reviews(a: &crate::app::Ax, repo: &str, listed: &[Va
             }
         };
         let _ = final_repository;
-        if fresh["head"]["sha"] != head || fresh["updated_at"] != detail["updated_at"] {
+        if fresh["head"]["sha"] != head
+            || fresh["updated_at"] != detail["updated_at"]
+            || fresh["comments"] != detail["comments"]
+            || eligible_creation(&fresh, activation.1) != Some(created)
+        {
             let _ = finish_request(
                 &a.db,
                 repo,
@@ -1361,13 +1429,15 @@ pub(crate) async fn route_findings(
             "low" => 3,
             _ => 4,
         });
-        candidates.truncate(20);
         if candidates.is_empty() {
             continue;
         }
         let mut guarded = Vec::new();
         let mut to_guard = Vec::new();
         for finding in candidates {
+            if guarded.len() + to_guard.len() >= 20 {
+                break;
+            }
             let state = match reserve_finding(&a.db, repo, number, head, &finding) {
                 Ok(state) => state,
                 Err(_) => continue,
@@ -1388,7 +1458,7 @@ pub(crate) async fn route_findings(
                 .iter()
                 .map(|(finding, _)| guard_input(repo, number, head, finding))
                 .collect::<Vec<_>>();
-            match crate::wk::guard(a, inputs.clone(), "watcher", None).await {
+            match crate::wk::guard_partial(a, inputs.clone(), "watcher", None).await {
                 Ok(verdicts) => {
                     for (finding, ticket) in to_guard {
                         let id = format!("coderabbit:{repo}#{number}:{}:{}", head, finding.id);
@@ -1619,6 +1689,30 @@ mod tests {
         );
     }
     #[test]
+    fn equal_timestamp_across_surfaces_does_not_establish_coverage() {
+        let mut summary = row(HEAD);
+        let at = summary["updated_at"].as_str().unwrap().to_owned();
+        let current = review(999, HEAD, &at);
+        assert_eq!(
+            classify(
+                std::slice::from_ref(&summary),
+                std::slice::from_ref(&current),
+                HEAD
+            )["state"],
+            "unknown"
+        );
+        summary["body"] = json!("<!-- coderabbit-ai-generated:v1 -->\n<!-- This is an auto-generated comment: summarize by coderabbit.ai -->\n<!-- This is an auto-generated comment: skip review by coderabbit.ai -->");
+        assert_eq!(classify(&[summary], &[current], HEAD)["state"], "skipped");
+    }
+
+    #[test]
+    fn observation_page_budget_covers_three_bounded_inventories() {
+        assert_eq!(PAGE_SIZE * MAX_PAGES, 200);
+        let requests = 4 + 2 * (180 / PAGE_SIZE + 1) + 1;
+        assert!(requests <= LOCAL_REQUEST_LIMIT);
+    }
+
+    #[test]
     fn inline_findings_require_exact_bot_head_and_valid_location() {
         let finding = json!({"id":7,"pull_request_review_id":8,"commit_id":HEAD,"path":"src/lib.rs","line":19,"position":1,
             "body":"[P1] Avoid accepting an invalid token","user":{"id":BOT_ID,"login":"coderabbitai[bot]","type":"Bot"}});
@@ -1820,19 +1914,97 @@ mod tests {
             .unwrap();
         assert!(!save(&db, repo, 67, &ticket, &json!({"state":"observed_current"})).unwrap());
     }
+    fn reserve_test_request(
+        db: &crate::db::Db,
+        repo: &str,
+        number: i64,
+        head: &str,
+    ) -> rusqlite::Result<bool> {
+        let Some(activation) = request_activation(db, repo) else {
+            return Ok(false);
+        };
+        reserve_request(db, repo, number, head, activation, activation.1)
+    }
+
+    #[test]
+    fn request_creation_requires_valid_timestamp_after_activation() {
+        let pr = json!({"created_at":"2026-01-01T00:00:00Z"});
+        let at = 1_767_225_600_000;
+        assert_eq!(eligible_creation(&pr, at), Some(at));
+        assert_eq!(eligible_creation(&pr, at + 1), None);
+        assert_eq!(eligible_creation(&json!({}), at), None);
+        assert_eq!(
+            eligible_creation(&json!({"created_at":"invalid"}), at),
+            None
+        );
+    }
+
+    #[test]
+    fn request_reservation_rejects_changed_activation() {
+        let db = crate::db::Db::mem();
+        let repo = "croquete1/ApolloOffice";
+        db.0.lock().unwrap().execute(
+            "insert into rp(full,on_,coderabbit_review,coderabbit_free_confirmed,coderabbit_epoch,coderabbit_review_since) values(?,1,1,1,3,100)", [repo],
+        ).unwrap();
+        let old = request_activation(&db, repo).unwrap();
+        db.0.lock()
+            .unwrap()
+            .execute(
+                "update rp set coderabbit_epoch=5,coderabbit_review_since=200 where full=?",
+                [repo],
+            )
+            .unwrap();
+        assert!(!reserve_request(&db, repo, 67, HEAD, old, 250).unwrap());
+        let current = request_activation(&db, repo).unwrap();
+        assert!(!reserve_request(&db, repo, 67, HEAD, current, 150).unwrap());
+        assert!(reserve_request(&db, repo, 67, HEAD, current, 250).unwrap());
+        assert!(request_is_current(&db, repo, 67, HEAD));
+    }
+
+    #[test]
+    fn manual_review_commands_block_automatic_requests() {
+        let db = crate::db::Db::mem();
+        let repo = "croquete1/ApolloOffice";
+        let inventory =
+            review_command_inventory(&[json!({"id":1,"body":"  @CodeRabbitAI  review"})]);
+        assert!(!commands_allow_request(
+            &db,
+            repo,
+            67,
+            &json!({"review_commands":inventory})
+        ));
+        assert!(commands_allow_request(
+            &db,
+            repo,
+            67,
+            &json!({"review_commands":[]})
+        ));
+        let automatic = format!(
+            "@coderabbitai review\n\n<!-- apollo-office-coderabbit-review:v1 head={HEAD} -->"
+        );
+        let state = json!({"review_commands":review_command_inventory(&[json!({"id":2,"body":automatic})])});
+        assert!(!commands_allow_request(&db, repo, 67, &state));
+        db.0.lock().unwrap().execute(
+            "insert into coderabbit_requests(repo,number,head,status,requested_at,activation,comment_id) values(?,67,?,'sent',100,1,2)",
+            rusqlite::params![repo, HEAD],
+        ).unwrap();
+        assert!(commands_allow_request(&db, repo, 67, &state));
+        assert!(!commands_allow_request(&db, repo, 68, &state));
+    }
+
     #[test]
     fn review_requests_are_opt_in_deduplicated_and_capped() {
         let db = crate::db::Db::mem();
         let repo = "croquete1/ApolloOffice";
         db.0.lock().unwrap().execute(
-            "insert into rp(full,on_,coderabbit_review,coderabbit_free_confirmed,coderabbit_epoch) values(?,1,0,0,1)", [repo],
+            "insert into rp(full,on_,coderabbit_review,coderabbit_free_confirmed,coderabbit_epoch,coderabbit_review_since) values(?,1,0,0,1,100)", [repo],
         ).unwrap();
-        assert!(!reserve_request(&db, repo, 67, HEAD).unwrap());
+        assert!(!reserve_test_request(&db, repo, 67, HEAD).unwrap());
         db.0.lock()
             .unwrap()
             .execute("update rp set coderabbit_review=1 where full=?", [repo])
             .unwrap();
-        assert!(!reserve_request(&db, repo, 67, HEAD).unwrap());
+        assert!(!reserve_test_request(&db, repo, 67, HEAD).unwrap());
         db.0.lock()
             .unwrap()
             .execute(
@@ -1840,9 +2012,9 @@ mod tests {
                 [repo],
             )
             .unwrap();
-        assert!(reserve_request(&db, repo, 67, HEAD).unwrap());
+        assert!(reserve_test_request(&db, repo, 67, HEAD).unwrap());
         assert!(request_is_current(&db, repo, 67, HEAD));
-        assert!(!reserve_request(&db, repo, 67, HEAD).unwrap());
+        assert!(!reserve_test_request(&db, repo, 67, HEAD).unwrap());
         assert!(finish_request(&db, repo, 67, HEAD, "sent", Some(456), "").unwrap());
         assert!(request_followup_allowed(&db, repo, 67, OLD));
         db.0.lock()
@@ -1856,21 +2028,47 @@ mod tests {
             )
             .unwrap();
         assert!(request_followup_allowed(&db, repo, 67, OLD));
-        assert!(reserve_request(&db, repo, 67, OLD).unwrap());
+        assert!(reserve_test_request(&db, repo, 67, OLD).unwrap());
         assert!(
-            !reserve_request(&db, repo, 67, "0123456789012345678901234567890123456789").unwrap()
+            !reserve_test_request(&db, repo, 67, "0123456789012345678901234567890123456789")
+                .unwrap()
         );
         assert_eq!(request_history(&db, repo, 67)["attempts"], 2);
     }
     #[test]
+    fn cancelled_requests_retry_only_after_cooldown_and_uncertain_never_retries() {
+        let db = crate::db::Db::mem();
+        let repo = "croquete1/ApolloOffice";
+        db.0.lock().unwrap().execute("insert into rp(full,on_,coderabbit_review,coderabbit_free_confirmed,coderabbit_review_since) values(?,1,1,1,100)", [repo]).unwrap();
+        assert!(reserve_test_request(&db, repo, 67, HEAD).unwrap());
+        assert!(finish_request(&db, repo, 67, HEAD, "cancelled", None, "before POST").unwrap());
+        assert!(!request_followup_allowed(&db, repo, 67, OLD));
+        assert!(!reserve_test_request(&db, repo, 67, HEAD).unwrap());
+        db.0.lock()
+            .unwrap()
+            .execute(
+                "update coderabbit_requests set requested_at=? where repo=? and number=67",
+                rusqlite::params![crate::db::now() - CANCELLED_RETRY_MS - 1, repo],
+            )
+            .unwrap();
+        assert!(request_followup_allowed(&db, repo, 67, HEAD));
+        assert!(reserve_test_request(&db, repo, 67, HEAD).unwrap());
+        assert!(finish_request(&db, repo, 67, HEAD, "uncertain", None, "POST uncertain").unwrap());
+        assert!(!request_followup_allowed(&db, repo, 67, OLD));
+        assert!(!reserve_test_request(&db, repo, 67, OLD).unwrap());
+        assert!(!reserve_test_request(&db, repo, 67, HEAD).unwrap());
+    }
+
+    #[test]
     fn global_review_request_limit_counts_uncertain_requests() {
         let db = crate::db::Db::mem();
         let repo = "croquete1/ApolloOffice";
-        db.0.lock().unwrap().execute("insert into rp(full,on_,coderabbit_review,coderabbit_free_confirmed) values(?,1,1,1)", [repo]).unwrap();
-        assert!(reserve_request(&db, repo, 67, HEAD).unwrap());
-        assert!(reserve_request(&db, repo, 68, OLD).unwrap());
+        db.0.lock().unwrap().execute("insert into rp(full,on_,coderabbit_review,coderabbit_free_confirmed,coderabbit_review_since) values(?,1,1,1,100)", [repo]).unwrap();
+        assert!(reserve_test_request(&db, repo, 67, HEAD).unwrap());
+        assert!(reserve_test_request(&db, repo, 68, OLD).unwrap());
         assert!(
-            reserve_request(&db, repo, 69, "0123456789012345678901234567890123456789").unwrap()
+            reserve_test_request(&db, repo, 69, "0123456789012345678901234567890123456789")
+                .unwrap()
         );
         assert!(finish_request(
             &db,
@@ -1883,15 +2081,16 @@ mod tests {
         )
         .unwrap());
         assert!(
-            !reserve_request(&db, repo, 70, "abcdefabcdefabcdefabcdefabcdefabcdefabcd").unwrap()
+            !reserve_test_request(&db, repo, 70, "abcdefabcdefabcdefabcdefabcdefabcdefabcd")
+                .unwrap()
         );
     }
     #[test]
     fn review_request_epoch_invalidates_an_in_flight_post() {
         let db = crate::db::Db::mem();
         let repo = "croquete1/ApolloOffice";
-        db.0.lock().unwrap().execute("insert into rp(full,on_,coderabbit_review,coderabbit_free_confirmed,coderabbit_epoch) values(?,1,1,1,3)", [repo]).unwrap();
-        assert!(reserve_request(&db, repo, 67, HEAD).unwrap());
+        db.0.lock().unwrap().execute("insert into rp(full,on_,coderabbit_review,coderabbit_free_confirmed,coderabbit_epoch,coderabbit_review_since) values(?,1,1,1,3,100)", [repo]).unwrap();
+        assert!(reserve_test_request(&db, repo, 67, HEAD).unwrap());
         assert!(request_is_current(&db, repo, 67, HEAD));
         db.0.lock()
             .unwrap()
@@ -1914,9 +2113,9 @@ mod tests {
         let db = crate::db::Db::mem();
         let repo = "croquete1/ApolloOffice";
         db.0.lock().unwrap().execute(
-            "insert into rp(full,on_,coderabbit_review,coderabbit_free_confirmed,coderabbit_epoch) values(?,1,1,1,3)", [repo],
+            "insert into rp(full,on_,coderabbit_review,coderabbit_free_confirmed,coderabbit_epoch,coderabbit_review_since) values(?,1,1,1,3,100)", [repo],
         ).unwrap();
-        assert!(reserve_request(&db, repo, 67, HEAD).unwrap());
+        assert!(reserve_test_request(&db, repo, 67, HEAD).unwrap());
         assert!(request_is_current(&db, repo, 67, HEAD));
         db.0.lock()
             .unwrap()
@@ -1926,7 +2125,7 @@ mod tests {
             )
             .unwrap();
         assert!(!request_is_current(&db, repo, 67, HEAD));
-        assert!(!reserve_request(&db, repo, 68, OLD).unwrap());
+        assert!(!reserve_test_request(&db, repo, 68, OLD).unwrap());
     }
     #[test]
     fn guarded_findings_queue_once_and_keep_normal_review_provenance() {
@@ -2062,6 +2261,61 @@ mod tests {
         assert_eq!(row["state"], "queued");
         assert_eq!(row["job"], job["id"]);
     }
+    #[test]
+    fn repair_cycle_limit_survives_history_cleanup() {
+        let db = crate::db::Db::mem();
+        let repo = "croquete1/ApolloOffice";
+        db.0.lock().unwrap().execute_batch(
+            "insert into rp(full,on_,coderabbit_repair,coderabbit_epoch) values('croquete1/ApolloOffice',1,1,4);
+             insert into prs(repo,num,st) values('croquete1/ApolloOffice',67,'open');",
+        ).unwrap();
+        db.ks(
+            &format!("steward:{repo}"),
+            &json!({"prs":[{"number":67,"head_sha":HEAD,"overlaps":[],"possible_duplicates":[],"state":"revisao_final_necessaria"}]}),
+        );
+        for id in 81..=83 {
+            let item = finding(id, "[P1] Check authorization before accepting a token");
+            assert_eq!(
+                reserve_finding(&db, repo, 67, HEAD, &item).unwrap(),
+                "observed"
+            );
+            let ticket = claim_finding_guard(&db, repo, 67, HEAD, &item)
+                .unwrap()
+                .unwrap();
+            assert!(set_finding_state(&db, repo, 67, HEAD, &item, &ticket, "guarded").unwrap());
+            let admitted = queue_findings(
+                &db,
+                (repo, 67, HEAD),
+                "Title",
+                "https://github.com/croquete1/ApolloOffice/pull/67",
+                "codex/change",
+                "cargo test",
+                &[item],
+            )
+            .unwrap();
+            assert_eq!(admitted, id < 83);
+            db.0.lock()
+                .unwrap()
+                .execute_batch("update jobs set st='done'; delete from jobs where st='done';")
+                .unwrap();
+        }
+        assert_eq!(
+            db.n(
+                "select cycles from coderabbit_cycles where repo=? and number=67",
+                crate::pa![repo.to_string()],
+            ),
+            MAX_FIX_CYCLES_PER_PR
+        );
+        assert_eq!(db.n("select count(*) from jobs", crate::pa![]), 0);
+        assert_eq!(
+            db.n(
+                "select count(*) from coderabbit_findings where repo=? and number=67 and state='queued'",
+                crate::pa![repo.to_string()],
+            ),
+            2
+        );
+    }
+
     #[test]
     fn edited_findings_must_pass_guard_again_and_activation_races_fail_closed() {
         let db = crate::db::Db::mem();
