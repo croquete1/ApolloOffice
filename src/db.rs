@@ -848,8 +848,7 @@ impl Db {
             return Err(rusqlite::Error::InvalidQuery);
         }
         let unique = ids.iter().collect::<std::collections::HashSet<_>>();
-        if unique.len() != ids.len()
-            || ids.iter().any(|id| id.trim().is_empty() || id.len() > 128)
+        if unique.len() != ids.len() || ids.iter().any(|id| id.trim().is_empty() || id.len() > 128)
         {
             return Err(rusqlite::Error::InvalidQuery);
         }
@@ -2250,8 +2249,7 @@ mod watcher_storage_failure_tests {
         {
             let db = Db::open(&file).unwrap();
             seed(&db);
-            db.0
-                .lock()
+            db.0.lock()
                 .unwrap()
                 .busy_timeout(std::time::Duration::ZERO)
                 .unwrap();
@@ -2285,14 +2283,12 @@ mod watcher_storage_failure_tests {
     fn full_database_does_not_consume_review_receipt() {
         let db = Db::mem();
         seed(&db);
-        let pages: i64 = db
-            .0
-            .lock()
-            .unwrap()
-            .pragma_query_value(None, "page_count", |r| r.get(0))
-            .unwrap();
-        db.0
-            .lock()
+        let pages: i64 =
+            db.0.lock()
+                .unwrap()
+                .pragma_query_value(None, "page_count", |r| r.get(0))
+                .unwrap();
+        db.0.lock()
             .unwrap()
             .pragma_update(None, "max_page_count", pages)
             .unwrap();
@@ -2319,8 +2315,7 @@ mod watcher_storage_failure_tests {
             .queue_review_and_ack("o/r", 1, "t", &["r1".into()], &request())
             .is_err());
         assert_pending(&db);
-        db.0
-            .lock()
+        db.0.lock()
             .unwrap()
             .execute_batch("drop trigger fail_ack")
             .unwrap();

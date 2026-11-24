@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import {test} from "node:test";
 import {runInNewContext} from "node:vm";
-const source=readFileSync(new URL("../ui/p.js",import.meta.url),"utf8");
+const source=readFileSync(new URL("../ui/p.js",import.meta.url),"utf8").replace(/\r\n/g,"\n");
 const start=source.indexOf('    for (const button of B.querySelectorAll("[data-cr-repo]"))');
 const end=source.indexOf("\n  };\n  A.steward",start);
 assert.ok(start>=0 && end>start);
