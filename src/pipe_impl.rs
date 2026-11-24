@@ -549,11 +549,19 @@ fn automated_review_authorized(db: &crate::db::Db, j: &Job) -> R<()> {
     Ok(())
 }
 
+fn cancellation_requested(db: &crate::db::Db, id: i64) -> rusqlite::Result<bool> {
+    let c = db.0.lock().unwrap();
+    let raw: String = c.query_row(
+        "select coalesce((select v from kv where k=?),'false')",
+        [format!("kill:{id}")],
+        |row| row.get(0),
+    )?;
+    serde_json::from_str(&raw).map_err(|_| rusqlite::Error::InvalidQuery)
+}
+
 fn kill(a: &Ax, j: &Job) -> R<()> {
-    if a.db
-        .kg(&format!("kill:{}", j.id))
-        .as_bool()
-        .unwrap_or(false)
+    if cancellation_requested(&a.db, j.id)
+        .map_err(|_| X::Defer("job cancellation state unavailable".into()))?
     {
         return drop("dropped by the owner");
     }
@@ -4141,6 +4149,9 @@ async fn mergecheck(a: &Ax, j: &mut Job) -> R<()> {
 
 async fn go(a: &Ax, id: i64, h: &str) {
     let Some(mut j) = a.db.jg(id) else { return };
+    if !matches!(j.st.as_str(), "ready" | "submit") {
+        return;
+    }
     let rs = j.d["rs"].as_bool().unwrap_or(false);
     let rpp = j.d["rp"].as_bool().unwrap_or(false);
     let initial_submit=j.st=="submit";
@@ -4150,6 +4161,7 @@ async fn go(a: &Ax, id: i64, h: &str) {
     }
     a.say("repro", &format!("[{h}] takes {}", j.tag()), Some(id));
     let r: R<()> = async {
+        kill(a, &j)?;
         if j.kind == "mergecheck" {
             mergecheck(a, &mut j).await?;
             return Ok(());

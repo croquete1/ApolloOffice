@@ -3,6 +3,25 @@ mod t {
     use super::*;
 
     #[test]
+    fn cancellation_state_is_strict_and_database_errors_defer_work() {
+        let db = crate::db::Db::mem();
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::env::temp_dir(),
+            1,
+            "x".into(),
+        ));
+        let j = Job::of(json!({"id":42,"kind":"fix","d":{}}));
+        assert!(kill(&a, &j).is_ok());
+        a.db.ks("kill:42", &json!(true));
+        assert!(matches!(kill(&a, &j), Err(X::Drop(_))));
+        a.db.ks("kill:42", &json!("invalid"));
+        assert!(matches!(kill(&a, &j), Err(X::Defer(_))));
+        a.db.run("drop table kv", pa![]);
+        assert!(matches!(kill(&a, &j), Err(X::Defer(_))));
+    }
+
+    #[test]
     fn startup_recovery_is_atomic_and_preserves_approved_submission() {
         let db = crate::db::Db::mem();
         db.0.lock().unwrap().execute_batch(
