@@ -136,7 +136,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     let ax: Ax = Arc::new(App::new(d, dd.clone(), a.port, me));
-    pipe::recover(&ax);
+    pipe::recover(&ax).map_err(|e| anyhow::anyhow!("job recovery failed; workers not started: {e}"))?;
     tokio::spawn(net::watch(ax.clone()));
     tokio::spawn(pipe::lanes(ax.clone()));
     tokio::spawn(pipe::guard(ax.clone()));

@@ -4476,22 +4476,46 @@ async fn go(a: &Ax, id: i64, h: &str) {
     }
 }
 
-pub fn recover(a: &Ax) {
-    for j in a.db.all("select id, st, kind, d from jobs where st in ('repro','fix','ci','review','gate','hunt','submit')", pa![]) {
-        let id = j["id"].as_i64().unwrap_or(0);
-        let mut d = j["d"].clone();
-        let st = j["st"].as_str().unwrap_or("");
-        let kd = j["kind"].as_str().unwrap_or("");
+pub fn recover(a: &Ax) -> rusqlite::Result<()> {
+    let mut c = a.db.0.lock().unwrap();
+    let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let jobs = {
+        let mut stmt = tx.prepare(
+            "select id,st,kind,d from jobs where st in ('repro','fix','ci','review','gate','hunt','submit') order by id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (id, st, kd, raw) in jobs {
+        let mut d: Value = serde_json::from_str(&raw).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        if !d.is_object() {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
         if st == "submit" && d["ap"].as_bool().unwrap_or(false) {
             continue;
         }
-        if kd == "fix" && ["ci", "review", "gate", "submit"].contains(&st) && d["h"].is_string() && d["br"].is_string() {
+        if kd == "fix" && ["ci", "review", "gate", "submit"].contains(&st.as_str()) && d["h"].is_string() && d["br"].is_string() {
             d["rs"] = json!(true);
         } else if (kd == "fix" || kd == "hunt") && d["h"].is_string() {
             d["rp"] = json!(true);
         }
-        a.db.jset(id, &[("st", json!("ready")), ("d", d), ("prio", json!(-2))]);
+        if tx.execute(
+            "update jobs set st='ready',d=?,prio=-2,t1=? where id=?",
+            rusqlite::params![d.to_string(), now(), id],
+        )? != 1 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
     }
+    tx.commit()?;
+    crate::app::chg();
+    Ok(())
 }
 
 fn hk(a: &Ax, h: &str) -> String {
