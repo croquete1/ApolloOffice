@@ -521,10 +521,12 @@ pub(crate) async fn observe(repo: &str, number: i64, head: &str) -> Result<Value
     }
     let (rows, reviews, line_comments) =
         tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            let reviews_endpoint = format!("repos/{repo}/pulls/{number}/reviews");
+            let comments_endpoint = format!("repos/{repo}/pulls/{number}/comments");
             let (rows, reviews, line_comments) = tokio::join!(
                 bounded_comments_with(&client, repo, number),
-                bounded_rows_with(&client, &format!("repos/{repo}/pulls/{number}/reviews")),
-                bounded_rows_with(&client, &format!("repos/{repo}/pulls/{number}/comments")),
+                bounded_rows_with(&client, &reviews_endpoint),
+                bounded_rows_with(&client, &comments_endpoint),
             );
             Ok::<_, String>((rows?, reviews?, line_comments?))
         })
@@ -1478,6 +1480,12 @@ pub(crate) async fn route_findings(
             Ok(value) if own_public_pr(&value, repo, number, head, &me) => value,
             _ => continue,
         };
+        if fresh["updated_at"] != detail["updated_at"]
+            || fresh["head"]["ref"] != detail["head"]["ref"]
+            || fresh["base"]["ref"] != detail["base"]["ref"]
+        {
+            continue;
+        }
         // A repository can be renamed, replaced or made private while Guard runs.
         match ghj(&["api", &format!("repos/{repo}")], 45).await {
             Ok(value) if public_repository(&value, repo) && value["id"] == repository_id => {}
