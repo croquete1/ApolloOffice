@@ -57,7 +57,8 @@ pub async fn meta(a: &App, r: &str) -> Result<Value, String> {
 /// Fetch the complete open issue listing, excluding pull requests returned by REST.
 /// A second inventory detects changes that could otherwise remove a live issue.
 pub async fn open_issues(repo: &str) -> Result<Vec<Value>, String> {
-    let endpoint = format!("repos/{repo}/issues?state=open&sort=created&direction=asc&per_page=100");
+    let endpoint =
+        format!("repos/{repo}/issues?state=open&sort=created&direction=asc&per_page=100");
     reconcile_open_issues(apip(&endpoint).await?, apip(&endpoint).await?)
 }
 
