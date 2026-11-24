@@ -1,8 +1,7 @@
 //! Read-only CodeRabbit evidence. Never grants review/merge authority.
-use crate::sh::{gh, ghj};
 use std::collections::BTreeSet;
-use tokio::sync::Semaphore;
 use serde_json::{json, Value};
+use tokio::sync::Semaphore;
 
 const BOT_ID: u64 = 136622811;
 const COVERAGE: &str = "<!-- final_review_risk_coverage:";
@@ -10,6 +9,51 @@ const PAGE_SIZE: usize = 10;
 const MAX_PAGES: usize = 20;
 const MAX_BYTES: usize = 4 * 1024 * 1024;
 pub(crate) static OBSERVATIONS: Semaphore = Semaphore::const_new(2);
+
+const METADATA_BYTES: usize = 512 * 1024;
+const API: &str = "https://api.github.com";
+
+// Separate, anonymous public reads: no ambient gh host or stored GitHub tokens.
+// Refuse redirects rather than following a changed repository/host.
+fn public_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(15))
+        .user_agent("ApolloOffice-CodeRabbit-observation")
+        .build()
+        .map_err(|_| "public GitHub client unavailable".into())
+}
+
+async fn read_public(client: &reqwest::Client, endpoint: &str, limit: usize) -> Result<String, String> {
+    let mut response = client.get(format!("{API}/{endpoint}"))
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .send().await.map_err(|_| "public GitHub request failed")?;
+    if !response.status().is_success() {
+        return Err(format!("public GitHub HTTP {}", response.status().as_u16()));
+    }
+    if response.content_length().is_some_and(|n| n > limit as u64) {
+        return Err("public GitHub response exceeds byte budget".into());
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| "public GitHub read failed")? {
+        if chunk.len() > limit.saturating_sub(bytes.len()) {
+            return Err("public GitHub response exceeds byte budget".into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    String::from_utf8(bytes).map_err(|_| "invalid public GitHub UTF-8".into())
+}
+
+async fn public_json(client: &reqwest::Client, endpoint: &str) -> Result<Value, String> {
+    let raw = read_public(client, endpoint, METADATA_BYTES).await?;
+    serde_json::from_str(&raw).map_err(|_| "invalid public GitHub metadata".into())
+}
+
+fn count_matches(before: &Value, after: &Value, collected: usize) -> bool {
+    let count = collected as u64;
+    before["comments"].as_u64() == Some(count) && after["comments"].as_u64() == Some(count)
+}
 
 fn accept_page(rows: &mut Vec<Value>, ids: &mut BTreeSet<u64>, bytes: &mut usize, raw: &str) -> Result<bool, String> {
     *bytes = bytes.checked_add(raw.len()).ok_or("comment byte counter overflow")?;
@@ -31,13 +75,13 @@ fn accept_page(rows: &mut Vec<Value>, ids: &mut BTreeSet<u64>, bytes: &mut usize
     Ok(complete)
 }
 
-async fn bounded_comments(repo: &str, number: i64) -> Result<Vec<Value>, String> {
+async fn bounded_comments(client: &reqwest::Client, repo: &str, number: i64) -> Result<Vec<Value>, String> {
     let mut rows = Vec::new();
     let mut ids = BTreeSet::new();
     let mut bytes = 0;
     for page in 1..=MAX_PAGES {
         let endpoint = format!("repos/{repo}/issues/{number}/comments?per_page={PAGE_SIZE}&page={page}");
-        let raw = gh(&["api", &endpoint], 15).await?;
+        let raw = read_public(client, &endpoint, MAX_BYTES.saturating_sub(bytes)).await?;
         if accept_page(&mut rows, &mut ids, &mut bytes, &raw)? {
             return Ok(rows);
         }
@@ -144,22 +188,30 @@ pub(crate) async fn observe(repo: &str, number: i64, head: &str) -> Result<Value
     }
     // The only remote operations are GitHub reads. Never call CodeRabbit's API or
     // request a review, and refuse private/unknown repositories.
-    let repository = ghj(&["api", &format!("repos/{repo}")], 45).await?;
+    let client = public_client()?;
+    let repository = public_json(&client, &format!("repos/{repo}")).await?;
     if !public_repository(&repository, repo) {
         return Err("Only verified public repositories are eligible".into());
     }
     let endpoint = format!("repos/{repo}/pulls/{number}");
-    let before = ghj(&["api", &endpoint], 45).await?;
+    let before = public_json(&client, &endpoint).await?;
     if !matches_pr(&before, repo, number, head) {
         return Err("PR scope or HEAD changed; refresh Steward".into());
     }
-    let rows = tokio::time::timeout(std::time::Duration::from_secs(60), bounded_comments(repo, number))
+    let count = before["comments"].as_u64().ok_or("missing PR comment count")?;
+    if count >= (PAGE_SIZE * MAX_PAGES) as u64 {
+        return Err("PR comment count exceeds observation budget".into());
+    }
+    let rows = tokio::time::timeout(std::time::Duration::from_secs(60), bounded_comments(&client, repo, number))
         .await.map_err(|_| "CodeRabbit comment read timed out")??;
-    let after = ghj(&["api", &endpoint], 45).await?;
+    let after = public_json(&client, &endpoint).await?;
     if !matches_pr(&after, repo, number, head) || before["updated_at"] != after["updated_at"] {
         return Err("PR changed during observation; refresh Steward".into());
     }
-    let final_repo = ghj(&["api", &format!("repos/{repo}")], 45).await?;
+    if !count_matches(&before, &after, rows.len()) {
+        return Err("PR comment count changed or inventory incomplete".into());
+    }
+    let final_repo = public_json(&client, &format!("repos/{repo}")).await?;
     if !public_repository(&final_repo, repo) || final_repo["id"] != repository["id"] {
         return Err("Repository visibility or identity changed".into());
     }
@@ -288,6 +340,16 @@ mod tests {
         assert!(accept_page(&mut rows, &mut ids, &mut bytes, "[]").is_err());
         let (mut rows, mut ids, mut bytes) = (Vec::new(), BTreeSet::new(), 0);
         assert!(accept_page(&mut rows, &mut ids, &mut bytes, "[]").unwrap());
+    }
+    #[test]
+    fn comment_counts_reject_offset_gap_even_with_same_timestamp() {
+        let before = json!({"comments":20,"updated_at":"2026-11-24T12:22:00Z"});
+        let after = json!({"comments":19,"updated_at":"2026-11-24T12:22:00Z"});
+        assert!(!count_matches(&before, &after, 19));
+        assert!(!count_matches(&before, &before, 19));
+        assert!(!count_matches(&before, &Value::Null, 20));
+        assert!(count_matches(&before, &before, 20));
+        assert!(count_matches(&json!({"comments":0}), &json!({"comments":0}), 0));
     }
     #[test]
     fn repository_and_pr_scope_are_strict() {
