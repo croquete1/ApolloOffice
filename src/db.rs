@@ -126,6 +126,27 @@ fn init(c: &mut Connection) -> anyhow::Result<()> {
             tx.execute(sql, [])?;
         }
     }
+    // A terminal/deleted tracked PR cannot retain executable review receipts.
+    // Keep identifiers for audit; never write comment acknowledgements here.
+    tx.execute_batch("
+        create trigger if not exists watcher_inbox_pr_terminal
+        after update of st on prs when new.st in ('closed','merged') and old.st is not new.st
+        begin
+          update watcher_inbox set state='superseded',updated_at=cast(strftime('%s','now') as integer)*1000
+            where repo=new.repo and num=new.num and state='received';
+          delete from watcher_retry where repo=new.repo and num=new.num;
+        end;
+        create trigger if not exists watcher_inbox_pr_deleted
+        after delete on prs
+        begin
+          update watcher_inbox set state='superseded',updated_at=cast(strftime('%s','now') as integer)*1000
+            where repo=old.repo and num=old.num and state='received';
+          delete from watcher_retry where repo=old.repo and num=old.num;
+        end;
+        update watcher_inbox set state='superseded',updated_at=cast(strftime('%s','now') as integer)*1000
+          where state='received' and not exists(select 1 from prs where prs.repo=watcher_inbox.repo and prs.num=watcher_inbox.num and prs.st='open');
+        delete from watcher_retry where not exists(select 1 from prs where prs.repo=watcher_retry.repo and prs.num=watcher_retry.num and prs.st='open');
+    ")?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
     Ok(())
@@ -569,6 +590,25 @@ impl Db {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Reconcile previously received IDs only after a successful fresh comment
+    /// read and remote snapshot recheck. Absence is NOT an acknowledgement;
+    /// an ID seen again is eligible for a new receipt and authorization check.
+    pub fn reconcile_review_receipts(&self,repo:&str,number:i64,updated:&str,head:&str,observed:&[String])->rusqlite::Result<usize>{
+        let mut c=self.0.lock().unwrap();
+        let tx=c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if !Self::review_snapshot_matches(&tx,repo,number,updated,head)? {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let unique=observed.iter().collect::<std::collections::HashSet<_>>();
+        if unique.len()!=observed.len() || observed.iter().any(|id|id.is_empty() || id.len()>128){
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let changed=tx.execute("update watcher_inbox set state='superseded',updated_at=? where repo=? and num=? and head=? and state='received' and not exists(select 1 from json_each(?) where value=watcher_inbox.comment_id)",rusqlite::params![now(),repo,number,head,json!(observed).to_string()])?;
+        tx.execute("delete from watcher_retry where repo=? and num=? and head=? and not exists(select 1 from watcher_inbox where repo=? and num=? and head=? and state='received')",rusqlite::params![repo,number,head,repo,number,head])?;
+        tx.commit()?;
+        Ok(changed)
     }
 
     /// Pending receipts override the normal timestamp/age polling shortcut.
@@ -1417,5 +1457,43 @@ mod watcher_retry_tests {
         db.ack_pr_comments_with_reply("o/r",1,"t2",head,&ids,&Value::Null).unwrap();
         assert!(!db.has_pending_review("o/r",1).unwrap());
         assert_eq!(db.n("select count(*) from watcher_retry",vec![]),0);
+    }
+}
+
+#[cfg(test)]
+mod watcher_receipt_lifecycle_tests {
+    use super::*;
+    const HEAD:&str="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    fn setup()->Db {
+        let db=Db::mem();
+        db.run("insert into prs(repo,num,st,upd,d) values('o/r',1,'open','t',?)",crate::pa![json!({"watcher_head":HEAD}).to_string()]);
+        db
+    }
+    #[test]
+    fn terminal_pr_retires_only_pending_receipts_and_retry(){
+        let db=setup();
+        let done=vec!["r1".to_string()];
+        db.receive_review_batch("o/r",1,"t",HEAD,&done).unwrap();
+        db.ack_pr_comments_with_reply("o/r",1,"t",HEAD,&done,&Value::Null).unwrap();
+        db.receive_review_batch("o/r",1,"t",HEAD,&["r2".into()]).unwrap();
+        db.claim_review_attempt("o/r",1,"t",HEAD,0).unwrap();
+        db.run("update prs set st='closed' where repo='o/r' and num=1",vec![]);
+        assert_eq!(db.n("select count(*) from watcher_inbox where state='done'",vec![]),1);
+        assert_eq!(db.n("select count(*) from watcher_inbox where state='superseded'",vec![]),1);
+        assert_eq!(db.n("select count(*) from watcher_retry",vec![]),0);
+        assert!(!db.comment_acknowledged("o/r","r2").unwrap());
+    }
+    #[test]
+    fn absent_receipt_is_not_acknowledged_and_can_return(){
+        let db=setup();
+        let ids=vec!["r1".to_string(),"r2".to_string()];
+        db.receive_review_batch("o/r",1,"t",HEAD,&ids).unwrap();
+        assert!(db.reconcile_review_receipts("o/r",1,"wrong",HEAD,&[]).is_err());
+        assert_eq!(db.reconcile_review_receipts("o/r",1,"t",HEAD,&ids[..1]).unwrap(),1);
+        assert!(!db.comment_acknowledged("o/r","r2").unwrap());
+        db.receive_review_batch("o/r",1,"t",HEAD,&ids).unwrap();
+        assert_eq!(db.n("select count(*) from watcher_inbox where state='received'",vec![]),2);
+        db.run("delete from prs where repo='o/r' and num=1",vec![]);
+        assert_eq!(db.n("select count(*) from watcher_inbox where state='superseded'",vec![]),2);
     }
 }
