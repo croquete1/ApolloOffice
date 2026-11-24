@@ -49,6 +49,16 @@ fn classify(rows: &[Value], head: &str) -> Value {
         return json!({"state":"not_observed","head":head});
     };
     let mut result = json!({"state":"unknown","head":head,"comment_id":id,"observed_at":at.to_rfc3339()});
+    // These observed markers are advisory only; a processing/skipped summary
+    // must not inherit coverage from a previous review.
+    if body.contains("<!-- This is an auto-generated comment: review in progress by coderabbit.ai -->") {
+        result["state"] = json!("pending");
+        return result;
+    }
+    if body.contains("<!-- This is an auto-generated comment: skip review by coderabbit.ai -->") {
+        result["state"] = json!("skipped");
+        return result;
+    }
     let markers: Vec<_> = body.match_indices(COVERAGE).collect();
     if markers.len() != 1 {
         return result;
@@ -179,6 +189,15 @@ mod tests {
         skipped["updated_at"] = json!("2026-11-24T12:23:00Z");
         skipped["body"] = json!("<!-- coderabbit-ai-generated:v1 -->\n<!-- This is an auto-generated comment: summarize by coderabbit.ai -->\nReview skipped");
         assert_eq!(classify(&[row(HEAD), skipped], HEAD)["state"], "unknown");
+    }
+    #[test]
+    fn processing_or_skipped_summary_does_not_inherit_coverage() {
+        let mut progress = row(HEAD);
+        progress["body"] = json!(format!("{}\n<!-- This is an auto-generated comment: review in progress by coderabbit.ai -->", progress["body"].as_str().unwrap()));
+        assert_eq!(classify(&[progress], HEAD)["state"], "pending");
+        let mut skipped = row(HEAD);
+        skipped["body"] = json!(format!("{}\n<!-- This is an auto-generated comment: skip review by coderabbit.ai -->", skipped["body"].as_str().unwrap()));
+        assert_eq!(classify(&[skipped], HEAD)["state"], "skipped");
     }
     #[test]
     fn durable_ticket_and_history_are_scoped() {
