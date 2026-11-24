@@ -1289,9 +1289,15 @@ mod t {
     async fn real_docker_worker_lifecycle() {
         let name = ct();
         assert!(name.starts_with("apollo-ci-"));
-        assert_eq!(std::env::var("APOLLO_OFFICE_REAL_DOCKER").as_deref(), Ok("1"));
+        assert_eq!(
+            std::env::var("APOLLO_OFFICE_REAL_DOCKER").as_deref(),
+            Ok("1")
+        );
         let db = crate::db::Db::mem();
-        db.run("insert into hs(id,dk,on_,ln,ci) values('local',1,1,1,1)", pa![]);
+        db.run(
+            "insert into hs(id,dk,on_,ln,ci) values('local',1,1,1,1)",
+            pa![],
+        );
         let a = std::sync::Arc::new(App::new(
             db,
             std::env::temp_dir(),
