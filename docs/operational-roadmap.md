@@ -107,6 +107,12 @@ Estas PRs estão em draft e **não estão integradas**. A main funcional continu
 - QA: cinco cenários Python SQLite executados com SQL da implementação (receção idempotente, reabertura, rollback, substituição de HEAD, replay concluído) e um cenário adicional com SQL final (HEAD revertido e preservação de done), todos PASS. Dois testes Rust escritos, não executados nativamente.
 - Limites: regista apenas identificadores, não corpos; reconsulta GitHub para análise, não recupera autonomamente comentários removidos, não tem lease/estado analyzing, retry persistente ou recuperação independente da poll; pode deixar receções pendentes se comentário desaparecer no mesmo HEAD. Não equivale à conclusão de F02–F04. Integração consultiva CodeRabbit no Watcher/Guard continua pendente; sem merge funcional. Canvas e modelos preservados.
 
+## Décima sétima entrega — janelas persistentes de recuperação (24/11/2026)
+- CodeRabbit #70 reporta revisão ignorada, perfil ASSERTIVE (https://github.com/croquete1/ApolloOffice/pull/70#issuecomment-7134842161); #77 mantém a revisão anterior b6161cd, não cobre o HEAD 88d6132. Não foi solicitada revisão adicional, faturação OSS por confirmar.
+- #70 ampliada (draft, HEAD 31913d748a5a038703620a464a6d388869ff61fc): tabela aditiva watcher_retry com uma reserva por repo/PR, vinculada ao HEAD e snapshot. Admissão transacional antes de Guard/Watcher, atraso de 10/20/40/60 minutos, teto de 60 minutos; novo snapshot reinicia janela, falha/restart preserva a reserva. Receções pendentes passam a ignorar atalhos de idade/cursor do Watcher. Limpeza transacional da reserva só quando não restam receções pendentes desse HEAD.
+- QA: seis cenários Python SQLite executados sobre SQL publicado PASS: cooldown inicial; persistência após reabertura e teto; novo snapshot; alteração HEAD e separação de repos; oito reservas concorrentes (uma aceite); limpeza apenas após conclusão. Um teste Rust escrito, não executado nativamente.
+- Limites: janela não é lease de exclusão de análise longa; recuperação continua dependente do ciclo Watcher e reconsulta GitHub, não recupera comentário apagado nem persiste conteúdo; alterações de snapshot reiniciam o intervalo, consultas GitHub ocorrem antes da reserva e não são limitadas por ela. Ainda falta expor diagnóstico e tratar receções órfãs/fecho de PR, validar concorrência end-to-end e integrar CodeRabbit com Guard. Sem alterações aos agentes/modelos nem merge funcional.
+
 ## Balanço por fase
 | Fase | Estado | Falta |
 |---|---|---|
