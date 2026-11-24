@@ -74,8 +74,11 @@ fn open(dd: &std::path::Path) -> anyhow::Result<db::Db> {
     db::Db::open(&dd.join("office.db"))
 }
 
-fn url(d: &db::Db, port: u16) -> String {
-    format!("http://127.0.0.1:{port}/auth/link?c={}", web::link_new(d))
+fn url(d: &db::Db, port: u16) -> anyhow::Result<String> {
+    Ok(format!(
+        "http://127.0.0.1:{port}/auth/link?c={}",
+        web::link_new(d)?
+    ))
 }
 
 #[tokio::main]
@@ -91,7 +94,7 @@ async fn main() -> anyhow::Result<()> {
         Some(C::LoginLink) => {
             let d = open(&dd)?;
             let p = d.kg("port").as_u64().unwrap_or(a.port as u64) as u16;
-            println!("One-time login link (valid 10 minutes):\n{}", url(&d, p));
+            println!("One-time login link (valid 10 minutes):\n{}", url(&d, p)?);
             return Ok(());
         }
         Some(C::Autostart { on }) => {
@@ -146,7 +149,9 @@ async fn main() -> anyhow::Result<()> {
         println!(
             "\n  ApolloOffice {}\n\n  Open {}\n\n  Data: {}\n  Stop with Ctrl+C\n",
             app::V,
-            url(&ax.db, a.port),
+            url(&ax.db, a.port).unwrap_or_else(|e| {
+                format!("login link unavailable ({e}); retry with apollo-office login-link")
+            }),
             dd.display()
         );
     }
