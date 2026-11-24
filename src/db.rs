@@ -224,6 +224,22 @@ impl Db {
         clippy::too_many_arguments,
         reason = "Typed insert mirrors the existing jobs schema"
     )]
+    /// Atomically acknowledge a successfully processed comment batch and its PR cursor.
+    pub fn ack_pr_comments(&self, repo: &str, number: i64, updated: &str, ids: &[String]) -> rusqlite::Result<()> {
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction()?;
+        for id in ids {
+            tx.execute("insert or ignore into cm(id,t) values(?,?)", rusqlite::params![format!("{repo}:{id}"), now()])?;
+        }
+        let changed = tx.execute("update prs set d=json_set(d, '$.seen', json('true'), '$.comment_seen_at', ?) where repo=? and num=?", rusqlite::params![updated, repo, number])?;
+        if changed != 1 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        tx.commit()?;
+        crate::app::chg();
+        Ok(())
+    }
+
     pub fn jnew(
         &self,
         repo: &str,
@@ -407,5 +423,26 @@ mod tests {
             .unwrap()["lang"],
             "pt-PT"
         );
+    }
+}
+
+#[cfg(test)]
+mod comment_cursor_tests {
+    use super::*;
+
+    #[test]
+    fn comment_ack_is_atomic_and_preserves_other_metadata() {
+        let db = Db::mem();
+        let ids = vec!["review-1".to_string()];
+        assert!(db.ack_pr_comments("a/b", 1, "new", &ids).is_err());
+        assert_eq!(db.n("select count(*) from cm", vec![]), 0);
+        db.run("insert into prs(repo,num,d) values(?,?,?)", crate::pa!["a/b".to_string(), 1_i64, r#"{"auto_merge":true}"#.to_string()]);
+        db.ack_pr_comments("a/b", 1, "new", &ids).unwrap();
+        db.ack_pr_comments("a/b", 1, "new", &ids).unwrap();
+        assert_eq!(db.n("select count(*) from cm", vec![]), 1);
+        let row = db.one("select d from prs where repo='a/b' and num=1", vec![]).unwrap();
+        assert_eq!(row["d"]["comment_seen_at"], "new");
+        assert_eq!(row["d"]["seen"], true);
+        assert_eq!(row["d"]["auto_merge"], true);
     }
 }
