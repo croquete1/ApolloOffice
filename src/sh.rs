@@ -93,14 +93,9 @@ pub fn bash() -> String {
 }
 
 pub fn cmd(p: &str, a: &[String]) -> tokio::process::Command {
-    let lw = p.to_lowercase();
-    let mut c = if cfg!(windows) && (lw.ends_with(".cmd") || lw.ends_with(".bat")) {
-        let mut c = tokio::process::Command::new("cmd");
-        c.arg("/C").arg(p);
-        c
-    } else {
-        tokio::process::Command::new(p)
-    };
+    // Invoke batch files directly too. Rust's Windows Command implementation
+    // escapes batch arguments; manually calling cmd /C bypasses that handling.
+    let mut c = tokio::process::Command::new(p);
     c.args(a);
     #[cfg(windows)]
     {
@@ -1077,6 +1072,27 @@ fn api_pages(output: &str) -> Result<Vec<Value>, String> {
 #[cfg(test)]
 mod t {
     use super::*;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn batch_wrapper_preserves_rest_query_arguments() {
+        let script = std::env::temp_dir().join(format!(
+            "apollo-batch-query-{}.cmd",
+            rand::random::<u64>()
+        ));
+        std::fs::write(&script, "@echo off\r\necho %1\r\n").unwrap();
+        let endpoint = "repos/o/r/issues?state=open&sort=created&per_page=100";
+        let output = cmd(script.to_str().unwrap(), &[endpoint.to_string()])
+            .output()
+            .await;
+        let _ = std::fs::remove_file(script);
+        let output = output.unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(endpoint),
+            "{output:?}"
+        );
+    }
 
     #[test]
     fn worker_image_uses_verified_node24_instead_of_debian_node20() {
