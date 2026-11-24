@@ -333,14 +333,41 @@ fn authed(a: &Ax, h: &HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
-pub fn link_new(a: &crate::db::Db) -> String {
-    let c = hex::encode(rand::random::<[u8; 16]>());
-    a.run("delete from lnk where exp<?", pa![now()]);
-    a.run(
+pub fn link_new(db: &crate::db::Db) -> rusqlite::Result<String> {
+    let code = hex::encode(rand::random::<[u8; 16]>());
+    let mut c = db.0.lock().unwrap();
+    let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let at = now();
+    tx.execute("delete from lnk where exp<?", [at])?;
+    tx.execute(
         "insert into lnk(c,exp) values(?,?)",
-        pa![c.clone(), now() + 600_000],
-    );
-    c
+        rusqlite::params![code, at + 600_000],
+    )?;
+    tx.commit()?;
+    Ok(code)
+}
+
+// Consume the link only if its new session can be persisted. Concurrent
+// redemptions are serialized by SQLite, including across processes.
+fn redeem_login_link(db: &crate::db::Db, code: &str) -> rusqlite::Result<Option<String>> {
+    let mut c = db.0.lock().unwrap();
+    let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let at = now();
+    if tx.execute(
+        "delete from lnk where c=? and exp>?",
+        rusqlite::params![code, at],
+    )? != 1
+    {
+        return Ok(None);
+    }
+    let session = hex::encode(rand::random::<[u8; 32]>());
+    tx.execute("delete from ses where exp<?", [at])?;
+    tx.execute(
+        "insert into ses(id,exp) values(?,?)",
+        rusqlite::params![session, at + 30 * 86_400_000],
+    )?;
+    tx.commit()?;
+    Ok(Some(session))
 }
 
 const LP: &str = "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>ApolloOffice</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0c0e;color:#ecebe6;font:14px/1.5 ui-monospace,Menlo,Consolas,monospace}div{max-width:420px;padding:24px}button{font:inherit;color:#0b0c0e;background:#ecebe6;border:0;border-radius:6px;padding:8px 16px;cursor:pointer}code{color:#4fb3e0}</style><div>";
@@ -2584,30 +2611,23 @@ pub async fn h(State(a): State<Ax>, req: Request<Body>) -> Response<Body> {
             return page(&format!("<p>Log in to ApolloOffice on this computer?</p><form method=post action='/auth/link?c={c}'><button>Log in</button></form>"));
         }
         if m == Method::POST && origin_ok(&a, &hd) {
-            if a.db
-                .ch("delete from lnk where c=? and exp>?", pa![c, now()])
-                == 1
-            {
-                let s = hex::encode(rand::random::<[u8; 32]>());
-                a.db.run("delete from ses where exp<?", pa![now()]);
-                a.db.run(
-                    "insert into ses(id,exp) values(?,?)",
-                    pa![s.clone(), now() + 30 * 86_400_000],
-                );
-                return Response::builder()
-                    .status(StatusCode::SEE_OTHER)
-                    .header("location", "/")
-                    .header(
-                        "set-cookie",
-                        format!(
-                            "ao={s}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}",
-                            30 * 86400
-                        ),
-                    )
-                    .body(Body::empty())
-                    .unwrap();
-            }
-            return page("This login link was already used or has expired. Run <code>apollo-office login-link</code> for a new one.");
+            let s = match redeem_login_link(&a.db, &c) {
+                Ok(Some(s)) => s,
+                Ok(None) => return page("This login link was already used or has expired. Run <code>apollo-office login-link</code> for a new one."),
+                Err(_) => return er(StatusCode::SERVICE_UNAVAILABLE, "login could not be saved; retry the link"),
+            };
+            return Response::builder()
+                .status(StatusCode::SEE_OTHER)
+                .header("location", "/")
+                .header(
+                    "set-cookie",
+                    format!(
+                        "ao={s}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}",
+                        30 * 86400
+                    ),
+                )
+                .body(Body::empty())
+                .unwrap();
         }
         return er(StatusCode::FORBIDDEN, "forbidden");
     }
@@ -3578,6 +3598,34 @@ mod t {
         );
         assert!(!tok_ok(&a, &headers));
         assert!(a.db.kg("api").is_null());
+    }
+
+    #[test]
+    fn login_link_redemption_is_atomic_and_single_use() {
+        let db = crate::db::Db::mem();
+        let code = link_new(&db).unwrap();
+        db.0.lock().unwrap().execute_batch(
+            "create trigger fail_session before insert on ses begin select raise(abort,'injected'); end;",
+        ).unwrap();
+        assert!(redeem_login_link(&db, &code).is_err());
+        assert_eq!(db.n("select count(*) from lnk", pa![]), 1);
+        assert_eq!(db.n("select count(*) from ses", pa![]), 0);
+        db.0.lock()
+            .unwrap()
+            .execute_batch("drop trigger fail_session")
+            .unwrap();
+        let session = redeem_login_link(&db, &code).unwrap().unwrap();
+        assert_eq!(session.len(), 64);
+        assert!(redeem_login_link(&db, &code).unwrap().is_none());
+        assert_eq!(db.n("select count(*) from ses", pa![]), 1);
+        let expired = link_new(&db).unwrap();
+        db.run("update lnk set exp=0", pa![]);
+        assert!(redeem_login_link(&db, &expired).unwrap().is_none());
+        db.0.lock().unwrap().execute_batch(
+            "create trigger fail_link before insert on lnk begin select raise(abort,'injected'); end;",
+        ).unwrap();
+        assert!(link_new(&db).is_err());
+        assert_eq!(db.n("select count(*) from lnk", pa![]), 1);
     }
 
     #[test]
