@@ -46,6 +46,19 @@ fn wipe_office_data(db: &crate::db::Db) -> rusqlite::Result<()> {
     Ok(())
 }
 
+fn remove_repository(db: &crate::db::Db, repo: &str) -> rusqlite::Result<()> {
+    let mut c = db.0.lock().unwrap();
+    let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    tx.execute("delete from rp where full=?", [repo])?;
+    tx.execute(
+        "update jobs set st='drop', why='repository removed' where repo=? and st in ('vet','ready','approve','park')",
+        [repo],
+    )?;
+    tx.commit()?;
+    crate::app::chg();
+    Ok(())
+}
+
 fn save_repo_settings(db: &crate::db::Db, repo: &str, b: &Value) -> rusqlite::Result<()> {
     let mut c = db.0.lock().unwrap();
     let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -1885,10 +1898,12 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                     }
                     let r = mt["full"].as_str().unwrap_or(&r).to_string();
                     let (c, s) = crate::gh::detect(&r).await;
-                    a.db.run(
+                    if a.db.run(
                         "insert or ignore into rp(full,ci,setup,mode,t0,coderabbit_epoch) values(?,?,?,?,?,?)",
                         pa![r.clone(), c.clone(), s.clone(), "ask".to_string(), now(), now()],
-                    );
+                    ) < 0 {
+                        return er(StatusCode::CONFLICT, "repository was not added");
+                    }
                     a.sw.notify_one();
                     js(json!({"full": r, "ci": c, "setup": s, "cfg": cfg(a)}))
                 }
@@ -1905,8 +1920,9 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                     js(json!({"ci": c, "setup": s}))
                 }
                 "del" => {
-                    a.db.run("delete from rp where full=?", pa![r.clone()]);
-                    a.db.run("update jobs set st='drop', why='repository removed' where repo=? and st in ('vet','ready','approve')", pa![r.clone()]);
+                    if remove_repository(&a.db, &r).is_err() {
+                        return er(StatusCode::CONFLICT, "repository was not removed");
+                    }
                     js(cfg(a))
                 }
                 _ => er(StatusCode::BAD_REQUEST, "unknown op"),
@@ -2609,6 +2625,33 @@ mod t {
         assert_eq!(snapshot["byRepo"][0]["repo"], "o/r");
         assert!(!snapshot.to_string().contains("private command"));
         assert!(!snapshot.to_string().contains("private result"));
+    }
+
+    #[test]
+    fn repository_removal_is_atomic_and_cancels_parked_jobs() {
+        let db = crate::db::Db::mem();
+        db.0.lock().unwrap().execute_batch(
+            "insert into rp(full) values('o/r'),('other/r');
+             insert into jobs(repo,st) values('o/r','ready'),('o/r','park'),('other/r','ready');
+             create trigger fail_drop before update of st on jobs begin select raise(abort,'injected'); end;",
+        ).unwrap();
+        assert!(remove_repository(&db, "o/r").is_err());
+        assert_eq!(db.n("select count(*) from rp", pa![]), 2);
+        assert_eq!(db.n("select count(*) from jobs where st='drop'", pa![]), 0);
+        db.0.lock()
+            .unwrap()
+            .execute_batch("drop trigger fail_drop")
+            .unwrap();
+        remove_repository(&db, "o/r").unwrap();
+        assert_eq!(db.n("select count(*) from rp where full='o/r'", pa![]), 0);
+        assert_eq!(db.n("select count(*) from jobs where st='drop'", pa![]), 2);
+        assert_eq!(
+            db.n(
+                "select count(*) from jobs where repo='other/r' and st='ready'",
+                pa![]
+            ),
+            1
+        );
     }
 
     #[test]
