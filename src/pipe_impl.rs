@@ -481,6 +481,69 @@ fn commit_subject_kind(title: &str, kind: &str) -> R<String> {
     Ok(header.trim_end().to_string())
 }
 
+// Recheck the live opt-in and the durable evidence at execution boundaries.
+// The CodeRabbit activation epoch is stored on each queued finding. Turning
+// the feature off and on must not revive a job from the previous activation.
+fn automated_review_authorized(db: &crate::db::Db, j: &Job) -> R<()> {
+    if j.kind != "review" {
+        return Ok(());
+    }
+    let coderabbit = j.d["coderabbit_source"] == "coderabbit"
+        || j.d["steward_review_id"] == "coderabbit";
+    let human = j.d["steward_review_id"].is_i64();
+    if !coderabbit && !human {
+        return Ok(());
+    }
+    let number = j.pr.filter(|n| *n > 0).ok_or_else(|| {
+        X::Drop("Automated review has no original PR number; manual review required".into())
+    })?;
+    let head = review_bound_head(j)?.ok_or_else(|| {
+        X::Drop("Automated review has no bound HEAD; manual review required".into())
+    })?;
+    let authorized = if coderabbit {
+        let ids = j.d["coderabbit_comment_ids"].as_array().ok_or_else(|| {
+            X::Drop("CodeRabbit job has no finding inventory; manual review required".into())
+        })?;
+        let unique = ids
+            .iter()
+            .filter_map(Value::as_i64)
+            .filter(|id| *id > 0)
+            .collect::<std::collections::BTreeSet<_>>();
+        if ids.is_empty() || ids.len() > 100 || unique.len() != ids.len() {
+            return drop("Invalid CodeRabbit finding inventory; manual review required");
+        }
+        db.try_n(
+            "select count(*) from coderabbit_findings f join rp r on r.full=f.repo
+             where f.repo=? and f.number=? and f.head=? and f.job=?
+               and f.state='queued' and f.activation=r.coderabbit_epoch
+               and r.on_=1 and r.coderabbit_repair=1
+               and f.comment_id in (select value from json_each(?))
+               and exists(select 1 from prs where repo=f.repo and num=f.number and st='open')",
+            pa![
+                j.repo.clone(),
+                number,
+                head.to_string(),
+                j.id,
+                json!(ids).to_string()
+            ],
+        )
+        .map_err(|error| X::E(error.to_string()))?
+            == ids.len() as i64
+    } else {
+        db.try_n(
+            "select count(*) from rp where full=? and on_=1 and steward_repair=1
+             and exists(select 1 from prs where repo=rp.full and num=? and st='open')",
+            pa![j.repo.clone(), number],
+        )
+        .map_err(|error| X::E(error.to_string()))?
+            == 1
+    };
+    if !authorized {
+        return drop("Automated review authorization revoked or evidence stale; manual review required");
+    }
+    Ok(())
+}
+
 fn kill(a: &Ax, j: &Job) -> R<()> {
     if a.db
         .kg(&format!("kill:{}", j.id))
@@ -489,7 +552,7 @@ fn kill(a: &Ax, j: &Job) -> R<()> {
     {
         return drop("dropped by the owner");
     }
-    Ok(())
+    automated_review_authorized(&a.db, j)
 }
 
 fn bslug(j: &Job) -> String {
@@ -597,6 +660,7 @@ fn review_publish_target_matches(pr:&Value,repo:&str,branch:&str,source:&str,can
 }
 
 async fn prep(a: &Ax, j: &mut Job) -> R<()> {
+    kill(a, j)?;
     crate::net::need_once(a, &[&j.h(), "gh"]).await?;
     if j.d["rp"].as_bool().unwrap_or(false) {
         j.d.as_object_mut().unwrap().remove("rp");
@@ -2723,6 +2787,7 @@ fn fix_attempt_finish_active(a: &Ax, j: &Job, outcome: &str, gate: &str) {
 }
 
 async fn fix(a: &Ax, j: &mut Job, fb0: String, k0: u64) -> R<Value> {
+    kill(a, j)?;
     if staged_conflict(a, j) {
         return drop("staged TDD pilot requires free_first OFF: free-first routing would replace the configured FIXER/REVIEWER. Disable free_first for this installation or remove the repo from staged_repos.".to_string());
     }
@@ -3373,6 +3438,7 @@ fn needs_owner_approval(a:&Ax,j:&Job)->bool {
 }
 
 async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
+    kill(a, j)?;
     // Every path, including recovery/resume, must pass this boundary before any
     // squash, push or GitHub request. A resumed job is not an approval grant.
     if needs_owner_approval(a,j) {
@@ -3611,6 +3677,7 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
             return drop("PR operation publication target changed; no push; manual review required");
         }
     }
+    kill(a, j)?;
     if rem != sha {
         let fo = if j.kind == "rebase" || j.kind == "review" {
             format!("--force-with-lease=refs/heads/{br}:{}", j.s("old"))

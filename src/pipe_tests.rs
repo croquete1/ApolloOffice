@@ -3,6 +3,44 @@ mod t {
     use super::*;
 
     #[test]
+    fn automated_review_authorization_is_bound_to_current_policy_and_finding_epoch() {
+        let db = crate::db::Db::mem();
+        let head = "a".repeat(40);
+        db.run(
+            "insert into rp(full,on_,coderabbit_repair,coderabbit_epoch,steward_repair) values('o/r',1,1,4,1)",
+            vec![],
+        );
+        db.run(
+            "insert into prs(repo,num,st) values('o/r',1,'open')",
+            vec![],
+        );
+        let mut job = Job::of(json!({"id":7,"repo":"o/r","pr":1,"kind":"review","d":{
+            "steward_head":head,"coderabbit_source":"coderabbit","coderabbit_comment_ids":[91]
+        }}));
+        assert!(automated_review_authorized(&db, &job).is_err());
+        db.run(
+            "insert into coderabbit_findings(repo,number,comment_id,review_id,head,state,severity,body_hash,activation,job,created_at,updated_at) values('o/r',1,91,5,?,'queued','high','hash',4,7,0,0)",
+            pa![head.clone()],
+        );
+        assert!(automated_review_authorized(&db, &job).is_ok());
+        job.d["coderabbit_comment_ids"] = json!([91,91]);
+        assert!(automated_review_authorized(&db, &job).is_err());
+        job.d["coderabbit_comment_ids"] = json!([91,92]);
+        assert!(automated_review_authorized(&db, &job).is_err());
+        job.d["coderabbit_comment_ids"] = json!([91]);
+        db.run("update rp set coderabbit_repair=0,coderabbit_epoch=5", vec![]);
+        assert!(automated_review_authorized(&db, &job).is_err());
+        db.run("update rp set coderabbit_repair=1,coderabbit_epoch=6", vec![]);
+        assert!(automated_review_authorized(&db, &job).is_err());
+        job.d = json!({"steward_head":head,"steward_review_id":91});
+        assert!(automated_review_authorized(&db, &job).is_ok());
+        db.run("update rp set steward_repair=0", vec![]);
+        assert!(automated_review_authorized(&db, &job).is_err());
+        job.d = json!({});
+        assert!(automated_review_authorized(&db, &job).is_ok());
+    }
+
+    #[test]
     fn review_publication_requires_original_open_pr_and_exact_head(){
         let source="a".repeat(40);
         let candidate="b".repeat(40);
