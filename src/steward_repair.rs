@@ -3,7 +3,7 @@
 use crate::app::Ax;
 use crate::db::now;
 use crate::pa;
-use crate::sh::{apip, ghj};
+use crate::sh::{apip_unique, ghj};
 use serde_json::{json, Value};
 
 const ALLOWED_REVIEWERS: &[&str] = &["OWNER", "MEMBER", "COLLABORATOR"];
@@ -114,14 +114,11 @@ async fn enqueue(
     {
         return Ok(false);
     }
-    let reviews = apip(&format!("repos/{repo}/pulls/{number}/reviews?per_page=100")).await?;
-    let comments = apip(&format!(
+    let reviews = apip_unique(&format!("repos/{repo}/pulls/{number}/reviews?per_page=100")).await?;
+    let comments = apip_unique(&format!(
         "repos/{repo}/pulls/{number}/comments?per_page=100"
     ))
     .await?;
-    if reviews.len() >= 100 || comments.len() >= 100 {
-        return Ok(false); // Não tomar decisões com feedback incompleto.
-    }
     let Some((rid, request, since)) = actionable_request(&reviews, &comments, head, me) else {
         return Ok(false);
     };

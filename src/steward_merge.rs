@@ -2,7 +2,7 @@
 //! Cada operação é revalidada contra o GitHub no HEAD exato e sem bypass.
 use crate::app::Ax;
 use crate::pa;
-use crate::sh::ghj;
+use crate::sh::{apip_counted, apip_unique, ghj};
 use serde_json::{json, Value};
 
 fn allowed_file(path: &str) -> bool {
@@ -44,6 +44,34 @@ fn allowed_file(path: &str) -> bool {
     ]
     .iter()
     .any(|word| p.contains(word))
+}
+
+fn safe_changed_file(file: &Value) -> bool {
+    file["filename"].as_str().is_some_and(allowed_file)
+        && if file["status"] == "renamed"
+            || file["status"] == "copied"
+            || !file["previous_filename"].is_null()
+        {
+            file["previous_filename"].as_str().is_some_and(allowed_file)
+        } else {
+            true
+        }
+}
+
+async fn all_checks(repo: &str, head: &str) -> Result<(Value, Value), String> {
+    let checks = apip_counted(
+        &format!("repos/{repo}/commits/{head}/check-runs?per_page=100"),
+        "check_runs",
+        None,
+    )
+    .await?;
+    let statuses = apip_counted(
+        &format!("repos/{repo}/commits/{head}/status?per_page=100"),
+        "statuses",
+        Some(head),
+    )
+    .await?;
+    Ok((checks, statuses))
 }
 
 fn candidate(listed: &Value, assessed: &Value) -> Result<(i64, String), &'static str> {
@@ -155,7 +183,7 @@ fn remote_checks_clean(checks: &Value, status: &Value) -> bool {
         return false;
     };
     let count = checks["total_count"].as_u64().unwrap_or(u64::MAX);
-    if count > 100 || count != runs.len() as u64 {
+    if count != runs.len() as u64 {
         return false;
     }
     if !runs
@@ -175,9 +203,6 @@ fn no_outstanding_reviews(reviews: &Value, head: &str) -> bool {
     let Some(rows) = reviews.as_array() else {
         return false;
     };
-    if rows.len() >= 100 {
-        return false;
-    }
     rows.iter()
         .filter(|r| r["state"] == "CHANGES_REQUESTED")
         .all(|request| {
@@ -200,9 +225,6 @@ fn reviewed(reviews: &Value, author: &str, head: &str) -> bool {
     let Some(rows) = reviews.as_array() else {
         return false;
     };
-    if rows.len() >= 100 {
-        return false; // É necessário paginar para analisar a totalidade.
-    }
     let mut approved = false;
     for r in rows {
         if r["state"] == "CHANGES_REQUESTED" {
@@ -227,7 +249,7 @@ fn ci_verified(checks: &Value, status: &Value) -> bool {
         return false;
     };
     let count = checks["total_count"].as_u64().unwrap_or(u64::MAX);
-    if count == 0 || count != runs.len() as u64 || count > 100 {
+    if count == 0 || count != runs.len() as u64 {
         return false;
     }
     // Um check de revisão automatizada isolado não comprova testes.
@@ -744,6 +766,7 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
         }
     }
     let changed = detail["changed_files"].as_u64().unwrap_or(u64::MAX);
+    // Preserve the existing conservative change-size limit; it is independent of pagination.
     if changed == 0 || changed >= 100 {
         return Ok(false);
     }
@@ -758,33 +781,15 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
     let Some(paths) = files.as_array() else {
         return Ok(false);
     };
-    if paths.len() as u64 != changed
-        || !paths
-            .iter()
-            .all(|p| p["filename"].as_str().is_some_and(allowed_file))
-    {
+    if paths.len() as u64 != changed || !paths.iter().all(safe_changed_file) {
         return Ok(false);
     }
-    let checks = ghj(
-        &[
-            "api",
-            &format!("repos/{repo}/commits/{head}/check-runs?per_page=100"),
-        ],
-        45,
-    )
-    .await?;
-    let statuses = ghj(&["api", &format!("repos/{repo}/commits/{head}/status")], 45).await?;
+    let (checks, statuses) = all_checks(repo, &head).await?;
     if !check_gate(&checks, &statuses, mode) {
         return Ok(false);
     }
-    let reviews = ghj(
-        &[
-            "api",
-            &format!("repos/{repo}/pulls/{number}/reviews?per_page=100"),
-        ],
-        45,
-    )
-    .await?;
+    let reviews =
+        json!(apip_unique(&format!("repos/{repo}/pulls/{number}/reviews?per_page=100")).await?);
     let expected = ExpectedMerge {
         repo,
         base,
@@ -878,24 +883,10 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
     // Ler novamente revisões, threads, checks, base e PR antes do PUT.
     // Uma resposta incompleta ou erro da API aborta o merge.
     let read: Result<FinalReads, String> = async {
-        let reviews = ghj(
-            &[
-                "api",
-                &format!("repos/{repo}/pulls/{number}/reviews?per_page=100"),
-            ],
-            40,
-        )
-        .await?;
+        let reviews =
+            json!(apip_unique(&format!("repos/{repo}/pulls/{number}/reviews?per_page=100")).await?);
         let threads_resolved = review_threads_resolved(repo, number).await?;
-        let checks = ghj(
-            &[
-                "api",
-                &format!("repos/{repo}/commits/{head}/check-runs?per_page=100"),
-            ],
-            40,
-        )
-        .await?;
-        let statuses = ghj(&["api", &format!("repos/{repo}/commits/{head}/status")], 40).await?;
+        let (checks, statuses) = all_checks(repo, &head).await?;
         let branch = ghj(&["api", &format!("repos/{repo}/branches/{base}")], 40).await?;
         let pr = ghj(&["api", &format!("repos/{repo}/pulls/{number}")], 40).await?;
         Ok(FinalReads {
@@ -1612,5 +1603,35 @@ mod thread_pagination_tests {
             .accept(&page(0, 1, 2, false, "end"))
             .is_err());
         assert!(ThreadScan::default().accept(&json!({})).is_err());
+    }
+}
+
+#[cfg(test)]
+mod complete_inventory_tests {
+    use super::*;
+    #[test]
+    fn checks_and_reviews_beyond_first_page_still_enforce_every_gate() {
+        let head = "a".repeat(40);
+        let mut checks = json!({"total_count":101,"check_runs":(1..=101).map(|id|json!({"id":id,"name":"test-suite","app":{"slug":"ci-service"},"status":"completed","conclusion":"success"})).collect::<Vec<_>>()});
+        let status = json!({"statuses":[]});
+        assert!(ci_verified(&checks, &status));
+        checks["check_runs"][100]["conclusion"] = json!("failure");
+        assert!(!ci_verified(&checks, &status));
+        let mut reviews=json!((1..=101).map(|id|json!({"id":id,"state":"APPROVED","commit_id":head,"user":{"login":"maintainer","type":"User"}})).collect::<Vec<_>>());
+        assert!(reviewed(&reviews, "author", &head));
+        reviews[100]["state"] = json!("CHANGES_REQUESTED");
+        assert!(!reviewed(&reviews, "author", &head));
+    }
+    #[test]
+    fn renamed_sensitive_file_still_blocks_merge() {
+        assert!(!safe_changed_file(
+            &json!({"filename":"src/ui.ts","previous_filename":"src/auth.ts","status":"renamed"})
+        ));
+        assert!(!safe_changed_file(
+            &json!({"filename":"src/ui.ts","status":"renamed"})
+        ));
+        assert!(safe_changed_file(
+            &json!({"filename":"src/ui.ts","previous_filename":"src/view.ts","status":"renamed"})
+        ));
     }
 }
