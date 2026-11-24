@@ -1,5 +1,7 @@
 //! Read-only CodeRabbit evidence. Never grants review/merge authority.
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use tokio::sync::Semaphore;
 
@@ -13,6 +15,59 @@ pub(crate) static OBSERVATIONS: Semaphore = Semaphore::const_new(2);
 const METADATA_BYTES: usize = 512 * 1024;
 const API: &str = "https://api.github.com";
 
+// Local request budget is deliberately below the anonymous GitHub allowance.
+// It is not a claim about the remaining remote quota (other users may share the IP).
+const LOCAL_REQUEST_LIMIT: usize = 40;
+const REQUEST_WINDOW: Duration = Duration::from_secs(3600);
+pub(crate) const RATE_LIMITED: &str = "public GitHub request budget unavailable";
+
+#[derive(Default)]
+struct RequestBudget {
+    attempts: VecDeque<Instant>,
+    blocked_until: Option<Instant>,
+}
+
+impl RequestBudget {
+    fn admit(&mut self, now: Instant) -> bool {
+        while self.attempts.front().is_some_and(|at| now.saturating_duration_since(*at) >= REQUEST_WINDOW) {
+            self.attempts.pop_front();
+        }
+        if self.blocked_until.is_some_and(|until| now < until)
+            || self.attempts.len() >= LOCAL_REQUEST_LIMIT {
+            return false;
+        }
+        self.attempts.push_back(now);
+        true
+    }
+
+    fn block(&mut self, now: Instant, delay: Duration) {
+        // Bound untrusted header values, and never shorten an existing cooldown.
+        let until = now + delay.clamp(Duration::from_secs(60), Duration::from_secs(86_400));
+        self.blocked_until = Some(self.blocked_until.map_or(until, |old| old.max(until)));
+    }
+}
+
+static REQUESTS: LazyLock<Mutex<RequestBudget>> = LazyLock::new(|| Mutex::new(RequestBudget::default()));
+
+fn reserve_request() -> Result<(), String> {
+    if REQUESTS.lock().map_err(|_| RATE_LIMITED)?.admit(Instant::now()) {
+        Ok(())
+    } else {
+        Err(RATE_LIMITED.into())
+    }
+}
+
+fn remote_cooldown(status: u16, headers: &reqwest::header::HeaderMap, unix_now: u64) -> Option<Duration> {
+    let numeric = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok());
+    let exhausted = numeric("x-ratelimit-remaining") == Some(0);
+    if status != 429 && status != 403 && !exhausted {
+        return None;
+    }
+    let reset = if exhausted { numeric("x-ratelimit-reset").unwrap_or(unix_now).saturating_sub(unix_now) } else { 0 };
+    Some(Duration::from_secs(numeric("retry-after").unwrap_or(0).max(reset).max(60)))
+}
+
+
 // Separate, anonymous public reads: no ambient gh host or stored GitHub tokens.
 // Refuse redirects rather than following a changed repository/host.
 fn public_client() -> Result<reqwest::Client, String> {
@@ -25,12 +80,19 @@ fn public_client() -> Result<reqwest::Client, String> {
 }
 
 async fn read_public(client: &reqwest::Client, endpoint: &str, limit: usize) -> Result<String, String> {
+    reserve_request()?;
     let response = client.get(format!("{API}/{endpoint}"))
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .send().await.map_err(|_| "public GitHub request failed")?;
+    let status = response.status().as_u16();
+    let unix_now = chrono::Utc::now().timestamp().max(0) as u64;
+    let delay = remote_cooldown(status, response.headers(), unix_now);
+    if let Some(delay) = delay {
+        REQUESTS.lock().map_err(|_| RATE_LIMITED)?.block(Instant::now(), delay);
+    }
     if !response.status().is_success() {
-        return Err(format!("public GitHub HTTP {}", response.status().as_u16()));
+        return Err(if delay.is_some() { RATE_LIMITED.into() } else { format!("public GitHub HTTP {status}") });
     }
     bounded_body(response, limit).await
 }
@@ -377,6 +439,35 @@ mod tests {
         assert!(!count_matches(&before, &Value::Null, 20));
         assert!(count_matches(&before, &before, 20));
         assert!(count_matches(&json!({"comments":0}), &json!({"comments":0}), 0));
+    }
+    #[test]
+    fn local_budget_rolls_over_without_bursting() {
+        let start = Instant::now();
+        let mut b = RequestBudget::default();
+        for _ in 0..LOCAL_REQUEST_LIMIT {
+            assert!(b.admit(start));
+        }
+        assert!(!b.admit(start));
+        assert!(!b.admit(start + REQUEST_WINDOW - Duration::from_secs(1)));
+        assert!(b.admit(start + REQUEST_WINDOW));
+    }
+
+    #[test]
+    fn remote_cooldown_never_shortens_and_honors_reset() {
+        let now = Instant::now();
+        let mut b = RequestBudget::default();
+        b.block(now, Duration::from_secs(120));
+        b.block(now, Duration::from_secs(10));
+        assert!(!b.admit(now + Duration::from_secs(119)));
+        assert!(b.admit(now + Duration::from_secs(120)));
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-ratelimit-remaining", "0".parse().unwrap());
+        headers.insert("x-ratelimit-reset", "1300".parse().unwrap());
+        assert_eq!(remote_cooldown(200, &headers, 1000), Some(Duration::from_secs(300)));
+        headers.insert("retry-after", "600".parse().unwrap());
+        assert_eq!(remote_cooldown(429, &headers, 1000), Some(Duration::from_secs(600)));
+        assert_eq!(remote_cooldown(403, &reqwest::header::HeaderMap::new(), 1000), Some(Duration::from_secs(60)));
+        assert_eq!(remote_cooldown(200, &reqwest::header::HeaderMap::new(), 1000), None);
     }
     #[test]
     fn repository_and_pr_scope_are_strict() {
