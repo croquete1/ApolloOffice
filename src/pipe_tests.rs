@@ -30,6 +30,48 @@ mod t {
     }
 
     #[test]
+    fn safe_defer_preserves_verified_checkpoint_and_approval() {
+        let mut job=Job::of(json!({"id":1,"repo":"o/r","kind":"fix","st":"ci","d":{"h":"local","br":"fix","f0":{},"proof":{"b_exit":0,"fix_commit":"a".repeat(40)}}}));
+        assert!(verified_checkpoint(&job));
+        assert_eq!(deferred_delay(&mut job,false,false,false),30_000);
+        assert_eq!(job.d["rs"],true);
+        assert_eq!(job.d["deferred_checkpoint"],"verified");
+        assert_eq!(deferred_delay(&mut job,false,true,false),60_000);
+        job.d["ap"]=json!(true);
+        job.st="gate".into();
+        assert_eq!(deferred_delay(&mut job,true,false,false),120_000);
+        assert_eq!(job.st,"submit");
+        assert_eq!(job.d["ap"],true);
+        assert_eq!(job.d["deferred_checkpoint"],"submit");
+    }
+
+    #[test]
+    fn deferred_checkout_blocks_aliases_but_not_other_projects() {
+        let db=crate::db::Db::mem();
+        db.run("insert into hs(id,ssh,dk,ln,on_) values('one','same',1,2,1),('two','same',1,2,1),('other','other',1,2,1)",pa![]);
+        let a=std::sync::Arc::new(crate::app::App::new(db,std::env::temp_dir(),1,"apollo-office".into()));
+        let pending=a.db.jnew("o/r",1,"fix","waiting","","ready","",json!({"h":"one","rs":true,"deferred_checkpoint":"verified"}),None,0.0);
+        assert!(deferred_checkout_available(&a,"o/r","two",pending));
+        assert!(!deferred_checkout_available(&a,"o/r","two",pending+1));
+        assert!(deferred_checkout_available(&a,"o/r","other",pending+1));
+        assert!(deferred_checkout_available(&a,"o/s","two",pending+1));
+    }
+
+    #[test]
+    fn recovered_fix_in_ask_mode_needs_owner_approval() {
+        let db=crate::db::Db::mem();
+        db.run("insert into rp(full,mode) values('o/r','ask')",pa![]);
+        let a=std::sync::Arc::new(crate::app::App::new(db,std::env::temp_dir(),1,"apollo-office".into()));
+        let mut j=Job::of(json!({"repo":"o/r","kind":"fix","st":"submit","d":{"rs":true}}));
+        assert!(needs_owner_approval(&a,&j));
+        j.d["ap"]=json!(true);
+        assert!(!needs_owner_approval(&a,&j));
+        j.d["ap"]=json!(false);
+        a.db.run("update rp set mode='auto' where full='o/r'",pa![]);
+        assert!(!needs_owner_approval(&a,&j));
+    }
+
+    #[test]
     fn ready_fixes_precede_new_hunts_and_rebases() {
         let fix = json!({"id":1,"kind":"fix","st":"ready","prio":-0.5,"d":{}});
         let hunt = json!({"id":2,"kind":"hunt","st":"ready","prio":99.0,"d":{}});

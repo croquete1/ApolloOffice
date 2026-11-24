@@ -100,6 +100,23 @@ pub async fn all(a: &Ax) {
     probe(a, &ks).await;
 }
 
+/// Single availability check for an explicitly restartable phase boundary.
+/// Unlike need(), this never occupies a lane through exponential sleep.
+pub async fn need_once(a: &Ax, ks: &[&str]) -> R<()> {
+    let keys=ks.iter().filter(|k| !k.is_empty()).map(|k|k.to_string()).collect::<Vec<_>>();
+    if now()-LAST.load(Ordering::Relaxed)>20_000 || keys.iter().any(|k|!a.net(k)) {
+        probe(a,&keys).await;
+    }
+    let missing=keys.into_iter().filter(|k|!a.net(k)).collect::<Vec<_>>();
+    if missing.is_empty() { return Ok(()); }
+    for k in &missing {
+        if k!="gh" && k!="an" && crate::sh::ho(a,k).map(|h|!h.on).unwrap_or(true) {
+            return Err(X::Back(format!("{k} left the office")));
+        }
+    }
+    Err(X::Defer(format!("network unavailable: {}",missing.join(", "))))
+}
+
 pub async fn need(a: &Ax, w: &str, ks: &[&str]) -> R<()> {
     let mut b = 30_000u64;
     let ks: Vec<String> = ks

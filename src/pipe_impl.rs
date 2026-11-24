@@ -561,7 +561,7 @@ fn setup_transport_error(result: &Out) -> bool {
 }
 
 async fn prep(a: &Ax, j: &mut Job) -> R<()> {
-    need(a, "repro", &[&j.h(), "gh"]).await?;
+    crate::net::need_once(a, &[&j.h(), "gh"]).await?;
     if j.d["rp"].as_bool().unwrap_or(false) {
         j.d.as_object_mut().unwrap().remove("rp");
         a.db.jd(j);
@@ -1335,19 +1335,24 @@ async fn verify(a: &Ax, j: &mut Job, f: &Value) -> R<String> {
     crate::quality::check(a, j).await
 }
 
+fn try_slot(a: &Ax, h: &str) -> bool {
+    let cap = ho(a,h).map(|x|x.ci).unwrap_or(1) as usize;
+    let mut slots=a.sem.lock().unwrap();
+    let n=slots.entry(h.to_string()).or_insert(0);
+    if *n>=cap {return false;}
+    *n+=1;
+    true
+}
+
 async fn slot(a: &Ax, h: &str) {
-    let cap = ho(a, h).map(|x| x.ci).unwrap_or(1) as usize;
-    loop {
-        {
-            let mut s = a.sem.lock().unwrap();
-            let n = s.entry(h.to_string()).or_insert(0);
-            if *n < cap {
-                *n += 1;
-                return;
-            }
-        }
-        sl(5000).await;
-    }
+    while !try_slot(a,h) { sl(5000).await; }
+}
+
+fn verified_checkpoint(j: &Job) -> bool {
+    let sha=j.d["proof"]["fix_commit"].as_str().unwrap_or("");
+    j.kind=="fix" && j.d["proof"]["b_exit"]==0 && sha.len()==40
+        && sha.bytes().all(|b|b.is_ascii_hexdigit()) && j.d["f0"].is_object()
+        && !j.h().is_empty() && !j.s("br").is_empty() && j.d["sq"]!=true
 }
 
 fn unslot(a: &Ax, h: &str) {
@@ -1415,7 +1420,14 @@ async fn ci(a: &Ax, j: &mut Job) -> R<String> {
         &format!("[{}] waiting for the build slot", j.h()),
         Some(j.id),
     );
-    slot(a, &j.h()).await;
+    if verified_checkpoint(j) || j.kind=="mergecheck" {
+        // The candidate is committed and can be rechecked. Do not keep the
+        // lane while another build occupies all CI slots.
+        a.db.jset(j.id,&[("st",json!("ci"))]);
+        if !try_slot(a,&j.h()) { return Err(X::Defer("CI capacity unavailable".into())); }
+    } else {
+        slot(a,&j.h()).await;
+    }
     struct SlotGuard(Ax, String);
     impl Drop for SlotGuard {
         fn drop(&mut self) {
@@ -2851,7 +2863,9 @@ async fn fix(a: &Ax, j: &mut Job, fb0: String, k0: u64) -> R<Value> {
         fb = match ci(a, j).await {
             Ok(value) => value,
             Err(e) => {
-                fix_attempt_finish(a, attempt_id, attempt_started, "failed", "ci");
+                if !matches!(e,X::Defer(_)) {
+                    fix_attempt_finish(a, attempt_id, attempt_started, "failed", "ci");
+                }
                 return Err(e);
             }
         };
@@ -3117,7 +3131,11 @@ async fn gate(a: &Ax, j: &mut Job) -> R<()> {
         &format!("pre-push gate for {}", j.tag()),
         Some(j.id),
     );
-    need(a, "submit", &["gh", &j.h()]).await?;
+    if verified_checkpoint(j) || j.st=="submit" {
+        crate::net::need_once(a,&["gh",&j.h()]).await?;
+    } else {
+        need(a,"submit",&["gh",&j.h()]).await?;
+    }
     if j.kind != "fix" {
         let p = ghj(
             &[
@@ -3305,10 +3323,15 @@ fn auto_merge_requested(prior: Option<&Value>, newly_created: bool, j: &Job, rep
 }
 
 
+fn needs_owner_approval(a:&Ax,j:&Job)->bool {
+    (crate::routing::enabled(a) || (j.kind=="fix" && rp(a,&j.repo)["mode"]!="auto"))
+        && j.d["ap"]!=true
+}
+
 async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
     // Every path, including recovery/resume, must pass this boundary before any
     // squash, push or GitHub request. A resumed job is not an approval grant.
-    if crate::routing::enabled(a) && j.d["ap"].as_bool() != Some(true) {
+    if needs_owner_approval(a,j) {
         // Persist the hold before any fallible worker/preview operation.
         a.db.jset(
             j.id,
@@ -3350,7 +3373,7 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
     a.db.jset(j.id, &[("st", json!("submit"))]);
     a.st("submit", "work", Some(j.id), "");
     a.flow("reviewer", "submit", &j.tag());
-    need(a, "submit", &["gh", &j.h()]).await?;
+    crate::net::need_once(a,&["gh",&j.h()]).await?;
     let f = j.d["f"].clone();
     let ft = stored_pr_footer(j, fo(a, j));
     let tr = trs(j);
@@ -3877,6 +3900,15 @@ async fn resume(a: &Ax, j: &mut Job) -> R<Value> {
     );
     ok(a, j, &format!("git checkout -q {}", q(&j.s("br"))), 120).await?;
     let mut f = j.d["f0"].clone();
+    if j.d["deferred_checkpoint"]=="verified" {
+        // Recheck exact branch identity AND rerun regression proof before the
+        // regular resume gates. A checkout changed while waiting is rejected.
+        if !verified_checkpoint(j) || ok(a,j,"git rev-parse HEAD",60).await?!=j.d["proof"]["fix_commit"].as_str().unwrap_or("") {
+            return drop("deferred checkpoint no longer matches verified candidate");
+        }
+        let proof=verify(a,j,&f).await?;
+        if !proof.is_empty() { return drop(format!("deferred regression proof no longer valid: {proof}")); }
+    }
     if f.is_null() {
         f = desc(a, j).await?;
         j.d["f0"] = f.clone();
@@ -3897,7 +3929,9 @@ async fn resume(a: &Ax, j: &mut Job) -> R<Value> {
         fb = match ci(a, j).await {
             Ok(value) => value,
             Err(e) => {
-                fix_attempt_finish_active(a, j, "failed", "ci");
+                if !matches!(e,X::Defer(_)) {
+                    fix_attempt_finish_active(a, j, "failed", "ci");
+                }
                 return Err(e);
             }
         };
@@ -3997,6 +4031,7 @@ async fn go(a: &Ax, id: i64, h: &str) {
     let Some(mut j) = a.db.jg(id) else { return };
     let rs = j.d["rs"].as_bool().unwrap_or(false);
     let rpp = j.d["rp"].as_bool().unwrap_or(false);
+    let initial_submit=j.st=="submit";
     if (j.st != "submit" && !rs && !rpp) || j.h().is_empty() {
         j.d["h"] = json!(h);
         a.db.jd(&j);
@@ -4211,6 +4246,15 @@ async fn go(a: &Ax, id: i64, h: &str) {
     .await;
     match r {
         Ok(()) => {}
+        Err(X::Defer(reason)) => {
+            let mut current=a.db.jg(id).unwrap_or(j.clone());
+            let delay=deferred_delay(&mut current,initial_submit,rs,rpp);
+            idle_all(a,id);
+            match a.db.defer_host_retry(&current,now().saturating_add(delay),&crate::hunt_health::safe_tail(&reason)) {
+                Ok(())=>a.say("ci",&format!("{} deferred for {} s: {}",current.tag(),delay/1000,crate::sh::head(&reason,180)),Some(id)),
+                Err(error)=>a.say("ci",&format!("{}: could not persist deferred checkpoint: {error}",current.tag()),Some(id)),
+            }
+        }
         Err(X::Back(m)) => {
             if !m.is_empty() {
                 a.db.jset(id, &[("st", json!("ready"))]);
@@ -4375,6 +4419,40 @@ async fn red(a: &Ax, r: &str, h: &str) -> bool {
     !(h["s"].is_string() && cr["sha"].is_string() && h["s"] != cr["sha"])
 }
 
+/// Safe wait boundaries retain the approved submission or verified commit;
+/// a fresh prep/mergecheck can restart without treating unverified work as proof.
+fn deferred_delay(j:&mut Job,initial_submit:bool,was_resume:bool,was_prep:bool)->i64 {
+    let n=j.d["deferred_count"].as_i64().unwrap_or(0).saturating_add(1).clamp(1,6);
+    j.d["deferred_count"]=json!(n);
+    if initial_submit || j.st=="submit" {
+        j.st="submit".into();
+        j.d["deferred_checkpoint"]=json!("submit");
+    } else if verified_checkpoint(j) && (was_resume || matches!(j.st.as_str(),"ci"|"gate"|"review")) {
+        j.d["rs"]=json!(true);
+        j.d["deferred_checkpoint"]=json!("verified");
+    } else if was_prep {
+        j.d["rp"]=json!(true);
+        j.d["deferred_checkpoint"]=json!("prep");
+    } else {
+        j.d["deferred_checkpoint"]=json!("restart");
+    }
+    (30_000 * (1_i64 << (n-1))).min(300_000)
+}
+
+fn checkout_target(a:&Ax,host:&str)->String {
+    if let Some(target)=docker_cache_target(a,host) {return target;}
+    ho(a,host).map(|h|format!("raw:{}",h.ssh.trim())).unwrap_or_else(||format!("unknown:{host}"))
+}
+
+fn deferred_checkout_available(a:&Ax,repo:&str,host:&str,id:i64)->bool {
+    let target=checkout_target(a,host);
+    let rows=a.db.try_all("select id,json_extract(d,'$.h') host from jobs
+        where repo=? and id<>? and st in ('ready','submit')
+        and json_extract(d,'$.deferred_checkpoint') in ('verified','prep','submit')",
+        pa![repo.to_string(),id]);
+    rows.is_ok_and(|rows|rows.iter().all(|r|r["host"].as_str().is_some_and(|h|checkout_target(a,h)!=target)))
+}
+
 // Existing maximum of five attempts; persist a bounded cooldown between them.
 fn host_retry_delay(attempt: i64) -> i64 {
     30_000 * (1_i64 << (attempt.clamp(1,5)-1))
@@ -4386,7 +4464,9 @@ pub(crate) fn admit(a: &Ax, repo: &str, host: &str, id: i64) -> bool {
     if a.drain.load(std::sync::atomic::Ordering::SeqCst) {
         return false;
     }
-    if !matches!(a.db.schedule_eligible(id, repo, now()), Ok(true)) {
+    if !matches!(a.db.schedule_eligible(id, repo, now()), Ok(true))
+        || !deferred_checkout_available(a,repo,host,id)
+        || crate::ai::rbud(a,Some(id)).is_some() {
         return false;
     }
     let is_hunt = a.db.jg(id).is_some_and(|job| job.kind == "hunt");
@@ -4406,7 +4486,8 @@ pub(crate) fn admit(a: &Ax, repo: &str, host: &str, id: i64) -> bool {
         return false;
     }
     let claim = format!("{repo} {host}");
-    if active.contains(&claim) || locked.contains(&id) {
+    let target=checkout_target(a,host);
+    if active.iter().any(|entry|entry.split_once(' ').is_some_and(|(r,h)|r==repo && checkout_target(a,h)==target)) || locked.contains(&id) {
         return false;
     }
     if is_hunt
@@ -4506,7 +4587,7 @@ async fn pick(a: &Ax, h: &str, allow_hunt: bool) -> Option<i64> {
         let id = j["id"].as_i64().unwrap_or(0);
         let r = j["repo"].as_str().unwrap_or("").to_string();
         let d = &j["d"];
-        if !matches!(a.db.schedule_eligible(id,&r,now()),Ok(true)) {
+        if !matches!(a.db.schedule_eligible(id,&r,now()),Ok(true)) || crate::ai::rbud(a,Some(id)).is_some() {
             continue;
         }
         let pin = j["st"] == "submit"

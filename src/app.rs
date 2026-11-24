@@ -113,6 +113,8 @@ pub enum X {
     Back(String),
     Lim(String),
     Net(String),
+    // A safe phase boundary can return its lane to the scheduler.
+    Defer(String),
     Host(String, String),
     E(String),
 }
@@ -120,7 +122,7 @@ pub enum X {
 impl std::fmt::Display for X {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            X::Drop(s) | X::Back(s) | X::Lim(s) | X::Net(s) | X::E(s) | X::Host(_, s) => {
+            X::Drop(s) | X::Back(s) | X::Lim(s) | X::Net(s) | X::Defer(s) | X::E(s) | X::Host(_, s) => {
                 write!(f, "{s}")
             }
         }
