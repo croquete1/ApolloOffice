@@ -2568,6 +2568,7 @@ mod watcher_rebase_admission_tests {
     #[test]
     fn rebase_admission_respects_snapshot_and_other_pr_operations() {
         let db = Db::mem();
+        db.run("insert into rp(full) values('o/r')", vec![]);
         db.run(
             "insert into prs(repo,num,st,upd,d) values('o/r',1,'open','t',?)",
             crate::pa![json!({"watcher_head":HEAD}).to_string()],
@@ -2576,6 +2577,12 @@ mod watcher_rebase_admission_tests {
         assert!(db
             .queue_watcher_rebase("o/r", 1, "wrong", HEAD, &request)
             .is_err());
+        db.run("update rp set on_=0", vec![]);
+        assert!(db
+            .queue_watcher_rebase("o/r", 1, "t", HEAD, &request)
+            .is_err());
+        assert_eq!(db.n("select count(*) from jobs", vec![]), 0);
+        db.run("update rp set on_=1", vec![]);
         let job = db.jnew(
             "o/r",
             1,
