@@ -31,6 +31,9 @@ fn read_health(db: &crate::db::Db, repo: &str) -> rusqlite::Result<Value> {
 
 /// Devolve as falhas acumuladas e a suspensão efetiva da pesquisa.
 pub fn status(a: &Ax, repo: &str) -> Value {
+    if a.hunt_storage_holds.lock().unwrap().contains(repo) {
+        return json!({"blocked":true,"failures":null,"until":null,"stage":"storage_write_failed","exit_code":null});
+    }
     let Ok(v) = read_health(&a.db, repo) else {
         return json!({"blocked":true,"failures":null,"until":null,"stage":"state_unavailable","exit_code":null});
     };
@@ -99,6 +102,8 @@ pub fn fail(a: &Ax, repo: &str, stage: &str, code: i32) {
             rusqlite::params![key(repo), state.to_string()],
         );
         if !matches!(written, Ok(1)) {
+            a.hunt_storage_holds.lock().unwrap().insert(repo.to_string());
+            crate::app::chg();
             a.say(
                 "hunter",
                 &format!("{repo}: could not persist failure counter"),
@@ -130,10 +135,18 @@ pub fn success(a: &Ax, repo: &str) {
     let had_failures = {
         let _transition = a.update_transition.lock().unwrap();
         let failed = status(a, repo)["failures"].as_i64().unwrap_or(0) > 0;
-        if failed {
-            a.db.kd(&key(repo));
+        if !failed {
+            return;
         }
-        failed
+        let deleted = a.db.0.lock().unwrap().execute("delete from kv where k=?", [key(repo)]);
+        if deleted.is_err() {
+            a.hunt_storage_holds.lock().unwrap().insert(repo.to_string());
+            crate::app::chg();
+            a.say("hunter", &format!("{repo}: could not clear failure counter"), None);
+            return;
+        }
+        crate::app::chg();
+        true
     };
     if had_failures {
         a.say(
@@ -145,16 +158,24 @@ pub fn success(a: &Ax, repo: &str) {
 }
 
 /// Reposição explícita do bloqueio após corrigir o ambiente.
-pub fn reset(a: &Ax, repo: &str) {
+pub fn reset(a: &Ax, repo: &str) -> rusqlite::Result<()> {
     {
         let _transition = a.update_transition.lock().unwrap();
-        a.db.kd(&key(repo));
+        let deleted = a.db.0.lock().unwrap().execute("delete from kv where k=?", [key(repo)]);
+        if let Err(error) = deleted {
+            a.hunt_storage_holds.lock().unwrap().insert(repo.to_string());
+            crate::app::chg();
+            return Err(error);
+        }
+        a.hunt_storage_holds.lock().unwrap().remove(repo);
+        crate::app::chg();
     }
     a.say(
         "hunter",
         &format!("{repo}: bloqueio de pesquisas reposto manualmente"),
         None,
     );
+    Ok(())
 }
 
 /// Redact common credentials before saving the bounded diagnostic tail.
@@ -262,10 +283,30 @@ mod tests {
         fail(&a, "example/one", "setup", 1);
         success(&a, "example/one");
         assert!(blocked(&a, "example/one"));
-        reset(&a, "example/one");
+        reset(&a, "example/one").unwrap();
         assert!(!blocked(&a, "example/one"));
         a.db.run("drop table kv", vec![]);
         assert!(blocked(&a, "example/one"));
+    }
+
+    #[test]
+    fn failed_health_write_holds_only_affected_repo_until_verified_reset() {
+        let a = app();
+        a.db.ks(&key("example/one"), &json!({"failures":1,"until":0}));
+        a.db.0.lock().unwrap().execute_batch(
+            "create trigger reject_health_update before update on kv when new.k='hunt-fail:example/one' begin select raise(abort,'fixture write failure'); end;
+             create trigger reject_health_delete before delete on kv when old.k='hunt-fail:example/one' begin select raise(abort,'fixture delete failure'); end;"
+        ).unwrap();
+        fail(&a, "example/one", "setup", 1);
+        assert!(blocked(&a, "example/one"));
+        assert_eq!(status(&a, "example/one")["stage"], "storage_write_failed");
+        assert!(!blocked(&a, "example/two"));
+        success(&a, "example/one");
+        assert!(reset(&a, "example/one").is_err());
+        assert!(blocked(&a, "example/one"));
+        a.db.0.lock().unwrap().execute_batch("drop trigger reject_health_update; drop trigger reject_health_delete;").unwrap();
+        reset(&a, "example/one").unwrap();
+        assert!(!blocked(&a, "example/one"));
     }
 
     #[tokio::test]
