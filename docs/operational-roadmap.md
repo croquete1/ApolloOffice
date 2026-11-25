@@ -468,3 +468,19 @@ Evidências observadas no GitHub; nenhuma fase é encerrada apenas por estes mer
 - CI #248 e #254: falhas Ubuntu apenas em Rustfmt, corrigidas sem reduzir gates; Windows aprovado nos dois runs. CI #250 e #255 validaram os HEADs corrigidos. Aprendizagem: aplicar todos os hunks do formatter, incluindo vírgulas finais; não confundir aprovação de uma plataforma com a matriz completa.
 - Lote #110–112: CI #260 aprovado em `9896661d6d25d247ba16aef63b913e8bbc3208de`; revisão encontrou normalização de metadados inválidos. CI #265 aprovado em `9d3a2044a615da90c332371576d9f287364093f8`; revisão encontrou possibilidade de reinícios repetidos perante checksum inválido. Correções subsequentes de #110/#111 exigem novo CI e revisão. CI #262 aprovado em `8d97951dad01e48e6884370fb9721b2857dc8200`, revisão desse SHA sem comentários acionáveis. Sem alterar representação dos agentes ou modelos.
 - Última quota observada do CodeRabbit: zero revisões incluídas restantes após #109; não foram solicitadas revisões pagas. Não declarar cobertura de commits não revistos pelo serviço.
+
+## Lote #110–114 — 25/11/2026
+
+| PR | Merge | CI do HEAD | Revisão |
+|---|---|---|---|
+| #110 | `1127cbed43a813021fe73e0b0cb14951e32e0e17` | #270 (45674106411) aprovado | Correção do finding de metadados persistidos, revisão manual do HEAD final; 397 unitários Ubuntu (5 ignorados), 351 Windows, 2 integração por plataforma |
+| #111 | `cf54b1af930974a381d1a44c8e3102356db456a1` | #267 (45672678277) aprovado | CodeRabbit do HEAD exato, thread resolvida; 396 Ubuntu (5 ignorados), 350 Windows, 2 integração por plataforma |
+| #112 | `f5793b60f923edf22b98e218081363ea71edf1b2` | #262 (45670206177) aprovado | CodeRabbit do HEAD exato sem comentários acionáveis |
+| #113 | `4c154cc6a695cd46d2e60176fc91ecd46b0cce62` | #268 (45672687880) aprovado | Correção documental e revisão manual do HEAD final |
+| #114 | `1c7fef62e82557b599d22d2f66e8811b65f2070b` | #272 (45674213859) aprovado | Revisão manual; 398 Ubuntu (5 ignorados), 352 Windows, 2 integração por plataforma |
+
+CI pós-merge #269 e #271 aprovados; última observação: #275 (45676026852): success; #274 (45675984461): success; #273 (45675943719): success. Não equiparar o resultado do HEAD da PR ao resultado da main.
+
+Política de integração acordada nesta ronda: CI integral aprovado no HEAD exato, correção dos findings conhecidos, revisão manual documentada quando a quota opcional CodeRabbit não está disponível, merge individual sem contornar proteções obrigatórias. Não declarar revisão automática para um HEAD sem evidência. Revisões incluídas continuam úteis; não contratar funcionalidades pagas. CI #266 falhou apenas Rustfmt no Ubuntu, corrigido e validado no #270. Aprendizagem: testar os dados persistidos reais antes da normalização e o hash do staged antes de pedir reinício; preservar a prova de efeitos externos incertos.
+
+Novas frentes abertas: #115 bloqueio de retry perante intenção durável de publicação; #116 fence de gerações das sondagens concorrentes; #117 confirmação transacional do staging; #118 marcador alternativo de bloqueio Hunter fora da SQLite. CI e revisões ainda pendentes; não há prova de restart de processo real, atomicidade entre GitHub e SQLite, tolerância à falha simultânea de disco/BD, nem ensaio de atualização de produção. Nenhuma fase encerrada. Interface dos agentes e modelos preservados.
