@@ -39,8 +39,25 @@ fn capacity(profile: &str, configured: i64, telemetry: &Value, at: i64) -> (i64,
     let temp = telemetry["temp"]
         .as_f64()
         .filter(|v| (0.0..=130.0).contains(v));
+    // Worker probes report filesystem capacity in whole GiB. A zero free
+    // sample means less than 1 GiB remains, not necessarily exactly zero.
+    let disk = telemetry["disk"].as_array().and_then(|values| {
+        if values.len() != 2 {
+            return None;
+        }
+        let total = values[0].as_f64()?;
+        let free = values[1].as_f64()?;
+        (total.is_finite() && free.is_finite() && total > 0.0 && free >= 0.0 && free <= total)
+            .then_some(free)
+    });
     if temp.is_some_and(|v| v >= 95.0) || memory.is_some_and(|(t, f)| f < (t * 0.05).max(256.0)) {
         return (0, "critical_pressure");
+    }
+    if disk.is_some_and(|free| free < 1.0) {
+        return (0, "disk_critical");
+    }
+    if disk.is_some_and(|free| free < 5.0) {
+        return (nominal.min(1), "disk_pressure");
     }
     if temp.is_some_and(|v| v >= 85.0) || memory.is_some_and(|(t, f)| f < (t * 0.15).max(768.0)) {
         return (nominal.min(1), "memory_or_temperature");
@@ -240,6 +257,27 @@ mod tests {
         hw["temp"] = json!(96);
         assert_eq!(capacity("performance", 5, &hw, at).0, 0);
         assert_eq!(capacity("manual", 5, &hw, at).0, 5);
+    }
+
+    #[test]
+    fn disk_pressure_limits_new_work_but_not_manual_or_completion() {
+        let db = crate::db::Db::mem();
+        let a = App::new(db, std::env::temp_dir(), 1, "apollo-office".into());
+        a.db.ks("set", &json!({"resource_profile":"performance"}));
+        a.lv.lock().unwrap().hst.insert(
+            "local".into(),
+            json!({"t":crate::db::now(),"cpu":8,"load":1,"mem":[16000,8000],"disk":[100,0]}),
+        );
+        assert_eq!(host_capacity(&a, "local", 4), (0, "disk_critical"));
+        assert_eq!(ci_capacity(&a, "local", 4, true), 0);
+        assert_eq!(ci_capacity(&a, "local", 4, false), 1);
+        a.lv.lock().unwrap().hst.get_mut("local").unwrap()["disk"] = json!([100, 4]);
+        assert_eq!(host_capacity(&a, "local", 4), (1, "disk_pressure"));
+        a.lv.lock().unwrap().hst.get_mut("local").unwrap()["disk"] = json!([100, 5]);
+        assert_eq!(host_capacity(&a, "local", 4), (4, "profile"));
+        a.lv.lock().unwrap().hst.get_mut("local").unwrap()["disk"] = json!([100, 0]);
+        a.db.ks("set", &json!({"resource_profile":"manual"}));
+        assert_eq!(host_capacity(&a, "local", 4), (4, "manual"));
     }
 
     #[test]
