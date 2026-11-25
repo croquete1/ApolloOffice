@@ -1242,6 +1242,69 @@ mod t {
         assert_eq!(db.n("select count(*) from prs",pa![]),1);
     }
 
+    fn submission_fixture() -> (crate::db::Db, Job, Value, Value) {
+        let db = crate::db::Db::mem();
+        let j = Job::of(json!({"id":7,"repo":"o/r","kind":"fix","d":{}}));
+        db.run("insert into rp(full) values('o/r')",pa![]);
+        db.run("insert into jobs(id,repo,kind,st) values(7,'o/r','fix','submit')",pa![]);
+        let sha = "a".repeat(40);
+        let publication = json!({"job":7,"test_cmd":"cargo test","tests":["regression"],"branch":"fix","head":"o/r","head_sha":sha,"base_branch":"main"});
+        let remote = json!({"id":123,"number":12,"state":"open","html_url":"https://github.com/o/r/pull/12","base":{"repo":{"full_name":"o/r"},"ref":"main"},"head":{"repo":{"full_name":"o/r"},"ref":"fix","sha":sha}});
+        (db,j,publication,remote)
+    }
+
+    #[test]
+    fn publication_receipt_survives_failed_registration_without_second_creation() {
+        let (db,j,publication,remote) = submission_fixture();
+        let mut checkpoint = begin_submit_publication(&db,&j,"Title",&publication,None).unwrap();
+        assert!(checkpoint["number"].is_null());
+        assert_eq!(checkpoint["auto_merge"],true);
+        assert!(begin_submit_publication(&db,&j,"Title",&publication,None).is_err());
+        // Simulate successful creation once, followed by failure of local registration.
+        save_submit_number(&db,&j,&mut checkpoint,12).unwrap();
+        db.run("create trigger fail_registration before insert on prs begin select raise(abort,'injected failure'); end",pa![]);
+        assert!(persist_submit_receipt(&db,&j,&checkpoint,&remote).is_err());
+        let recovered = load_submit_publication(&db,&j).unwrap().unwrap();
+        assert_eq!(recovered["number"],12);
+        assert_eq!(recovered["auto_merge"],true);
+        assert!(begin_submit_publication(&db,&j,"Title",&publication,None).is_err());
+        db.run("drop trigger fail_registration",pa![]);
+        assert_eq!(persist_submit_receipt(&db,&j,&recovered,&remote).unwrap(),("https://github.com/o/r/pull/12".into(),12));
+        assert_eq!(db.one("select d from prs where num=12",pa![]).unwrap()["d"]["auto_merge"],true);
+        let mut closed = remote.clone();
+        closed["state"] = json!("closed");
+        assert!(persist_submit_receipt(&db,&j,&recovered,&closed).is_err());
+        assert!(begin_submit_publication(&db,&j,"Title",&publication,None).is_err());
+    }
+
+    #[test]
+    fn ambiguous_publication_intent_never_allows_another_creation() {
+        let (db,j,publication,remote) = submission_fixture();
+        begin_submit_publication(&db,&j,"Title",&publication,None).unwrap();
+        let recovered = load_submit_publication(&db,&j).unwrap().unwrap();
+        assert!(persist_submit_receipt(&db,&j,&recovered,&remote).is_err());
+        assert!(begin_submit_publication(&db,&j,"Title",&publication,None).is_err());
+        assert_eq!(db.n("select count(*) from prs",pa![]),0);
+    }
+
+    #[test]
+    fn submitted_pr_inventory_rejects_ambiguous_and_incomplete_targets() {
+        let (_,_,publication,remote) = submission_fixture();
+        assert_eq!(select_submit_pr(&[],"o/r",&publication).unwrap(),None);
+        assert_eq!(select_submit_pr(std::slice::from_ref(&remote),"o/r",&publication).unwrap(),Some(12));
+        assert!(select_submit_pr(&[json!({})],"o/r",&publication).is_err());
+        assert!(select_submit_pr(&[remote.clone(),remote.clone()],"o/r",&publication).is_err());
+        for (field,value) in [("sha",json!("b".repeat(40))),("repo",Value::Null)] {
+            let mut changed=remote.clone();
+            changed["head"][field]=value;
+            assert!(select_submit_pr(&[changed],"o/r",&publication).is_err());
+        }
+        let mut another=remote.clone();
+        another["number"]=json!(13);
+        another["html_url"]=json!("https://github.com/o/r/pull/13");
+        assert!(select_submit_pr(&[remote,another],"o/r",&publication).is_err());
+    }
+
     #[test]
     fn infra() {
         let o = "CI: 6 passed, FAILED at `deny`: cargo-deny is required in CI: cargo install cargo-deny --locked\nxtask ci: error: ci failed at `deny`\n[exit 1]";
