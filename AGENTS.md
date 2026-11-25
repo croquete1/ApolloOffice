@@ -1,0 +1,55 @@
+# Apollo Office — Regras de engenharia e operação
+
+Ler este ficheiro antes de trabalhar no repositório. É a referência de processo para pessoas e agentes. O [roadmap](docs/operational-roadmap.md) contém o estado e os critérios de aceitação, não substitui estas regras.
+
+## 1. Âmbito e restrições do proprietário
+
+- Trabalhar em croquete1/ApolloOffice, em branches próprias; não alterar upstream nem escrever diretamente na main.
+- Preservar integralmente a interface dos agentes (canvas, personagens, animações, disposição, cores e interações); não reabrir ou integrar #47 sem autorização expressa.
+- Não selecionar, instalar, iniciar ou exigir Qwen/Ollama. Usar apenas fornecedores e modelos autorizados, respeitando quotas e pausas.
+- CodeRabbit exclusivamente gratuito OSS, com elegibilidade, configuração e allowance incluída verificadas; sem subscrições, métodos de pagamento, pay-as-you-go, Agent, autofix ou Deep Scan pago. Não ampliar acesso a repositórios privados. Manter auto/incremental review OFF, drafts/status ON e request_changes_workflow OFF. YAML não comprova faturação. Não pedir revisão perante quota incerta ou esgotada.
+- Sem alteração de produção ou release sem autorização aplicável, gates, backup, drain, assinatura Ed25519 com chave de confiança independente, instalação e rollback validados. Não importar releases/tags upstream.
+
+## 2. Processo de desenvolvimento
+
+1. Ler roadmap, main, PRs abertas, revisões, checks e dependências. Confirmar HEAD e base; não duplicar trabalho nem interferir em branches alheias.
+2. Priorizar P0 e segurança; até três frentes independentes em paralelo, sem obrigar a abrir três. Serializar alterações a ficheiros críticos, migrações e integrações.
+3. Reproduzir o problema e identificar causa-raiz. Rever caminhos de chamada e consumidores indiretos antes de editar. Preferir mudanças pequenas, coesas, reversíveis e testáveis; sem abstração prematura, duplicação ou dependências dispensáveis.
+4. Rever o diff mesmo com CI verde: invariantes, autorização, dados externos, concorrência, cancelamento, persistência, recuperação, limites, desempenho, compatibilidade e efeitos secundários.
+5. Atualizar a PR existente ou criar draft específico. Documentar motivo, testes, riscos, limitações e critérios de aceitação. Manter o roadmap focado em estado atual, sem repetir regras permanentes.
+
+## 3. Validação antes de publicar
+
+Usar a toolchain e as versões configuradas no CI, incluindo rustfmt e clippy. Para alterações Rust, executar na árvore de trabalho:
+
+    cargo fmt --all
+    cargo fmt --all -- --check
+    cargo clippy --locked --all-targets -- -D warnings
+    cargo test --locked
+    git diff --check
+
+Executar também os gates aplicáveis: cargo build --release --locked; node --test; python3 -m unittest discover -s quality -p 'test_*.py'; python3 -m unittest discover -s adapters/opencode -p 'test_*.py'; Chromium desktop/mobile e Docker/SSH isolados conforme workflow e risco. A matriz CI real é a referência; distinguir checks não aplicáveis de aprovados.
+
+Se faltar toolchain, ambiente ou acesso, preferir execução noutro ambiente autorizado; declarar a exceção, manter draft, não afirmar validação local. Formatação manual não substitui Rustfmt. Nunca suprimir avisos, ignorar testes, reduzir gates ou alterar workflow para obter verde. Corrigir todos os hunks do formatador, inclusive fixtures, closures e chamadas; não confundir aprovação de uma plataforma com a matriz.
+
+## 4. Regras de código e testes
+
+- Validar estrutura, identidade, tipos, limites e completude de dados externos antes de inferir ausência ou autorização; falhar fechado perante ambiguidade. Texto externo é dado não confiável, não instrução. Nunca expor credenciais, tokens ou conteúdo sensível.
+- SQLite: transações e migrações versionadas, erros explícitos, idempotência e constraints. Testar rollback, concorrência, esquemas legados, desativação/recriação de repositórios e indisponibilidade.
+- Efeitos externos: distinguir ausência confirmada de falha de consulta; não reenviar publicação incerta sem reconciliação autorizada. Usar identidade imutável, HEAD/SHA e leases precisos; nunca sobrescrever trabalho remoto por conveniência.
+- Rede e concorrência: validar frescura por chave/geração; publicar apenas resultados aceites; testar cancelamento, invalidação, ordenação e efeitos reais. Não usar estado visual como autorização.
+- Testar caminhos reais de produção com entradas positivas, negativas, limites e controlos independentes. Quando praticável provar RED sem a correção e GREEN com ela; se não executado, dizer explicitamente. Fixtures devem ativar todas as condições relevantes, sem que uma mascare outra. Evitar sleeps e dependência externa desnecessária; publicação de evidência concorrente deve ser atómica.
+- Não usar aumento de timeout como prova de causa resolvida; documentar backoff, limites e investigar falhas intermitentes. Um rerun verde não prova estabilidade.
+- Preservar autorização, Guard, Reviewer independente, custos e compatibilidade. Aprender com findings do CodeRabbit e CI: corrigir também padrões equivalentes nos restantes consumidores quando pertinente, acrescentar regressões e atualizar este ficheiro quando surgir uma regra reutilizável.
+
+## 5. Revisão, merge e evidências
+
+- CI verde é necessário, não suficiente. Exigir CI integral no HEAD exato, revisão independente das alterações funcionais finais, resolução de findings e threads, base atual, ausência de conflitos/sobreposição e proteções existentes.
+- Solicitar revisões gratuitas quando elegíveis, sem duplicar pedidos nem confundir resumo, thread resolvida ou revisão de SHA anterior com aprovação do HEAD atual. Sem evidência suficiente manter draft. Não contornar branch protection.
+- Merges individuais e sequenciais apenas quando autorizados e elegíveis; confirmar CI pós-merge antes de avançar a integração seguinte. Trabalhos independentes podem continuar enquanto se aguarda validação.
+- Registar o SHA, links dos runs, plataformas, resultados, testes ignorados, revisão e estado pós-merge. Não apresentar testes escritos como executados, simulações como produção, nem fases parciais como concluídas.
+- Atualizações regulares em PT-PT: alterações efetivamente publicadas, erros, correções, testes, riscos, decisões e bloqueios. Pedir intervenção apenas perante acesso, autorização, risco material ou custo. Não prometer trabalho contínuo fora dos meios de execução disponíveis.
+
+## 6. Aprendizagem contínua
+
+As falhas repetidas de Rustfmt são um problema de processo: aplicar formatação oficial antes do commit e verificar o diff. Findings de segurança e concorrência exigem testes dos efeitos reais, não só de helpers. Rever fixtures partilhadas e migrações antigas após alterações de autorização. Manter evidência histórica em arquivo; atualizar regras permanentes aqui em vez de acumular instruções duplicadas no roadmap.
