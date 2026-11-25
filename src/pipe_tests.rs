@@ -564,7 +564,7 @@ mod t {
     #[tokio::test]
     async fn a_blocked_hunt_cannot_be_admitted_and_active_hunts_do_not_overlap() {
         let db = crate::db::Db::mem();
-        db.run("insert into rp(full) values('o/r')", pa![]);
+        db.run("insert into rp(full,hunt,ci) values('o/r',1,'true')", pa![]);
         let first = db.jnew(
             "o/r",
             0,
@@ -633,7 +633,7 @@ mod t {
     #[tokio::test]
     async fn unblocked_ready_hunt_cannot_exceed_the_active_hunter_cap() {
         let db = crate::db::Db::mem();
-        db.run("insert into rp(full) values('o/blocked'),('o/healthy')", pa![]);
+        db.run("insert into rp(full,hunt,ci) values('o/blocked',1,'true'),('o/healthy',1,'true')", pa![]);
         db.ks("set", &json!({"hunters": 1}));
         db.run("insert into hs(id,ln,dk,on_) values('local',2,0,1)", pa![]);
         let blocked_id = db.jnew(
@@ -677,6 +677,35 @@ mod t {
         a.lk.lock().unwrap().clear();
         assert!(admit(&a, "o/blocked", "local", blocked_id));
         assert!(!admit(&a, "o/healthy", "local", healthy_id));
+    }
+
+    #[tokio::test]
+    async fn queued_hunt_rechecks_repository_policy_at_admission() {
+        let db = crate::db::Db::mem();
+        db.run(
+            "insert into rp(full,hunt,ci) values('o/r',1,'true')",
+            pa![],
+        );
+        db.run("insert into hs(id,ln,dk,on_) values('local',2,0,1)", pa![]);
+        let id = db.jnew("o/r", 0, "hunt", "fixture", "", "ready", "", json!({}), None, 99.0);
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::env::temp_dir(),
+            1,
+            "x".into(),
+        ));
+        for (revoke, restore) in [
+            ("update rp set on_=0", "update rp set on_=1"),
+            ("update rp set hunt=0", "update rp set hunt=1"),
+            ("update rp set ci=' '", "update rp set ci='true'"),
+        ] {
+            a.db.run(revoke, pa![]);
+            assert!(!admit(&a, "o/r", "local", id));
+            assert!(a.lk.lock().unwrap().is_empty());
+            assert!(a.act.lock().unwrap().is_empty());
+            a.db.run(restore, pa![]);
+        }
+        assert!(admit(&a, "o/r", "local", id));
     }
 
     #[tokio::test]
@@ -753,6 +782,86 @@ mod t {
         assert!(!mk_hunt(&a), "the healthy hunt must still use its lane");
         crate::hunt_health::success(&a, "o/blocked");
         assert!(!mk_hunt(&a), "unblocked hunts count toward capacity again");
+    }
+
+    #[tokio::test]
+    async fn policy_ineligible_ready_hunts_do_not_starve_other_repositories() {
+        for (revoke, restore) in [
+            ("update rp set hunt=0 where full='o/blocked'", "update rp set hunt=1 where full='o/blocked'"),
+            ("update rp set on_=0 where full='o/blocked'", "update rp set on_=1 where full='o/blocked'"),
+            ("update rp set ci=' ' where full='o/blocked'", "update rp set ci='true' where full='o/blocked'"),
+        ] {
+            let db = crate::db::Db::mem();
+            db.ks("set", &json!({"hunters": 1}));
+            db.run("insert into hs(id,ln,dk,on_) values('local',1,0,1)", pa![]);
+            db.run(
+                "insert into rp(full,ci,hunt,on_) values('o/blocked','true',1,1),('o/healthy','true',1,1)",
+                pa![],
+            );
+            let a = std::sync::Arc::new(crate::app::App::new(
+                db,
+                std::env::temp_dir(),
+                1,
+                "apollo-office".into(),
+            ));
+            let id = a.db.jnew(
+                "o/blocked",
+                0,
+                "hunt",
+                "waiting",
+                "",
+                "ready",
+                "",
+                json!({}),
+                None,
+                99.0,
+            );
+            assert!(!mk_hunt(&a));
+            a.db.run(revoke, pa![]);
+            // A reserved lane still occupies capacity, even after revocation.
+            a.lk.lock().unwrap().insert(id);
+            assert!(!mk_hunt(&a));
+            a.lk.lock().unwrap().remove(&id);
+            assert!(mk_hunt(&a));
+            assert!(!mk_hunt(&a));
+            assert_eq!(
+                a.db.n("select count(*) from jobs where kind='hunt' and repo='o/healthy'", pa![]),
+                1
+            );
+            assert_eq!(
+                a.db.n("select count(*) from jobs where kind='hunt' and repo='o/blocked' and st='ready'", pa![]),
+                1
+            );
+            a.db.run(restore, pa![]);
+            assert!(!mk_hunt(&a));
+        }
+    }
+
+    #[test]
+    fn hunter_revocation_is_terminal_but_database_failure_is_retryable() {
+        let db = crate::db::Db::mem();
+        db.run("insert into rp(full,hunt,ci) values('o/r',1,'true')", pa![]);
+        db.run(
+            "insert into jobs(id,repo,kind,st) values(100,'o/r','hunt','hunt')",
+            pa![],
+        );
+        let data = json!({"title":"Bug","body":"reproduction","hunt":{"where":"src/lib.rs","proof":"failed test"}});
+        assert!(hunter_finding_result(db.queue_hunter_find("o/r", 100, &data)).unwrap());
+        assert!(!hunter_finding_result(db.queue_hunter_find("o/r", 100, &data)).unwrap());
+        db.run("update rp set hunt=0 where full='o/r'", pa![]);
+        assert!(matches!(
+            hunter_finding_result(db.queue_hunter_find("o/r", 100, &data)),
+            Err(X::Drop(_))
+        ));
+        assert_eq!(
+            db.n("select count(*) from jobs where kind='fix'", pa![]),
+            1
+        );
+        db.run("drop table rp", pa![]);
+        assert!(matches!(
+            hunter_finding_result(db.queue_hunter_find("o/r", 100, &data)),
+            Err(X::Defer(_))
+        ));
     }
 
     #[tokio::test]

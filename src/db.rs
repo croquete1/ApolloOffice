@@ -6,6 +6,13 @@ use std::sync::{Arc, Mutex};
 #[derive(Clone)]
 pub struct Db(pub Arc<Mutex<Connection>>);
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum HunterFinding {
+    Queued,
+    Duplicate,
+    Revoked,
+}
+
 pub enum ProviderAdmission {
     Ready,
     Probe(String),
@@ -1387,7 +1394,14 @@ impl Db {
     /// Admit an exact internal Hunter duplicate at most once while the prior
     /// candidate is active. Different locations and subsequent regressions
     /// after a completed/dropped candidate remain eligible for human triage.
-    pub fn queue_hunter_find(&self, repo: &str, data: &Value) -> rusqlite::Result<bool> {
+    /// The originating hunt must still be active and authorized. A revoked
+    /// policy has its own outcome, distinct from duplicates and database errors.
+    pub fn queue_hunter_find(
+        &self,
+        repo: &str,
+        hunt_id: i64,
+        data: &Value,
+    ) -> rusqlite::Result<HunterFinding> {
         let title = data["title"]
             .as_str()
             .map(str::trim)
@@ -1407,8 +1421,19 @@ impl Db {
         }
         let display = title.chars().take(200).collect::<String>();
         let t = now();
-        let c = self.0.lock().unwrap();
-        let changed = c.execute(
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let authorized: bool = tx.query_row(
+            "select exists(select 1 from rp join jobs j on j.repo=rp.full
+             where rp.full=? and rp.on_=1 and rp.hunt=1 and trim(rp.ci)<>''
+             and j.id=? and j.kind='hunt' and j.st='hunt')",
+            rusqlite::params![repo, hunt_id],
+            |row| row.get(0),
+        )?;
+        if !authorized {
+            return Ok(HunterFinding::Revoked);
+        }
+        let changed = tx.execute(
             "insert into jobs(repo,num,kind,title,url,st,why,d,prio,t0,t1)
              select ?,0,'fix',?,?,'vet','found by Hunter',?,0,?,?
              where not exists(select 1 from jobs where repo=? and num=0 and kind='fix'
@@ -1427,10 +1452,15 @@ impl Db {
                 location
             ],
         )?;
+        tx.commit()?;
         if changed != 0 {
             crate::app::chg();
         }
-        Ok(changed == 1)
+        Ok(if changed == 1 {
+            HunterFinding::Queued
+        } else {
+            HunterFinding::Duplicate
+        })
     }
 
     // Column order deliberately mirrors the jobs table.
@@ -2181,21 +2211,186 @@ mod provider_cooldown_tests {
 #[cfg(test)]
 mod hunter_duplicate_tests {
     use super::*;
+
+    fn seed() -> Db {
+        let db = Db::mem();
+        db.run(
+            "insert into rp(full,hunt,ci) values('o/r',1,'true'),('o/s',1,'true')",
+            vec![],
+        );
+        db.run(
+            "insert into jobs(id,repo,kind,st) values(100,'o/r','hunt','hunt'),(101,'o/s','hunt','hunt')",
+            vec![],
+        );
+        db
+    }
+
     #[test]
     fn exact_hunter_duplicate_is_atomic_and_scoped_to_repo_and_location() {
-        let db = Db::mem();
+        let db = seed();
         let mut data = json!({"title":"Broken parser","body":"reproduction","hunt":{"where":"src/parser.rs","proof":"test failed for expected bug"}});
-        assert!(db.queue_hunter_find("o/r", &data).unwrap());
+        assert_eq!(
+            db.queue_hunter_find("o/r", 100, &data).unwrap(),
+            HunterFinding::Queued
+        );
         data["title"] = json!(" broken PARSER ");
-        assert!(!db.queue_hunter_find("o/r", &data).unwrap());
-        assert!(db.queue_hunter_find("o/s", &data).unwrap());
+        assert_eq!(
+            db.queue_hunter_find("o/r", 100, &data).unwrap(),
+            HunterFinding::Duplicate
+        );
+        assert_eq!(
+            db.queue_hunter_find("o/s", 101, &data).unwrap(),
+            HunterFinding::Queued
+        );
         data["hunt"]["where"] = json!("src/other.rs");
-        assert!(db.queue_hunter_find("o/r", &data).unwrap());
-        db.run("update jobs set st='done' where repo='o/r'", vec![]);
-        assert!(db.queue_hunter_find("o/r", &data).unwrap());
+        assert_eq!(
+            db.queue_hunter_find("o/r", 100, &data).unwrap(),
+            HunterFinding::Queued
+        );
+        db.run(
+            "update jobs set st='done' where repo='o/r' and kind='fix'",
+            vec![],
+        );
+        assert_eq!(
+            db.queue_hunter_find("o/r", 100, &data).unwrap(),
+            HunterFinding::Queued
+        );
         data["hunt"]["where"] = json!("");
-        assert!(db.queue_hunter_find("o/r", &data).is_err());
-        assert_eq!(db.n("select count(*) from jobs", vec![]), 4);
+        assert!(db.queue_hunter_find("o/r", 100, &data).is_err());
+        assert_eq!(
+            db.n("select count(*) from jobs where kind='fix'", vec![]),
+            4
+        );
+    }
+
+    #[test]
+    fn independent_connections_order_hunter_revocation_and_finding_writes() {
+        let path = std::env::temp_dir().join(format!("apollo-hunt-race-{}", rand::random::<u64>()));
+        std::fs::create_dir(&path).unwrap();
+        let file = path.join("state.db");
+        {
+            let db = Db::open(&file).unwrap();
+            db.run(
+                "insert into rp(full,hunt,ci) values('o/r',1,'true')",
+                vec![],
+            );
+            db.run(
+                "insert into jobs(id,repo,kind,st) values(100,'o/r','hunt','hunt')",
+                vec![],
+            );
+            let data = json!({"title":"Bug","body":"reproduction","hunt":{"where":"src/lib.rs","proof":"failed test"}});
+            db.0.lock()
+                .unwrap()
+                .busy_timeout(std::time::Duration::ZERO)
+                .unwrap();
+            let mut other = Connection::open(&file).unwrap();
+            // An independent writer owns the transaction before admission.
+            let tx = other
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+            tx.execute("update rp set hunt=0 where full='o/r'", [])
+                .unwrap();
+            let error = db.queue_hunter_find("o/r", 100, &data).unwrap_err();
+            assert_eq!(
+                error.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::DatabaseBusy)
+            );
+            tx.commit().unwrap();
+            assert_eq!(
+                db.queue_hunter_find("o/r", 100, &data).unwrap(),
+                HunterFinding::Revoked
+            );
+            assert_eq!(
+                db.n("select count(*) from jobs where kind='fix'", vec![]),
+                0
+            );
+
+            // Rollback must not revoke the committed authorization.
+            other
+                .execute("update rp set hunt=1 where full='o/r'", [])
+                .unwrap();
+            let tx = other
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+            tx.execute("update jobs set st='drop' where id=100", [])
+                .unwrap();
+            let error = db.queue_hunter_find("o/r", 100, &data).unwrap_err();
+            assert_eq!(
+                error.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::DatabaseBusy)
+            );
+            tx.rollback().unwrap();
+            assert_eq!(
+                db.queue_hunter_find("o/r", 100, &data).unwrap(),
+                HunterFinding::Queued
+            );
+
+            // The opposite committed order preserves the earlier finding.
+            other
+                .execute("update jobs set st='drop' where id=100", [])
+                .unwrap();
+            assert_eq!(
+                db.queue_hunter_find("o/r", 100, &data).unwrap(),
+                HunterFinding::Revoked
+            );
+            assert_eq!(
+                db.n("select count(*) from jobs where kind='fix'", vec![]),
+                1
+            );
+        }
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn hunter_find_requires_active_authorized_origin() {
+        let db = seed();
+        let data = json!({"title":"Broken parser","body":"reproduction","hunt":{"where":"src/parser.rs","proof":"test failed for expected bug"}});
+        assert_eq!(
+            db.queue_hunter_find("o/r", 101, &data).unwrap(),
+            HunterFinding::Revoked
+        );
+        assert_eq!(
+            db.queue_hunter_find("o/r", 999, &data).unwrap(),
+            HunterFinding::Revoked
+        );
+        for (revoke, restore) in [
+            (
+                "update rp set on_=0 where full='o/r'",
+                "update rp set on_=1 where full='o/r'",
+            ),
+            (
+                "update rp set hunt=0 where full='o/r'",
+                "update rp set hunt=1 where full='o/r'",
+            ),
+            (
+                "update rp set ci=' ' where full='o/r'",
+                "update rp set ci='true' where full='o/r'",
+            ),
+            (
+                "update jobs set st='drop' where id=100",
+                "update jobs set st='hunt' where id=100",
+            ),
+        ] {
+            db.run(revoke, vec![]);
+            assert_eq!(
+                db.queue_hunter_find("o/r", 100, &data).unwrap(),
+                HunterFinding::Revoked
+            );
+            db.run(restore, vec![]);
+        }
+        db.run("delete from rp where full='o/r'", vec![]);
+        assert_eq!(
+            db.queue_hunter_find("o/r", 100, &data).unwrap(),
+            HunterFinding::Revoked
+        );
+        assert_eq!(
+            db.n("select count(*) from jobs where kind='fix'", vec![]),
+            0
+        );
+        assert_eq!(
+            db.queue_hunter_find("o/s", 101, &data).unwrap(),
+            HunterFinding::Queued
+        );
     }
 }
 
