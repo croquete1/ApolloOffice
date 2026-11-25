@@ -166,6 +166,7 @@ fn begin_probe(key: &str) -> u64 {
     ticket
 }
 
+#[cfg(test)]
 fn fresh(key: &str) -> bool {
     PROBES.lock().unwrap().fresh(key, now())
 }
@@ -290,8 +291,13 @@ fn all_keys(a: &Ax) -> Vec<String> {
 }
 
 fn missing_keys(a: &Ax, keys: &[String]) -> Vec<String> {
+    // Match the publication/down lock order. Read availability and its
+    // freshness together, rather than combining two different generations.
+    let live = a.lv.lock().unwrap();
+    let probes = PROBES.lock().unwrap();
+    let at = now();
     keys.iter()
-        .filter(|key| !fresh(key) || !a.net(key))
+        .filter(|key| !probes.fresh(key, at) || live.o.net.get(*key) != Some(&true))
         .cloned()
         .collect()
 }
@@ -318,10 +324,7 @@ where
     }
     // An overlapping newer probe owns the decision. Defer conservatively
     // rather than authorizing work with a rejected older result.
-    let missing = keys
-        .into_iter()
-        .filter(|k| !fresh(k) || !a.net(k))
-        .collect::<Vec<_>>();
+    let missing = missing_keys(a, &keys);
     if missing.is_empty() {
         return Ok(());
     }
@@ -348,11 +351,7 @@ pub async fn need(a: &Ax, w: &str, ks: &[&str]) -> R<()> {
         if !missing.is_empty() {
             probe(a, &missing).await;
         }
-        let miss: Vec<String> = ks
-            .iter()
-            .filter(|k| !fresh(k) || !a.net(k))
-            .cloned()
-            .collect();
+        let miss = missing_keys(a, &ks);
         if miss.is_empty() {
             return Ok(());
         }
@@ -594,6 +593,28 @@ mod gpu_telemetry_tests {
             PROBES.lock().unwrap().invalidate(key);
             FAIL.lock().unwrap().remove(key);
         }
+    }
+
+    #[test]
+    fn freshness_requires_explicit_positive_availability() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            47300,
+            "apollo-office".into(),
+        ));
+        let key = "fixture-probe-explicit-availability";
+        let keys = [key.to_string()];
+        let ticket = begin_probe(key);
+        publish_probe_results(&a, &keys, vec![ticket], vec![(true, None)]);
+        assert!(missing_keys(&a, &keys).is_empty());
+
+        a.lv.lock().unwrap().o.net.remove(key);
+        assert!(fresh(key));
+        assert_eq!(missing_keys(&a, &keys), keys.to_vec());
+
+        PROBES.lock().unwrap().invalidate(key);
+        FAIL.lock().unwrap().remove(key);
     }
 
     #[tokio::test]
