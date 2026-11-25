@@ -1,7 +1,8 @@
 use crate::app::{sl, Ax, R, X};
 use crate::db::now;
 use crate::sh::{gh, ho, hosts, hraw};
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const HW: &str = r#"o=$(uname -s); echo "os $o"
 if [ "$o" = Darwin ]; then echo "cpu $(sysctl -n hw.ncpu)"; echo "load $(sysctl -n vm.loadavg | awk '{print $2}')"; p=$(pagesize); echo "mem $(($(sysctl -n hw.memsize)/1048576)) $(vm_stat | awk -v p=$p '/Pages (free|inactive|speculative)/{gsub(/[.]/,"",$NF);s+=$NF} END{print int(s*p/1048576)}')"
@@ -86,19 +87,57 @@ fn gpu_sample(line: &str) -> Option<serde_json::Value> {
     )
 }
 
-static LAST: AtomicI64 = AtomicI64::new(0);
 static FAIL: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, u32>>> =
     std::sync::LazyLock::new(Default::default);
 
 static NEXT_PROBE: AtomicU64 = AtomicU64::new(1);
-static PROBES: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> =
+#[derive(Default)]
+struct ProbeBook {
+    pending: HashMap<String, u64>,
+    checked: HashMap<String, i64>,
+}
+
+impl ProbeBook {
+    fn begin(&mut self, key: &str, ticket: u64) {
+        self.pending.insert(key.to_string(), ticket);
+    }
+
+    fn publish(&mut self, key: &str, ticket: u64, at: i64) -> bool {
+        if self.pending.get(key) != Some(&ticket) {
+            return false;
+        }
+        self.pending.remove(key);
+        self.checked.insert(key.to_string(), at);
+        true
+    }
+
+    fn invalidate(&mut self, key: &str) {
+        self.pending.remove(key);
+        self.checked.remove(key);
+    }
+
+    fn fresh(&self, key: &str, at: i64) -> bool {
+        !self.pending.contains_key(key)
+            && self
+                .checked
+                .get(key)
+                .and_then(|last| at.checked_sub(*last))
+                .is_some_and(|age| (0..=20_000).contains(&age))
+    }
+}
+
+static PROBES: std::sync::LazyLock<std::sync::Mutex<ProbeBook>> =
     std::sync::LazyLock::new(Default::default);
 
 fn begin_probe(key: &str) -> u64 {
     let mut probes = PROBES.lock().unwrap();
     let ticket = NEXT_PROBE.fetch_add(1, Ordering::Relaxed);
-    probes.insert(key.to_string(), ticket);
+    probes.begin(key, ticket);
     ticket
+}
+
+fn fresh(key: &str) -> bool {
+    PROBES.lock().unwrap().fresh(key, now())
 }
 
 async fn ck(a: &Ax, k: &str) -> (bool, Option<serde_json::Value>) {
@@ -147,10 +186,9 @@ pub async fn probe(a: &Ax, ks: &[String]) {
     let mut probes = PROBES.lock().unwrap();
     let mut f = FAIL.lock().unwrap();
     for ((k, ticket), (ok, sample)) in ks.iter().zip(tickets).zip(v) {
-        if probes.get(k) != Some(&ticket) {
+        if !probes.publish(k, ticket, now()) {
             continue;
         }
-        probes.remove(k);
         if let Some(sample) = sample {
             l.hst.insert(k.clone(), sample);
         }
@@ -169,12 +207,11 @@ pub async fn probe(a: &Ax, ks: &[String]) {
         }
     }
     l.o.off = !*l.o.net.get("gh").unwrap_or(&true) || !*l.o.net.get("an").unwrap_or(&true);
-    LAST.store(now(), Ordering::Relaxed);
 }
 
 pub fn down(a: &Ax, k: &str) {
     let mut l = a.lv.lock().unwrap();
-    PROBES.lock().unwrap().remove(k);
+    PROBES.lock().unwrap().invalidate(k);
     FAIL.lock().unwrap().insert(k.to_string(), 2);
     l.hst.remove(k);
     l.o.net.insert(k.to_string(), false);
@@ -194,10 +231,13 @@ pub async fn need_once(a: &Ax, ks: &[&str]) -> R<()> {
         .filter(|k| !k.is_empty())
         .map(|k| k.to_string())
         .collect::<Vec<_>>();
-    if now() - LAST.load(Ordering::Relaxed) > 20_000 || keys.iter().any(|k| !a.net(k)) {
+    if keys.iter().any(|k| !fresh(k) || !a.net(k)) {
         probe(a, &keys).await;
     }
-    let missing = keys.into_iter().filter(|k| !a.net(k)).collect::<Vec<_>>();
+    let missing = keys
+        .into_iter()
+        .filter(|k| !fresh(k) || !a.net(k))
+        .collect::<Vec<_>>();
     if missing.is_empty() {
         return Ok(());
     }
@@ -220,10 +260,14 @@ pub async fn need(a: &Ax, w: &str, ks: &[&str]) -> R<()> {
         .map(|k| k.to_string())
         .collect();
     loop {
-        if now() - LAST.load(Ordering::Relaxed) > 20_000 || ks.iter().any(|k| !a.net(k)) {
+        if ks.iter().any(|k| !fresh(k) || !a.net(k)) {
             probe(a, &ks).await;
         }
-        let miss: Vec<String> = ks.iter().filter(|k| !a.net(k)).cloned().collect();
+        let miss: Vec<String> = ks
+            .iter()
+            .filter(|k| !fresh(k) || !a.net(k))
+            .cloned()
+            .collect();
         if miss.is_empty() {
             return Ok(());
         }
@@ -275,15 +319,41 @@ mod gpu_telemetry_tests {
         let old = begin_probe(host);
         let latest = begin_probe(host);
         assert_ne!(old, latest);
-        assert_eq!(PROBES.lock().unwrap().get(host), Some(&latest));
+        assert_eq!(PROBES.lock().unwrap().pending.get(host), Some(&latest));
         down(&a, host);
-        assert!(!PROBES.lock().unwrap().contains_key(host));
+        assert!(!PROBES.lock().unwrap().pending.contains_key(host));
+        assert!(!fresh(host));
         let live = a.lv.lock().unwrap();
         assert!(!live.hst.contains_key(host));
         assert!(live.hst.contains_key(other));
         assert_eq!(live.o.net.get(host), Some(&false));
         drop(live);
         FAIL.lock().unwrap().remove(host);
+    }
+
+    #[test]
+    fn stale_probe_cannot_refresh_its_key_or_another_worker() {
+        let mut book = ProbeBook::default();
+        book.begin("a", 1);
+        book.begin("a", 2);
+        assert!(book.publish("a", 2, 1_000));
+        assert!(book.fresh("a", 20_000));
+        assert!(!book.publish("a", 1, 20_000));
+        assert!(!book.fresh("a", 21_001));
+        book.begin("b", 3);
+        assert!(book.publish("b", 3, 21_001));
+        assert!(book.fresh("b", 21_001));
+        assert!(!book.fresh("a", 21_001));
+        book.begin("a", 4);
+        book.begin("a", 5);
+        assert!(!book.publish("a", 4, 22_000));
+        assert!(!book.fresh("a", 22_000));
+        assert!(book.publish("a", 5, 22_001));
+        assert!(book.fresh("a", 22_001));
+        assert!(!book.fresh("a", 22_000));
+        book.invalidate("a");
+        assert!(!book.fresh("a", 22_001));
+        assert!(book.fresh("b", 22_001));
     }
 
     #[test]
