@@ -2926,6 +2926,58 @@ mod t {
         assert!(a.vtk.lock().unwrap().is_empty());
     }
 
+    #[test]
+    fn vet_admission_finishes_before_repository_deactivation() {
+        let db = crate::db::Db::mem();
+        db.run("insert into rp(full,on_) values('o/r',1)", pa![]);
+        db.run("insert into jobs(id,repo,st) values(42,'o/r','vet')", pa![]);
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::env::temp_dir(),
+            1,
+            "x".into(),
+        ));
+        let (admitted_tx, admitted_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let vet_app = std::sync::Arc::clone(&a);
+        let vet = std::thread::spawn(move || {
+            with_update_transition(&vet_app, || {
+                let admitted = crate::wk::admit_vet_locked(&vet_app, 42);
+                admitted_tx.send(admitted).unwrap();
+                release_rx.recv().unwrap();
+                admitted
+            })
+        });
+        assert!(admitted_rx.recv().unwrap());
+
+        let settings_app = std::sync::Arc::clone(&a);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (saved_tx, saved_rx) = std::sync::mpsc::channel();
+        let settings = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let result = with_update_transition(&settings_app, || {
+                save_repo_settings(&settings_app.db, "o/r", &json!({"on_": false}))
+            });
+            saved_tx.send(()).unwrap();
+            result
+        });
+        started_rx.recv().unwrap();
+        assert!(saved_rx
+            .recv_timeout(std::time::Duration::from_millis(25))
+            .is_err());
+        assert!(a.update_transition.try_lock().is_err());
+
+        release_tx.send(()).unwrap();
+        assert!(vet.join().unwrap());
+        assert!(saved_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap()
+            .is_ok());
+        assert!(settings.join().unwrap().is_ok());
+        assert_eq!(a.db.n("select on_ from rp where full='o/r'", pa![]), 0);
+        assert!(a.vtk.lock().unwrap().contains(&42));
+    }
+
     #[tokio::test]
     async fn repository_removal_blocks_reserved_work_and_cancels_queued_submission() {
         let db = crate::db::Db::mem();
