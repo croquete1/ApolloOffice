@@ -386,10 +386,7 @@ pub async fn need(a: &Ax, w: &str, ks: &[&str]) -> R<()> {
         .map(|k| k.to_string())
         .collect();
     loop {
-        let miss = refresh_missing_with(a, &ks, |keys| async move {
-            probe(a, &keys).await
-        })
-        .await;
+        let miss = refresh_missing_with(a, &ks, |keys| async move { probe(a, &keys).await }).await;
         if miss.is_empty() {
             return Ok(());
         }
