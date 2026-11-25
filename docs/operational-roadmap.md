@@ -460,7 +460,7 @@ Evidências observadas no GitHub; nenhuma fase é encerrada apenas por estes mer
 | #108 | `5232961c8e03919790c0f967dddd810dfeb2e39c` | [#253](https://github.com/croquete1/ApolloOffice/actions/runs/45667638596) | HEAD exato revisto; zero comentários acionáveis |
 | #109 | `ecba5861dce920bb8a82960c3d3c578c12f370de` | [#255](https://github.com/croquete1/ApolloOffice/actions/runs/45668641108) | CodeRabbit reviu `7a61003`; alteração subsequente `e7993a7` verificada manualmente contra os dois hunks Rustfmt, sem revisão automática do HEAD final |
 
-- CI pós-merge #251 e #256 aprovados; #257–259 em execução na última observação. Não atribuir sucesso antes do resultado final.
+- CI pós-merge #251 (45667469051), #256 (45668703634), #257 (45669548213), #258 (45669596438) e #259 (45669684810) concluídos com sucesso. CI dos HEADs iniciais #110–113: #260 (45670189153), #261 (45670197403), #262 (45670206177) e #263 (45670279703) também aprovados; revisão independente ainda pendente.
 - F02/F04: reconciliação do push por SHA exato na execução atual; reinício durável e identidade imutável continuam pendentes.
 - F04/F05: contador inválido de retry automático bloqueia novas tentativas; Hunter mantém hold persistente quando a BD aceita a chave separada. Indisponibilidade total da BD, crash antes de commit e teste real de restart continuam pendentes.
 - F11: parser de telemetria rejeita tokens inválidos e aridade incorreta. Hardware e pressão reais por validar.
