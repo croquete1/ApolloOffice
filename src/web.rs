@@ -3106,6 +3106,44 @@ mod t {
     }
 
     #[tokio::test]
+    async fn reset_hunt_reports_conflict_and_keeps_hold_when_delete_fails() {
+        let db = crate::db::Db::mem();
+        db.run("insert into rp(full) values('o/r')", pa![]);
+        db.ks("hunt-fail:o/r", &json!({"failures":1,"until":0}));
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::env::temp_dir(),
+            1,
+            "x".into(),
+        ));
+        let request = || {
+            api(
+                &a,
+                &Method::POST,
+                "/api/act",
+                "",
+                json!({"a":"reset-hunt","repo":"o/r"}),
+            )
+        };
+        assert!(!crate::hunt_health::blocked(&a, "o/r"));
+        a.db.0.lock().unwrap().execute_batch(
+            "create trigger fail_reset_hunt before delete on kv when old.k='hunt-fail:o/r' begin select raise(abort,'injected'); end;",
+        ).unwrap();
+        assert_eq!(request().await.status(), StatusCode::CONFLICT);
+        assert!(crate::hunt_health::blocked(&a, "o/r"));
+        assert_eq!(a.db.kg("hunt-fail:o/r")["failures"], 1);
+        a.db.0
+            .lock()
+            .unwrap()
+            .execute_batch("drop trigger fail_reset_hunt")
+            .unwrap();
+        assert!(crate::hunt_health::blocked(&a, "o/r"));
+        assert_eq!(request().await.status(), StatusCode::OK);
+        assert!(!crate::hunt_health::blocked(&a, "o/r"));
+        assert_eq!(crate::hunt_health::status(&a, "o/r")["failures"], 0);
+    }
+
+    #[tokio::test]
     async fn settings_reset_preserves_pause_on_failure_and_during_drain() {
         let db = crate::db::Db::mem();
         db.ks("man", &json!(true));
