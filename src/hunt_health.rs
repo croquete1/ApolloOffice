@@ -465,7 +465,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn existing_symlink_marker_does_not_truncate_target() {
-        let dir = std::env::temp_dir().join(format!("apollo-hunter-link-{}", rand::random::<u64>()));
+        let dir =
+            std::env::temp_dir().join(format!("apollo-hunter-link-{}", rand::random::<u64>()));
         std::fs::create_dir(&dir).unwrap();
         let a = Arc::new(App::new(Db::mem(), dir.clone(), 0, dir.join("apollo")));
         let target = dir.join("target");
