@@ -235,14 +235,24 @@ pub async fn all(a: &Ax) {
 /// Single availability check for an explicitly restartable phase boundary.
 /// Unlike need(), this never occupies a lane through exponential sleep.
 pub async fn need_once(a: &Ax, ks: &[&str]) -> R<()> {
+    need_once_with(a, ks, |keys| async move { probe(a, &keys).await }).await
+}
+
+async fn need_once_with<F, Fut>(a: &Ax, ks: &[&str], probe_keys: F) -> R<()>
+where
+    F: FnOnce(Vec<String>) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
     let keys = ks
         .iter()
         .filter(|k| !k.is_empty())
         .map(|k| k.to_string())
         .collect::<Vec<_>>();
     if keys.iter().any(|k| !fresh(k) || !a.net(k)) {
-        probe(a, &keys).await;
+        probe_keys(keys.clone()).await;
     }
+    // An overlapping newer probe owns the decision. Defer conservatively
+    // rather than authorizing work with a rejected older result.
     let missing = keys
         .into_iter()
         .filter(|k| !fresh(k) || !a.net(k))
@@ -396,6 +406,52 @@ mod gpu_telemetry_tests {
             assert_eq!(FAIL.lock().unwrap().get(host), Some(&2));
         }
         assert!(!fresh(host));
+        PROBES.lock().unwrap().invalidate(host);
+        FAIL.lock().unwrap().remove(host);
+    }
+
+    #[tokio::test]
+    async fn need_once_defers_until_newer_probe_publishes() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            47300,
+            "apollo-office".into(),
+        ));
+        let host = "fixture-overlapping-probe";
+        a.db.run(
+            "insert into hs(id,on_) values(?,1)",
+            crate::pa![host.to_string()],
+        );
+        let newer = std::cell::Cell::new(0);
+        let a_ref = &a;
+        let newer_ref = &newer;
+        let result = need_once_with(&a, &[host], |keys| async move {
+            let older = begin_probe(host);
+            newer_ref.set(begin_probe(host));
+            publish_probe_results(
+                a_ref,
+                &keys,
+                vec![older],
+                vec![(true, Some(hw("cpu 8")))],
+            );
+        })
+        .await;
+        assert!(matches!(result, Err(X::Defer(_))));
+        assert_eq!(
+            PROBES.lock().unwrap().pending.get(host),
+            Some(&newer.get())
+        );
+        assert!(!fresh(host));
+        let keys = [host.to_string()];
+        publish_probe_results(
+            &a,
+            &keys,
+            vec![newer.get()],
+            vec![(true, Some(hw("cpu 16")))],
+        );
+        assert!(need_once(&a, &[host]).await.is_ok());
+        assert_eq!(a.lv.lock().unwrap().hst[host]["cpu"], 16.0);
         PROBES.lock().unwrap().invalidate(host);
         FAIL.lock().unwrap().remove(host);
     }
