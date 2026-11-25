@@ -190,7 +190,16 @@ fn update_history(
         samples.clear();
     }
     let used = 100.0 - rem;
-    if samples.last().is_some_and(|prev| used + 0.25 < prev.used) {
+    let previous_used = if stored["reset_at"] == reset_sec {
+        stored["observed_used"]
+            .as_f64()
+            .filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
+    } else {
+        None
+    };
+    if previous_used.is_some_and(|prev| used + 0.25 < prev)
+        || samples.last().is_some_and(|prev| used + 0.25 < prev.used)
+    {
         samples.clear();
     }
 
@@ -207,7 +216,9 @@ fn update_history(
     }
     // Persist ordering even when the sampling interval has not elapsed.
     let saved: Vec<Value> = samples.iter().map(|s| json!([s.at, s.used])).collect();
-    let state = json!({"reset_at":reset_sec,"samples":saved,"observed_at":now_ms});
+    let state = json!({
+        "reset_at":reset_sec,"samples":saved,"observed_at":now_ms,"observed_used":used
+    });
     let changed = tx.execute(
         "insert into kv(k,v) values(?,?) on conflict(k) do update set v=excluded.v",
         rusqlite::params![KEY, state.to_string()],
@@ -328,6 +339,21 @@ mod tests {
         let mut next = state(NOW + H, 25.0, reset);
         update(&db, &mut next);
         assert_eq!(db.kg(KEY)["samples"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn unsampled_observation_still_detects_consumption_regression() {
+        let db = Db::mem();
+        let reset = NOW + 24 * H;
+        for (at, used) in [(NOW - 2 * H, 20.0), (NOW - H, 30.0), (NOW, 40.0)] {
+            update(&db, &mut state(at, used, reset));
+        }
+        update(&db, &mut state(NOW + 60_000, 40.8, reset));
+        assert_eq!(db.kg(KEY)["samples"].as_array().unwrap().len(), 3);
+        let mut next = state(NOW + 120_000, 40.4, reset);
+        update(&db, &mut next);
+        assert_eq!(next["weekly_forecast"]["status"], "insufficient");
+        assert_eq!(db.kg(KEY)["samples"].as_array().unwrap().len(), 1);
     }
 
     #[test]
