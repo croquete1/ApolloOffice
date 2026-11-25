@@ -874,10 +874,12 @@ mod t {
         assert!(staged_checksum(&mismatched, url, &key, "0.10.16", target).is_err());
         assert!(staged_checksum(&state, url, &key, "0.10.17", target).is_err());
         assert!(staged_checksum(&state, url, &key, "0.10.16", "wrong-target").is_err());
-        assert!(
-            staged_checksum(&state, "https://other.example", &key, "0.10.16", target).is_err()
+        assert!(staged_checksum(&state, "https://other.example", &key, "0.10.16", target).is_err());
+        let other = hex::encode(
+            SigningKey::from_bytes(&[8u8; 32])
+                .verifying_key()
+                .to_bytes(),
         );
-        let other = hex::encode(SigningKey::from_bytes(&[8u8; 32]).verifying_key().to_bytes());
         let mut wrong_key = state.clone();
         wrong_key["channel"] = json!(channel_id(url, &other));
         assert!(staged_checksum(&wrong_key, url, &other, "0.10.16", target).is_err());
