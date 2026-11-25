@@ -322,6 +322,7 @@ Este registo atualiza os estados históricos anteriores. Os merges abaixo foram 
 | #88 | `a213b92f7a81ba6e15fcf55c55e3c023a7946577` | #122 (45510012042) | F04/F05: recuperação inicial transacional |
 | #89 | `701a9e6b28a37bf2cf3fd9173f88a24f3b2394b5` | #125 (45511464910) | F04/F10: cancelamento e aprovação atómica |
 | #90 | `32e2f25e2fe391356460c0553685874d5a479205` | #128 (45575512461) | F03/F04/F10: proteção de remoção e admissão |
+| #91 | `d1825062157e9fb2e62e443405a587cf5c17ee22` | #130 (45577052788) | F03/F04/F09: revalidação Scout |
 
 CI #125 aprovou integralmente o HEAD `4a422b102da1a4b476cd51ca13ef260e5b7826a3`, incluindo os dois E2E que falharam no #124. Aprendizagem: reserva de lane pode prolongar-se após publicação do estado approve; publicar metadados e aprovação juntos, sem recusar ação legítima durante limpeza.
 
@@ -347,3 +348,10 @@ F03/F04/F09 — lote seguinte: Scout recusa snapshots de repositórios removidos
 
 ## Sequência
 Integrar PRs apenas após revisão e testes, uma fase de cada vez. Não ativar Qwen. Não alterar main ou instalação em produção sem evidência. Atualizar este ficheiro com PR, SHA e resultado dos testes de cada fase.
+
+
+CI #130: HEAD `b221c18981ac3056fcecbfaa72eeaa7fa20500a0` aprovado integralmente em Ubuntu e Windows, incluindo Docker/SSH isolados; #91 integrada. Sem revisão externa registada.
+
+Lote seguinte F04/F09: cancelar respostas Watcher pendentes na remoção/desativação do repositório, impedir novos registos e claims sem autorização local, preservar entregas incertas e histórico. Aprendizagem: distinguir revogação de trabalho ainda não enviado de reconciliação de efeitos externos possivelmente já realizados. CI pendente; não revoga POST já reclamado nem resolve todos os casos de remoção/recriação durante análise remota.
+
+CI #132 (45577754592): quatro falhas em ambas as plataformas. A migração mínima legada não tinha `rp.on_`; acrescentada coluna em falta com valor conservador 0, preservando valores existentes. Três testes dependiam de repositório não registado; corrigidos fixtures, incluindo seed partilhado dos testes de concorrência e rollback. Aprendizagem: alterações de autorização exigem inventário dos fixtures indiretos e dos esquemas legados, não apenas testes novos. Novo CI obrigatório.
