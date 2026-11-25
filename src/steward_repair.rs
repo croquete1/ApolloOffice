@@ -122,6 +122,15 @@ fn permission_matches_reviewer(permission: &Value, reviewer: &Value) -> bool {
         )
 }
 
+fn reviewer_login(reviewer: &Value) -> Option<&str> {
+    reviewer["login"].as_str().filter(|login| {
+        !login.is_empty()
+            && login
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+    })
+}
+
 async fn reviewer_still_authorized(
     repo: &str,
     reviews: &[Value],
@@ -131,12 +140,7 @@ async fn reviewer_still_authorized(
         return Ok(false);
     };
     let reviewer = &review["user"];
-    let Some(login) = reviewer["login"].as_str().filter(|login| {
-        !login.is_empty()
-            && login
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-    }) else {
+    let Some(login) = reviewer_login(reviewer) else {
         return Ok(false);
     };
     let permission = ghj(
@@ -528,6 +532,20 @@ mod tests {
                 .0,
             92
         );
+    }
+
+    #[test]
+    fn enterprise_reviewer_login_is_a_safe_path_segment() {
+        for login in ["maintainer", "mona-cat_octo"] {
+            let reviewer = json!({"login":login,"id":12,"type":"User"});
+            assert_eq!(reviewer_login(&reviewer), Some(login));
+            let permission = json!({"permission":"write","user":reviewer.clone()});
+            assert!(permission_matches_reviewer(&permission, &reviewer));
+        }
+        for login in ["", "owner/reviewer", "owner%2freviewer", "a?b", "a#b", ".."] {
+            let reviewer = json!({"login":login,"id":12,"type":"User"});
+            assert!(reviewer_login(&reviewer).is_none());
+        }
     }
 
     #[test]
