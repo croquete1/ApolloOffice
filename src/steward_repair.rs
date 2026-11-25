@@ -90,6 +90,40 @@ fn actionable_request(
     Some((id, request, since))
 }
 
+fn permission_matches_reviewer(permission: &Value, reviewer: &Value) -> bool {
+    reviewer["id"].as_i64().is_some_and(|id| id > 0)
+        && permission["user"]["id"] == reviewer["id"]
+        && permission["user"]["type"] == "User"
+        && permission["user"]["login"]
+            .as_str()
+            .zip(reviewer["login"].as_str())
+            .is_some_and(|(actual, expected)| actual.eq_ignore_ascii_case(expected))
+        && matches!(permission["permission"].as_str(), Some("admin" | "write" | "maintain"))
+}
+
+async fn reviewer_still_authorized(
+    repo: &str,
+    reviews: &[Value],
+    rid: i64,
+) -> Result<bool, String> {
+    let Some(review) = reviews.iter().find(|r| r["id"].as_i64() == Some(rid)) else {
+        return Ok(false);
+    };
+    let reviewer = &review["user"];
+    let Some(login) = reviewer["login"].as_str().filter(|login| {
+        !login.is_empty()
+            && login.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    }) else {
+        return Ok(false);
+    };
+    let permission = ghj(
+        &["api", &format!("repos/{repo}/collaborators/{login}/permission")],
+        45,
+    )
+    .await?;
+    Ok(permission_matches_reviewer(&permission, reviewer))
+}
+
 fn eligible(pr: &Value, assessed: &Value) -> bool {
     pr["reviewDecision"] == "CHANGES_REQUESTED"
         && pr["isDraft"] == false
@@ -229,6 +263,9 @@ async fn enqueue(
     let Some((rid, request, since)) = actionable_request(&reviews, &comments, head, me) else {
         return Ok(false);
     };
+    if !reviewer_still_authorized(repo, &reviews, rid).await? {
+        return Ok(false);
+    }
     let key = format!("steward:repair:{repo}#{number}:{head}:{rid}");
     if !a.db.kg(&key).is_null() {
         return Ok(false);
@@ -254,6 +291,9 @@ async fn enqueue(
     if actionable_request(&current_reviews, &current_comments, head, me)
         != Some((rid, request.clone(), since))
     {
+        return Ok(false);
+    }
+    if !reviewer_still_authorized(repo, &current_reviews, rid).await? {
         return Ok(false);
     }
     let fresh = ghj(&["api", &format!("repos/{repo}/pulls/{number}")], 45).await?;
@@ -440,6 +480,18 @@ mod tests {
                 .0,
             92
         );
+    }
+
+    #[test]
+    fn current_repository_permission_must_match_reviewer() {
+        let reviewer = json!({"login":"maintainer","id":12,"type":"User"});
+        let mut permission = json!({"permission":"write","user":reviewer.clone()});
+        assert!(permission_matches_reviewer(&permission, &reviewer));
+        permission["permission"] = json!("read");
+        assert!(!permission_matches_reviewer(&permission, &reviewer));
+        permission["permission"] = json!("admin");
+        permission["user"]["id"] = json!(13);
+        assert!(!permission_matches_reviewer(&permission, &reviewer));
     }
 
     #[test]
