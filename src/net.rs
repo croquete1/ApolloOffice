@@ -225,7 +225,12 @@ where
         let check = check(key.clone());
         Some(async move {
             let result = check.await;
-            publish_probe_results(a, std::slice::from_ref(key), vec![lease.ticket], vec![result]);
+            publish_probe_results(
+                a,
+                std::slice::from_ref(key),
+                vec![lease.ticket],
+                vec![result],
+            );
             drop(lease);
         })
     }))
