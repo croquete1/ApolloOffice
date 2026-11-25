@@ -51,8 +51,11 @@ fn eligible(j: &Job, automatic: bool) -> bool {
 
 fn recovery_job(a: &Ax, id: i64) -> Option<Job> {
     let rows =
-        a.db.try_all("select * from jobs where id=?", pa![id])
-            .ok()?;
+        a.db.try_all(
+            "select * from jobs where id=? and not exists(select 1 from kv where k=?)",
+            pa![id, format!("submit_publication:{id}")],
+        )
+        .ok()?;
     let row = rows.into_iter().next()?;
     row["d"].is_object().then(|| Job::of(row))
 }
@@ -253,6 +256,7 @@ fn commit_retry(
         "update jobs set st=?1,why=?2,d=?3,t1=?4
          where id=?5 and st='drop' and kind='fix' and pr is null
            and t1=?6 and why=?7
+           and not exists(select 1 from kv where k='submit_publication:' || jobs.id)
            and case when typeof(jobs.d)='text' and json_valid(jobs.d)
                     then json_type(jobs.d)='object' else 0 end
            and not exists(select fullkey,type,atom from json_tree(jobs.d)
@@ -358,15 +362,16 @@ pub fn report(a: &Ax, repo: &str) -> Value {
     );
     let rows: Vec<Value> =
         a.db.all(
-            "select *, case when typeof(d)='text' and json_valid(d) then json_type(d)='object' else 0 end as valid_metadata from jobs where repo=? and st='drop' order by t1 desc limit 25",
+            "select *, case when typeof(d)='text' and json_valid(d) then json_type(d)='object' else 0 end as valid_metadata, exists(select 1 from kv where k='submit_publication:' || jobs.id) as publication_pending from jobs where repo=? and st='drop' order by t1 desc limit 25",
             pa![repo.to_string()],
         )
         .into_iter()
         .map(|row| {
             let valid_metadata = row["valid_metadata"] == 1;
+            let publication_pending = row["publication_pending"] == 1;
             let j = Job::of(row);
             let cause = category(&j.why);
-            let can_retry = valid_metadata && eligible(&j, true);
+            let can_retry = valid_metadata && !publication_pending && eligible(&j, true);
             let used = if valid_metadata { attempts(&j) } else { None };
             json!({
                 "id": j.id,
@@ -420,6 +425,19 @@ mod tests {
             pa![now() - RETRY_DELAY_MS - 1, id],
         );
         id
+    }
+
+    #[test]
+    fn durable_publication_intent_blocks_drop_recovery() {
+        let a = setup();
+        let id = dropped(&a, "machine kept failing: timed out", json!({}));
+        let key = format!("submit_publication:{id}");
+        a.db.ks(&key, &json!({"number":42}));
+        assert!(retry(&a, id, false).is_err());
+        assert!(retry(&a, id, true).is_err());
+        assert_eq!(report(&a, "org/repo")["jobs"][0]["safe_auto"], false);
+        assert_eq!(a.db.kg(&key)["number"], 42);
+        assert_eq!(a.db.jg(id).unwrap().st, "drop");
     }
 
     #[test]
@@ -601,6 +619,10 @@ mod tests {
             .as_i64()
             .unwrap();
         let commit = || commit_retry(&a, &job, updated, true, "ready", "retry", &json!({}));
+        let publication = format!("submit_publication:{id}");
+        a.db.ks(&publication, &json!(null));
+        assert!(!commit().unwrap());
+        a.db.kd(&publication);
         a.db.run("update rp set auto_recover_drops=0", vec![]);
         assert!(!commit().unwrap());
         a.db.run("update rp set auto_recover_drops=1", vec![]);
