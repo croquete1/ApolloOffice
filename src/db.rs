@@ -251,6 +251,25 @@ fn init(c: &mut Connection) -> anyhow::Result<()> {
           delete from kv where substr(k,1,length('coderabbit:observation:' || old.full || '#')) = 'coderabbit:observation:' || old.full || '#';
         end;
     ")?;
+    // Cancel unsent replies when repository authorization is revoked. Never
+    // discard uncertain deliveries: they may already have reached GitHub.
+    tx.execute_batch("
+        create trigger if not exists watcher_outbox_repo_removed
+        after delete on rp
+        begin
+          update watcher_outbox set state='cancelled',updated=cast(strftime('%s','now') as integer)*1000
+            where repo=old.full and state='pending';
+        end;
+        create trigger if not exists watcher_outbox_repo_disabled
+        after update of on_,full on rp
+        when new.on_ is not 1 or old.full is not new.full
+        begin
+          update watcher_outbox set state='cancelled',updated=cast(strftime('%s','now') as integer)*1000
+            where repo=old.full and state='pending';
+        end;
+        update watcher_outbox set state='cancelled',updated=cast(strftime('%s','now') as integer)*1000
+          where state='pending' and not exists(select 1 from rp where full=watcher_outbox.repo and on_=1);
+    ")?;
     // A fresh opaque token also fences deletion/recreation of a repository.
     // Existing permissions are preserved, but old jobs have no valid token.
     tx.execute_batch("
@@ -1089,7 +1108,7 @@ impl Db {
     /// ambiguous response must never automatically issue a second POST.
     pub fn claim_watcher_reply(&self, id: &str, author: &str) -> rusqlite::Result<bool> {
         let c = self.0.lock().unwrap();
-        let changed=c.execute("update watcher_outbox set state='uncertain',updated=? where id=? and author=? and state='pending'",rusqlite::params![now(),id,author])?;
+        let changed=c.execute("update watcher_outbox set state='uncertain',updated=? where id=? and author=? and state='pending' and exists(select 1 from rp where full=watcher_outbox.repo and on_=1)",rusqlite::params![now(),id,author])?;
         Ok(changed == 1)
     }
 
@@ -2151,6 +2170,7 @@ mod watcher_outbox_tests {
     #[test]
     fn reply_is_atomic_with_review_and_never_claimed_twice() {
         let db = Db::mem();
+        db.run("insert into rp(full) values('o/r')", vec![]);
         db.run(
             "insert into prs(repo,num,st,upd,d) values('o/r',1,'open','t',?)",
             crate::pa![
@@ -2186,6 +2206,23 @@ mod watcher_outbox_tests {
     }
 
     #[test]
+    fn repository_revocation_cancels_pending_but_preserves_uncertain_replies() {
+        let db = Db::mem();
+        db.run("insert into rp(full) values('o/r'),('other/r')", vec![]);
+        db.run("insert into watcher_outbox(id,repo,num,author,body,state,created,updated) values('a','o/r',1,'owner','reply','pending',1,1),('b','o/r',1,'owner','reply','uncertain',1,1),('c','other/r',1,'owner','reply','pending',1,1)",vec![]);
+        db.run("update rp set on_=0 where full='o/r'", vec![]);
+        assert!(!db.claim_watcher_reply("a", "owner").unwrap());
+        assert_eq!(db.watcher_outbox_counts().unwrap()["cancelled"], 1);
+        assert_eq!(db.watcher_outbox_counts().unwrap()["uncertain"], 1);
+        db.run("delete from rp where full='other/r'", vec![]);
+        assert!(!db.claim_watcher_reply("c", "owner").unwrap());
+        db.run("insert into rp(full) values('other/r')", vec![]);
+        assert!(!db.claim_watcher_reply("c", "owner").unwrap());
+        assert_eq!(db.watcher_outbox_counts().unwrap()["cancelled"], 2);
+        assert!(db.finish_watcher_reply("b", "sent").unwrap());
+    }
+
+    #[test]
     fn stale_snapshot_cannot_acknowledge_or_enqueue_review() {
         let db = Db::mem();
         let head = "a".repeat(40);
@@ -2210,6 +2247,7 @@ mod watcher_outbox_tests {
     #[test]
     fn owner_inventory_prioritizes_unresolved_and_cancel_cannot_race_claim() {
         let db = Db::mem();
+        db.run("insert into rp(full) values('o/r')", vec![]);
         for (id, state, at) in [("a", "sent", 3), ("b", "pending", 1), ("c", "uncertain", 2)] {
             db.run("insert into watcher_outbox(id,repo,num,author,body,state,created,updated) values(?,'o/r',1,'owner','reply',?,?,?)",crate::pa![id.to_string(),state.to_string(),at,at]);
         }
