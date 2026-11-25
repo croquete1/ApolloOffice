@@ -49,7 +49,7 @@ fn eligible(j: &Job, automatic: bool) -> bool {
         && j.d["rp"] != true
 }
 
-fn recovery_job(a: &Ax, id: i64) -> Option<Job> {
+fn recovery_job(a: &Ax, id: i64) -> Option<(Job, i64)> {
     let rows =
         a.db.try_all(
             "select * from jobs where id=? and not exists(select 1 from kv where k=?)",
@@ -57,7 +57,8 @@ fn recovery_job(a: &Ax, id: i64) -> Option<Job> {
         )
         .ok()?;
     let row = rows.into_iter().next()?;
-    row["d"].is_object().then(|| Job::of(row))
+    let updated = row["t1"].as_i64()?;
+    row["d"].is_object().then(|| (Job::of(row), updated))
 }
 
 fn open_issue(issue: &Value, number: i64) -> bool {
@@ -83,20 +84,34 @@ fn cache_default_head(a: &Ax, repo: &str, head: &Value) -> Result<(), String> {
     Ok(())
 }
 
+async fn recovery_remote(args: Vec<String>, timeout: u64) -> Result<Value, String> {
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    ghj(&refs, timeout).await
+}
+
 /// Só recoloca uma issue após confirmar o estado do GitHub e o HEAD real.
 pub async fn retry_manual(a: &Ax, id: i64) -> Result<bool, String> {
-    let job = recovery_job(a, id).ok_or("Trabalho inexistente ou metadados inválidos")?;
+    retry_manual_with(a, id, recovery_remote).await
+}
+
+async fn retry_manual_with<F, Fut>(a: &Ax, id: i64, mut remote: F) -> Result<bool, String>
+where
+    F: FnMut(Vec<String>, u64) -> Fut,
+    Fut: std::future::Future<Output = Result<Value, String>>,
+{
+    let (job, updated) =
+        recovery_job(a, id).ok_or("Trabalho inexistente ou metadados inválidos")?;
     if !eligible(&job, false) {
         return Err("Drop não elegível para recuperação segura".into());
     }
     if job.num > 0 {
         let issue_path = format!("repos/{}/issues/{}", job.repo, job.num);
-        let issue = ghj(&["api", &issue_path], 40).await?;
+        let issue = remote(vec!["api".into(), issue_path], 40).await?;
         if !open_issue(&issue, job.num) {
             return Err("Issue já não está aberta no GitHub".into());
         }
-        let prs = ghj(
-            &[
+        let prs = remote(
+            [
                 "pr",
                 "list",
                 "-R",
@@ -107,7 +122,10 @@ pub async fn retry_manual(a: &Ax, id: i64) -> Result<bool, String> {
                 "200",
                 "--json",
                 "number,title,body",
-            ],
+            ]
+            .iter()
+            .map(|arg| arg.to_string())
+            .collect(),
             90,
         )
         .await?;
@@ -122,16 +140,27 @@ pub async fn retry_manual(a: &Ax, id: i64) -> Result<bool, String> {
     // Evita que uma cache anterior bloqueie uma nova tentativa depois de a
     // branch principal mudar. Mantém as provas cired que ainda correspondem.
     let path = format!("repos/{}/commits/HEAD", job.repo);
-    let head = ghj(&["api", &path, "--jq", "{s: .sha}"], 60).await?;
+    let head = remote(
+        vec!["api".into(), path, "--jq".into(), "{s: .sha}".into()],
+        60,
+    )
+    .await?;
     cache_default_head(a, &job.repo, &head)?;
-    retry(a, id, false).map_err(|error| error.to_string())
+    retry_snapshot(a, &job, updated, false).map_err(|error| error.to_string())
 }
 
 /// Nova tentativa desde o início, com limpeza de provas e autorizações antigas.
 /// A escrita condicional impede duas recuperações do mesmo drop em simultâneo.
-pub fn retry(a: &Ax, id: i64, automatic: bool) -> Result<bool, &'static str> {
-    let j = recovery_job(a, id).ok_or("Trabalho inexistente ou metadados inválidos")?;
-    if !eligible(&j, automatic) {
+#[cfg(test)]
+fn retry(a: &Ax, id: i64, automatic: bool) -> Result<bool, &'static str> {
+    let (job, updated) =
+        recovery_job(a, id).ok_or("Trabalho inexistente ou metadados inválidos")?;
+    retry_snapshot(a, &job, updated, automatic)
+}
+
+fn retry_snapshot(a: &Ax, j: &Job, updated: i64, automatic: bool) -> Result<bool, &'static str> {
+    let id = j.id;
+    if !eligible(j, automatic) {
         return Err("Drop não elegível para recuperação segura");
     }
     if (automatic && a.hold("watcher")) || a.drain.load(std::sync::atomic::Ordering::Relaxed) {
@@ -157,10 +186,6 @@ pub fn retry(a: &Ax, id: i64, automatic: bool) -> Result<bool, &'static str> {
     {
         return Err("Já existe outro trabalho ativo para a mesma issue");
     }
-    let updated =
-        a.db.one("select t1 from jobs where id=?", pa![id])
-            .and_then(|v| v["t1"].as_i64())
-            .ok_or("Data de estado em falta")?;
     let age = now().saturating_sub(updated);
     if automatic && age < RETRY_DELAY_MS {
         return Err("Aguarda intervalo de segurança");
@@ -176,7 +201,7 @@ pub fn retry(a: &Ax, id: i64, automatic: bool) -> Result<bool, &'static str> {
     history.push(json!({"at":now(),"reason":j.why.clone(),"automatic":automatic}));
     data["drop_history"] = json!(history);
     let next_attempt = if automatic {
-        let n = attempts(&j).ok_or("Contador de recuperação inválido")? + 1;
+        let n = attempts(j).ok_or("Contador de recuperação inválido")? + 1;
         data["recovery_attempts"] = json!(n);
         Some(n)
     } else {
@@ -231,7 +256,7 @@ pub fn retry(a: &Ax, id: i64, automatic: bool) -> Result<bool, &'static str> {
     };
     // Lock the policy and the exact dropped job snapshot together. A newer
     // cancellation, proof, retry or repository change cannot reuse this decision.
-    let changed = commit_retry(a, &j, updated, automatic, next_state, &message, &data)
+    let changed = commit_retry(a, j, updated, automatic, next_state, &message, &data)
         .map_err(|_| "Falha ao guardar recuperação na base de dados")?;
     if !changed {
         return Ok(false);
@@ -256,6 +281,7 @@ fn commit_retry(
         "update jobs set st=?1,why=?2,d=?3,t1=?4
          where id=?5 and st='drop' and kind='fix' and pr is null
            and t1=?6 and why=?7
+           and repo=?11 and num=?12 and t0=?13 and title=?14 and url=?15
            and not exists(select 1 from kv where k='submit_publication:' || jobs.id)
            and case when typeof(jobs.d)='text' and json_valid(jobs.d)
                     then json_type(jobs.d)='object' else 0 end
@@ -282,7 +308,12 @@ fn commit_retry(
             job.why,
             job.d.to_string(),
             automatic,
-            format!("kill:{}", job.id)
+            format!("kill:{}", job.id),
+            job.repo,
+            job.num,
+            job.t0,
+            job.title,
+            job.url
         ],
     )?;
     if changed != 1 {
@@ -301,6 +332,14 @@ fn commit_retry(
 /// Drops deliberados, com publicação, alterações de código ou sem provas
 /// de segurança ficam intactos para análise manual.
 pub async fn scan(a: &Ax, repo: &str, prs: &[Value]) {
+    scan_with(a, repo, prs, recovery_remote).await;
+}
+
+async fn scan_with<F, Fut>(a: &Ax, repo: &str, prs: &[Value], mut remote: F)
+where
+    F: FnMut(Vec<String>, u64) -> Fut,
+    Fut: std::future::Future<Output = Result<Value, String>>,
+{
     if a.hold("watcher") || a.drain.load(std::sync::atomic::Ordering::Relaxed) {
         return;
     }
@@ -324,11 +363,12 @@ pub async fn scan(a: &Ax, repo: &str, prs: &[Value]) {
             break;
         }
         if let Some(id) = item["id"].as_i64() {
-            let Some(job) = recovery_job(a, id) else {
+            let Some((job, updated)) = recovery_job(a, id) else {
                 continue;
             };
-            let age = now().saturating_sub(item["t1"].as_i64().unwrap_or(0));
-            if !eligible(&job, true)
+            let age = now().saturating_sub(updated);
+            if job.repo != repo
+                || !eligible(&job, true)
                 || !(RETRY_DELAY_MS..=MAX_AUTO_AGE_MS).contains(&age)
                 || has_related_pr(prs, job.num)
             {
@@ -337,14 +377,14 @@ pub async fn scan(a: &Ax, repo: &str, prs: &[Value]) {
             // A issue tem de continuar aberta no GitHub. Erros de leitura
             // bloqueiam a recuperação, sem qualquer escrita ou requeue.
             let path = format!("repos/{repo}/issues/{}", job.num);
-            let issue = match ghj(&["api", &path], 40).await {
+            let issue = match remote(vec!["api".into(), path], 40).await {
                 Ok(value) => value,
                 Err(_) => continue,
             };
             if !open_issue(&issue, job.num) {
                 continue;
             }
-            if retry(a, id, true) == Ok(true) {
+            if retry_snapshot(a, &job, updated, true) == Ok(true) {
                 restarted += 1;
             }
         }
@@ -636,6 +676,104 @@ mod tests {
         a.db.run("update jobs set d='{}' where id=?", pa![id]);
         assert!(commit().unwrap());
         assert!(!commit().unwrap());
+    }
+
+    #[test]
+    fn recovery_does_not_reuse_remote_evidence_for_changed_drop() {
+        for automatic in [false, true] {
+            let a = setup();
+            let id = dropped(&a, "machine kept failing: timed out", json!({}));
+            let (job, updated) = recovery_job(&a, id).unwrap();
+            a.db.run("update jobs set num=43 where id=?", pa![id]);
+            assert_eq!(retry_snapshot(&a, &job, updated, automatic), Ok(false));
+            assert_eq!(a.db.jg(id).unwrap().st, "drop");
+            a.db.run("update jobs set num=42 where id=?", pa![id]);
+            a.db.run("update jobs set t1=t1+1 where id=?", pa![id]);
+            assert_eq!(retry_snapshot(&a, &job, updated, automatic), Ok(false));
+            a.db.run("update jobs set t1=? where id=?", pa![updated, id]);
+            a.db.run(
+                "update jobs set d='{\"recovery_attempts\":1}' where id=?",
+                pa![id],
+            );
+            assert_eq!(retry_snapshot(&a, &job, updated, automatic), Ok(false));
+            a.db.run("update jobs set d='{}' where id=?", pa![id]);
+            assert_eq!(retry_snapshot(&a, &job, updated, automatic), Ok(true));
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_entry_points_preserve_the_snapshot_during_io() {
+        for automatic in [false, true] {
+            for mutation in ["num", "timestamp", "metadata", "none", "cancel"] {
+                if mutation == "cancel" && !automatic {
+                    continue;
+                }
+                let a = setup();
+                let id = dropped(&a, "machine kept failing: timed out", json!({}));
+                let kill = format!("kill:{id}");
+                if !automatic {
+                    a.db.ks(&kill, &json!(true));
+                }
+                let mut calls = 0;
+                let remote = |args: Vec<String>, _: u64| {
+                    calls += 1;
+                    let response = match args[0].as_str() {
+                        "api" if args[1] == "repos/org/repo/issues/42" => {
+                            match mutation {
+                                "num" => {
+                                    a.db.run("update jobs set num=43 where id=?", pa![id]);
+                                }
+                                "timestamp" => {
+                                    a.db.run("update jobs set t1=t1+1 where id=?", pa![id]);
+                                }
+                                "metadata" => {
+                                    a.db.run(
+                                        "update jobs set d=json_set(d,'$.fixture',1) where id=?",
+                                        pa![id],
+                                    );
+                                }
+                                _ => {}
+                            }
+                            if mutation == "cancel" {
+                                a.db.ks(&kill, &json!(true));
+                            }
+                            json!({"number":42,"state":"open"})
+                        }
+                        "pr" => json!([]),
+                        "api" if args[1] == "repos/org/repo/commits/HEAD" => {
+                            json!({"s":"a".repeat(40)})
+                        }
+                        _ => panic!("unexpected fixture request: {args:?}"),
+                    };
+                    std::future::ready(Ok(response))
+                };
+                if automatic {
+                    scan_with(&a, "org/repo", &[], remote).await;
+                    assert_eq!(calls, 1);
+                } else {
+                    assert_eq!(
+                        retry_manual_with(&a, id, remote).await.unwrap(),
+                        mutation == "none"
+                    );
+                    assert_eq!(calls, 3);
+                }
+                let job = a.db.jg(id).unwrap();
+                if mutation == "none" {
+                    assert_eq!(job.st, "ready");
+                    assert_eq!(attempts(&job), Some(u64::from(automatic)));
+                    assert!(a.db.kg(&kill).is_null());
+                } else {
+                    assert_eq!(job.st, "drop");
+                    assert_eq!(attempts(&job), Some(0));
+                    if !automatic || mutation == "cancel" {
+                        assert_eq!(a.db.kg(&kill), true);
+                    } else {
+                        assert!(a.db.kg(&kill).is_null());
+                    }
+                    assert!(job.d["drop_history"].is_null());
+                }
+            }
+        }
     }
 
     #[test]
