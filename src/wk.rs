@@ -1072,9 +1072,9 @@ async fn vet1(a: &Ax, id: i64) -> R<()> {
     Ok(())
 }
 
-/// Admits Vet work under the same shutdown barrier as other workers.
-pub(crate) fn admit_vet(a: &Ax, id: i64) -> bool {
-    let _transition = a.update_transition.lock().unwrap();
+/// Performs Vet eligibility checks and reservation while the caller holds
+/// the repository-update transition barrier.
+pub(crate) fn admit_vet_locked(a: &Ax, id: i64) -> bool {
     if a.drain.load(std::sync::atomic::Ordering::SeqCst)
         || a.hold("vet")
         || !matches!(
@@ -1088,6 +1088,12 @@ pub(crate) fn admit_vet(a: &Ax, id: i64) -> bool {
         return false;
     }
     a.vtk.lock().unwrap().insert(id)
+}
+
+/// Admits Vet work under the same shutdown and repository-update barrier.
+pub(crate) fn admit_vet(a: &Ax, id: i64) -> bool {
+    let _transition = a.update_transition.lock().unwrap();
+    admit_vet_locked(a, id)
 }
 
 async fn vetl(a: Ax) {
