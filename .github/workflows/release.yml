@@ -7,10 +7,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     permissions:
-      contents: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -44,29 +48,27 @@ jobs:
           f=target/${{ matrix.target }}/release/apollo-office
           [ -f "$f.exe" ] && f="$f.exe"
           cp "$f" "${{ matrix.name }}"
-      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          files: ${{ matrix.name }}
-          prerelease: ${{ contains(github.ref_name, '-') }}
-
+          name: release-bin-${{ github.run_attempt }}-${{ matrix.target }}
+          path: ${{ matrix.name }}
+          if-no-files-found: error
+          retention-days: 7
 
   sign:
     needs: build
     permissions:
-      contents: write
+      contents: read
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Download release binaries
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir dist
-          gh release download "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" -p 'apollo-office-*' -D dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-bin-${{ github.run_attempt }}-*
+          path: dist
+          merge-multiple: true
       - name: Validate inventory and generate manifest
         working-directory: dist
         shell: bash
@@ -90,13 +92,34 @@ jobs:
           base64 -w0 latest.json.sig.raw > latest.json.sig
           test -s latest.json.sig
           rm -f -- "$key" latest.json.sig.raw
-      - name: Upload signed manifest
-        working-directory: dist
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: release-signed-${{ github.run_attempt }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: sign
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-signed-${{ github.run_attempt }}
+          path: dist
+      - name: Revalidate staged release
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/release_manifest.py --verify dist
+      - name: Publish only a new, complete release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          set -euo pipefail
-          test -s latest.json
-          test -s latest.json.sig
-          gh release upload "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" latest.json latest.json.sig --clobber
+          bash scripts/publish_release.sh dist
