@@ -1389,12 +1389,7 @@ impl Db {
     /// after a completed/dropped candidate remain eligible for human triage.
     /// The originating hunt must still be active and authorized. A revoked
     /// policy is an error, not an exact-duplicate result.
-    pub fn queue_hunter_find(
-        &self,
-        repo: &str,
-        hunt_id: i64,
-        data: &Value,
-    ) -> rusqlite::Result<bool> {
+    pub fn queue_hunter_find(&self, repo: &str, hunt_id: i64, data: &Value) -> rusqlite::Result<bool> {
         let title = data["title"]
             .as_str()
             .map(str::trim)
@@ -2224,7 +2219,10 @@ mod hunter_duplicate_tests {
         assert!(db.queue_hunter_find("o/s", 101, &data).unwrap());
         data["hunt"]["where"] = json!("src/other.rs");
         assert!(db.queue_hunter_find("o/r", 100, &data).unwrap());
-        db.run("update jobs set st='done' where repo='o/r' and kind='fix'", vec![]);
+        db.run(
+            "update jobs set st='done' where repo='o/r' and kind='fix'",
+            vec![],
+        );
         assert!(db.queue_hunter_find("o/r", 100, &data).unwrap());
         data["hunt"]["where"] = json!("");
         assert!(db.queue_hunter_find("o/r", 100, &data).is_err());
@@ -2238,10 +2236,22 @@ mod hunter_duplicate_tests {
         assert!(db.queue_hunter_find("o/r", 101, &data).is_err());
         assert!(db.queue_hunter_find("o/r", 999, &data).is_err());
         for (revoke, restore) in [
-            ("update rp set on_=0 where full='o/r'", "update rp set on_=1 where full='o/r'"),
-            ("update rp set hunt=0 where full='o/r'", "update rp set hunt=1 where full='o/r'"),
-            ("update rp set ci=' ' where full='o/r'", "update rp set ci='true' where full='o/r'"),
-            ("update jobs set st='drop' where id=100", "update jobs set st='hunt' where id=100"),
+            (
+                "update rp set on_=0 where full='o/r'",
+                "update rp set on_=1 where full='o/r'",
+            ),
+            (
+                "update rp set hunt=0 where full='o/r'",
+                "update rp set hunt=1 where full='o/r'",
+            ),
+            (
+                "update rp set ci=' ' where full='o/r'",
+                "update rp set ci='true' where full='o/r'",
+            ),
+            (
+                "update jobs set st='drop' where id=100",
+                "update jobs set st='hunt' where id=100",
+            ),
         ] {
             db.run(revoke, vec![]);
             assert!(db.queue_hunter_find("o/r", 100, &data).is_err());
