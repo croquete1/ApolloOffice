@@ -2264,6 +2264,84 @@ mod hunter_duplicate_tests {
     }
 
     #[test]
+    fn independent_connections_order_hunter_revocation_and_finding_writes() {
+        let path = std::env::temp_dir().join(format!("apollo-hunt-race-{}", rand::random::<u64>()));
+        std::fs::create_dir(&path).unwrap();
+        let file = path.join("state.db");
+        {
+            let db = Db::open(&file).unwrap();
+            db.run(
+                "insert into rp(full,hunt,ci) values('o/r',1,'true')",
+                vec![],
+            );
+            db.run(
+                "insert into jobs(id,repo,kind,st) values(100,'o/r','hunt','hunt')",
+                vec![],
+            );
+            let data = json!({"title":"Bug","body":"reproduction","hunt":{"where":"src/lib.rs","proof":"failed test"}});
+            db.0.lock()
+                .unwrap()
+                .busy_timeout(std::time::Duration::ZERO)
+                .unwrap();
+            let mut other = Connection::open(&file).unwrap();
+            // An independent writer owns the transaction before admission.
+            let tx = other
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+            tx.execute("update rp set hunt=0 where full='o/r'", [])
+                .unwrap();
+            let error = db.queue_hunter_find("o/r", 100, &data).unwrap_err();
+            assert_eq!(
+                error.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::DatabaseBusy)
+            );
+            tx.commit().unwrap();
+            assert_eq!(
+                db.queue_hunter_find("o/r", 100, &data).unwrap(),
+                HunterFinding::Revoked
+            );
+            assert_eq!(
+                db.n("select count(*) from jobs where kind='fix'", vec![]),
+                0
+            );
+
+            // Rollback must not revoke the committed authorization.
+            other
+                .execute("update rp set hunt=1 where full='o/r'", [])
+                .unwrap();
+            let tx = other
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+            tx.execute("update jobs set st='drop' where id=100", [])
+                .unwrap();
+            let error = db.queue_hunter_find("o/r", 100, &data).unwrap_err();
+            assert_eq!(
+                error.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::DatabaseBusy)
+            );
+            tx.rollback().unwrap();
+            assert_eq!(
+                db.queue_hunter_find("o/r", 100, &data).unwrap(),
+                HunterFinding::Queued
+            );
+
+            // The opposite committed order preserves the earlier finding.
+            other
+                .execute("update jobs set st='drop' where id=100", [])
+                .unwrap();
+            assert_eq!(
+                db.queue_hunter_find("o/r", 100, &data).unwrap(),
+                HunterFinding::Revoked
+            );
+            assert_eq!(
+                db.n("select count(*) from jobs where kind='fix'", vec![]),
+                1
+            );
+        }
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
     fn hunter_find_requires_active_authorized_origin() {
         let db = seed();
         let data = json!({"title":"Broken parser","body":"reproduction","hunt":{"where":"src/parser.rs","proof":"test failed for expected bug"}});
