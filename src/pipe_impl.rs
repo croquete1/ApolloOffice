@@ -3581,7 +3581,8 @@ fn submitted_pr_url(repo: &str, number: i64) -> String {
 }
 
 fn exact_submit_target(pr: &Value, repo: &str, number: i64, publication: &Value) -> bool {
-    pr["number"].as_i64() == Some(number)
+    ["head","branch","base_branch"].iter().all(|key| publication[*key].as_str().is_some_and(|s| !s.trim().is_empty()))
+        && pr["number"].as_i64() == Some(number)
         && number > 0
         && pr["html_url"].as_str().is_some_and(|url| url.eq_ignore_ascii_case(&submitted_pr_url(repo,number)))
         && pr["base"]["repo"]["full_name"].as_str().is_some_and(|name| name.eq_ignore_ascii_case(repo))
@@ -3601,7 +3602,7 @@ fn select_submit_pr(rows: &[Value], repo: &str, publication: &Value) -> R<Option
         let head_ref = pr["head"]["ref"].as_str().filter(|v| !v.is_empty()).ok_or_else(|| X::Defer("incomplete PR inventory ref".into()))?;
         if !numbers.insert(n) || pr["state"]!="open" { return Err(X::Defer("inconsistent PR inventory".into())); }
         if Some(head_ref)!=publication["branch"].as_str() { continue; }
-        let head_repo = pr["head"]["repo"]["full_name"].as_str().ok_or_else(|| X::Defer("incomplete matching PR repository".into()))?;
+        let head_repo = pr["head"]["repo"]["full_name"].as_str().filter(|name| !name.trim().is_empty()).ok_or_else(|| X::Defer("incomplete matching PR repository".into()))?;
         if !publication["head"].as_str().is_some_and(|expected| head_repo.eq_ignore_ascii_case(expected)) { continue; }
         if !exact_submit_target(pr,repo,n,publication) || found.replace(n).is_some() {
             return Err(X::Defer("ambiguous or changed publication target; manual review required".into()));
