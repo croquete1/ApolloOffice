@@ -1,4 +1,4 @@
-import json, os, subprocess, sys
+import json, os, subprocess, sys, uuid
 
 D = os.environ["FAKE_GH_DIR"]
 a = sys.argv[1:]
@@ -22,7 +22,15 @@ def opt(k):
     return a[a.index(k) + 1] if k in a else None
 
 
-open(os.path.join(D, "calls.log"), "a").write(json.dumps(a) + "\n")
+# Multiple CLI processes can run concurrently. Publish each complete record
+# independently; append on Windows is not a reliable interprocess lock.
+calls = os.path.join(D, "calls")
+os.makedirs(calls, exist_ok=True)
+call_id = uuid.uuid4().hex
+temporary = os.path.join(calls, call_id + ".tmp")
+with open(temporary, "x", encoding="utf-8") as record:
+    json.dump(a, record)
+os.replace(temporary, os.path.join(calls, call_id + ".json"))
 R = os.environ.get("FAKE_GH_REPO", "o/r")
 
 
