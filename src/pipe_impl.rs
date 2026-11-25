@@ -4912,31 +4912,39 @@ fn mk_hunt(a: &Ax) -> bool {
     if a.hold("hunter") || a.hunter_quota_blocked() {
         return false;
     }
-    let on = a.db.all(
-        "select repo, st from jobs where kind='hunt' and st not in ('done','drop','park')",
+    let Ok(on) = a.db.try_all(
+        "select id, repo, st from jobs where kind='hunt' and st not in ('done','drop','park')",
         pa![],
-    );
-    // A queued hunt blocked by the circuit breaker cannot use a lane.
-    // Keep it in 'on' for duplicate suppression, but exclude it from
-    // active capacity until its repository is no longer blocked.
+    ) else {
+        return false;
+    };
+    let Ok(eligible) = a.db.try_all(
+        "select full from rp where on_=1 and hunt=1 and trim(ci)<>''",
+        pa![],
+    ) else {
+        return false;
+    };
+    let rs: Vec<String> = eligible
+        .iter()
+        .filter_map(|x| x["full"].as_str().map(String::from))
+        .collect();
+    // Keep ineligible ready hunts for duplicate suppression, but do not
+    // charge them against creation capacity. Already reserved or running
+    // work still counts until the lane releases it.
+    let locked = a.lk.lock().unwrap().clone();
     let occupying = on
         .iter()
         .filter(|j| {
-            j["st"] != "ready" || !crate::hunt_health::blocked(a, j["repo"].as_str().unwrap_or(""))
+            let repo = j["repo"].as_str().unwrap_or("");
+            j["st"] != "ready"
+                || j["id"].as_i64().is_some_and(|id| locked.contains(&id))
+                || (rs.iter().any(|r| r == repo) && !crate::hunt_health::blocked(a, repo))
         })
         .count() as i64;
     if occupying >= hn(a) {
         return false;
     }
     let d0 = crate::db::day0();
-    let rs: Vec<String> =
-        a.db.all(
-            "select full from rp where on_=1 and hunt=1 and ci<>''",
-            pa![],
-        )
-        .iter()
-        .filter_map(|x| x["full"].as_str().map(String::from))
-        .collect();
     let act: Vec<String> = a
         .act
         .lock()
