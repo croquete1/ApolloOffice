@@ -55,6 +55,7 @@ struct K(Child);
 impl Drop for K {
     fn drop(&mut self) {
         let _ = self.0.kill();
+        let _ = self.0.wait();
     }
 }
 
@@ -117,7 +118,7 @@ async fn full_run(pv: bool) {
             if pv { "1".into() } else { "0".into() },
         ),
     ];
-    let _k = K(Command::new(exe)
+    let mut server = K(Command::new(exe)
         .args([
             "--data",
             &data.display().to_string(),
@@ -130,7 +131,29 @@ async fn full_run(pv: bool) {
         .stderr(Stdio::null())
         .spawn()
         .unwrap());
-    std::thread::sleep(Duration::from_millis(1500));
+    let o = format!("http://127.0.0.1:{port}");
+    let c = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let started = Instant::now();
+    loop {
+        assert!(
+            server.0.try_wait().unwrap().is_none(),
+            "Apollo Office exited before becoming ready"
+        );
+        if let Ok(response) = c.get(format!("{o}/api/state")).send().await {
+            assert_eq!(response.status().as_u16(), 401);
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "Apollo Office did not become ready"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     let l = Command::new(exe)
         .args(["--data", &data.display().to_string(), "login-link"])
         .output()
@@ -141,11 +164,6 @@ async fn full_run(pv: bool) {
         .unwrap()
         .trim()
         .to_string();
-    let o = format!("http://127.0.0.1:{port}");
-    let c = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .unwrap();
     let r = c.post(&l).header("origin", &o).send().await.unwrap();
     assert_eq!(r.status().as_u16(), 303);
     let ck = r
