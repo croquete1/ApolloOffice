@@ -180,9 +180,25 @@ async fn ck(a: &Ax, k: &str) -> (bool, Option<serde_json::Value>) {
 }
 
 pub async fn probe(a: &Ax, ks: &[String]) {
+    probe_with(a, ks, |key| async move { ck(a, &key).await }).await;
+}
+
+async fn probe_with<F, Fut>(a: &Ax, ks: &[String], check: F)
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = (bool, Option<serde_json::Value>)>,
+{
     let tickets: Vec<_> = ks.iter().map(|k| begin_probe(k)).collect();
-    let v = futures::future::join_all(ks.iter().map(|k| ck(a, k))).await;
-    publish_probe_results(a, ks, tickets, v);
+    // Publish each key as soon as its own check completes. Slow unrelated
+    // providers must not delay an already completed worker observation.
+    futures::future::join_all(ks.iter().zip(tickets).map(|(key, ticket)| {
+        let check = check(key.clone());
+        async move {
+            let result = check.await;
+            publish_probe_results(a, std::slice::from_ref(key), vec![ticket], vec![result]);
+        }
+    }))
+    .await;
 }
 
 fn publish_probe_results(
@@ -408,6 +424,45 @@ mod gpu_telemetry_tests {
         assert!(!fresh(host));
         PROBES.lock().unwrap().invalidate(host);
         FAIL.lock().unwrap().remove(host);
+    }
+
+    #[tokio::test]
+    async fn completed_probe_publishes_while_another_key_is_pending() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            47300,
+            "apollo-office".into(),
+        ));
+        let fast = "fixture-independent-fast";
+        let slow = "fixture-independent-slow";
+        let keys = [fast.to_string(), slow.to_string()];
+        let release = tokio::sync::Notify::new();
+        let release_ref = &release;
+        let work = probe_with(&a, &keys, |key| async move {
+            if key == slow {
+                release_ref.notified().await;
+            }
+            (true, Some(hw("cpu 8")))
+        });
+        tokio::pin!(work);
+        assert!(futures::poll!(work.as_mut()).is_pending());
+        assert!(fresh(fast));
+        assert!(!fresh(slow));
+        assert_eq!(a.lv.lock().unwrap().hst[fast]["cpu"], 8.0);
+        assert!(!a.lv.lock().unwrap().hst.contains_key(slow));
+
+        // A later invalidation must still fence a pending successful check.
+        down(&a, slow);
+        release.notify_one();
+        work.await;
+        assert!(fresh(fast));
+        assert!(!fresh(slow));
+        assert!(!a.lv.lock().unwrap().hst.contains_key(slow));
+        for key in [fast, slow] {
+            PROBES.lock().unwrap().invalidate(key);
+            FAIL.lock().unwrap().remove(key);
+        }
     }
 
     #[tokio::test]
