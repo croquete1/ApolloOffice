@@ -78,6 +78,7 @@ fn detail_matches(row: &Value, number: i64, identity: &(String, String, String))
         && row["baseRefOid"] == identity.1
         && row["updatedAt"] == identity.2
         && row["title"].is_string()
+        && row["body"].is_string()
         && row["url"].is_string()
         && row["isDraft"].is_boolean()
         && row["baseRefName"].is_string()
@@ -560,6 +561,30 @@ mod tests {
         assert!(detail_matches(&row, 1, &identity));
         row["baseRefOid"] = json!("c".repeat(40));
         assert!(!detail_matches(&row, 1, &identity));
+    }
+
+    #[test]
+    fn enrichment_rejects_missing_or_malformed_issue_reference_source() {
+        let identity = (
+            "a".repeat(40),
+            "b".repeat(40),
+            "2026-01-01T00:00:00Z".to_string(),
+        );
+        let mut row = sample(1, "src/a.rs", "42");
+        row["headRefOid"] = json!(identity.0);
+        row["baseRefOid"] = json!(identity.1);
+        row["updatedAt"] = json!(identity.2);
+        assert!(detail_matches(&row, 1, &identity));
+        assert!(issue_refs(&row).contains("42"));
+        for body in [Value::Null, json!(42), json!(["Fixes #42"])] {
+            row["body"] = body;
+            assert!(!detail_matches(&row, 1, &identity));
+        }
+        row.as_object_mut().unwrap().remove("body");
+        assert!(!detail_matches(&row, 1, &identity));
+        row["body"] = json!("");
+        assert!(detail_matches(&row, 1, &identity));
+        assert!(issue_refs(&row).is_empty());
     }
 
     #[test]
