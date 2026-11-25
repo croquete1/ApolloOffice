@@ -2381,9 +2381,18 @@ fn watcher_reply_remote_matches(pr: &Value, source_head: &str) -> Option<bool> {
     }
 }
 
+// Interleave the oldest eligible row of each state. Neither new work nor
+// reconciliation can monopolize the bounded batch; unused slots are shared.
+fn watcher_delivery_batch(db: &crate::db::Db, author: &str, at: i64) -> rusqlite::Result<Vec<Value>> {
+    db.try_all(
+        "select * from watcher_outbox where author=? and (state='pending' or (state='uncertain' and updated<=?))
+         order by row_number() over(partition by state order by updated,id), case state when 'pending' then 0 else 1 end limit 20",
+        pa![author.to_string(), at.saturating_sub(600_000)],
+    )
+}
+
 async fn deliver_watcher_outbox(a: &Ax, me: &str) -> R<()> {
-    // Pending sends first, then ambiguous sends. No uncertain row can be claimed again.
-    let rows=a.db.try_all("select * from watcher_outbox where author=? and (state='pending' or (state='uncertain' and updated<=?)) order by updated,id limit 20",pa![me.to_string(),now()-600_000]).map_err(|e|X::E(e.to_string()))?;
+    let rows = watcher_delivery_batch(&a.db, me, now()).map_err(|e| X::E(e.to_string()))?;
     for row in rows {
         if a.hold("watcher") {
             break;
@@ -2568,6 +2577,28 @@ pub async fn watch(a: Ax) {
 #[cfg(test)]
 mod t {
     use super::*;
+
+    #[test]
+    fn watcher_delivery_batch_reserves_capacity_for_both_states() {
+        let db = crate::db::Db::mem();
+        let at = 2_000_000;
+        for i in 0..25 {
+            db.run("insert into watcher_outbox(id,repo,num,author,body,state,created,updated) values(?,'o/r',1,'owner','reply','uncertain',1,?)",pa![format!("u{i:02}"),i]);
+            db.run("insert into watcher_outbox(id,repo,num,author,body,state,created,updated) values(?,'o/r',1,'owner','reply','pending',1,?)",pa![format!("p{i:02}"),at]);
+        }
+        db.run("insert into watcher_outbox(id,repo,num,author,body,state,created,updated) values('recent','o/r',1,'owner','reply','uncertain',1,?),('other','o/r',1,'other','reply','pending',1,0),('sent','o/r',1,'owner','reply','sent',1,0)",pa![at]);
+        let rows = watcher_delivery_batch(&db, "owner", at).unwrap();
+        assert_eq!(rows.len(), 20);
+        assert_eq!(rows[0]["id"], "p00");
+        assert_eq!(rows[1]["id"], "u00");
+        assert_eq!(rows[18]["id"], "p09");
+        assert_eq!(rows[19]["id"], "u09");
+        db.run("delete from watcher_outbox where state='pending' and id<>'p00'",pa![]);
+        let rows = watcher_delivery_batch(&db, "owner", at).unwrap();
+        assert_eq!(rows.len(), 20);
+        assert_eq!(rows.iter().filter(|r| r["state"] == "uncertain").count(), 19);
+        assert!(rows.iter().all(|r| r["id"] != "recent" && r["id"] != "sent" && r["author"] == "owner"));
+    }
 
     #[test]
     fn scout_rechecks_repository_registration_and_policy() {
