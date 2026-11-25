@@ -299,10 +299,14 @@ async fn full_run(pv: bool) {
     let ps: Value =
         serde_json::from_str(&std::fs::read_to_string(fk.join("prs.json")).unwrap()).unwrap();
     assert_eq!(ps.as_array().unwrap().len(), 1);
-    let calls: Vec<Vec<String>> = std::fs::read_to_string(fk.join("calls.log"))
+    let calls: Vec<Vec<String>> = std::fs::read_dir(fk.join("calls"))
         .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .map(|path| {
+            serde_json::from_slice(&std::fs::read(&path).unwrap())
+                .unwrap_or_else(|error| panic!("invalid CLI call record {}: {error}", path.display()))
+        })
         .collect();
     assert_eq!(
         calls
