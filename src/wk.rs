@@ -254,6 +254,17 @@ fn changed_since_drop(updated_at: &str, created_at: i64, data: &Value) -> bool {
     current > previous
 }
 
+// Recheck after remote calls; the caller holds update_transition when writing.
+fn scout_repo_enabled(a: &Ax, repo: &str) -> bool {
+    matches!(
+        a.db.try_n(
+            "select count(*) from rp where full=? and on_=1 and iss=1 and ci<>''",
+            pa![repo.to_string()],
+        ),
+        Ok(1)
+    )
+}
+
 async fn scout1(a: &Ax) -> R<()> {
     need(a, "scout", &["gh"]).await?;
     a.st("scout", "work", None, "");
@@ -288,6 +299,10 @@ async fn scout1(a: &Ax) -> R<()> {
         let is = match crate::gh::open_issues(&r).await {
             Ok(items) => items,
             Err(error) => {
+                let _transition = a.update_transition.lock().unwrap();
+                if !scout_repo_enabled(a, &r) {
+                    continue;
+                }
                 let previous = a.db.kg(&format!("iscan:{r}"));
                 a.db.ks(&format!("iscan:{r}"), &json!({
                     "at":previous["at"],"count":previous["count"],"limit":previous["limit"],
@@ -512,6 +527,10 @@ async fn scout1(a: &Ax) -> R<()> {
             )
             .await?;
             for i in pk {
+                let _transition = a.update_transition.lock().unwrap();
+                if !scout_repo_enabled(a, &r) {
+                    break;
+                }
                 let n = i["number"].as_i64().unwrap_or(0);
                 let id = format!("{r}#{n}");
                 let ti = i["title"].as_str().unwrap_or("").to_string();
@@ -2522,6 +2541,24 @@ pub async fn watch(a: Ax) {
 #[cfg(test)]
 mod t {
     use super::*;
+
+    #[test]
+    fn scout_rechecks_repository_registration_and_policy() {
+        let db = crate::db::Db::mem();
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::env::temp_dir(),
+            1,
+            "x".into(),
+        ));
+        assert!(!scout_repo_enabled(&a, "o/r"));
+        a.db.run("insert into rp(full,ci) values('o/r','test')", pa![]);
+        assert!(scout_repo_enabled(&a, "o/r"));
+        a.db.run("update rp set iss=0 where full='o/r'", pa![]);
+        assert!(!scout_repo_enabled(&a, "o/r"));
+        a.db.run("delete from rp where full='o/r'", pa![]);
+        assert!(!scout_repo_enabled(&a, "o/r"));
+    }
 
     #[test]
     fn vet_keeps_optimizations_separate_from_features() {

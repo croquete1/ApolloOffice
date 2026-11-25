@@ -465,7 +465,15 @@ impl Db {
         at: i64,
     ) -> rusqlite::Result<()> {
         let mut c = self.0.lock().unwrap();
-        let tx = c.transaction()?;
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let enabled: bool = tx.query_row(
+            "select exists(select 1 from rp where full=? and on_=1 and iss=1 and ci<>'')",
+            [repo],
+            |row| row.get(0),
+        )?;
+        if !enabled {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
         for issue in issues {
             let number = issue["number"]
                 .as_i64()
@@ -1720,8 +1728,26 @@ mod issue_snapshot_tests {
     }
 
     #[test]
+    fn issue_snapshot_rejects_removed_or_disabled_repository() {
+        let db = Db::mem();
+        assert!(db.replace_issue_snapshot("o/r", &[issue(1)], 10).is_err());
+        db.run("insert into rp(full,ci) values('o/r','test')", vec![]);
+        db.replace_issue_snapshot("o/r", &[issue(1)], 20).unwrap();
+        db.run("update rp set on_=0 where full='o/r'", vec![]);
+        assert!(db.replace_issue_snapshot("o/r", &[issue(2)], 30).is_err());
+        db.run("delete from rp where full='o/r'", vec![]);
+        assert!(db.replace_issue_snapshot("o/r", &[issue(2)], 40).is_err());
+        assert_eq!(
+            db.n("select num from github_issues where is_open=1", vec![]),
+            1
+        );
+        assert_eq!(db.kg("iscan:o/r")["at"], 20);
+    }
+
+    #[test]
     fn failed_snapshot_rolls_back_rows_closures_and_scan_metadata() {
         let db = Db::mem();
+        db.run("insert into rp(full,ci) values('o/r','test')", vec![]);
         db.replace_issue_snapshot("o/r", &[issue(1)], 10).unwrap();
         assert!(db
             .replace_issue_snapshot("o/r", &[issue(2), json!({"number":3})], 20)

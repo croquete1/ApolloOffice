@@ -321,6 +321,7 @@ Este registo atualiza os estados históricos anteriores. Os merges abaixo foram 
 | #87 | `c536f982bcec5cdd1ef6c77fd63fde2026972efa` | #119 (45508555167) | F04/F16: sessões Google e registo de evidência |
 | #88 | `a213b92f7a81ba6e15fcf55c55e3c023a7946577` | #122 (45510012042) | F04/F05: recuperação inicial transacional |
 | #89 | `701a9e6b28a37bf2cf3fd9173f88a24f3b2394b5` | #125 (45511464910) | F04/F10: cancelamento e aprovação atómica |
+| #90 | `32e2f25e2fe391356460c0553685874d5a479205` | #128 (45575512461) | F03/F04/F10: proteção de remoção e admissão |
 
 CI #125 aprovou integralmente o HEAD `4a422b102da1a4b476cd51ca13ef260e5b7826a3`, incluindo os dois E2E que falharam no #124. Aprendizagem: reserva de lane pode prolongar-se após publicação do estado approve; publicar metadados e aprovação juntos, sem recusar ação legítima durante limpeza.
 
@@ -339,6 +340,10 @@ CI #116: Rustfmt, Clippy, Rust (Ubuntu e Windows), release, JavaScript, Chromium
 Aprendizagem do CI: #102, #107, #110 e #113 detetaram Rustfmt; #107 detetou também um teste estrutural JavaScript que ainda dependia da implementação antiga. Corrigir todos os hunks e verificar referências de testes estruturais antes de publicar refatorações; manter testes de comportamento e rollback, sem remover gates. O ambiente de edição atual continua sem cargo/rustfmt local. #105 e #116 passaram na primeira execução. Não confundir sucesso de uma matriz parcial com CI completo.
 
 CI #121 (45509652837), HEAD `2abf1af30e3f88f3170c7163d4eab3451c690a91`: Windows aprovado, incluindo a regressão de recuperação atómica; Ubuntu parou em Rustfmt. Correções de formatação aplicadas em lote no commit seguinte; validação integral ainda pendente. Não alterar os gates nem assumir que a recuperação real em produção está validada.
+
+CI #128: HEAD `c1e6bdd72aedc0715ee5df634d0a85bbbc184565` aprovado em Ubuntu e Windows; Rustfmt, Clippy, Rust, Release, Node, Chromium, aceitação e Docker/SSH isolados aprovados. PR #90 integrada; sem revisão externa registada. Aprendizagem: repetir a validação de autorização imediatamente antes da escrita após chamadas remotas, e atualizar fixtures de políticas transversais sem enfraquecer as asserções existentes.
+
+F03/F04/F09 — lote seguinte: Scout recusa snapshots de repositórios removidos/desativados ou sem issues/CI configurados dentro de transação imediata; revalida política sob a barreira de transição antes de guardar erro remoto ou criar tarefas após Guard. Testes de regressão e fixture ajustado. CI pendente; não elimina todas as corridas de remoção/recriação com o mesmo nome, não revoga chamadas remotas em curso nem garante isolamento de todos os escritores do Watcher. Sem alteração da interface dos agentes, modelos, faturação ou gates.
 
 ## Sequência
 Integrar PRs apenas após revisão e testes, uma fase de cada vez. Não ativar Qwen. Não alterar main ou instalação em produção sem evidência. Atualizar este ficheiro com PR, SHA e resultado dos testes de cada fase.
