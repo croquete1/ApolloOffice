@@ -731,7 +731,7 @@ mod t {
         }
         assert!(!admit(&a, "o/blocked", "local", blocked_id));
         assert!(admit(&a, "o/healthy", "local", healthy_id));
-        crate::hunt_health::reset(&a, "o/blocked");
+        crate::hunt_health::reset(&a, "o/blocked").unwrap();
         assert!(!admit(&a, "o/blocked", "local", blocked_id));
         a.act.lock().unwrap().clear();
         a.lk.lock().unwrap().clear();
