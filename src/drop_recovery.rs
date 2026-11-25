@@ -74,6 +74,26 @@ fn has_related_pr(prs: &[Value], number: i64) -> bool {
         .any(|pr| crate::steward::issue_refs(pr).contains(&issue))
 }
 
+// The manual recovery query requests number, title and body explicitly.
+// A malformed or duplicated entry is not evidence that no related PR exists.
+fn manual_pr_inventory(prs: &Value) -> Result<&[Value], &'static str> {
+    let list = prs.as_array().ok_or("Resposta de PRs inválida")?;
+    if list.len() >= 200 {
+        return Err("Lista de PRs truncada; recuperação bloqueada");
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for pr in list {
+        let number = pr["number"]
+            .as_i64()
+            .filter(|n| *n > 0)
+            .ok_or("Resposta de PRs inválida")?;
+        if !seen.insert(number) || !pr["title"].is_string() || !pr["body"].is_string() {
+            return Err("Resposta de PRs inválida");
+        }
+    }
+    Ok(list)
+}
+
 /// Atualiza a cache do HEAD remoto sem apagar marcadores CI válidos.
 fn cache_default_head(a: &Ax, repo: &str, head: &Value) -> Result<(), String> {
     let sha = head["s"].as_str().ok_or("HEAD remoto sem SHA")?;
@@ -129,10 +149,7 @@ where
             90,
         )
         .await?;
-        let list = prs.as_array().ok_or("Resposta de PRs inválida")?;
-        if list.len() >= 200 {
-            return Err("Lista de PRs truncada; recuperação bloqueada".into());
-        }
+        let list = manual_pr_inventory(&prs)?;
         if has_related_pr(list, job.num) {
             return Err("Já existe uma PR aberta para esta issue".into());
         }
@@ -648,6 +665,59 @@ mod tests {
         let pr = json!({"body":"Fixes #42","number":123});
         assert!(has_related_pr(&[pr], 42));
         assert!(!has_related_pr(&[json!({"body":"Fixes #99"})], 42));
+    }
+
+    #[tokio::test]
+    async fn manual_recovery_rejects_incomplete_pr_inventory() {
+        let valid = json!({"number":123,"title":"Unrelated","body":""});
+        for (prs, expected) in [
+            (json!([null]), false),
+            (json!([{"number":123,"title":"Unrelated"}]), false),
+            (
+                json!([{"number":123,"title":"Unrelated","body":null}]),
+                false,
+            ),
+            (json!([{"number":0,"title":"Unrelated","body":""}]), false),
+            (json!([valid.clone(), valid.clone()]), false),
+            (json!(vec![valid.clone(); 200]), false),
+            (json!([{"number":123,"title":"Fixes #42","body":""}]), false),
+            (json!([valid]), true),
+        ] {
+            let a = setup();
+            let id = dropped(&a, "machine kept failing: timed out", json!({}));
+            let kill = format!("kill:{id}");
+            a.db.ks(&kill, &json!(true));
+            let mut calls = 0;
+            let remote = |args: Vec<String>, _: u64| {
+                calls += 1;
+                let response = match args[0].as_str() {
+                    "api" if args[1] == "repos/org/repo/issues/42" => {
+                        json!({"number":42,"state":"open"})
+                    }
+                    "pr" => prs.clone(),
+                    "api" if args[1] == "repos/org/repo/commits/HEAD" => {
+                        json!({"s":"a".repeat(40)})
+                    }
+                    _ => panic!("unexpected fixture request: {args:?}"),
+                };
+                std::future::ready(Ok(response))
+            };
+            let result = retry_manual_with(&a, id, remote).await;
+            let job = a.db.jg(id).unwrap();
+            if expected {
+                assert_eq!(result, Ok(true));
+                assert_eq!(calls, 3);
+                assert_eq!(job.st, "ready");
+                assert!(a.db.kg(&kill).is_null());
+            } else {
+                assert!(result.is_err());
+                assert_eq!(calls, 2);
+                assert_eq!(job.st, "drop");
+                assert_eq!(a.db.kg(&kill), true);
+                assert!(job.d["drop_history"].is_null());
+            }
+            assert_eq!(attempts(&job), Some(0));
+        }
     }
 
     #[test]
