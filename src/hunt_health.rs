@@ -13,13 +13,34 @@ fn key(repo: &str) -> String {
     format!("hunt-fail:{repo}")
 }
 
+// An absent record is healthy; malformed or unreadable evidence is not.
+fn read_health(db: &crate::db::Db, repo: &str) -> rusqlite::Result<Value> {
+    let rows = db.try_all("select v from kv where k=?", crate::pa![key(repo)])?;
+    let Some(row) = rows.first() else {
+        return Ok(json!({"failures":0,"until":0}));
+    };
+    let raw = row["v"].as_str().ok_or(rusqlite::Error::InvalidQuery)?;
+    let value: Value = serde_json::from_str(raw).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let failures = value["failures"].as_i64().filter(|n| *n >= 0);
+    let until = value["until"].as_i64().filter(|n| *n >= 0);
+    if failures.is_none() || until.is_none() {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(value)
+}
+
 /// Devolve as falhas acumuladas e a suspensão efetiva da pesquisa.
 pub fn status(a: &Ax, repo: &str) -> Value {
-    let v = a.db.kg(&key(repo));
+    if a.hunt_storage_holds.lock().unwrap().contains(repo) {
+        return json!({"blocked":true,"failures":null,"until":null,"stage":"storage_write_failed","exit_code":null});
+    }
+    let Ok(v) = read_health(&a.db, repo) else {
+        return json!({"blocked":true,"failures":null,"until":null,"stage":"state_unavailable","exit_code":null});
+    };
     let until = v["until"].as_i64().unwrap_or(0);
     json!({
         "blocked": until > now(),
-        "failures": v["failures"].as_i64().unwrap_or(0),
+        "failures": v["failures"],
         "until": until,
         "stage": v["stage"],
         "exit_code": v["exit_code"],
@@ -56,21 +77,49 @@ pub fn fail(a: &Ax, repo: &str, stage: &str, code: i32) {
     let (failures, until, was_blocked) = {
         let _transition = a.update_transition.lock().unwrap();
         let before = status(a, repo);
-        let failures = before["failures"].as_i64().unwrap_or(0).saturating_add(1);
+        let Some(previous) = before["failures"].as_i64() else {
+            a.hunt_storage_holds
+                .lock()
+                .unwrap()
+                .insert(repo.to_string());
+            crate::app::chg();
+            a.say(
+                "hunter",
+                &format!("{repo}: failure state unavailable; Hunter held"),
+                None,
+            );
+            return;
+        };
+        let failures = previous.saturating_add(1);
         let until = if failures >= LIMIT {
             now().saturating_add(COOLDOWN_MS)
         } else {
             0
         };
-        a.db.ks(
-            &key(repo),
-            &json!({
-                "failures": failures,
-                "until": until,
-                "stage": stage,
-                "exit_code": code,
-            }),
+        let state = json!({
+            "failures": failures,
+            "until": until,
+            "stage": stage,
+            "exit_code": code,
+        });
+        let written = a.db.0.lock().unwrap().execute(
+            "insert into kv(k,v) values(?,?) on conflict(k) do update set v=excluded.v",
+            rusqlite::params![key(repo), state.to_string()],
         );
+        if !matches!(written, Ok(1)) {
+            a.hunt_storage_holds
+                .lock()
+                .unwrap()
+                .insert(repo.to_string());
+            crate::app::chg();
+            a.say(
+                "hunter",
+                &format!("{repo}: could not persist failure counter"),
+                None,
+            );
+            return;
+        }
+        crate::app::chg();
         (failures, until, before["blocked"] == true)
     };
     if failures == LIMIT || (until > 0 && !was_blocked) {
@@ -94,10 +143,29 @@ pub fn success(a: &Ax, repo: &str) {
     let had_failures = {
         let _transition = a.update_transition.lock().unwrap();
         let failed = status(a, repo)["failures"].as_i64().unwrap_or(0) > 0;
-        if failed {
-            a.db.kd(&key(repo));
+        if !failed {
+            return;
         }
-        failed
+        let deleted =
+            a.db.0
+                .lock()
+                .unwrap()
+                .execute("delete from kv where k=?", [key(repo)]);
+        if deleted.is_err() {
+            a.hunt_storage_holds
+                .lock()
+                .unwrap()
+                .insert(repo.to_string());
+            crate::app::chg();
+            a.say(
+                "hunter",
+                &format!("{repo}: could not clear failure counter"),
+                None,
+            );
+            return;
+        }
+        crate::app::chg();
+        true
     };
     if had_failures {
         a.say(
@@ -109,16 +177,31 @@ pub fn success(a: &Ax, repo: &str) {
 }
 
 /// Reposição explícita do bloqueio após corrigir o ambiente.
-pub fn reset(a: &Ax, repo: &str) {
+pub fn reset(a: &Ax, repo: &str) -> rusqlite::Result<()> {
     {
         let _transition = a.update_transition.lock().unwrap();
-        a.db.kd(&key(repo));
+        let deleted =
+            a.db.0
+                .lock()
+                .unwrap()
+                .execute("delete from kv where k=?", [key(repo)]);
+        if let Err(error) = deleted {
+            a.hunt_storage_holds
+                .lock()
+                .unwrap()
+                .insert(repo.to_string());
+            crate::app::chg();
+            return Err(error);
+        }
+        a.hunt_storage_holds.lock().unwrap().remove(repo);
+        crate::app::chg();
     }
     a.say(
         "hunter",
         &format!("{repo}: bloqueio de pesquisas reposto manualmente"),
         None,
     );
+    Ok(())
 }
 
 /// Redact common credentials before saving the bounded diagnostic tail.
@@ -214,6 +297,72 @@ mod tests {
         success(&a, "example/one");
         assert!(!blocked(&a, "example/one"));
         assert_eq!(status(&a, "example/one")["failures"], 0);
+    }
+
+    #[test]
+    fn invalid_or_unreadable_breaker_state_holds_hunter_until_manual_reset() {
+        let a = app();
+        assert!(!blocked(&a, "example/one"));
+        a.db.ks(&key("example/one"), &json!({"failures":"bad","until":0}));
+        assert!(blocked(&a, "example/one"));
+        assert!(status(&a, "example/one")["failures"].is_null());
+        fail(&a, "example/one", "setup", 1);
+        success(&a, "example/one");
+        assert!(blocked(&a, "example/one"));
+        reset(&a, "example/one").unwrap();
+        assert!(!blocked(&a, "example/one"));
+        a.db.run("drop table kv", vec![]);
+        assert!(blocked(&a, "example/one"));
+    }
+
+    #[test]
+    fn failed_health_read_holds_repo_even_after_read_recovers() {
+        let a = app();
+        let repo = "example/one";
+        a.db.ks(&key(repo), &json!({"failures":2,"until":0}));
+        assert!(!blocked(&a, repo));
+        a.db.0
+            .lock()
+            .unwrap()
+            .execute_batch("alter table kv rename to kv_unavailable;")
+            .unwrap();
+        fail(&a, repo, "setup", 1);
+        a.db.0
+            .lock()
+            .unwrap()
+            .execute_batch("alter table kv_unavailable rename to kv;")
+            .unwrap();
+        assert_eq!(read_health(&a.db, repo).unwrap()["failures"], 2);
+        assert!(blocked(&a, repo));
+        assert!(!blocked(&a, "example/two"));
+        success(&a, repo);
+        assert!(blocked(&a, repo));
+        reset(&a, repo).unwrap();
+        assert!(!blocked(&a, repo));
+    }
+
+    #[test]
+    fn failed_health_write_holds_only_affected_repo_until_verified_reset() {
+        let a = app();
+        a.db.ks(&key("example/one"), &json!({"failures":1,"until":0}));
+        a.db.0.lock().unwrap().execute_batch(
+            "create trigger reject_health_update before update on kv when new.k='hunt-fail:example/one' begin select raise(abort,'fixture write failure'); end;
+             create trigger reject_health_delete before delete on kv when old.k='hunt-fail:example/one' begin select raise(abort,'fixture delete failure'); end;"
+        ).unwrap();
+        fail(&a, "example/one", "setup", 1);
+        assert!(blocked(&a, "example/one"));
+        assert_eq!(status(&a, "example/one")["stage"], "storage_write_failed");
+        assert!(!blocked(&a, "example/two"));
+        success(&a, "example/one");
+        assert!(reset(&a, "example/one").is_err());
+        assert!(blocked(&a, "example/one"));
+        a.db.0
+            .lock()
+            .unwrap()
+            .execute_batch("drop trigger reject_health_update; drop trigger reject_health_delete;")
+            .unwrap();
+        reset(&a, "example/one").unwrap();
+        assert!(!blocked(&a, "example/one"));
     }
 
     #[tokio::test]
