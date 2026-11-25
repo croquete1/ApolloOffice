@@ -171,9 +171,7 @@ fn update_history(
                 // Reject malformed rows as a group: silently removing a
                 // broken observation could hide a quota discontinuity.
                 rows.iter()
-                    .filter(|row| {
-                        !row[0].as_i64().is_some_and(|at| at < reset_ms - WEEK_MS)
-                    })
+                    .filter(|row| !row[0].as_i64().is_some_and(|at| at < reset_ms - WEEK_MS))
                     .map(|row| valid_sample(row, now_ms))
                     .collect::<Option<Vec<_>>>()
                     .unwrap_or_default()
