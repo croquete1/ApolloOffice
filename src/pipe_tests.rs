@@ -1278,6 +1278,32 @@ mod t {
     }
 
     #[test]
+    fn startup_preserves_auto_publication_receipt_without_granting_approval() {
+        let (db,j,publication,remote) = submission_fixture();
+        db.run("update rp set mode='auto' where full='o/r'",pa![]);
+        let mut checkpoint = begin_submit_publication(&db,&j,"Title",&publication,None).unwrap();
+        save_submit_number(&db,&j,&mut checkpoint,12).unwrap();
+        let a = std::sync::Arc::new(crate::app::App::new(db,std::env::temp_dir(),1,"x".into()));
+        recover(&a).unwrap();
+        let resumed = a.db.jg(j.id).unwrap();
+        assert_eq!(resumed.st,"submit");
+        assert_ne!(resumed.d["ap"],true);
+        assert!(!needs_owner_approval(&a,&resumed));
+        let saved = load_submit_publication(&a.db,&resumed).unwrap().unwrap();
+        assert_eq!(saved,checkpoint);
+        assert!(begin_submit_publication(&a.db,&resumed,"Title",&publication,None).is_err());
+        assert_eq!(persist_submit_receipt(&a.db,&resumed,&saved,&remote).unwrap().1,12);
+        assert_eq!(a.db.n("select count(*) from prs",pa![]),1);
+        a.db.run("update rp set mode='manual' where full='o/r'",pa![]);
+        recover(&a).unwrap();
+        let resumed = a.db.jg(j.id).unwrap();
+        assert_eq!(resumed.st,"submit");
+        assert!(needs_owner_approval(&a,&resumed));
+        assert_ne!(resumed.d["ap"],true);
+        assert_eq!(load_submit_publication(&a.db,&resumed).unwrap().unwrap(),checkpoint);
+    }
+
+    #[test]
     fn publication_intent_rechecks_cancellation_inside_transaction() {
         let (db,j,publication,_) = submission_fixture();
         assert!(!cancellation_requested(&db,j.id).unwrap());
