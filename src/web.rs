@@ -277,6 +277,12 @@ fn save_repo_settings(db: &crate::db::Db, repo: &str, b: &Value) -> rusqlite::Re
     Ok(())
 }
 
+// Serialize repository policy changes with worker admission and removal.
+fn with_update_transition<T>(a: &Ax, operation: impl FnOnce() -> T) -> T {
+    let _transition = a.update_transition.lock().unwrap();
+    operation()
+}
+
 fn work_class(job: &Value) -> &'static str {
     match job["kind"].as_str().unwrap_or("") {
         "hunt" => "discovered_bug",
@@ -2070,7 +2076,7 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                     js(json!({"full": r, "ci": c, "setup": s, "cfg": cfg(a)}))
                 }
                 "set" => {
-                    if save_repo_settings(&a.db, &r, &b).is_err() {
+                    if with_update_transition(a, || save_repo_settings(&a.db, &r, &b)).is_err() {
                         return er(StatusCode::CONFLICT, "repository settings were not saved");
                     }
                     a.sw.notify_one();
@@ -2879,6 +2885,96 @@ mod t {
             ),
             1
         );
+    }
+
+    #[test]
+    fn repository_deactivation_serializes_with_vet_admission() {
+        let db = crate::db::Db::mem();
+        db.run("insert into rp(full,on_) values('o/r',1)", pa![]);
+        db.run("insert into jobs(id,repo,st) values(42,'o/r','vet')", pa![]);
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::env::temp_dir(),
+            1,
+            "x".into(),
+        ));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let settings_app = std::sync::Arc::clone(&a);
+        let settings = std::thread::spawn(move || {
+            with_update_transition(&settings_app, || {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                save_repo_settings(&settings_app.db, "o/r", &json!({"on_": false}))
+            })
+        });
+        entered_rx.recv().unwrap();
+        assert!(a.update_transition.try_lock().is_err());
+
+        let vet_app = std::sync::Arc::clone(&a);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let vet = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            crate::wk::admit_vet(&vet_app, 42)
+        });
+        started_rx.recv().unwrap();
+        release_tx.send(()).unwrap();
+
+        assert!(settings.join().unwrap().is_ok());
+        assert!(!vet.join().unwrap());
+        assert_eq!(a.db.n("select on_ from rp where full='o/r'", pa![]), 0);
+        assert!(a.vtk.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn vet_admission_finishes_before_repository_deactivation() {
+        let db = crate::db::Db::mem();
+        db.run("insert into rp(full,on_) values('o/r',1)", pa![]);
+        db.run("insert into jobs(id,repo,st) values(42,'o/r','vet')", pa![]);
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::env::temp_dir(),
+            1,
+            "x".into(),
+        ));
+        let (admitted_tx, admitted_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let vet_app = std::sync::Arc::clone(&a);
+        let vet = std::thread::spawn(move || {
+            with_update_transition(&vet_app, || {
+                let admitted = crate::wk::admit_vet_locked(&vet_app, 42);
+                admitted_tx.send(admitted).unwrap();
+                release_rx.recv().unwrap();
+                admitted
+            })
+        });
+        assert!(admitted_rx.recv().unwrap());
+
+        let settings_app = std::sync::Arc::clone(&a);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (saved_tx, saved_rx) = std::sync::mpsc::channel();
+        let settings = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let result = with_update_transition(&settings_app, || {
+                save_repo_settings(&settings_app.db, "o/r", &json!({"on_": false}))
+            });
+            saved_tx.send(result.is_ok()).unwrap();
+            result
+        });
+        started_rx.recv().unwrap();
+        assert!(saved_rx
+            .recv_timeout(std::time::Duration::from_millis(25))
+            .is_err());
+        assert!(a.update_transition.try_lock().is_err());
+
+        release_tx.send(()).unwrap();
+        assert!(vet.join().unwrap());
+        assert!(saved_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap());
+        assert!(settings.join().unwrap().is_ok());
+        assert_eq!(a.db.n("select on_ from rp where full='o/r'", pa![]), 0);
+        assert!(a.vtk.lock().unwrap().contains(&42));
     }
 
     #[tokio::test]
