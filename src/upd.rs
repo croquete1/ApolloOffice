@@ -377,15 +377,35 @@ fn valid_staged_size(size: u64) -> bool {
     (1..=MAX_UPDATE_BYTES as u64).contains(&size)
 }
 
+fn staged_file_matches(path: &Path, checksum: &str) -> std::io::Result<bool> {
+    let meta = path.metadata()?;
+    if !meta.is_file() || !valid_staged_size(meta.len()) {
+        return Ok(false);
+    }
+    let mut reader = std::fs::File::open(path)?.take(MAX_UPDATE_BYTES as u64 + 1);
+    let mut digest = Sha256::new();
+    let mut buf = [0u8; 8192];
+    let mut total = 0u64;
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        total += n as u64;
+        digest.update(&buf[..n]);
+    }
+    Ok(valid_staged_size(total) && hex::encode(digest.finalize()) == checksum)
+}
+
 /// Checks that the staged update is still authorized by the trusted signer.
 pub fn ready(a: &Ax) -> bool {
     let Ok((url, key)) = channel() else {
         return false;
     };
-    staged(a)
-        .metadata()
-        .is_ok_and(|m| m.is_file() && valid_staged_size(m.len()))
-        && staged_checksum(&a.db.kg("upd"), &url, &key, crate::app::V, asset()).is_ok()
+    let Ok(checksum) = staged_checksum(&a.db.kg("upd"), &url, &key, crate::app::V, asset()) else {
+        return false;
+    };
+    staged_file_matches(&staged(a), &checksum).unwrap_or(false)
 }
 
 /// Reports whether no admitted job or merge is still running.
@@ -609,6 +629,20 @@ mod t {
         assert_eq!(read_bounded_update(&b"1234"[..], 4).unwrap(), b"1234");
         assert!(read_bounded_update(&b"12345"[..], 4).is_err());
         assert!(read_bounded_update(&b""[..], 4).is_err());
+    }
+
+    #[test]
+    fn rejected_staging_stays_ineligible_until_valid_replacement() {
+        let path = std::env::temp_dir().join(format!("apollo-stage-{}", rand::random::<u64>()));
+        let checksum = hex::encode(Sha256::digest(b"valid"));
+        std::fs::write(&path, b"wrong").unwrap();
+        assert!(!staged_file_matches(&path, &checksum).unwrap());
+        // A fresh eligibility check has no dependency on process-local state.
+        assert!(!staged_file_matches(&path, &checksum).unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), b"wrong");
+        std::fs::write(&path, b"valid").unwrap();
+        assert!(staged_file_matches(&path, &checksum).unwrap());
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
