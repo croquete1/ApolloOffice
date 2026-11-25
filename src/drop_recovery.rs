@@ -50,9 +50,8 @@ fn eligible(j: &Job, automatic: bool) -> bool {
 }
 
 fn recovery_job(a: &Ax, id: i64) -> Option<Job> {
-    let rows = a
-        .db
-        .try_all(
+    let rows =
+        a.db.try_all(
             "select * from jobs where id=? and not exists(select 1 from kv where k=?)",
             pa![id, format!("submit_publication:{id}")],
         )
