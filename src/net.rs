@@ -111,13 +111,13 @@ async fn ck(a: &Ax, k: &str) -> (bool, Option<serde_json::Value>) {
         ),
         "an" if crate::routing::enabled(a) => (true, None),
         "an" => (
-                a.hc.get("https://api.anthropic.com/")
-                    .timeout(std::time::Duration::from_secs(15))
-                    .send()
-                    .await
-                    .is_ok(),
-                None,
-            ),
+            a.hc.get("https://api.anthropic.com/")
+                .timeout(std::time::Duration::from_secs(15))
+                .send()
+                .await
+                .is_ok(),
+            None,
+        ),
         h => match ho(a, h) {
             Some(x) => {
                 let dkcheck = format!(
