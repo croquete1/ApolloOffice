@@ -1389,7 +1389,12 @@ impl Db {
     /// after a completed/dropped candidate remain eligible for human triage.
     /// The originating hunt must still be active and authorized. A revoked
     /// policy is an error, not an exact-duplicate result.
-    pub fn queue_hunter_find(&self, repo: &str, hunt_id: i64, data: &Value) -> rusqlite::Result<bool> {
+    pub fn queue_hunter_find(
+        &self,
+        repo: &str,
+        hunt_id: i64,
+        data: &Value,
+    ) -> rusqlite::Result<bool> {
         let title = data["title"]
             .as_str()
             .map(str::trim)
@@ -2226,7 +2231,10 @@ mod hunter_duplicate_tests {
         assert!(db.queue_hunter_find("o/r", 100, &data).unwrap());
         data["hunt"]["where"] = json!("");
         assert!(db.queue_hunter_find("o/r", 100, &data).is_err());
-        assert_eq!(db.n("select count(*) from jobs where kind='fix'", vec![]), 4);
+        assert_eq!(
+            db.n("select count(*) from jobs where kind='fix'", vec![]),
+            4
+        );
     }
 
     #[test]
@@ -2259,7 +2267,10 @@ mod hunter_duplicate_tests {
         }
         db.run("delete from rp where full='o/r'", vec![]);
         assert!(db.queue_hunter_find("o/r", 100, &data).is_err());
-        assert_eq!(db.n("select count(*) from jobs where kind='fix'", vec![]), 0);
+        assert_eq!(
+            db.n("select count(*) from jobs where kind='fix'", vec![]),
+            0
+        );
         assert!(db.queue_hunter_find("o/s", 101, &data).unwrap());
     }
 }
