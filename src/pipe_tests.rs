@@ -174,7 +174,7 @@ mod t {
         let good=format!("{sha}\trefs/heads/fix/1");
         assert_eq!(remote_branch_sha(&good,"fix/1").unwrap(),Some(sha.clone()));
         assert_eq!(remote_branch_sha("","fix/1").unwrap(),None);
-        for bad in [format!("{good}\n{good}"),format!("{sha}\trefs/heads/fix/2"),format!("bad\trefs/heads/fix/1"),format!("{sha} refs/heads/fix/1")] {
+        for bad in [format!("{good}\n{good}"),format!("{sha}\trefs/heads/fix/2"),"bad\trefs/heads/fix/1".to_string(),format!("{sha} refs/heads/fix/1")] {
             assert!(remote_branch_sha(&bad,"fix/1").is_err());
         }
     }
