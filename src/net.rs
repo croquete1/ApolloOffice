@@ -90,6 +90,8 @@ fn gpu_sample(line: &str) -> Option<serde_json::Value> {
 static FAIL: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, u32>>> =
     std::sync::LazyLock::new(Default::default);
 
+const FRESH_MS: i64 = 20_000;
+
 static NEXT_PROBE: AtomicU64 = AtomicU64::new(1);
 #[derive(Default)]
 struct ProbeBook {
@@ -122,7 +124,7 @@ impl ProbeBook {
                 .checked
                 .get(key)
                 .and_then(|last| at.checked_sub(*last))
-                .is_some_and(|age| (0..=20_000).contains(&age))
+                .is_some_and(|age| (0..=FRESH_MS).contains(&age))
     }
 }
 
@@ -290,16 +292,57 @@ fn all_keys(a: &Ax) -> Vec<String> {
     ks
 }
 
-fn missing_keys(a: &Ax, keys: &[String]) -> Vec<String> {
+fn missing_snapshot(a: &Ax, keys: &[String]) -> (Vec<String>, bool) {
     // Match the publication/down lock order. Read availability and its
     // freshness together, rather than combining two different generations.
     let live = a.lv.lock().unwrap();
     let probes = PROBES.lock().unwrap();
     let at = now();
-    keys.iter()
+    let missing: Vec<String> = keys
+        .iter()
         .filter(|key| !probes.fresh(key, at) || live.o.net.get(*key) != Some(&true))
         .cloned()
-        .collect()
+        .collect();
+    // Only retry immediately when every missing key has an expired success.
+    // Failed, pending, unknown and future-dated observations still defer.
+    let expired_only = !missing.is_empty()
+        && missing.iter().all(|key| {
+            live.o.net.get(key) == Some(&true)
+                && !probes.pending.contains_key(key)
+                && probes
+                    .checked
+                    .get(key)
+                    .and_then(|last| at.checked_sub(*last))
+                    .is_some_and(|age| age > FRESH_MS)
+        });
+    (missing, expired_only)
+}
+
+fn missing_keys(a: &Ax, keys: &[String]) -> Vec<String> {
+    missing_snapshot(a, keys).0
+}
+
+async fn refresh_missing_with<F, Fut>(a: &Ax, keys: &[String], probe_keys: F) -> Vec<String>
+where
+    F: Fn(Vec<String>) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let mut missing = missing_keys(a, keys);
+    // A slow check may outlive the freshness of a faster one. Allow two
+    // immediate selective refreshes before applying ordinary backoff.
+    // The bound prevents an endless loop when no fresh overlap is possible.
+    for _ in 0..3 {
+        if missing.is_empty() {
+            break;
+        }
+        probe_keys(missing).await;
+        let (remaining, expired_only) = missing_snapshot(a, keys);
+        missing = remaining;
+        if !expired_only {
+            break;
+        }
+    }
+    missing
 }
 
 /// Single availability check for an explicitly restartable phase boundary.
@@ -310,7 +353,7 @@ pub async fn need_once(a: &Ax, ks: &[&str]) -> R<()> {
 
 async fn need_once_with<F, Fut>(a: &Ax, ks: &[&str], probe_keys: F) -> R<()>
 where
-    F: FnOnce(Vec<String>) -> Fut,
+    F: Fn(Vec<String>) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
     let keys = ks
@@ -318,13 +361,9 @@ where
         .filter(|k| !k.is_empty())
         .map(|k| k.to_string())
         .collect::<Vec<_>>();
-    let missing = missing_keys(a, &keys);
-    if !missing.is_empty() {
-        probe_keys(missing).await;
-    }
     // An overlapping newer probe owns the decision. Defer conservatively
     // rather than authorizing work with a rejected older result.
-    let missing = missing_keys(a, &keys);
+    let missing = refresh_missing_with(a, &keys, probe_keys).await;
     if missing.is_empty() {
         return Ok(());
     }
@@ -347,11 +386,10 @@ pub async fn need(a: &Ax, w: &str, ks: &[&str]) -> R<()> {
         .map(|k| k.to_string())
         .collect();
     loop {
-        let missing = missing_keys(a, &ks);
-        if !missing.is_empty() {
-            probe(a, &missing).await;
-        }
-        let miss = missing_keys(a, &ks);
+        let miss = refresh_missing_with(a, &ks, |keys| async move {
+            probe(a, &keys).await
+        })
+        .await;
         if miss.is_empty() {
             return Ok(());
         }
@@ -593,6 +631,86 @@ mod gpu_telemetry_tests {
             PROBES.lock().unwrap().invalidate(key);
             FAIL.lock().unwrap().remove(key);
         }
+    }
+
+    #[tokio::test]
+    async fn expired_success_is_refreshed_before_backoff() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            47300,
+            "apollo-office".into(),
+        ));
+        let fast = "fixture-expiry-fast";
+        let slow = "fixture-expiry-slow";
+        let rounds = std::cell::Cell::new(0);
+        let rounds_ref = &rounds;
+        let a_ref = &a;
+        let result = need_once_with(&a, &[fast, slow], |keys| async move {
+            let round = rounds_ref.get();
+            rounds_ref.set(round + 1);
+            if round == 0 {
+                assert_eq!(keys, vec![fast.to_string(), slow.to_string()]);
+                let ticket = begin_probe(fast);
+                let fast_keys = [fast.to_string()];
+                publish_probe_results(a_ref, &fast_keys, vec![ticket], vec![(true, None)]);
+                // Simulate completions at 1s and 25s without real sleeps.
+                PROBES
+                    .lock()
+                    .unwrap()
+                    .checked
+                    .insert(fast.to_string(), now() - 24_000);
+                let ticket = begin_probe(slow);
+                let slow_keys = [slow.to_string()];
+                publish_probe_results(a_ref, &slow_keys, vec![ticket], vec![(true, None)]);
+            } else {
+                assert_eq!(round, 1);
+                assert_eq!(keys, vec![fast.to_string()]);
+                let ticket = begin_probe(fast);
+                publish_probe_results(a_ref, &keys, vec![ticket], vec![(true, None)]);
+            }
+        })
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(rounds.get(), 2);
+        for key in [fast, slow] {
+            PROBES.lock().unwrap().invalidate(key);
+            FAIL.lock().unwrap().remove(key);
+        }
+    }
+
+    #[tokio::test]
+    async fn immediate_refresh_is_bounded_when_success_never_stays_fresh() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            47300,
+            "apollo-office".into(),
+        ));
+        let host = "fixture-expiry-bounded";
+        a.db.run(
+            "insert into hs(id,on_) values(?,1)",
+            crate::pa![host.to_string()],
+        );
+        let rounds = std::cell::Cell::new(0);
+        let rounds_ref = &rounds;
+        let a_ref = &a;
+        let result = need_once_with(&a, &[host], |keys| async move {
+            rounds_ref.set(rounds_ref.get() + 1);
+            assert_eq!(keys, vec![host.to_string()]);
+            let ticket = begin_probe(host);
+            publish_probe_results(a_ref, &keys, vec![ticket], vec![(true, None)]);
+            PROBES
+                .lock()
+                .unwrap()
+                .checked
+                .insert(host.to_string(), now() - FRESH_MS - 1);
+        })
+        .await;
+        assert!(matches!(result, Err(X::Defer(_))));
+        assert_eq!(rounds.get(), 3);
+        PROBES.lock().unwrap().invalidate(host);
+        FAIL.lock().unwrap().remove(host);
     }
 
     #[test]
