@@ -429,19 +429,11 @@ mod gpu_telemetry_tests {
         let result = need_once_with(&a, &[host], |keys| async move {
             let older = begin_probe(host);
             newer_ref.set(begin_probe(host));
-            publish_probe_results(
-                a_ref,
-                &keys,
-                vec![older],
-                vec![(true, Some(hw("cpu 8")))],
-            );
+            publish_probe_results(a_ref, &keys, vec![older], vec![(true, Some(hw("cpu 8")))]);
         })
         .await;
         assert!(matches!(result, Err(X::Defer(_))));
-        assert_eq!(
-            PROBES.lock().unwrap().pending.get(host),
-            Some(&newer.get())
-        );
+        assert_eq!(PROBES.lock().unwrap().pending.get(host), Some(&newer.get()));
         assert!(!fresh(host));
         let keys = [host.to_string()];
         publish_probe_results(
