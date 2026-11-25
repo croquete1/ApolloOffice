@@ -1,4 +1,4 @@
-import json, os, sys
+import json, os, subprocess, sys
 
 D = os.environ["FAKE_GH_DIR"]
 a = sys.argv[1:]
@@ -24,6 +24,27 @@ def opt(k):
 
 open(os.path.join(D, "calls.log"), "a").write(json.dumps(a) + "\n")
 R = os.environ.get("FAKE_GH_REPO", "o/r")
+
+
+def rest_pr(pr):
+    # Resolve the actual pushed SHA from the isolated bare Git fixture.
+    branch = pr["head"]
+    remote = os.path.join(os.path.dirname(D), "remotes", R + ".git")
+    sha = subprocess.check_output(
+        ["git", "--git-dir", remote, "rev-parse", "refs/heads/" + branch],
+        text=True,
+    ).strip()
+    return {
+        "id": pr["number"],
+        "number": pr["number"],
+        "state": pr.get("state", "open"),
+        "html_url": pr["url"],
+        "title": pr["title"],
+        "body": pr["body"],
+        "head": {"repo": {"full_name": R}, "ref": branch, "sha": sha},
+        "base": {"repo": {"full_name": R}, "ref": pr["base"]},
+    }
+
 if a[:2] == ["auth", "token"]:
     print("fake-token")
     sys.exit(0)
@@ -45,7 +66,14 @@ if a[0] == "api":
               "created_at": i.get("createdAt", i["updatedAt"]), "updated_at": i["updatedAt"]}
              for i in ld("issues.json", [])])
     if p.startswith(f"repos/{R}/pulls?state=open&"):
-        out([])
+        out([rest_pr(pr) for pr in ld("prs.json", []) if pr.get("state", "open") == "open"])
+    if p.startswith(f"repos/{R}/pulls/"):
+        number = p.rsplit("/", 1)[-1]
+        for pr in ld("prs.json", []):
+            if str(pr["number"]) == number:
+                out(rest_pr(pr))
+        sys.stderr.write("HTTP 404: Not Found")
+        sys.exit(1)
     if "/timeline" in p or "/comments" in p or "/reviews" in p:
         out([[]] if "--slurp" in a else [])
     if "/contents/" in p:
