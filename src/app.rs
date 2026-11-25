@@ -74,6 +74,8 @@ pub struct App {
     pub act: Mutex<HashSet<String>>,
     // Serializes npm-cache maintenance with new work admission per host.
     pub cache_maintenance: Mutex<HashSet<String>>,
+    // Hold Hunter admission when a failure counter could not be persisted.
+    pub hunt_storage_holds: Mutex<HashSet<String>>,
     pub lk: Mutex<HashSet<i64>>,
     pub lanes: Mutex<HashSet<String>>,
     pub sem: Mutex<HashMap<String, usize>>,
@@ -231,6 +233,7 @@ impl App {
                 .unwrap(),
             act: Mutex::new(HashSet::new()),
             cache_maintenance: Mutex::new(HashSet::new()),
+            hunt_storage_holds: Mutex::new(HashSet::new()),
             lk: Mutex::new(HashSet::new()),
             lanes: Mutex::new(HashSet::new()),
             sem: Mutex::new(HashMap::new()),
