@@ -711,10 +711,7 @@ mod t {
             47300,
             PathBuf::from("/tmp/apollo-vet-test/apollo-office"),
         ));
-        a.db.run(
-            "insert into rp(full) values('sample/repo')",
-            crate::pa![],
-        );
+        a.db.run("insert into rp(full) values('sample/repo')", crate::pa![]);
         a.db.run(
             "insert into jobs(id,repo,st) values(42,'sample/repo','vet'),(43,'sample/repo','drop'),(44,'missing/repo','vet')",
             crate::pa![],
