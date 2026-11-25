@@ -80,6 +80,28 @@ fn st(a: &Ax, f: impl FnOnce(&mut Value)) {
     a.db.ks("upd", &v);
 }
 
+fn persist_staged_receipt(db: &crate::db::Db, receipt: &Value) -> rusqlite::Result<()> {
+    use rusqlite::OptionalExtension;
+    let mut connection = db.0.lock().unwrap();
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let raw: Option<String> = tx
+        .query_row("select v from kv where k='upd'", [], |row| row.get(0))
+        .optional()?;
+    let mut state = match raw {
+        Some(raw) => serde_json::from_str::<Value>(&raw)
+            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+        None => json!({}),
+    };
+    let fields = state.as_object_mut().ok_or(rusqlite::Error::InvalidQuery)?;
+    let proof = receipt.as_object().ok_or(rusqlite::Error::InvalidQuery)?;
+    fields.extend(proof.clone());
+    tx.execute(
+        "insert into kv(k,v) values('upd',?) on conflict(k) do update set v=excluded.v",
+        [state.to_string()],
+    )?;
+    tx.commit()
+}
+
 /// Rejects update channels without an explicit HTTPS origin and Ed25519 key.
 fn trusted_channel_inputs(
     url: Option<&str>,
@@ -301,14 +323,20 @@ pub async fn check(a: &Ax) -> Result<Value, String> {
         let f = staged(a);
         let tmp = f.with_extension("part");
         std::fs::write(&tmp, &bin).map_err(|e| e.to_string())?;
+        std::fs::File::open(&tmp)
+            .and_then(|file| file.sync_all())
+            .map_err(|e| e.to_string())?;
         std::fs::rename(&tmp, &f).map_err(|e| e.to_string())?;
-        st(a, |x| {
-            x["ready"] = json!(v);
-            x["sha"] = json!(want);
-            x["channel"] = json!(cid);
-            x["manifest_body"] = json!(base64::engine::general_purpose::STANDARD.encode(&body));
-            x["manifest_sig"] = json!(sig);
+        #[cfg(unix)]
+        std::fs::File::open(&a.dd)
+            .and_then(|dir| dir.sync_all())
+            .map_err(|e| e.to_string())?;
+        let receipt = json!({
+            "ready":v,"sha":want,"channel":cid,
+            "manifest_body":base64::engine::general_purpose::STANDARD.encode(&body),
+            "manifest_sig":sig
         });
+        persist_staged_receipt(&a.db, &receipt).map_err(|e| e.to_string())?;
         a.say(
             "submit",
             &format!("update {v} downloaded, it installs once the running jobs are done"),
@@ -619,6 +647,26 @@ pub fn cleanup(me: &Path) {
 mod t {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
+
+    #[test]
+    fn staging_receipt_reports_sqlite_write_failure() {
+        let db = crate::db::Db::mem();
+        db.ks("upd", &json!({"latest":"1.0.0","ready":"0.9.0"}));
+        db.0.lock().unwrap().execute_batch(
+            "create trigger reject_update_receipt before update on kv when new.k='upd' begin select raise(abort,'fixture'); end;"
+        ).unwrap();
+        let receipt = json!({"ready":"1.0.0","sha":"fixture"});
+        assert!(persist_staged_receipt(&db, &receipt).is_err());
+        assert_eq!(db.kg("upd")["ready"], "0.9.0");
+        db.0
+            .lock()
+            .unwrap()
+            .execute_batch("drop trigger reject_update_receipt")
+            .unwrap();
+        persist_staged_receipt(&db, &receipt).unwrap();
+        assert_eq!(db.kg("upd")["ready"], "1.0.0");
+        assert_eq!(db.kg("upd")["latest"], "1.0.0");
+    }
 
     #[test]
     fn staged_update_reader_enforces_size_bound() {
