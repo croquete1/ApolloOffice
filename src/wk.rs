@@ -2366,6 +2366,21 @@ pub(crate) fn reply_confirmed(rows: &[Value], author: &str, body: &str) -> bool 
     })
 }
 
+// None means remote evidence is incomplete; defer without changing delivery state.
+fn watcher_reply_remote_matches(pr: &Value, source_head: &str) -> Option<bool> {
+    match pr["state"].as_str() {
+        Some("MERGED" | "CLOSED") => Some(false),
+        Some("OPEN") => {
+            let head = pr["headRefOid"].as_str()?;
+            if !crate::db::valid_git_sha(head) || !crate::db::valid_git_sha(source_head) {
+                return None;
+            }
+            Some(head == source_head)
+        }
+        _ => None,
+    }
+}
+
 async fn deliver_watcher_outbox(a: &Ax, me: &str) -> R<()> {
     // Pending sends first, then ambiguous sends. No uncertain row can be claimed again.
     let rows=a.db.try_all("select * from watcher_outbox where author=? and (state='pending' or (state='uncertain' and updated<=?)) order by updated,id limit 20",pa![me.to_string(),now()-600_000]).map_err(|e|X::E(e.to_string()))?;
@@ -2438,7 +2453,7 @@ async fn deliver_watcher_outbox(a: &Ax, me: &str) -> R<()> {
                 "-R",
                 repo,
                 "--json",
-                "state",
+                "state,headRefOid",
             ],
             45,
         )
@@ -2446,19 +2461,22 @@ async fn deliver_watcher_outbox(a: &Ax, me: &str) -> R<()> {
         else {
             continue;
         };
-        match pr["state"].as_str() {
-            Some("OPEN") => {}
-            Some("MERGED" | "CLOSED") => {
-                a.db.finish_watcher_reply(id, "cancelled")
-                    .map_err(|e| X::E(e.to_string()))?;
-                a.say(
-                    "watcher",
-                    &format!("{tag}: unsent reply cancelled because PR is no longer open"),
-                    None,
-                );
+        match watcher_reply_remote_matches(&pr, row["source_head"].as_str().unwrap_or("")) {
+            Some(true) => {}
+            Some(false) => {
+                if a.db
+                    .finish_watcher_reply(id, "cancelled")
+                    .map_err(|e| X::E(e.to_string()))?
+                {
+                    a.say(
+                        "watcher",
+                        &format!("{tag}: unsent reply cancelled because PR closed or HEAD changed"),
+                        None,
+                    );
+                }
                 continue;
             }
-            _ => continue,
+            None => continue,
         }
         let identity = ghj(&["api", "user"], 45).await.map_err(X::E)?;
         if identity["login"].as_str() != Some(author) {
@@ -2647,6 +2665,38 @@ mod t {
             body
         ));
         assert!(!reply_confirmed(&[], "owner", body));
+    }
+
+    #[test]
+    fn pending_reply_requires_exact_remote_head_and_open_state() {
+        let head = "a".repeat(40);
+        let other = "b".repeat(40);
+        assert_eq!(
+            watcher_reply_remote_matches(&json!({"state":"OPEN","headRefOid":head}), &head),
+            Some(true)
+        );
+        assert_eq!(
+            watcher_reply_remote_matches(&json!({"state":"OPEN","headRefOid":other}), &head),
+            Some(false)
+        );
+        for state in ["CLOSED", "MERGED"] {
+            assert_eq!(
+                watcher_reply_remote_matches(&json!({"state":state}), &head),
+                Some(false)
+            );
+        }
+        for incomplete in [
+            json!({}),
+            json!({"state":"OPEN"}),
+            json!({"state":"OPEN","headRefOid":"invalid"}),
+            json!({"state":"UNKNOWN","headRefOid":head}),
+        ] {
+            assert_eq!(watcher_reply_remote_matches(&incomplete, &head), None);
+        }
+        assert_eq!(
+            watcher_reply_remote_matches(&json!({"state":"OPEN","headRefOid":head}), ""),
+            None
+        );
     }
 
     #[test]
