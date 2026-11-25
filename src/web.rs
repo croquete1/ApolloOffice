@@ -2891,10 +2891,7 @@ mod t {
     fn repository_deactivation_serializes_with_vet_admission() {
         let db = crate::db::Db::mem();
         db.run("insert into rp(full,on_) values('o/r',1)", pa![]);
-        db.run(
-            "insert into jobs(id,repo,st) values(42,'o/r','vet')",
-            pa![],
-        );
+        db.run("insert into jobs(id,repo,st) values(42,'o/r','vet')", pa![]);
         let a = std::sync::Arc::new(crate::app::App::new(
             db,
             std::env::temp_dir(),
