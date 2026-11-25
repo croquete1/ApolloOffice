@@ -373,12 +373,18 @@ fn staged_checksum(
     Ok(checksum.to_string())
 }
 
+fn valid_staged_size(size: u64) -> bool {
+    (1..=MAX_UPDATE_BYTES as u64).contains(&size)
+}
+
 /// Checks that the staged update is still authorized by the trusted signer.
 pub fn ready(a: &Ax) -> bool {
     let Ok((url, key)) = channel() else {
         return false;
     };
-    staged(a).exists()
+    staged(a)
+        .metadata()
+        .is_ok_and(|m| m.is_file() && valid_staged_size(m.len()))
         && staged_checksum(&a.db.kg("upd"), &url, &key, crate::app::V, asset()).is_ok()
 }
 
@@ -596,6 +602,10 @@ mod t {
 
     #[test]
     fn staged_update_reader_enforces_size_bound() {
+        assert!(!valid_staged_size(0));
+        assert!(valid_staged_size(1));
+        assert!(valid_staged_size(MAX_UPDATE_BYTES as u64));
+        assert!(!valid_staged_size(MAX_UPDATE_BYTES as u64 + 1));
         assert_eq!(read_bounded_update(&b"1234"[..], 4).unwrap(), b"1234");
         assert!(read_bounded_update(&b"12345"[..], 4).is_err());
         assert!(read_bounded_update(&b""[..], 4).is_err());
