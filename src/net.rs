@@ -1,7 +1,7 @@
 use crate::app::{sl, Ax, R, X};
 use crate::db::now;
 use crate::sh::{gh, ho, hosts, hraw};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 const HW: &str = r#"o=$(uname -s); echo "os $o"
 if [ "$o" = Darwin ]; then echo "cpu $(sysctl -n hw.ncpu)"; echo "load $(sysctl -n vm.loadavg | awk '{print $2}')"; p=$(pagesize); echo "mem $(($(sysctl -n hw.memsize)/1048576)) $(vm_stat | awk -v p=$p '/Pages (free|inactive|speculative)/{gsub(/[.]/,"",$NF);s+=$NF} END{print int(s*p/1048576)}')"
@@ -90,19 +90,34 @@ static LAST: AtomicI64 = AtomicI64::new(0);
 static FAIL: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, u32>>> =
     std::sync::LazyLock::new(Default::default);
 
-async fn ck(a: &Ax, k: &str) -> bool {
+static NEXT_PROBE: AtomicU64 = AtomicU64::new(1);
+static PROBES: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn begin_probe(key: &str) -> u64 {
+    let mut probes = PROBES.lock().unwrap();
+    let ticket = NEXT_PROBE.fetch_add(1, Ordering::Relaxed);
+    probes.insert(key.to_string(), ticket);
+    ticket
+}
+
+async fn ck(a: &Ax, k: &str) -> (bool, Option<serde_json::Value>) {
     match k {
-        "gh" => gh(&["api", "rate_limit", "--jq", ".rate.remaining"], 30)
-            .await
-            .is_ok(),
-        "an" if crate::routing::enabled(a) => true,
-        "an" => {
-            a.hc.get("https://api.anthropic.com/")
-                .timeout(std::time::Duration::from_secs(15))
-                .send()
+        "gh" => (
+            gh(&["api", "rate_limit", "--jq", ".rate.remaining"], 30)
                 .await
-                .is_ok()
-        }
+                .is_ok(),
+            None,
+        ),
+        "an" if crate::routing::enabled(a) => (true, None),
+        "an" => (
+                a.hc.get("https://api.anthropic.com/")
+                    .timeout(std::time::Duration::from_secs(15))
+                    .send()
+                    .await
+                    .is_ok(),
+                None,
+            ),
         h => match ho(a, h) {
             Some(x) => {
                 let dkcheck = format!(
@@ -118,21 +133,27 @@ async fn ck(a: &Ax, k: &str) -> bool {
                     45,
                 )
                 .await;
-                if o.c == 0 {
-                    a.lv.lock().unwrap().hst.insert(h.to_string(), hw(&o.o));
-                }
-                o.c == 0
+                (o.c == 0, (o.c == 0).then(|| hw(&o.o)))
             }
-            None => false,
+            None => (false, None),
         },
     }
 }
 
 pub async fn probe(a: &Ax, ks: &[String]) {
+    let tickets: Vec<_> = ks.iter().map(|k| begin_probe(k)).collect();
     let v = futures::future::join_all(ks.iter().map(|k| ck(a, k))).await;
     let mut l = a.lv.lock().unwrap();
+    let mut probes = PROBES.lock().unwrap();
     let mut f = FAIL.lock().unwrap();
-    for (k, ok) in ks.iter().zip(v) {
+    for ((k, ticket), (ok, sample)) in ks.iter().zip(tickets).zip(v) {
+        if probes.get(k) != Some(&ticket) {
+            continue;
+        }
+        probes.remove(k);
+        if let Some(sample) = sample {
+            l.hst.insert(k.clone(), sample);
+        }
         let n = if ok {
             0
         } else {
@@ -153,6 +174,7 @@ pub async fn probe(a: &Ax, ks: &[String]) {
 
 pub fn down(a: &Ax, k: &str) {
     let mut l = a.lv.lock().unwrap();
+    PROBES.lock().unwrap().remove(k);
     FAIL.lock().unwrap().insert(k.to_string(), 2);
     l.hst.remove(k);
     l.o.net.insert(k.to_string(), false);
@@ -250,7 +272,12 @@ mod gpu_telemetry_tests {
             live.hst.insert(host.into(), hw("cpu 8"));
             live.hst.insert(other.into(), hw("cpu 4"));
         }
+        let old = begin_probe(host);
+        let latest = begin_probe(host);
+        assert_ne!(old, latest);
+        assert_eq!(PROBES.lock().unwrap().get(host), Some(&latest));
         down(&a, host);
+        assert!(!PROBES.lock().unwrap().contains_key(host));
         let live = a.lv.lock().unwrap();
         assert!(!live.hst.contains_key(host));
         assert!(live.hst.contains_key(other));
