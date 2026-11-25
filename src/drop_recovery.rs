@@ -27,8 +27,11 @@ fn published_or_approved(j: &Job) -> bool {
     j.pr.is_some() || j.d["published_sha"].is_string() || j.d["ap"] == true || j.d["sq"] == true
 }
 
-fn attempts(j: &Job) -> u64 {
-    j.d["recovery_attempts"].as_u64().unwrap_or(0)
+fn attempts(j: &Job) -> Option<u64> {
+    match j.d.as_object()?.get("recovery_attempts") {
+        None => Some(0),
+        Some(value) => value.as_u64(),
+    }
 }
 
 fn eligible(j: &Job, automatic: bool) -> bool {
@@ -40,7 +43,7 @@ fn eligible(j: &Job, automatic: bool) -> bool {
     }
     category(&j.why) == "transitorio"
         && j.num > 0
-        && attempts(j) < MAX_AUTO_ATTEMPTS
+        && attempts(j).is_some_and(|n| n < MAX_AUTO_ATTEMPTS)
         && !j.d["br"].is_string()
         && j.d["rs"] != true
         && j.d["rp"] != true
@@ -161,9 +164,13 @@ pub fn retry(a: &Ax, id: i64, automatic: bool) -> Result<bool, &'static str> {
     }
     history.push(json!({"at":now(),"reason":j.why.clone(),"automatic":automatic}));
     data["drop_history"] = json!(history);
-    if automatic {
-        data["recovery_attempts"] = json!(attempts(&j) + 1);
-    }
+    let next_attempt = if automatic {
+        let n = attempts(&j).ok_or("Contador de recuperação inválido")? + 1;
+        data["recovery_attempts"] = json!(n);
+        Some(n)
+    } else {
+        None
+    };
     if let Some(map) = data.as_object_mut() {
         for key in [
             "h",
@@ -206,11 +213,8 @@ pub fn retry(a: &Ax, id: i64, automatic: bool) -> Result<bool, &'static str> {
     } else {
         "ready"
     };
-    let message = if automatic {
-        format!(
-            "Recuperação automática segura ({}/{MAX_AUTO_ATTEMPTS})",
-            attempts(&j) + 1
-        )
+    let message = if let Some(n) = next_attempt {
+        format!("Recuperação automática segura ({n}/{MAX_AUTO_ATTEMPTS})")
     } else {
         "Recolocado na fila pelo proprietário".to_string()
     };
@@ -405,6 +409,21 @@ mod tests {
             pa![now() - RETRY_DELAY_MS - 1, id],
         );
         id
+    }
+
+    #[test]
+    fn malformed_retry_counter_never_resets_automatic_budget() {
+        for counter in [json!(-1), json!(null), json!(0.5), json!("0")] {
+            let a = setup();
+            let id = dropped(
+                &a,
+                "machine kept failing: timed out",
+                json!({"recovery_attempts":counter}),
+            );
+            assert!(retry(&a, id, true).is_err());
+            assert_eq!(a.db.jg(id).unwrap().st, "drop");
+            assert!(attempts(&a.db.jg(id).unwrap()).is_none());
+        }
     }
 
     #[test]
