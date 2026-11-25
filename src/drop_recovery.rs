@@ -140,7 +140,11 @@ where
     // Evita que uma cache anterior bloqueie uma nova tentativa depois de a
     // branch principal mudar. Mantém as provas cired que ainda correspondem.
     let path = format!("repos/{}/commits/HEAD", job.repo);
-    let head = remote(vec!["api".into(), path, "--jq".into(), "{s: .sha}".into()], 60).await?;
+    let head = remote(
+        vec!["api".into(), path, "--jq".into(), "{s: .sha}".into()],
+        60,
+    )
+    .await?;
     cache_default_head(a, &job.repo, &head)?;
     retry_snapshot(a, &job, updated, false).map_err(|error| error.to_string())
 }
