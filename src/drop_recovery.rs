@@ -673,7 +673,10 @@ mod tests {
         for (prs, expected) in [
             (json!([null]), false),
             (json!([{"number":123,"title":"Unrelated"}]), false),
-            (json!([{"number":123,"title":"Unrelated","body":null}]), false),
+            (
+                json!([{"number":123,"title":"Unrelated","body":null}]),
+                false,
+            ),
             (json!([{"number":0,"title":"Unrelated","body":""}]), false),
             (json!([valid.clone(), valid.clone()]), false),
             (json!(vec![valid.clone(); 200]), false),
