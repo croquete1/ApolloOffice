@@ -379,6 +379,16 @@ where
 }
 
 pub async fn need(a: &Ax, w: &str, ks: &[&str]) -> R<()> {
+    need_with(a, w, ks, |keys| async move { probe(a, &keys).await }, sl).await
+}
+
+async fn need_with<F, Fut, W, Wait>(a: &Ax, w: &str, ks: &[&str], probe_keys: F, wait: W) -> R<()>
+where
+    F: Fn(Vec<String>) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+    W: Fn(u64) -> Wait,
+    Wait: std::future::Future<Output = ()>,
+{
     let mut b = 30_000u64;
     let ks: Vec<String> = ks
         .iter()
@@ -386,7 +396,7 @@ pub async fn need(a: &Ax, w: &str, ks: &[&str]) -> R<()> {
         .map(|k| k.to_string())
         .collect();
     loop {
-        let miss = refresh_missing_with(a, &ks, |keys| async move { probe(a, &keys).await }).await;
+        let miss = refresh_missing_with(a, &ks, &probe_keys).await;
         if miss.is_empty() {
             return Ok(());
         }
@@ -404,7 +414,7 @@ pub async fn need(a: &Ax, w: &str, ks: &[&str]) -> R<()> {
             ),
             None,
         );
-        sl(b).await;
+        wait(b).await;
         b = (b * 2).min(300_000);
     }
 }
@@ -631,7 +641,7 @@ mod gpu_telemetry_tests {
     }
 
     #[tokio::test]
-    async fn expired_success_is_refreshed_before_backoff() {
+    async fn need_refreshes_expired_success_before_backoff() {
         let a = std::sync::Arc::new(crate::app::App::new(
             crate::db::Db::mem(),
             std::env::temp_dir(),
@@ -643,7 +653,7 @@ mod gpu_telemetry_tests {
         let rounds = std::cell::Cell::new(0);
         let rounds_ref = &rounds;
         let a_ref = &a;
-        let result = need_once_with(&a, &[fast, slow], |keys| async move {
+        let check = |keys: Vec<String>| async move {
             let round = rounds_ref.get();
             rounds_ref.set(round + 1);
             if round == 0 {
@@ -666,6 +676,9 @@ mod gpu_telemetry_tests {
                 let ticket = begin_probe(fast);
                 publish_probe_results(a_ref, &keys, vec![ticket], vec![(true, None)]);
             }
+        };
+        let result = need_with(&a, "watcher", &[fast, slow], check, |_| async {
+            panic!("expired positive evidence must be refreshed before backoff");
         })
         .await;
         assert!(result.is_ok());
@@ -674,6 +687,47 @@ mod gpu_telemetry_tests {
             PROBES.lock().unwrap().invalidate(key);
             FAIL.lock().unwrap().remove(key);
         }
+    }
+
+    #[tokio::test]
+    async fn need_waits_for_pending_generation_before_authorizing() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            47300,
+            "apollo-office".into(),
+        ));
+        let host = "fixture-need-pending";
+        a.db.run(
+            "insert into hs(id,on_) values(?,1)",
+            crate::pa![host.to_string()],
+        );
+        let lease = try_begin_probe(host).unwrap();
+        let waits = std::cell::Cell::new(0);
+        let a_ref = &a;
+        let check = |keys: Vec<String>| async move {
+            assert_eq!(keys, vec![host.to_string()]);
+            probe_with(a_ref, &keys, |_| async {
+                panic!("pending generation must not be superseded");
+            })
+            .await;
+        };
+        let wait = |ms| {
+            assert_eq!(ms, 30_000);
+            assert_eq!(waits.get(), 0);
+            assert!(!fresh(host));
+            waits.set(1);
+            let keys = [host.to_string()];
+            publish_probe_results(&a, &keys, vec![lease.ticket], vec![(true, None)]);
+            std::future::ready(())
+        };
+        let result = need_with(&a, "watcher", &[host], check, wait).await;
+        assert!(result.is_ok());
+        assert_eq!(waits.get(), 1);
+        assert!(fresh(host));
+        drop(lease);
+        PROBES.lock().unwrap().invalidate(host);
+        FAIL.lock().unwrap().remove(host);
     }
 
     #[tokio::test]
