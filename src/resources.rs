@@ -309,6 +309,7 @@ mod tests {
             hw["disk"] = invalid;
             assert_eq!(capacity("performance", 4, &hw, at), (4, "profile"));
         }
+        hw["disk"] = json!([100, 0]);
         hw["mem"][1] = json!(100);
         assert_eq!(
             capacity("performance", 4, &hw, at),
