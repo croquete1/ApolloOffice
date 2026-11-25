@@ -320,6 +320,11 @@ Este registo atualiza os estados históricos anteriores. Os merges abaixo foram 
 | #86 | `91b7949913f5c6f5a16146f6b98adba71ab81c27` | #116 (45506660407) | F04: links de acesso e sessões transacionais |
 | #87 | `c536f982bcec5cdd1ef6c77fd63fde2026972efa` | #119 (45508555167) | F04/F16: sessões Google e registo de evidência |
 | #88 | `a213b92f7a81ba6e15fcf55c55e3c023a7946577` | #122 (45510012042) | F04/F05: recuperação inicial transacional |
+| #89 | `701a9e6b28a37bf2cf3fd9173f88a24f3b2394b5` | #125 (45511464910) | F04/F10: cancelamento e aprovação atómica |
+
+CI #125 aprovou integralmente o HEAD `4a422b102da1a4b476cd51ca13ef260e5b7826a3`, incluindo os dois E2E que falharam no #124. Aprendizagem: reserva de lane pode prolongar-se após publicação do estado approve; publicar metadados e aprovação juntos, sem recusar ação legítima durante limpeza.
+
+F03/F04/F10 — lote seguinte: serializar remoção de repositórios com reservas de lane, Vet e merge; cancelar submissões em fila, recusar estado ativo persistente, revalidar existência na admissão e política depois da reserva de merge. Testes de regressão adicionados. CI #127 (45512635816), HEAD `881e2b18735c60d6407405d11d2e338ae3fe2e32`: Ubuntu falhou Rustfmt em três hunks; Windows aprovou 308 unitários e falhou um (resources::tests::night_and_pressure_limit_only_new_admissions), cujo fixture criava tarefas de repositórios não registados. Corrigidos os três hunks e registados os três repositórios no fixture, preservando as asserções de capacidade e pressão térmica. Aprendizagem: ao introduzir uma pré-condição transversal de admissão, rever também fixtures de módulos consumidores, não apenas os testes do scheduler. Novo CI pendente; não equivale a revogação de chamadas remotas já iniciadas nem eliminação de toda a concorrência do Scout/Watcher.
 
 CI #122 validou integralmente o HEAD `763d220327309533c06e3442da2754f626217be9` em Ubuntu/Windows, incluindo Docker e SSH reais em runners isolados. F04/F05 continuam parciais.
 

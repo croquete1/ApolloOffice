@@ -117,14 +117,48 @@ fn owner_job_transition(
 fn remove_repository(db: &crate::db::Db, repo: &str) -> rusqlite::Result<()> {
     let mut c = db.0.lock().unwrap();
     let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let active: bool = tx.query_row(
+        "select exists(select 1 from jobs where repo=? and st in ('hunt','repro','fix','ci','review','gate'))",
+        [repo],
+        |row| row.get(0),
+    )?;
+    if active {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
     tx.execute("delete from rp where full=?", [repo])?;
     tx.execute(
-        "update jobs set st='drop', why='repository removed' where repo=? and st in ('vet','ready','approve','park')",
+        "update jobs set st='drop', why='repository removed' where repo=? and st in ('vet','ready','approve','park','submit')",
         [repo],
     )?;
     tx.commit()?;
     crate::app::chg();
     Ok(())
+}
+
+// Called under update_transition, so no lane, Vet or merge can acquire
+// a new reservation while removal is checking the existing reservations.
+fn repository_removal_idle(a: &Ax, repo: &str) -> bool {
+    if a.drain.load(std::sync::atomic::Ordering::SeqCst)
+        || a.act
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|entry| entry.split_once(' ').is_some_and(|(r, _)| r == repo))
+        || a.merge_in_progress.lock().unwrap().contains(repo)
+    {
+        return false;
+    }
+    let mut reserved: Vec<i64> = a.lk.lock().unwrap().iter().copied().collect();
+    reserved.extend(a.vtk.lock().unwrap().iter().copied());
+    reserved.into_iter().all(|id| {
+        matches!(
+            a.db.try_n(
+                "select count(*) from jobs where id=? and repo<>?",
+                pa![id, repo.to_string()],
+            ),
+            Ok(1)
+        )
+    })
 }
 
 fn save_repo_settings(db: &crate::db::Db, repo: &str, b: &Value) -> rusqlite::Result<()> {
@@ -2048,6 +2082,10 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                     js(json!({"ci": c, "setup": s}))
                 }
                 "del" => {
+                    let _transition = a.update_transition.lock().unwrap();
+                    if !repository_removal_idle(a, &r) {
+                        return er(StatusCode::CONFLICT, "wait for repository work to finish");
+                    }
                     if remove_repository(&a.db, &r).is_err() {
                         return er(StatusCode::CONFLICT, "repository was not removed");
                     }
@@ -2841,6 +2879,48 @@ mod t {
             ),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn repository_removal_blocks_reserved_work_and_cancels_queued_submission() {
+        let db = crate::db::Db::mem();
+        db.run("insert into rp(full) values('o/r'),('other/r')", pa![]);
+        db.run(
+            "insert into jobs(id,repo,st) values(1,'o/r','ready'),(2,'o/r','vet'),(3,'o/r','submit'),(4,'other/r','ready')",
+            pa![],
+        );
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::env::temp_dir(),
+            1,
+            "x".into(),
+        ));
+        let request = || {
+            api(
+                &a,
+                &Method::POST,
+                "/api/repo",
+                "",
+                json!({"op":"del","full":"o/r"}),
+            )
+        };
+        a.lk.lock().unwrap().insert(1);
+        assert_eq!(request().await.status(), StatusCode::CONFLICT);
+        a.lk.lock().unwrap().clear();
+        a.vtk.lock().unwrap().insert(2);
+        assert_eq!(request().await.status(), StatusCode::CONFLICT);
+        a.vtk.lock().unwrap().clear();
+        a.merge_in_progress.lock().unwrap().insert("o/r".into());
+        assert_eq!(request().await.status(), StatusCode::CONFLICT);
+        a.merge_in_progress.lock().unwrap().clear();
+        a.db.run("update jobs set st='fix' where id=1", pa![]);
+        assert_eq!(request().await.status(), StatusCode::CONFLICT);
+        a.db.run("update jobs set st='ready' where id=1", pa![]);
+        a.lk.lock().unwrap().insert(4);
+        assert_eq!(request().await.status(), StatusCode::OK);
+        assert_eq!(a.db.n("select count(*) from rp where full='o/r'", pa![]), 0);
+        assert_eq!(a.db.jg(3).unwrap().st, "drop");
+        assert_eq!(a.db.jg(4).unwrap().st, "ready");
     }
 
     #[test]

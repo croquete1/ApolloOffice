@@ -971,6 +971,16 @@ pub async fn run(a: &Ax, repo: &str, listed: &[Value], assessed: &[Value]) {
     let Some(_permit) = MergePermit::acquire(a, repo) else {
         return;
     };
+    // A removal or policy change may have occurred before acquiring the permit.
+    if !matches!(
+        a.db.try_n(
+            "select auto_merge from rp where full=? and on_=1",
+            pa![repo.to_string()],
+        ),
+        Ok(1)
+    ) {
+        return;
+    }
     for (pr, status) in listed.iter().zip(assessed.iter()) {
         match try_one(a, repo, pr, status).await {
             Ok(true) => return,
