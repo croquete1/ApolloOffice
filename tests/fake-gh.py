@@ -72,7 +72,19 @@ if a[0] == "api":
         # Only the private fixture opts in; record the fault before returning.
         marker = os.path.join(D, "receipt-fault.json")
         if os.environ.get("FAKE_GH_FAIL_RECEIPT_ONCE") == "1" and not os.path.exists(marker):
-            sv("receipt-fault.json", {"endpoint": p})
+            # Move main to a conflicting commit after the original PR exists.
+            # Receipt recovery must not rebase or republish that PR.
+            seed = os.path.join(os.path.dirname(D), "seed")
+            remote = os.path.join(os.path.dirname(D), "remotes", R + ".git")
+            with open(os.path.join(seed, "add.sh"), "w") as changed:
+                changed.write("add() { echo $(( $1 * $2 )); }\n")
+            subprocess.check_call(["git", "-C", seed, "add", "add.sh"])
+            subprocess.check_call(
+                ["git", "-C", seed, "-c", "user.name=fixture", "-c",
+                 "user.email=fixture@example.test", "commit", "-qm", "conflicting main"]
+            )
+            subprocess.check_call(["git", "-C", seed, "push", "-q", remote, "main"])
+            sv("receipt-fault.json", {"endpoint": p, "main_advanced": True})
             sys.stderr.write("HTTP 503: injected receipt verification failure")
             sys.exit(1)
         number = p.rsplit("/", 1)[-1]
