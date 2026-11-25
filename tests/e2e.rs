@@ -282,6 +282,9 @@ async fn full_run(pv: bool) {
     )
     .await;
     assert!(r["error"].is_null(), "{r}");
+    // Private fixtures inject a receipt failure after publication. Allow
+    // the real scheduler's backoff plus time for remote verification.
+    let submission_timeout = Duration::from_secs(if pv { 300 } else { 120 });
     let t0 = Instant::now();
     loop {
         let s = get("/api/state").await;
@@ -290,7 +293,7 @@ async fn full_run(pv: bool) {
             break;
         }
         assert!(
-            t0.elapsed() < Duration::from_secs(120),
+            t0.elapsed() < submission_timeout,
             "not submitted: {}",
             s["ev"]
         );
