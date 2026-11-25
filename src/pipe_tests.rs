@@ -1321,7 +1321,7 @@ mod t {
         assert_eq!(select_submit_pr(std::slice::from_ref(&remote),"o/r",&publication).unwrap(),Some(12));
         assert!(select_submit_pr(&[json!({})],"o/r",&publication).is_err());
         assert!(select_submit_pr(&[remote.clone(),remote.clone()],"o/r",&publication).is_err());
-        for (field,value) in [("sha",json!("b".repeat(40))),("repo",Value::Null)] {
+        for (field,value) in [("sha",json!("b".repeat(40))),("repo",Value::Null),("repo",json!({"full_name":""}))] {
             let mut changed=remote.clone();
             changed["head"][field]=value;
             assert!(select_submit_pr(&[changed],"o/r",&publication).is_err());
