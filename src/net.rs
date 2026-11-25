@@ -136,9 +136,12 @@ pub async fn probe(a: &Ax, ks: &[String]) {
         let n = if ok {
             0
         } else {
-            f.get(k).copied().unwrap_or(0) + 1
+            f.get(k).copied().unwrap_or(0).saturating_add(1)
         };
         f.insert(k.clone(), n);
+        if !ok {
+            l.hst.remove(k);
+        }
         if l.o.net.insert(k.clone(), n < 2) == Some(false) && n == 0 && k != "gh" && k != "an" {
             let (a2, id) = (a.clone(), k.clone());
             tokio::spawn(async move { crate::sh::orph(&a2, &id).await });
@@ -149,8 +152,10 @@ pub async fn probe(a: &Ax, ks: &[String]) {
 }
 
 pub fn down(a: &Ax, k: &str) {
+    let mut l = a.lv.lock().unwrap();
     FAIL.lock().unwrap().insert(k.to_string(), 2);
-    a.lv.lock().unwrap().o.net.insert(k.to_string(), false);
+    l.hst.remove(k);
+    l.o.net.insert(k.to_string(), false);
 }
 
 pub async fn all(a: &Ax) {
@@ -229,6 +234,30 @@ pub async fn watch(a: Ax) {
 #[cfg(test)]
 mod gpu_telemetry_tests {
     use super::*;
+
+    #[test]
+    fn worker_down_invalidates_only_its_telemetry() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            47300,
+            "apollo-office".into(),
+        ));
+        let host = "fixture-telemetry-down";
+        let other = "fixture-telemetry-other";
+        {
+            let mut live = a.lv.lock().unwrap();
+            live.hst.insert(host.into(), hw("cpu 8"));
+            live.hst.insert(other.into(), hw("cpu 4"));
+        }
+        down(&a, host);
+        let live = a.lv.lock().unwrap();
+        assert!(!live.hst.contains_key(host));
+        assert!(live.hst.contains_key(other));
+        assert_eq!(live.o.net.get(host), Some(&false));
+        drop(live);
+        FAIL.lock().unwrap().remove(host);
+    }
 
     #[test]
     fn duplicate_numeric_samples_are_unavailable() {
