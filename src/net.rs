@@ -182,6 +182,15 @@ async fn ck(a: &Ax, k: &str) -> (bool, Option<serde_json::Value>) {
 pub async fn probe(a: &Ax, ks: &[String]) {
     let tickets: Vec<_> = ks.iter().map(|k| begin_probe(k)).collect();
     let v = futures::future::join_all(ks.iter().map(|k| ck(a, k))).await;
+    publish_probe_results(a, ks, tickets, v);
+}
+
+fn publish_probe_results(
+    a: &Ax,
+    ks: &[String],
+    tickets: Vec<u64>,
+    v: Vec<(bool, Option<serde_json::Value>)>,
+) {
     let mut l = a.lv.lock().unwrap();
     let mut probes = PROBES.lock().unwrap();
     let mut f = FAIL.lock().unwrap();
@@ -354,6 +363,41 @@ mod gpu_telemetry_tests {
         book.invalidate("a");
         assert!(!book.fresh("a", 22_001));
         assert!(book.fresh("b", 22_001));
+    }
+
+    #[test]
+    fn stale_probe_cannot_publish_after_newer_result_or_down() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            47300,
+            "apollo-office".into(),
+        ));
+        let host = "fixture-probe-publication";
+        let keys = [host.to_string()];
+        let older = begin_probe(host);
+        let newer = begin_probe(host);
+        let sample = hw("cpu 8");
+        publish_probe_results(&a, &keys, vec![newer], vec![(true, Some(sample.clone()))]);
+        publish_probe_results(&a, &keys, vec![older], vec![(false, None)]);
+        {
+            let live = a.lv.lock().unwrap();
+            assert_eq!(live.hst.get(host), Some(&sample));
+            assert_eq!(live.o.net.get(host), Some(&true));
+            assert_eq!(FAIL.lock().unwrap().get(host), Some(&0));
+        }
+        let late = begin_probe(host);
+        down(&a, host);
+        publish_probe_results(&a, &keys, vec![late], vec![(true, Some(hw("cpu 64")))]);
+        {
+            let live = a.lv.lock().unwrap();
+            assert!(!live.hst.contains_key(host));
+            assert_eq!(live.o.net.get(host), Some(&false));
+            assert_eq!(FAIL.lock().unwrap().get(host), Some(&2));
+        }
+        assert!(!fresh(host));
+        PROBES.lock().unwrap().invalidate(host);
+        FAIL.lock().unwrap().remove(host);
     }
 
     #[test]
