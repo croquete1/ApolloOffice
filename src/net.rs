@@ -278,10 +278,21 @@ pub fn down(a: &Ax, k: &str) {
     l.o.net.insert(k.to_string(), false);
 }
 
-pub async fn all(a: &Ax) {
+fn all_keys(a: &Ax) -> Vec<String> {
     let mut ks: Vec<String> = vec!["gh".into(), "an".into()];
     ks.extend(hosts(a).into_iter().filter(|h| h.on).map(|h| h.id));
-    probe(a, &ks).await;
+    ks
+}
+
+pub async fn all(a: &Ax) {
+    probe(a, &all_keys(a)).await;
+}
+
+fn missing_keys(a: &Ax, keys: &[String]) -> Vec<String> {
+    keys.iter()
+        .filter(|key| !fresh(key) || !a.net(key))
+        .cloned()
+        .collect()
 }
 
 /// Single availability check for an explicitly restartable phase boundary.
@@ -300,8 +311,9 @@ where
         .filter(|k| !k.is_empty())
         .map(|k| k.to_string())
         .collect::<Vec<_>>();
-    if keys.iter().any(|k| !fresh(k) || !a.net(k)) {
-        probe_keys(keys.clone()).await;
+    let missing = missing_keys(a, &keys);
+    if !missing.is_empty() {
+        probe_keys(missing).await;
     }
     // An overlapping newer probe owns the decision. Defer conservatively
     // rather than authorizing work with a rejected older result.
@@ -331,8 +343,9 @@ pub async fn need(a: &Ax, w: &str, ks: &[&str]) -> R<()> {
         .map(|k| k.to_string())
         .collect();
     loop {
-        if ks.iter().any(|k| !fresh(k) || !a.net(k)) {
-            probe(a, &ks).await;
+        let missing = missing_keys(a, &ks);
+        if !missing.is_empty() {
+            probe(a, &missing).await;
         }
         let miss: Vec<String> = ks
             .iter()
@@ -363,7 +376,12 @@ pub async fn need(a: &Ax, w: &str, ks: &[&str]) -> R<()> {
 
 pub async fn watch(a: Ax) {
     loop {
-        all(&a).await;
+        // Periodic refresh must not invalidate still-fresh evidence merely
+        // because another key needs attention or the polling cadence is fast.
+        let missing = missing_keys(&a, &all_keys(&a));
+        if !missing.is_empty() {
+            probe(&a, &missing).await;
+        }
         sl(60_000).await;
     }
 }
@@ -544,6 +562,33 @@ mod gpu_telemetry_tests {
         assert!(!fresh(slow));
         assert!(!a.lv.lock().unwrap().hst.contains_key(slow));
         for key in [fast, slow] {
+            PROBES.lock().unwrap().invalidate(key);
+            FAIL.lock().unwrap().remove(key);
+        }
+    }
+
+    #[tokio::test]
+    async fn need_once_refreshes_only_missing_keys() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            47300,
+            "apollo-office".into(),
+        ));
+        let healthy = "fixture-selective-healthy";
+        let missing = "fixture-selective-missing";
+        let keys = [healthy.to_string()];
+        let ticket = begin_probe(healthy);
+        publish_probe_results(&a, &keys, vec![ticket], vec![(true, Some(hw("cpu 8")))]);
+        let result = need_once_with(&a, &[healthy, missing], |keys| async {
+            assert_eq!(keys, vec![missing.to_string()]);
+            let ticket = begin_probe(missing);
+            publish_probe_results(&a, &keys, vec![ticket], vec![(true, Some(hw("cpu 4")))]);
+        })
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(a.lv.lock().unwrap().hst[healthy]["cpu"], 8.0);
+        for key in [healthy, missing] {
             PROBES.lock().unwrap().invalidate(key);
             FAIL.lock().unwrap().remove(key);
         }
