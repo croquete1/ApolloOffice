@@ -122,6 +122,7 @@ jobs:
       - name: Publish only a new, complete release
         env:
           GH_TOKEN: ${{ github.token }}
+          APOLLO_OFFICE_UPDATE_PUBKEY: ${{ vars.APOLLO_OFFICE_UPDATE_PUBKEY }}
         shell: bash
         run: |
           bash scripts/publish_release.sh dist
