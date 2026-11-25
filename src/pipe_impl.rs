@@ -3983,7 +3983,9 @@ async fn hunt(a: &Ax, j: &mut Job) -> R<i64> {
         }
         let data=json!({"ms":[md],"hunt":{"title":x["title"],"where":x["where"],"proof":x["proof"]},
             "title":x["title"],"body":format!("{}\n\nWhere: {}\nProof: {}",x["desc"].as_str().unwrap_or(""),x["where"].as_str().unwrap_or(""),x["proof"].as_str().unwrap_or("-"))});
-        match a.db.queue_hunter_find(&j.repo,&data) {
+        let _transition = a.update_transition.lock().unwrap();
+        kill(a, j)?;
+        match a.db.queue_hunter_find(&j.repo,j.id,&data) {
             Ok(true)=>{
                 a.flow("hunter","guard",&j.repo);
                 n+=1;
@@ -4640,7 +4642,10 @@ pub(crate) fn admit(a: &Ax, repo: &str, host: &str, id: i64) -> bool {
         && a.codex_low_priority_blocked(&a.md("fixer")) {
         return false;
     }
-    if is_hunt && (crate::hunt_health::blocked(a, repo) || a.hunter_quota_blocked()) {
+    if is_hunt && (!matches!(
+        a.db.try_n("select count(*) from rp where full=? and on_=1 and hunt=1 and trim(ci)<>''",pa![repo]),
+        Ok(1)
+    ) || crate::hunt_health::blocked(a, repo) || a.hunter_quota_blocked()) {
         return false;
     }
     let hunter_limit = if is_hunt { hn(a) } else { 0 };
