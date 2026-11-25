@@ -3891,6 +3891,15 @@ fn hunter_findings(response: &Value) -> R<&[Value]> {
     Ok(rows)
 }
 
+fn hunter_finding_result(result: rusqlite::Result<crate::db::HunterFinding>) -> R<bool> {
+    match result {
+        Ok(crate::db::HunterFinding::Queued) => Ok(true),
+        Ok(crate::db::HunterFinding::Duplicate) => Ok(false),
+        Ok(crate::db::HunterFinding::Revoked) => drop("Hunter: repository or origin no longer authorized"),
+        Err(_) => Err(X::Defer("Hunter: could not persist finding".into())),
+    }
+}
+
 async fn hunt(a: &Ax, j: &mut Job) -> R<i64> {
     a.db.jset(j.id, &[("st", json!("hunt"))]);
     a.st("hunter", "work", Some(j.id), "");
@@ -3985,13 +3994,12 @@ async fn hunt(a: &Ax, j: &mut Job) -> R<i64> {
             "title":x["title"],"body":format!("{}\n\nWhere: {}\nProof: {}",x["desc"].as_str().unwrap_or(""),x["where"].as_str().unwrap_or(""),x["proof"].as_str().unwrap_or("-"))});
         let _transition = a.update_transition.lock().unwrap();
         kill(a, j)?;
-        match a.db.queue_hunter_find(&j.repo,j.id,&data) {
-            Ok(true)=>{
+        match hunter_finding_result(a.db.queue_hunter_find(&j.repo,j.id,&data))? {
+            true=>{
                 a.flow("hunter","guard",&j.repo);
                 n+=1;
             }
-            Ok(false)=>a.say("hunter","Exact active finding already queued; no duplicate task",Some(j.id)),
-            Err(_)=>return Err(X::Defer("Hunter: could not persist finding".into())),
+            false=>a.say("hunter","Exact active finding already queued; no duplicate task",Some(j.id)),
         }
     }
     a.say(
