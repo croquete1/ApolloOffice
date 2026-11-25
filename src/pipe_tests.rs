@@ -169,6 +169,35 @@ mod t {
     }
 
     #[test]
+    fn remote_branch_inventory_requires_exact_single_valid_ref(){
+        let sha="a".repeat(40);
+        let good=format!("{sha}\trefs/heads/fix/1");
+        assert_eq!(remote_branch_sha(&good,"fix/1").unwrap(),Some(sha.clone()));
+        assert_eq!(remote_branch_sha("","fix/1").unwrap(),None);
+        for bad in [format!("{good}\n{good}"),format!("{sha}\trefs/heads/fix/2"),format!("bad\trefs/heads/fix/1"),format!("{sha} refs/heads/fix/1")] {
+            assert!(remote_branch_sha(&bad,"fix/1").is_err());
+        }
+    }
+
+    #[test]
+    fn publication_branch_lease_never_overwrites_unrelated_fix(){
+        let old="a".repeat(40);
+        let candidate="b".repeat(40);
+        let other="c".repeat(40);
+        assert_eq!(submit_branch_lease("fix","fix/1",None,&candidate,"").unwrap().as_deref(),Some("--force-with-lease=refs/heads/fix/1:"));
+        assert_eq!(submit_branch_lease("fix","fix/1",Some(&candidate),&candidate,"").unwrap(),None);
+        assert!(submit_branch_lease("fix","fix/1",Some(&old),&candidate,&old).is_err());
+        for kind in ["review","rebase"] {
+            assert_eq!(submit_branch_lease(kind,"fix/1",Some(&old),&candidate,&old).unwrap(),Some(format!("--force-with-lease=refs/heads/fix/1:{old}")));
+            assert_eq!(submit_branch_lease(kind,"fix/1",Some(&candidate),&candidate,&old).unwrap(),None);
+            assert!(submit_branch_lease(kind,"fix/1",None,&candidate,&old).is_err());
+            assert!(submit_branch_lease(kind,"fix/1",Some(&other),&candidate,&old).is_err());
+            assert!(submit_branch_lease(kind,"fix/1",Some(&old),&candidate,"").is_err());
+        }
+        assert!(submit_branch_lease("fix","fix/1",None,"invalid","").is_err());
+    }
+
+    #[test]
     fn review_publication_requires_original_open_pr_and_exact_head(){
         let source="a".repeat(40);
         let candidate="b".repeat(40);
