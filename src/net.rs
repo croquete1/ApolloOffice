@@ -284,10 +284,6 @@ fn all_keys(a: &Ax) -> Vec<String> {
     ks
 }
 
-pub async fn all(a: &Ax) {
-    probe(a, &all_keys(a)).await;
-}
-
 fn missing_keys(a: &Ax, keys: &[String]) -> Vec<String> {
     keys.iter()
         .filter(|key| !fresh(key) || !a.net(key))
@@ -580,10 +576,11 @@ mod gpu_telemetry_tests {
         let keys = [healthy.to_string()];
         let ticket = begin_probe(healthy);
         publish_probe_results(&a, &keys, vec![ticket], vec![(true, Some(hw("cpu 8")))]);
-        let result = need_once_with(&a, &[healthy, missing], |keys| async {
+        let a_ref = &a;
+        let result = need_once_with(&a, &[healthy, missing], |keys| async move {
             assert_eq!(keys, vec![missing.to_string()]);
             let ticket = begin_probe(missing);
-            publish_probe_results(&a, &keys, vec![ticket], vec![(true, Some(hw("cpu 4")))]);
+            publish_probe_results(a_ref, &keys, vec![ticket], vec![(true, Some(hw("cpu 4")))]);
         })
         .await;
         assert!(result.is_ok());
