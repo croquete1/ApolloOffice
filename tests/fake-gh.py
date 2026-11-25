@@ -68,6 +68,13 @@ if a[0] == "api":
     if p.startswith(f"repos/{R}/pulls?state=open&"):
         out([rest_pr(pr) for pr in ld("prs.json", []) if pr.get("state", "open") == "open"])
     if p.startswith(f"repos/{R}/pulls/"):
+        # Exercise a transient verification failure after successful creation.
+        # Only the private fixture opts in; record the fault before returning.
+        marker = os.path.join(D, "receipt-fault.json")
+        if os.environ.get("FAKE_GH_FAIL_RECEIPT_ONCE") == "1" and not os.path.exists(marker):
+            sv("receipt-fault.json", {"endpoint": p})
+            sys.stderr.write("HTTP 503: injected receipt verification failure")
+            sys.exit(1)
         number = p.rsplit("/", 1)[-1]
         for pr in ld("prs.json", []):
             if str(pr["number"]) == number:
