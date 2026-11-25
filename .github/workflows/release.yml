@@ -85,13 +85,15 @@ jobs:
           umask 077
           test -n "$RELEASE_KEY"
           key=$(mktemp "$RUNNER_TEMP/apollo-release-key.XXXXXX")
-          trap 'rm -f -- "$key"' EXIT
+          trap 'rm -f -- "$key" "$key.pub"' EXIT
           printf '%s\n' "$RELEASE_KEY" > "$key"
           unset RELEASE_KEY
           openssl pkeyutl -sign -inkey "$key" -rawin -in latest.json -out latest.json.sig.raw
+          openssl pkey -in "$key" -pubout -out "$key.pub"
+          openssl pkeyutl -verify -pubin -inkey "$key.pub" -rawin -in latest.json -sigfile latest.json.sig.raw
           base64 -w0 latest.json.sig.raw > latest.json.sig
           test -s latest.json.sig
-          rm -f -- "$key" latest.json.sig.raw
+          rm -f -- "$key" "$key.pub" latest.json.sig.raw
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: release-signed-${{ github.run_attempt }}
