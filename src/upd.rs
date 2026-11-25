@@ -4,6 +4,7 @@ use base64::Engine;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -23,6 +24,7 @@ pub fn asset() -> &'static str {
 }
 
 static CK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+const MAX_UPDATE_BYTES: usize = 128 * 1024 * 1024;
 
 fn release_version(value: &str) -> Result<semver::Version, semver::Error> {
     semver::Version::parse(value.strip_prefix('v').unwrap_or(value))
@@ -292,7 +294,7 @@ pub async fn check(a: &Ax) -> Result<Value, String> {
             .as_str()
             .ok_or("no build for this system in the release")?
             .to_string();
-        let bin = get(a, &format!("{b}/{}", asset()), 128 * 1024 * 1024).await?;
+        let bin = get(a, &format!("{b}/{}", asset()), MAX_UPDATE_BYTES).await?;
         if hex::encode(Sha256::digest(&bin)) != want {
             return Err("downloaded update does not match the signed checksum".into());
         }
@@ -371,13 +373,39 @@ fn staged_checksum(
     Ok(checksum.to_string())
 }
 
+fn valid_staged_size(size: u64) -> bool {
+    (1..=MAX_UPDATE_BYTES as u64).contains(&size)
+}
+
+fn staged_file_matches(path: &Path, checksum: &str) -> std::io::Result<bool> {
+    let meta = path.metadata()?;
+    if !meta.is_file() || !valid_staged_size(meta.len()) {
+        return Ok(false);
+    }
+    let mut reader = std::fs::File::open(path)?.take(MAX_UPDATE_BYTES as u64 + 1);
+    let mut digest = Sha256::new();
+    let mut buf = [0u8; 8192];
+    let mut total = 0u64;
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        total += n as u64;
+        digest.update(&buf[..n]);
+    }
+    Ok(valid_staged_size(total) && hex::encode(digest.finalize()) == checksum)
+}
+
 /// Checks that the staged update is still authorized by the trusted signer.
 pub fn ready(a: &Ax) -> bool {
     let Ok((url, key)) = channel() else {
         return false;
     };
-    staged(a).exists()
-        && staged_checksum(&a.db.kg("upd"), &url, &key, crate::app::V, asset()).is_ok()
+    let Ok(checksum) = staged_checksum(&a.db.kg("upd"), &url, &key, crate::app::V, asset()) else {
+        return false;
+    };
+    staged_file_matches(&staged(a), &checksum).unwrap_or(false)
 }
 
 /// Reports whether no admitted job or merge is still running.
@@ -494,6 +522,17 @@ pub fn apply(a: &Ax, manual: bool) -> bool {
     true
 }
 
+fn read_bounded_update(reader: impl Read, limit: usize) -> std::io::Result<Vec<u8>> {
+    let mut bin = Vec::new();
+    reader.take(limit as u64 + 1).read_to_end(&mut bin)?;
+    if bin.is_empty() || bin.len() > limit {
+        return Err(std::io::Error::other(
+            "staged update size outside allowed bounds",
+        ));
+    }
+    Ok(bin)
+}
+
 /// Installs the hash-verified staged binary, preserving the previous executable.
 pub fn install(a: &Ax) -> std::io::Result<()> {
     let (url, key) = channel().map_err(std::io::Error::other)?;
@@ -501,8 +540,7 @@ pub fn install(a: &Ax) -> std::io::Result<()> {
         .map_err(std::io::Error::other)?;
     let me = &a.me;
     let f0 = staged(a);
-    let bin = std::fs::read(&f0)?;
-    let _ = std::fs::remove_file(&f0);
+    let bin = read_bounded_update(std::fs::File::open(&f0)?, MAX_UPDATE_BYTES)?;
     if sha.len() != 64 || hex::encode(Sha256::digest(&bin)) != sha {
         return Err(std::io::Error::other(
             "staged update does not match the signed checksum",
@@ -543,6 +581,7 @@ pub fn install(a: &Ax) -> std::io::Result<()> {
         #[cfg(not(unix))]
         std::fs::rename(&f, me)?;
     }
+    let _ = std::fs::remove_file(&f0);
     Ok(())
 }
 
@@ -580,6 +619,31 @@ pub fn cleanup(me: &Path) {
 mod t {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
+
+    #[test]
+    fn staged_update_reader_enforces_size_bound() {
+        assert!(!valid_staged_size(0));
+        assert!(valid_staged_size(1));
+        assert!(valid_staged_size(MAX_UPDATE_BYTES as u64));
+        assert!(!valid_staged_size(MAX_UPDATE_BYTES as u64 + 1));
+        assert_eq!(read_bounded_update(&b"1234"[..], 4).unwrap(), b"1234");
+        assert!(read_bounded_update(&b"12345"[..], 4).is_err());
+        assert!(read_bounded_update(&b""[..], 4).is_err());
+    }
+
+    #[test]
+    fn rejected_staging_stays_ineligible_until_valid_replacement() {
+        let path = std::env::temp_dir().join(format!("apollo-stage-{}", rand::random::<u64>()));
+        let checksum = hex::encode(Sha256::digest(b"valid"));
+        std::fs::write(&path, b"wrong").unwrap();
+        assert!(!staged_file_matches(&path, &checksum).unwrap());
+        // A fresh eligibility check has no dependency on process-local state.
+        assert!(!staged_file_matches(&path, &checksum).unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), b"wrong");
+        std::fs::write(&path, b"valid").unwrap();
+        assert!(staged_file_matches(&path, &checksum).unwrap());
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn source_main_is_not_a_signed_installable_update() {
