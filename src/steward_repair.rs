@@ -385,13 +385,10 @@ mod tests {
             Value::Null,
         ] {
             approval["submitted_at"] = at;
-            assert!(actionable_request(
-                &[request.clone(), approval.clone()],
-                &[],
-                head,
-                "author"
-            )
-            .is_none());
+            assert!(
+                actionable_request(&[request.clone(), approval.clone()], &[], head, "author")
+                    .is_none()
+            );
         }
         approval["submitted_at"] = json!("2026-11-09T13:30:00+02:00");
         assert!(actionable_request(&[request.clone(), approval], &[], head, "author").is_some());
