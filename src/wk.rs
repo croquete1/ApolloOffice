@@ -2383,7 +2383,11 @@ fn watcher_reply_remote_matches(pr: &Value, source_head: &str) -> Option<bool> {
 
 // Interleave the oldest eligible row of each state. Neither new work nor
 // reconciliation can monopolize the bounded batch; unused slots are shared.
-fn watcher_delivery_batch(db: &crate::db::Db, author: &str, at: i64) -> rusqlite::Result<Vec<Value>> {
+fn watcher_delivery_batch(
+    db: &crate::db::Db,
+    author: &str,
+    at: i64,
+) -> rusqlite::Result<Vec<Value>> {
     db.try_all(
         "select * from watcher_outbox where author=? and (state='pending' or (state='uncertain' and updated<=?))
          order by row_number() over(partition by state order by updated,id), case state when 'pending' then 0 else 1 end limit 20",
@@ -2593,11 +2597,19 @@ mod t {
         assert_eq!(rows[1]["id"], "u00");
         assert_eq!(rows[18]["id"], "p09");
         assert_eq!(rows[19]["id"], "u09");
-        db.run("delete from watcher_outbox where state='pending' and id<>'p00'",pa![]);
+        db.run(
+            "delete from watcher_outbox where state='pending' and id<>'p00'",
+            pa![],
+        );
         let rows = watcher_delivery_batch(&db, "owner", at).unwrap();
         assert_eq!(rows.len(), 20);
-        assert_eq!(rows.iter().filter(|r| r["state"] == "uncertain").count(), 19);
-        assert!(rows.iter().all(|r| r["id"] != "recent" && r["id"] != "sent" && r["author"] == "owner"));
+        assert_eq!(
+            rows.iter().filter(|r| r["state"] == "uncertain").count(),
+            19
+        );
+        assert!(rows
+            .iter()
+            .all(|r| r["id"] != "recent" && r["id"] != "sent" && r["author"] == "owner"));
     }
 
     #[test]
