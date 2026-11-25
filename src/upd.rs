@@ -712,9 +712,18 @@ mod t {
             PathBuf::from("/tmp/apollo-vet-test/apollo-office"),
         ));
         a.db.run(
-            "insert into jobs(id,st) values(42,'vet'),(43,'drop')",
+            "insert into rp(full) values('sample/repo')",
             crate::pa![],
         );
+        a.db.run(
+            "insert into jobs(id,repo,st) values(42,'sample/repo','vet'),(43,'sample/repo','drop'),(44,'missing/repo','vet')",
+            crate::pa![],
+        );
+        assert!(!crate::wk::admit_vet(&a, 44));
+        a.db.run("update rp set on_=0", crate::pa![]);
+        assert!(!crate::wk::admit_vet(&a, 42));
+        assert!(a.vtk.lock().unwrap().is_empty());
+        a.db.run("update rp set on_=1", crate::pa![]);
         a.lv.lock().unwrap().o.man = true;
         assert!(!crate::wk::admit_vet(&a, 42));
         a.lv.lock().unwrap().o.man = false;
