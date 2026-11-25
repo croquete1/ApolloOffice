@@ -98,7 +98,10 @@ fn permission_matches_reviewer(permission: &Value, reviewer: &Value) -> bool {
             .as_str()
             .zip(reviewer["login"].as_str())
             .is_some_and(|(actual, expected)| actual.eq_ignore_ascii_case(expected))
-        && matches!(permission["permission"].as_str(), Some("admin" | "write" | "maintain"))
+        && matches!(
+            permission["permission"].as_str(),
+            Some("admin" | "write" | "maintain")
+        )
 }
 
 async fn reviewer_still_authorized(
@@ -112,12 +115,17 @@ async fn reviewer_still_authorized(
     let reviewer = &review["user"];
     let Some(login) = reviewer["login"].as_str().filter(|login| {
         !login.is_empty()
-            && login.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            && login
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
     }) else {
         return Ok(false);
     };
     let permission = ghj(
-        &["api", &format!("repos/{repo}/collaborators/{login}/permission")],
+        &[
+            "api",
+            &format!("repos/{repo}/collaborators/{login}/permission"),
+        ],
         45,
     )
     .await?;
