@@ -24,23 +24,24 @@ pub fn asset() -> &'static str {
 
 static CK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Compares the three semver components and prefers stable releases.
+fn release_version(value: &str) -> Result<semver::Version, semver::Error> {
+    semver::Version::parse(value.strip_prefix('v').unwrap_or(value))
+}
+
+/// Rejects malformed versions and compares SemVer precedence, not build metadata.
 pub fn newer(a: &str, b: &str) -> bool {
-    let p = |s: &str| -> (Vec<u64>, bool) {
-        let s = s.trim().trim_start_matches('v');
-        let (n, pre) = s
-            .split_once('-')
-            .map(|(n, _)| (n, true))
-            .unwrap_or((s, false));
-        let mut v: Vec<u64> = n
-            .split('.')
-            .take(3)
-            .map(|x| x.parse().unwrap_or(0))
-            .collect();
-        v.resize(3, 0);
-        (v, !pre)
-    };
-    p(a) > p(b)
+    match (release_version(a), release_version(b)) {
+        (Ok(a), Ok(b)) => a.cmp_precedence(&b).is_gt(),
+        _ => false,
+    }
+}
+
+fn manifest_version(manifest: &Value) -> Result<String, String> {
+    let version = manifest["v"]
+        .as_str()
+        .ok_or("signed manifest has no release version")?;
+    release_version(version).map_err(|_| "invalid release version in signed manifest")?;
+    Ok(version.to_string())
 }
 
 /// Confirms that the executable directory allows atomic replacement.
@@ -275,7 +276,7 @@ pub async fn check(a: &Ax) -> Result<Value, String> {
         let sig_bytes = get(a, &format!("{b}/latest.json.sig"), 4 * 1024).await?;
         let sig = String::from_utf8_lossy(&sig_bytes).to_string();
         let m = check_sig(&key, &body, &sig)?;
-        let v = m["v"].as_str().unwrap_or("").to_string();
+        let v = manifest_version(&m)?;
         st(a, |x| {
             x["latest"] = json!(v);
         });
@@ -577,6 +578,41 @@ mod t {
         // A primeira atualização assinada do fork parte da release 0.10.1.
         assert!(newer("0.10.2", "0.10.1"));
         assert!(!newer("0.10.1", "0.10.2"));
+    }
+
+    #[test]
+    fn malformed_versions_never_authorize_an_update() {
+        for bad in [
+            "",
+            "999",
+            "999.1",
+            "999.bad.1",
+            "999.1.1.2",
+            "999.1.01",
+            "vv999.1.1",
+            "999.1.1-",
+            "18446744073709551616.0.0",
+        ] {
+            assert!(!newer(bad, "0.10.15"), "{bad}");
+            assert!(!newer("999.1.1", bad), "{bad}");
+            assert!(manifest_version(&json!({"v": bad})).is_err(), "{bad}");
+        }
+        assert!(manifest_version(&json!({})).is_err());
+        assert!(manifest_version(&json!({"v": 123})).is_err());
+        assert_eq!(
+            manifest_version(&json!({"v": "0.10.16"})).unwrap(),
+            "0.10.16"
+        );
+    }
+
+    #[test]
+    fn version_precedence_orders_prereleases_and_ignores_build_metadata() {
+        assert!(newer("0.10.16-rc.10", "0.10.16-rc.2"));
+        assert!(!newer("0.10.16-rc.2", "0.10.16-rc.10"));
+        assert!(newer("0.10.16", "0.10.16-rc.10"));
+        assert!(!newer("0.10.16-rc.10", "0.10.16"));
+        assert!(!newer("0.10.16+new", "0.10.16+old"));
+        assert!(newer("0.10.17+build", "0.10.16"));
     }
 
     #[test]
