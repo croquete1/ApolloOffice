@@ -4,7 +4,7 @@ set -euo pipefail
 dist=${1:?staged release directory required}
 tag=${GITHUB_REF_NAME:?release tag required}
 repo=${GITHUB_REPOSITORY:?repository required}
-python3 "$(dirname "$0")/release_manifest.py" --verify "$dist"
+python3 "$(dirname "$0")/release_manifest.py" --verify-trusted "$dist"
 
 # A successful complete listing is required, including drafts. Never interpret
 # an API or authorization failure as proof that a tag has not been released.
@@ -24,4 +24,5 @@ trap 'rm -rf -- "$verified"' EXIT
 gh release view "$tag" --repo "$repo" --json isDraft --jq '.isDraft' | grep -qx true
 gh release download "$tag" --repo "$repo" --pattern '*' --dir "$verified"
 diff -qr -- "$dist" "$verified"
+python3 "$(dirname "$0")/release_manifest.py" --verify-trusted "$verified"
 gh release edit "$tag" --repo "$repo" --draft=false
