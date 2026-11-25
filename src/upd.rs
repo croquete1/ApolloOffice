@@ -137,6 +137,11 @@ pub fn info(a: &Ax) -> Value {
     if !v.is_object() {
         v = json!({});
     }
+    // The signed staging proof is internal, not dashboard state.
+    if let Some(fields) = v.as_object_mut() {
+        fields.remove("manifest_body");
+        fields.remove("manifest_sig");
+    }
     v["configured"] = json!(configured());
     v["auto"] = json!(on(a));
     v
@@ -299,6 +304,8 @@ pub async fn check(a: &Ax) -> Result<Value, String> {
             x["ready"] = json!(v);
             x["sha"] = json!(want);
             x["channel"] = json!(cid);
+            x["manifest_body"] = json!(base64::engine::general_purpose::STANDARD.encode(&body));
+            x["manifest_sig"] = json!(sig);
         });
         a.say(
             "submit",
@@ -323,18 +330,54 @@ pub fn staged(a: &Ax) -> PathBuf {
     })
 }
 
-/// Checks that the staged update matches the current trusted channel.
+// A cached checksum is not itself an authenticated update manifest.
+// Legacy staging records without signed proof must be downloaded again.
+fn staged_checksum(
+    state: &Value,
+    url: &str,
+    key: &str,
+    current: &str,
+    target: &str,
+) -> Result<String, String> {
+    if state["channel"].as_str() != Some(channel_id(url, key).as_str()) {
+        return Err("staged update belongs to another channel".into());
+    }
+    let encoded = state["manifest_body"]
+        .as_str()
+        .filter(|s| s.len() <= 4 * (128 * 1024_usize).div_ceil(3))
+        .ok_or("staged signed manifest missing or oversized")?;
+    let signature = state["manifest_sig"]
+        .as_str()
+        .filter(|s| s.len() <= 4 * 1024)
+        .ok_or("staged manifest signature missing or oversized")?;
+    let body = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| "invalid staged manifest encoding")?;
+    if body.len() > 128 * 1024 {
+        return Err("staged manifest exceeds size limit".into());
+    }
+    let manifest = check_sig(key, &body, signature)?;
+    let version = manifest_version(&manifest)?;
+    if state["ready"].as_str() != Some(version.as_str()) || !newer(&version, current) {
+        return Err("staged manifest version does not authorize this update".into());
+    }
+    let checksum = manifest["files"][target]
+        .as_str()
+        .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or("missing or invalid signed update checksum")?;
+    if state["sha"].as_str() != Some(checksum) {
+        return Err("cached checksum differs from signed manifest".into());
+    }
+    Ok(checksum.to_string())
+}
+
+/// Checks that the staged update is still authorized by the trusted signer.
 pub fn ready(a: &Ax) -> bool {
     let Ok((url, key)) = channel() else {
         return false;
     };
-    let state = a.db.kg("upd");
-    state["channel"].as_str() == Some(channel_id(&url, &key).as_str())
-        && state["ready"]
-            .as_str()
-            .map(|v| newer(v, crate::app::V))
-            .unwrap_or(false)
-        && staged(a).exists()
+    staged(a).exists()
+        && staged_checksum(&a.db.kg("upd"), &url, &key, crate::app::V, asset()).is_ok()
 }
 
 /// Reports whether no admitted job or merge is still running.
@@ -453,12 +496,9 @@ pub fn apply(a: &Ax, manual: bool) -> bool {
 
 /// Installs the hash-verified staged binary, preserving the previous executable.
 pub fn install(a: &Ax) -> std::io::Result<()> {
-    if !ready(a) {
-        return Err(std::io::Error::other(
-            "No trusted, verified fork update is ready",
-        ));
-    }
-    let sha = a.db.kg("upd")["sha"].as_str().unwrap_or("").to_string();
+    let (url, key) = channel().map_err(std::io::Error::other)?;
+    let sha = staged_checksum(&a.db.kg("upd"), &url, &key, crate::app::V, asset())
+        .map_err(std::io::Error::other)?;
     let me = &a.me;
     let f0 = staged(a);
     let bin = std::fs::read(&f0)?;
@@ -794,6 +834,55 @@ mod t {
         assert_eq!(check_sig(&pk, body, &sig).unwrap()["v"], "0.5.0");
         assert!(check_sig(&pk, br#"{"v":"9.9.9","files":{}}"#, &sig).is_err());
         assert!(check_sig(&hex::encode([0u8; 32]), body, &sig).is_err());
+    }
+
+    #[test]
+    fn staged_update_requires_original_signed_manifest() {
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let key = hex::encode(sk.verifying_key().to_bytes());
+        let url = "https://fork.example/releases";
+        let target = asset();
+        let checksum = hex::encode(Sha256::digest(b"fixture binary"));
+        let mut manifest = json!({"v":"0.10.17","files":{}});
+        manifest["files"][target] = json!(checksum);
+        let body = serde_json::to_vec(&manifest).unwrap();
+        let sig = base64::engine::general_purpose::STANDARD.encode(sk.sign(&body).to_bytes());
+        let state = json!({
+            "channel":channel_id(url, &key),
+            "ready":"0.10.17",
+            "sha":checksum,
+            "manifest_body":base64::engine::general_purpose::STANDARD.encode(&body),
+            "manifest_sig":sig
+        });
+        assert_eq!(
+            staged_checksum(&state, url, &key, "0.10.16", target).unwrap(),
+            checksum
+        );
+        for field in ["manifest_body", "manifest_sig", "sha", "ready", "channel"] {
+            let mut missing = state.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(staged_checksum(&missing, url, &key, "0.10.16", target).is_err());
+        }
+        let mut forged = state.clone();
+        forged["sha"] = json!("a".repeat(64));
+        manifest["files"][target] = forged["sha"].clone();
+        forged["manifest_body"] = json!(base64::engine::general_purpose::STANDARD
+            .encode(serde_json::to_vec(&manifest).unwrap()));
+        assert!(staged_checksum(&forged, url, &key, "0.10.16", target).is_err());
+        let mut mismatched = state.clone();
+        mismatched["sha"] = json!("a".repeat(64));
+        assert!(staged_checksum(&mismatched, url, &key, "0.10.16", target).is_err());
+        assert!(staged_checksum(&state, url, &key, "0.10.17", target).is_err());
+        assert!(staged_checksum(&state, url, &key, "0.10.16", "wrong-target").is_err());
+        assert!(staged_checksum(&state, "https://other.example", &key, "0.10.16", target).is_err());
+        let other = hex::encode(
+            SigningKey::from_bytes(&[8u8; 32])
+                .verifying_key()
+                .to_bytes(),
+        );
+        let mut wrong_key = state.clone();
+        wrong_key["channel"] = json!(channel_id(url, &other));
+        assert!(staged_checksum(&wrong_key, url, &other, "0.10.16", target).is_err());
     }
 
     #[test]
