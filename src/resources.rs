@@ -281,6 +281,42 @@ mod tests {
     }
 
     #[test]
+    fn disk_limits_require_fresh_valid_telemetry() {
+        let at = 1_000_000;
+        let mut hw = json!({"t":at,"cpu":8,"load":1,"mem":[16000,8000],"disk":[100,0]});
+        assert_eq!(capacity("performance", 4, &hw, at), (0, "disk_critical"));
+        assert_eq!(
+            capacity("performance", 4, &hw, at + 180_000),
+            (0, "disk_critical")
+        );
+        assert_eq!(
+            capacity("performance", 4, &hw, at + 180_001),
+            (1, "telemetry_unavailable")
+        );
+        assert_eq!(
+            capacity("performance", 4, &hw, at - 1),
+            (1, "telemetry_unavailable")
+        );
+        for invalid in [
+            Value::Null,
+            json!([100]),
+            json!([100, 0, 0]),
+            json!([0, 0]),
+            json!([100, -1]),
+            json!([100, 101]),
+            json!([100, "0"]),
+        ] {
+            hw["disk"] = invalid;
+            assert_eq!(capacity("performance", 4, &hw, at), (4, "profile"));
+        }
+        hw["mem"][1] = json!(100);
+        assert_eq!(
+            capacity("performance", 4, &hw, at),
+            (0, "critical_pressure")
+        );
+    }
+
+    #[test]
     fn balanced_preserves_headroom_without_relaxing_hard_limits() {
         let at = 1_000_000;
         let mut hw = json!({"t":at,"cpu":8,"load":7,"mem":[16000,8000],"temp":60});
