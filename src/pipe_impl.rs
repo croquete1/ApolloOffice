@@ -4670,8 +4670,18 @@ pub fn recover(a: &Ax) -> rusqlite::Result<()> {
         if !d.is_object() {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        if st == "submit" && d["ap"].as_bool().unwrap_or(false) {
-            continue;
+        if st == "submit" {
+            // A durable publication intent belongs to reconciliation, not to
+            // a new preparation attempt. Preserve submit even without manual
+            // approval; go/submit still enforce the current approval policy.
+            let publication_exists: bool = tx.query_row(
+                "select exists(select 1 from kv where k=?)",
+                [format!("submit_publication:{id}")],
+                |row| row.get(0),
+            )?;
+            if publication_exists || d["ap"].as_bool().unwrap_or(false) {
+                continue;
+            }
         }
         if kd == "fix" && ["ci", "review", "gate", "submit"].contains(&st.as_str()) && d["h"].is_string() && d["br"].is_string() {
             d["rs"] = json!(true);
