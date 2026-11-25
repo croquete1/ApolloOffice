@@ -17,6 +17,44 @@ fn hold_key(repo: &str) -> String {
     format!("hunt-storage-hold:{repo}")
 }
 
+fn hold_file(a: &Ax, repo: &str) -> std::path::PathBuf {
+    use sha2::{Digest, Sha256};
+    a.dd.join(format!("hunt-hold-{}", hex::encode(Sha256::digest(repo))))
+}
+
+fn write_file_hold(a: &Ax, repo: &str) -> std::io::Result<()> {
+    // Never truncate or follow a preexisting marker (including a symlink).
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(hold_file(a, repo))
+    {
+        Ok(file) => file.sync_all()?,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+    #[cfg(unix)]
+    std::fs::File::open(&a.dd)?.sync_all()?;
+    Ok(())
+}
+
+fn remove_file_hold(a: &Ax, repo: &str) -> std::io::Result<()> {
+    match std::fs::remove_file(hold_file(a, repo)) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    // Retry directory sync even when an earlier unlink already removed the
+    // marker. A missing marker alone does not prove a durable deletion.
+    #[cfg(unix)]
+    match std::fs::File::open(&a.dd) {
+        Ok(dir) => dir.sync_all()?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    Ok(())
+}
+
 fn hold_storage(a: &Ax, repo: &str) {
     a.hunt_storage_holds
         .lock()
@@ -26,7 +64,7 @@ fn hold_storage(a: &Ax, repo: &str) {
         "insert into kv(k,v) values(?,'true') on conflict(k) do update set v=excluded.v",
         [hold_key(repo)],
     );
-    if written.is_err() {
+    if !matches!(written, Ok(1)) && write_file_hold(a, repo).is_err() {
         a.say(
             "hunter",
             &format!("{repo}: storage hold could not be persisted"),
@@ -55,6 +93,15 @@ fn read_health(db: &crate::db::Db, repo: &str) -> rusqlite::Result<Value> {
 pub fn status(a: &Ax, repo: &str) -> Value {
     if a.hunt_storage_holds.lock().unwrap().contains(repo) {
         return json!({"blocked":true,"failures":null,"until":null,"stage":"storage_write_failed","exit_code":null});
+    }
+    match std::fs::symlink_metadata(hold_file(a, repo)) {
+        Ok(_) => {
+            return json!({"blocked":true,"failures":null,"until":null,"stage":"storage_write_failed","exit_code":null});
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => {
+            return json!({"blocked":true,"failures":null,"until":null,"stage":"state_unavailable","exit_code":null});
+        }
     }
     match a
         .db
@@ -214,6 +261,11 @@ pub fn reset(a: &Ax, repo: &str) -> rusqlite::Result<()> {
             crate::app::chg();
             return Err(error);
         }
+        if let Err(error) = remove_file_hold(a, repo) {
+            hold_storage(a, repo);
+            crate::app::chg();
+            return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(error)));
+        }
         a.hunt_storage_holds.lock().unwrap().remove(repo);
         crate::app::chg();
     }
@@ -360,6 +412,75 @@ mod tests {
         assert!(blocked(&a, repo));
         reset(&a, repo).unwrap();
         assert!(!blocked(&a, repo));
+    }
+
+    #[test]
+    fn fallback_hold_survives_reopening_database_and_app() {
+        let dir = std::env::temp_dir().join(format!("apollo-hunter-{}", rand::random::<u64>()));
+        std::fs::create_dir(&dir).unwrap();
+        let repo = "example/one";
+        let make = || {
+            Arc::new(App::new(
+                Db::open(&dir.join("test.db")).unwrap(),
+                dir.clone(),
+                0,
+                dir.join("apollo-office"),
+            ))
+        };
+        let a = make();
+        a.db.0
+            .lock()
+            .unwrap()
+            .execute_batch("alter table kv rename to kv_unavailable")
+            .unwrap();
+        fail(&a, repo, "setup", 1);
+        assert!(hold_file(&a, repo).exists());
+        a.db.0
+            .lock()
+            .unwrap()
+            .execute_batch("alter table kv_unavailable rename to kv")
+            .unwrap();
+        drop(a);
+        let a = make();
+        assert!(blocked(&a, repo));
+        assert!(!blocked(&a, "example/two"));
+        reset(&a, repo).unwrap();
+        assert!(!blocked(&a, repo));
+        assert!(!hold_file(&a, repo).exists());
+        write_file_hold(&a, repo).unwrap();
+        assert!(blocked(&a, repo));
+        // Simulate a prior unlink whose directory sync was interrupted.
+        std::fs::remove_file(hold_file(&a, repo)).unwrap();
+        a.db.ks(&hold_key(repo), &json!(true));
+        assert!(blocked(&a, repo));
+        reset(&a, repo).unwrap();
+        assert!(!blocked(&a, repo));
+        drop(a);
+        let a = make();
+        assert!(!blocked(&a, repo));
+        drop(a);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_symlink_marker_does_not_truncate_target() {
+        let dir =
+            std::env::temp_dir().join(format!("apollo-hunter-link-{}", rand::random::<u64>()));
+        std::fs::create_dir(&dir).unwrap();
+        let a = Arc::new(App::new(Db::mem(), dir.clone(), 0, dir.join("apollo")));
+        let target = dir.join("target");
+        std::fs::write(&target, b"untouched").unwrap();
+        let repo = "example/one";
+        std::os::unix::fs::symlink(&target, hold_file(&a, repo)).unwrap();
+        write_file_hold(&a, repo).unwrap();
+        assert!(blocked(&a, repo));
+        assert_eq!(std::fs::read(&target).unwrap(), b"untouched");
+        reset(&a, repo).unwrap();
+        assert!(!blocked(&a, repo));
+        assert_eq!(std::fs::read(&target).unwrap(), b"untouched");
+        drop(a);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
