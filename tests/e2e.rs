@@ -304,8 +304,9 @@ async fn full_run(pv: bool) {
         .map(|entry| entry.unwrap().path())
         .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
         .map(|path| {
-            serde_json::from_slice(&std::fs::read(&path).unwrap())
-                .unwrap_or_else(|error| panic!("invalid CLI call record {}: {error}", path.display()))
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap_or_else(|error| {
+                panic!("invalid CLI call record {}: {error}", path.display())
+            })
         })
         .collect();
     assert_eq!(
