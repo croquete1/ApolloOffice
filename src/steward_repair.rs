@@ -28,8 +28,9 @@ fn actionable_request(
             let user = r["user"]["login"].as_str().unwrap_or("");
             !user.is_empty()
                 && !user.eq_ignore_ascii_case(author)
-                && r["user"]["type"] != "Bot"
-                && !user.ends_with("[bot]")
+                && r["user"]["type"] == "User"
+                && r["user"]["id"].as_i64().is_some_and(|id| id > 0)
+                && !user.to_ascii_lowercase().ends_with("[bot]")
         })
         // A malformed eligible request might supersede a valid older one.
         // Reject ambiguous chronology rather than silently dropping it.
@@ -39,9 +40,10 @@ fn actionable_request(
     requests.retain(|(r, at)| {
         let reviewer = r["user"]["login"].as_str().unwrap_or("");
         !reviews.iter().any(|other| {
-            other["user"]["login"]
-                .as_str()
-                .is_some_and(|login| login.eq_ignore_ascii_case(reviewer))
+            (other["user"]["id"] == r["user"]["id"]
+                || other["user"]["login"]
+                    .as_str()
+                    .is_some_and(|login| login.eq_ignore_ascii_case(reviewer)))
                 && (other["state"] == "APPROVED" || other["state"] == "DISMISSED")
                 && review_time(other).is_none_or(|other_at| other_at >= *at)
         })
@@ -52,9 +54,7 @@ fn actionable_request(
         return None;
     }
     let id = last["id"].as_i64().filter(|id| *id > 0)?;
-    let since = chrono::DateTime::parse_from_rfc3339(last["submitted_at"].as_str()?)
-        .ok()?
-        .timestamp_millis();
+    let since = at.timestamp_millis();
     let reviewer = last["user"]["login"].as_str()?;
     let mut parts = Vec::new();
     if let Some(body) = last["body"].as_str().filter(|s| !s.trim().is_empty()) {
@@ -63,8 +63,16 @@ fn actionable_request(
     for c in comments
         .iter()
         .filter(|c| c["pull_request_review_id"].as_i64() == Some(id))
-        .filter(|c| c["user"]["login"].as_str() == Some(reviewer))
     {
+        // An inline comment must belong to the same human account.
+        if c["user"]["id"] != last["user"]["id"]
+            || c["user"]["type"] != "User"
+            || !c["user"]["login"]
+                .as_str()
+                .is_some_and(|login| login.eq_ignore_ascii_case(reviewer))
+        {
+            return None;
+        }
         if let Some(body) = c["body"].as_str().filter(|s| !s.trim().is_empty()) {
             let path = c["path"].as_str().unwrap_or("ficheiro");
             parts.push(format!("{path}: {}", body.trim()));
@@ -345,8 +353,8 @@ mod tests {
         let head = "0123456789012345678901234567890123456789";
         let review = json!({"id":91,"state":"CHANGES_REQUESTED","commit_id":head,
             "submitted_at":"2026-11-09T12:00:00Z","author_association":"COLLABORATOR",
-            "user":{"login":"reviewer","type":"User"},"body":"Rever tratamento de null"});
-        let comments = json!([{"pull_request_review_id":91,"user":{"login":"reviewer"},
+            "user":{"login":"reviewer","type":"User","id":11},"body":"Rever tratamento de null"});
+        let comments = json!([{"pull_request_review_id":91,"user":{"login":"reviewer","type":"User","id":11},
             "path":"src/form.ts","body":"Adicionar teste de regressão"}]);
         let req = actionable_request(
             std::slice::from_ref(&review),
@@ -379,7 +387,7 @@ mod tests {
         let head = "0123456789012345678901234567890123456789";
         let request = json!({"id":91,"state":"CHANGES_REQUESTED","commit_id":head,
             "submitted_at":"2026-11-09T12:00:00Z","author_association":"OWNER",
-            "user":{"login":"maintainer","type":"User"},"body":"Fix the regression"});
+            "user":{"login":"maintainer","type":"User","id":12},"body":"Fix the regression"});
         let mut approval = request.clone();
         approval["id"] = json!(92);
         approval["state"] = json!("APPROVED");
@@ -410,7 +418,7 @@ mod tests {
         let head = "0123456789012345678901234567890123456789";
         let request = json!({"id":91,"state":"CHANGES_REQUESTED","commit_id":head,
             "submitted_at":"2026-11-09T12:00:00Z","author_association":"OWNER",
-            "user":{"login":"maintainer","type":"User"},"body":"Fix the regression"});
+            "user":{"login":"maintainer","type":"User","id":12},"body":"Fix the regression"});
         let mut other = request.clone();
         other["id"] = json!(92);
         other["body"] = json!("Use a different fix");
@@ -435,11 +443,35 @@ mod tests {
     }
 
     #[test]
+    fn review_comments_require_the_same_human_identity() {
+        let head = "0123456789012345678901234567890123456789";
+        let review = json!({"id":91,"state":"CHANGES_REQUESTED","commit_id":head,
+            "submitted_at":"2026-11-09T12:00:00Z","author_association":"OWNER",
+            "user":{"login":"maintainer","type":"User","id":12},"body":"Fix regression"});
+        let mut comment = json!({"pull_request_review_id":91,
+            "user":{"login":"Maintainer","type":"User","id":12},
+            "path":"src/main.rs","body":"Add a test"});
+        let requests = std::slice::from_ref(&review);
+        assert!(actionable_request(requests, &[comment.clone()], head, "author").is_some());
+        comment["user"]["id"] = json!(13);
+        assert!(actionable_request(requests, &[comment], head, "author").is_none());
+        let mut invalid = review.clone();
+        invalid["user"]["type"] = Value::Null;
+        assert!(actionable_request(&[invalid], &[], head, "author").is_none());
+
+        let mut approval = review.clone();
+        approval["state"] = json!("APPROVED");
+        approval["submitted_at"] = json!("2026-11-09T13:00:00Z");
+        approval["user"]["login"] = json!("renamed-maintainer");
+        assert!(actionable_request(&[review, approval], &[], head, "author").is_none());
+    }
+
+    #[test]
     fn oversized_review_is_not_truncated_into_an_authorization() {
         let head = "0123456789012345678901234567890123456789";
         let review = json!({"id":91,"state":"CHANGES_REQUESTED","commit_id":head,
             "submitted_at":"2026-11-09T12:00:00Z","author_association":"OWNER",
-            "user":{"login":"maintainer","type":"User"},"body":"é".repeat(1751)});
+            "user":{"login":"maintainer","type":"User","id":12},"body":"é".repeat(1751)});
         assert!(actionable_request(&[review], &[], head, "author").is_none());
     }
 
@@ -491,7 +523,7 @@ mod tests {
         let head = "0123456789012345678901234567890123456789";
         let review = json!({"id":91,"state":"CHANGES_REQUESTED","commit_id":head,
             "submitted_at":"2026-11-09T12:00:00Z","author_association":"OWNER",
-            "user":{"login":"maintainer","type":"User"},"body":""});
+            "user":{"login":"maintainer","type":"User","id":12},"body":""});
         assert!(actionable_request(&[review], &[], head, "author").is_none());
     }
 }
