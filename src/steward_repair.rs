@@ -519,8 +519,7 @@ mod tests {
         newer["submitted_at"] = json!("2026-11-09T13:00:00Z");
         newer["user"]["id"] = Value::Null;
         assert!(
-            actionable_request(&[request.clone(), newer.clone()], &[], head, "author")
-                .is_none()
+            actionable_request(&[request.clone(), newer.clone()], &[], head, "author").is_none()
         );
         newer["user"]["id"] = json!(12);
         assert_eq!(
