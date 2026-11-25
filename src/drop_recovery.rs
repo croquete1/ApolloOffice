@@ -50,10 +50,9 @@ fn eligible(j: &Job, automatic: bool) -> bool {
 }
 
 fn recovery_job(a: &Ax, id: i64) -> Option<Job> {
-    let rows = a
-        .db
-        .try_all("select * from jobs where id=?", pa![id])
-        .ok()?;
+    let rows =
+        a.db.try_all("select * from jobs where id=?", pa![id])
+            .ok()?;
     let row = rows.into_iter().next()?;
     row["d"].is_object().then(|| Job::of(row))
 }
@@ -428,10 +427,7 @@ mod tests {
         let a = setup();
         let id = dropped(&a, "machine kept failing: timed out", json!({}));
         for raw in ["null", "[]", "\"bad\"", "1", "{invalid"] {
-            a.db.run(
-                "update jobs set d=? where id=?",
-                pa![raw.to_string(), id],
-            );
+            a.db.run("update jobs set d=? where id=?", pa![raw.to_string(), id]);
             assert!(recovery_job(&a, id).is_none());
             assert!(retry(&a, id, false).is_err());
             assert!(retry(&a, id, true).is_err());
