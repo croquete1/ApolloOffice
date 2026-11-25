@@ -162,28 +162,31 @@ Estas PRs estão em draft e **não estão integradas**. A main funcional continu
 - Corrigida a posição do atributo expect(clippy::too_many_arguments), deslocado para queue_hunter_find durante a combinação de patches; fica novamente junto a jnew. Dois testes Rust novos (snapshot merged e ack parcial), teste anterior de follow-up atualizado; não executados.
 - QA efetivo nesta sessão: sete cenários em Python SQLite, usando as instruções SQL publicadas e um ficheiro temporário, PASS (snapshot obsoleto, ack parcial, persistência/reabertura, rollback, IDs inválidos, ack completo e isolamento, estado closed). Não equivale a executar Rust. Confirmado no terminal: node disponível, cargo/rustc/rustfmt/gh indisponíveis no PATH, git ls-remote falha por DNS. Revalidação remota não é atómica; os comentários demasiado extensos não são analisados autonomamente; sem nova revisão CodeRabbit nem alterações pagas. Não encerrar fases sem QA integral.
  
-## Balanço por fase
-| Fase | Estado | Falta |
-|---|---|---|
-| F01 | Parcial (#49) | Validação Docker/fnm em workers reais, logs upstream, ciclo de vida sem interrupções |
-| F02 | Parcial (#48/#61) | Inbox/outbox duráveis, isolamento de falhas nas PRs abertas, deduplicação por PR/HEAD/review e recuperação end-to-end |
-| F03 | Parcial (#48/#52/#63) | Unificar revisão/rebase/recheck e preservar autorizações; testes concorrentes reais |
-| F04 | Parcial (#51/#57/#62) | Converter restantes decisões críticas; SQLITE_BUSY, disco cheio, recuperação e limites por repo |
-| F05 | Parcial (#54/#62) | Retoma de chamadas de fornecedores/quotas e fases sem checkpoint seguro, CI após rebase e recuperação end-to-end |
-| F06 | Parcial (#53/#58) | Cooldowns persistentes de todos os fornecedores, circuit breakers, fallback por papel |
-| F07 | Parcial (#53/#56) | Previsão/reserva concorrente por prioridade e otimizações; limites durante execução |
-| F08 | Parcial (#58) | Adaptar outros papéis, custo/complexidade calibrados, validação com providers reais |
-| F09 | Parcial (#51/#52/#63) | Sync incremental, reconciliação sob mutações e validação de múltiplas páginas reais; limite conservador de ficheiros mantido |
-| F10 | Parcial (#54/#56/#62) | Aging, causa comum e agrupamento, prevenção de sobreposições, validação remota de dependências |
-| F11 | Parcial (#56) | GPU/VRAM, CI dinâmico, prioridade processos e validação sob pressão real |
-| F12 | Parcial (#61/#62) | Isolamento efetivo por confiança/repo, segredos remotos, checkouts/caches executáveis e testes Docker/SSH reais |
-| F13 | Parcial (#59) | Medir eficácia real e validar fluxos interativos e expiração após reinício |
-| F14 | Implementação base integrada (#56) | Teste de persistência/reinício, perfis em máquinas reais e limites de CI |
-| F15 | Parcial (#56/#58/#59) | Próxima tarefa elegível, diagnóstico central de todos os bloqueios, histórico de etapas |
-| F16 | Parcial (#58/#59) | Tempo por fase e custo/merge com dados completos, baseline comparável, QA real Docker/Windows/providers, release assinada |
-| F17 | Parcial (#67, #76, #77 draft) | Validar política/conta, QA consulta e persistência, ingestão de findings, Guard e integração segura |
+## Balanço por fase — 25/11/2026
 
-Nenhuma fase completa é declarada encerrada sem cumprir todos os critérios abaixo. A última bateria automatizada tem 395 aprovações, não a soma de execuções repetidas.
+Resumo de estado integrado até à PR #98 (merge `8bc4466f41f65e5ea2fa26bb34a34b611d7c36c6`). Os registos cronológicos anteriores são históricos, não substituem este balanço. Nenhuma fase é dada como encerrada sem todos os critérios de aceitação.
+
+| Fase | Evidência de implementação integrada | Falta validar/concluir |
+|---|---|---|
+| F01 | #49, #78: Docker/fnm/logs; CI Linux/Windows e Docker isolado | Workers de produção, seleção real de Node, retoma e caches |
+| F02 | #48/#61/#78/#92–94: outbox, admissão, ack, proteção de autorizações | Inbox integral e recuperação end-to-end perante falhas remotas |
+| F03 | #48/#52/#63/#78/#90–91/#95: Steward, inventários, barreiras de autorização | Centralização integral e testes remotos de concorrência |
+| F04 | #51/#57/#62/#79–97: transações, rollback, admissão, SQLite_BUSY Hunter entre ligações | Escritores restantes, disco cheio, diagnóstico e recuperação de produção |
+| F05 | #54/#62/#78/#88–89: checkpoints, recuperação e cancelamento | Chamadas de fornecedores, restart real e efeitos externos incertos |
+| F06 | #53/#58/#78: cooldowns e routing autorizado | Circuit breakers restantes e testes reais de fornecedores |
+| F07 | #53/#56/#78: reserva Codex e prioridades | Previsão, limites concorrentes durante execução e validação real |
+| F08 | #58: routing adaptativo opt-in do Fixer | Restantes papéis, calibração e eficácia medida |
+| F09 | #51/#52/#63/#78/#91–94/#97: paginação, snapshots, Scout/Watcher/Hunter | Sync incremental, alterações remotas concorrentes, identidade após recriação |
+| F10 | #54/#56/#62/#78/#79/#82/#89–90/#97: prioridades, aging, dependências, autorização Hunter | Causa comum, agrupamento e cobertura integral de starvation |
+| F11 | #56/#78: perfis, CI adaptativo, telemetria GPU opcional | Pressão em hardware real e prioridade de processos |
+| F12 | #61/#62/#78: mitigação credenciais, Docker/SSH em CI isolado | Isolamento efetivo por confiança/repo, caches executáveis e workers de produção |
+| F13 | #59: aprendizagem supervisionada | Eficácia real, expiração e fluxo interativo após reinício |
+| F14 | #56: implementação base integrada | Transições, persistência e limites em máquinas reais |
+| F15 | #56/#58/#59/#78: diagnóstico, filtros e logs | Próxima tarefa elegível, histórico completo e regressão visual integral |
+| F16 | #58/#59/#96/#98: métricas parciais, CI e publicação por draft com assinatura Ed25519 independente | Chave de confiança de produção, ensaio de publicação/recuperação e instalação/rollback; métricas comparáveis |
+| F17 | #78 (inclui #76/#77): política, consulta e persistência consultiva; revisões incluídas confirmadas | Faturação efetiva após trial, integração opt-in integral de findings e recuperação end-to-end |
+
+Última evidência integral antes deste lote: CI #186 (`45605484561`), HEAD da PR #98 `752027b401eedb6920ff4fb0ff665a98b7ce4fc7`: Ubuntu/Windows aprovados, 367 unitários Rust e 2 integração em Ubuntu (5 ignorados no cargo test normal), 23 quality e 29 adapters Python; Docker/SSH isolados e demais gates aplicáveis aprovados. CodeRabbit reviu o HEAD exato, quota incluída, sem comentários acionáveis, ambas as threads resolvidas. Risco de arquitetura baixo: confirmação da chave pública independente e recuperação manual de draft ainda necessárias. Nenhuma release publicada.
 
 ## Fases e critérios de aceitação
 ### F01 / P0 — Integração seletiva upstream
@@ -404,3 +407,5 @@ F16 — CI #171 (`45598564203`) aprovou integralmente o HEAD `89878f31588c8f8700
 F16 — CI #174 (`45600945760`) aprovou integralmente `d6e676e249b7b600b3eb798978123261b377a3bf` em Ubuntu/Windows; 367 unitários Rust e 2 integração em Ubuntu; 12 quality + 29 adapter Python. CodeRabbit reviu HEAD exato com allowance incluída, resolveu thread de inventário e não identificou comentários acionáveis, mas reteve risco baixo de manifesto antigo incoerente com binários substituídos numa repetição de tag. Correção adicional na mesma #98: build e sign com contents: read, transferência de artefactos por tentativa de execução com Actions fixadas por SHA, inventário exato e verificação criptográfica da assinatura com chave pública derivada antes da transferência. Publish separado, sem chave privada, revalida hashes, inventário e formato da assinatura, recusa tag já associada a qualquer release/draft e falha fechada perante falha da listagem. Serialização por ref; cria draft com os oito ficheiros, confirma estado draft, descarrega assets para comparação byte a byte e só então promove. Não usa clobber nem apaga releases. Uma repetição parcial de jobs pode falhar por artefactos de outra tentativa; executar novamente todos os jobs após verificar que não existe draft. Se existir draft interrompido, preservar evidência e exigir intervenção manual autorizada, não reexecutar sobre a mesma release. Testes de manifesto alterado e CLI GitHub simulado (tag existente, falha API/upload, draft inválido, bytes alterados, promoção e inventário inválido) acrescentados, ainda não executados. Limites: não há ensaio real do workflow de tags, garantia contra alterações externas concorrentes, atestação independente do commit ou validação da chave pública configurada nos clientes. A comparação remota prova igualdade dos bytes no instante da leitura, não imutabilidade futura. Não publicar release neste lote. Aprendizagem: validar antes de qualquer efeito externo visível, separar privilégios entre jobs, usar staging e promoção única sem substituir versões publicadas. Novo CI e revisão pendentes.
 
 F16 — CI #181 (`45603440693`) aprovou integralmente `60b66aa8b32fcbb2b2952e6ef301a328d140eac6` em Ubuntu/Windows (367 Rust unitários, 2 integração, 20 quality + 29 adapters Python no Ubuntu). CodeRabbit reviu o HEAD exato com allowance incluída, risco baixo, identificou simulador de upload que não dependia dos argumentos reais e recomendou chave pública de confiança independente. Correções na #98: simulador guarda apenas ficheiros efetivamente enviados, download lê o inventário remoto simulado, teste omite um executável e exige bloqueio da promoção. Publisher autentica assinatura Ed25519 antes de criar draft e depois de descarregar/comparar os assets; utiliza variável GitHub Actions `APOLLO_OFFICE_UPDATE_PUBKEY` (64 caracteres hex da chave pública de 32 bytes já confiada pelos clientes), não derivada da chave privada durante publicação. A variável tem de ser configurada/verificada pelo proprietário antes de uma publicação real; não foi configurada nem confirmada neste lote. Ausência, chave incorreta ou assinatura adulterada bloqueiam antes de qualquer chamada à API. Testes usam chaves efémeras reais OpenSSL; novo CI ainda não confirmado. Decisão conservadora: manter recusa de tags com release/draft preexistente e recuperação manual de drafts interrompidos; não reutilizar artefactos de tentativas anteriores automaticamente. Isto pode atrasar uma atualização, mas evita sobrescrever uma versão distribuída sem prova. Não é garantia de disponibilidade, proveniência independente de compilação ou imutabilidade contra outros mantenedores. Aprendizagem: mocks de efeitos externos devem reproduzir os dados enviados, e verificação de assinatura exige uma âncora de confiança independente. Sem publicação real, nova revisão pendente.
+
+F16 — PR #98 integrada em `8bc4466f41f65e5ea2fa26bb34a34b611d7c36c6` após CI #186 e revisão do HEAD exato, zero threads pendentes. Lote seguinte: a ausência de JSON na listagem GitHub podia satisfazer `all` por vacuidade, e registos sem tag podiam ser aceites. Validar presença de pelo menos uma página JSON, estrutura de array e tag não vazia antes de qualquer escrita. Página válida vazia continua permitida. Testes de inventário ausente/malformado e simulação persistente de upload interrompido ou promoção com resposta ambígua: nova tentativa deve preservar assets e estado remoto, sem editar nem publicar novamente. O teste não recupera automaticamente drafts nem usa API real. Novo CI e revisão pendentes. Aprendizagem: validar a completude estrutural de inventários, não confundir vazio válido com ausência de resposta e testar replays contra estado externo persistente. Tabela principal consolidada sem fechar fases prematuramente.
