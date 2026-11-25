@@ -2958,7 +2958,7 @@ mod t {
             let result = with_update_transition(&settings_app, || {
                 save_repo_settings(&settings_app.db, "o/r", &json!({"on_": false}))
             });
-            saved_tx.send(()).unwrap();
+            saved_tx.send(result.is_ok()).unwrap();
             result
         });
         started_rx.recv().unwrap();
@@ -2971,8 +2971,7 @@ mod t {
         assert!(vet.join().unwrap());
         assert!(saved_rx
             .recv_timeout(std::time::Duration::from_secs(1))
-            .unwrap()
-            .is_ok());
+            .unwrap());
         assert!(settings.join().unwrap().is_ok());
         assert_eq!(a.db.n("select on_ from rp where full='o/r'", pa![]), 0);
         assert!(a.vtk.lock().unwrap().contains(&42));
