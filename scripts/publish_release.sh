@@ -9,7 +9,12 @@ python3 "$(dirname "$0")/release_manifest.py" --verify-trusted "$dist"
 # A successful complete listing is required, including drafts. Never interpret
 # an API or authorization failure as proof that a tag has not been released.
 gh api --paginate "repos/$repo/releases?per_page=100" |
-  jq -se --arg tag "$tag" 'all(.[][]; .tag_name != $tag)' >/dev/null || {
+  jq -se --arg tag "$tag" '
+    length > 0
+    and all(.[]; type == "array" and all(.[]; type == "object"
+      and (.tag_name | type == "string" and length > 0)))
+    and all(.[][]; .tag_name != $tag)
+  ' >/dev/null || {
     echo "Cannot prove release tag is unused; refusing to publish." >&2
     exit 1
   }

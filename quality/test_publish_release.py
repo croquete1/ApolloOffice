@@ -24,22 +24,37 @@ mode = os.environ["FAKE_MODE"]
 command = " ".join(args[:2]) if args[0] == "release" else args[0]
 with open(os.environ["FAKE_LOG"], "a") as log:
     log.write(command + "\\n")
+state = Path(os.environ["FAKE_STATE"])
 if command == "api":
     if mode == "api-fail":
         sys.exit(1)
-    print(json.dumps([{"tag_name": "v0.10.15", "draft": False}] if mode == "existing" else []))
+    if mode == "api-empty":
+        sys.exit(0)
+    if mode == "api-malformed":
+        print(json.dumps([{"wrong_field": "v0.10.15"}]))
+        sys.exit(0)
+    if mode == "api-wrong-shape":
+        print(json.dumps({"releases": []}))
+        sys.exit(0)
+    if state.exists():
+        print(json.dumps([json.loads(state.read_text())]))
+    else:
+        print(json.dumps([{"tag_name": "v0.10.15", "draft": False}] if mode == "existing" else []))
 elif command == "release create":
     assert "--draft" in args and "--verify-tag" in args
     if mode == "upload-fail":
         sys.exit(1)
     remote = Path(os.environ["FAKE_REMOTE"])
     remote.mkdir(exist_ok=True)
+    state.write_text(json.dumps({"tag_name": "v0.10.15", "draft": True}))
     for arg in args[3:]:
         item = Path(arg)
         if item.parent == Path(os.environ["FAKE_DIST"]) and item.is_file():
             if mode == "omitted" and item.name == "apollo-office-linux-x64":
                 continue
             shutil.copyfile(item, remote / item.name)
+            if mode == "interrupted-upload":
+                sys.exit(1)
 elif command == "release view":
     print("false" if mode == "not-draft" else "true")
 elif command == "release download":
@@ -50,6 +65,9 @@ elif command == "release download":
         (dst / "apollo-office-linux-x64").write_bytes(b"changed")
 elif command == "release edit":
     assert "--draft=false" in args
+    state.write_text(json.dumps({"tag_name": "v0.10.15", "draft": False}))
+    if mode == "ambiguous-promotion":
+        sys.exit(1)
 else:
     sys.exit(99)
 """
@@ -78,11 +96,15 @@ class PublishReleaseTests(unittest.TestCase):
         gh.chmod(0o755)
         self.log = self.root / "commands.log"
 
-    def run_publish(self, mode, public_key=None):
-        shutil.rmtree(self.root / "remote", ignore_errors=True)
+    def run_publish(self, mode, public_key=None, preserve_remote=False):
+        if not preserve_remote:
+            shutil.rmtree(self.root / "remote", ignore_errors=True)
+            (self.root / "state.json").unlink(missing_ok=True)
+        self.log.unlink(missing_ok=True)
         env = dict(os.environ, PATH=str(self.root) + os.pathsep + os.environ["PATH"],
                    FAKE_MODE=mode, FAKE_LOG=str(self.log), FAKE_DIST=str(self.dist),
                    FAKE_REMOTE=str(self.root / "remote"),
+                   FAKE_STATE=str(self.root / "state.json"),
                    APOLLO_OFFICE_UPDATE_PUBKEY=self.public_key if public_key is None else public_key,
                    GITHUB_REF_NAME="v0.10.15", GITHUB_REPOSITORY="example/fixture")
         result = subprocess.run(["bash", str(ROOT / "scripts/publish_release.sh"), str(self.dist)],
@@ -97,7 +119,7 @@ class PublishReleaseTests(unittest.TestCase):
                                  "release download", "release edit"])
 
     def test_existing_release_and_api_failure_are_fail_closed(self):
-        for mode in ("existing", "api-fail"):
+        for mode in ("existing", "api-fail", "api-empty", "api-malformed", "api-wrong-shape"):
             with self.subTest(mode=mode):
                 self.log.unlink(missing_ok=True)
                 status, calls = self.run_publish(mode)
@@ -138,3 +160,36 @@ class PublishReleaseTests(unittest.TestCase):
         status, calls = self.run_publish("ok")
         self.assertNotEqual(status, 0)
         self.assertEqual(calls, [])
+
+
+    def test_retry_after_interrupted_upload_preserves_draft(self):
+        status, calls = self.run_publish("interrupted-upload")
+        self.assertNotEqual(status, 0)
+        self.assertEqual(calls, ["api", "release create"])
+        state = self.root / "state.json"
+        before = state.read_bytes()
+        self.assertTrue(json.loads(before)["draft"])
+        remote = self.root / "remote"
+        files = {p.name: p.read_bytes() for p in remote.iterdir()}
+        self.assertEqual(len(files), 1)
+        status, calls = self.run_publish("ok", preserve_remote=True)
+        self.assertNotEqual(status, 0)
+        self.assertEqual(calls, ["api"])
+        self.assertEqual(state.read_bytes(), before)
+        self.assertEqual({p.name: p.read_bytes() for p in remote.iterdir()}, files)
+
+    def test_retry_after_ambiguous_promotion_preserves_published_release(self):
+        status, calls = self.run_publish("ambiguous-promotion")
+        self.assertNotEqual(status, 0)
+        self.assertEqual(calls[-1], "release edit")
+        state = self.root / "state.json"
+        before = state.read_bytes()
+        self.assertFalse(json.loads(before)["draft"])
+        remote = self.root / "remote"
+        files = {p.name: p.read_bytes() for p in remote.iterdir()}
+        self.assertEqual(len(files), 8)
+        status, calls = self.run_publish("ok", preserve_remote=True)
+        self.assertNotEqual(status, 0)
+        self.assertEqual(calls, ["api"])
+        self.assertEqual(state.read_bytes(), before)
+        self.assertEqual({p.name: p.read_bytes() for p in remote.iterdir()}, files)
