@@ -3,7 +3,7 @@ use crate::app::{drop, e, sl, Ax, Rn, R, X};
 use crate::db::{now, Job};
 use crate::net::need;
 use crate::pa;
-use crate::sh::{gh, gh_input, ghj, hb, hbid, ho, hosts, hx, hxl, q, Out};
+use crate::sh::{gh, ghj, hb, hbid, ho, hosts, hx, hxl, q, Out};
 use regex::Regex;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
