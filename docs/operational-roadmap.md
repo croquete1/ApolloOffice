@@ -548,3 +548,23 @@ Novas frentes abertas: #115 bloqueio de retry perante intenção durável de pub
 - #131: [CI](https://github.com/croquete1/ApolloOffice/actions/runs/45702262902) aprovado no HEAD `57fef4c2bcf2dcf7434d0f1d321f84e213621dc0`. E2E público e privado aprovados em [Windows (369 unitários)](https://github.com/croquete1/ApolloOffice/actions/runs/45702262902/job/139515138521) e [Ubuntu (416 unitários, 5 ignorados)](https://github.com/croquete1/ApolloOffice/actions/runs/45702262902/job/139515139028). Uma passagem não demonstra estabilidade recorrente; revisão pendente, não integrada.
 - #132: CI do HEAD inicial `e3e9f04439db1c8e79cdcde52f8d5ca77b06608f` aprovado em Ubuntu/Windows ([run](https://github.com/croquete1/ApolloOffice/actions/runs/45702352375)). Novo HEAD `57d30e1f8a7a1d8fa2ef7eff2faccf412083a28e` evita iniciar sondagem duplicada enquanto a chave está pendente e liberta a geração própria ao cancelar a future, sem invalidar uma geração posterior. Testes escritos para concorrência, cancelamento e invalidação; novo CI/revisão pendentes, não integrado. A relação causal com os timeouts E2E ainda não está demonstrada.
 - Rerun dos jobs falhados da [main](https://github.com/croquete1/ApolloOffice/actions/runs/45699660183) solicitado no mesmo HEAD; resultado pendente. Não considerar main verde até confirmar. Nenhuma fase encerrada. Última quota CodeRabbit incluída observada continua esgotada; não foram solicitadas revisões adicionais nesta ronda.
+
+## Critérios de engenharia e validação contínua — 25/11/2026
+
+CI verde é necessário, mas não suficiente para declarar uma PR pronta. Aplicar aos trabalhos atuais e futuros:
+
+- Rever o diff e os caminhos de chamada, invariantes, limites, cancelamentos, concorrência, persistência e recuperação de falhas conforme o risco da alteração. Preferir mudanças pequenas, coesas e reversíveis, sem abstrações prematuras ou dependências dispensáveis.
+- Validar entradas externas e autorizações de forma conservadora; não transformar dados ausentes, falhados ou ambíguos em evidência positiva. Preservar limites de segurança, privacidade e custos.
+- Escrever regressões com controlo positivo e negativo, incluindo fronteiras relevantes. Sempre que praticável, demonstrar que o teste falha sem a correção. Não ocultar avisos, desativar testes ou tratar aumento de timeout como prova de resolução da causa.
+- Executar formatação, lint, testes unitários e integração aplicáveis nas plataformas suportadas. Distinguir execução inicial, rerun, testes ignorados, HEAD exato e validação pós-merge. Não substituir evidência de estabilidade por uma passagem isolada.
+- Exigir revisão independente sobre as alterações funcionais finais, resolver findings pertinentes ou justificar tecnicamente a discordância; manter draft quando faltar evidência. Não pedir serviços pagos nem contornar a indisponibilidade da quota incluída.
+- Reavaliar compatibilidade com a base atual e dependências entre PRs; integrar individualmente apenas após os critérios de aprovação existentes e verificar a main após cada integração. Sem merge nesta ronda.
+- Reportar alterações efetivamente publicadas, riscos, limitações, evidências e próximos passos; distinguir proposta de funcionalidade validada. Manter interface dos agentes e política de modelos inalteradas.
+
+### Revisão manual após CI verde
+
+- #128: HEAD `33541bc40892fa49fabe473b00ee30d2aed5eef2` rejeita cronologia ambígua de pedidos de alteração elegíveis, incluindo timestamps inválidos e empate no instante mais recente; teste de regressão e controlo positivo escritos. [Novo CI](https://github.com/croquete1/ApolloOffice/actions/runs/45708333342) em execução na observação.
+- #129: HEAD `2736821617e228faa175466f83946dfd607cc944` exclui amostras anteriores ao início da janela semanal identificada pelo reset, com teste de histórico persistido incompatível. [Novo CI](https://github.com/croquete1/ApolloOffice/actions/runs/45708360068) em execução.
+- #132: HEAD `edbaf8f6e50bff96c63968dc3de0ad98bdcd9d77` impede que a primeira sondagem falhada conceda frescura à autorização, mantendo o debounce visual; teste verifica bloqueio após falha e recuperação após sucesso. [Novo CI](https://github.com/croquete1/ApolloOffice/actions/runs/45708310207) em execução.
+- #131: CI anterior aprovado; avaliar estabilidade repetida e a interação com #132 antes de decidir os deadlines finais. As cinco PRs continuam draft; revisão independente e confirmação de estabilidade da main pendentes. Não foram executados testes locais nesta ronda; nenhuma fase encerrada.
+
