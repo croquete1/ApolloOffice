@@ -78,6 +78,11 @@ pub fn fail(a: &Ax, repo: &str, stage: &str, code: i32) {
         let _transition = a.update_transition.lock().unwrap();
         let before = status(a, repo);
         let Some(previous) = before["failures"].as_i64() else {
+            a.hunt_storage_holds
+                .lock()
+                .unwrap()
+                .insert(repo.to_string());
+            crate::app::chg();
             a.say(
                 "hunter",
                 &format!("{repo}: failure state unavailable; Hunter held"),
@@ -308,6 +313,32 @@ mod tests {
         assert!(!blocked(&a, "example/one"));
         a.db.run("drop table kv", vec![]);
         assert!(blocked(&a, "example/one"));
+    }
+
+    #[test]
+    fn failed_health_read_holds_repo_even_after_read_recovers() {
+        let a = app();
+        let repo = "example/one";
+        a.db.ks(&key(repo), &json!({"failures":2,"until":0}));
+        assert!(!blocked(&a, repo));
+        a.db.0
+            .lock()
+            .unwrap()
+            .execute_batch("alter table kv rename to kv_unavailable;")
+            .unwrap();
+        fail(&a, repo, "setup", 1);
+        a.db.0
+            .lock()
+            .unwrap()
+            .execute_batch("alter table kv_unavailable rename to kv;")
+            .unwrap();
+        assert_eq!(read_health(&a.db, repo).unwrap()["failures"], 2);
+        assert!(blocked(&a, repo));
+        assert!(!blocked(&a, "example/two"));
+        success(&a, repo);
+        assert!(blocked(&a, repo));
+        reset(&a, repo).unwrap();
+        assert!(!blocked(&a, repo));
     }
 
     #[test]
