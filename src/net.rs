@@ -17,6 +17,7 @@ fn hw(o: &str) -> serde_json::Value {
     let mut v = serde_json::json!({"t": now()});
     let mut gpus = Vec::new();
     let mut gpu_ids = std::collections::HashSet::new();
+    let mut numeric_keys = std::collections::HashSet::new();
     for l in o.lines() {
         let (k, x) = l.split_once(' ').unwrap_or((l, ""));
         if k == "gpu" {
@@ -30,6 +31,9 @@ fn hw(o: &str) -> serde_json::Value {
         if matches!(k, "os" | "up") {
             v[k] = serde_json::json!(x.trim());
             continue;
+        }
+        if matches!(k, "cpu" | "load" | "temp" | "mem" | "disk") && !numeric_keys.insert(k) {
+            return serde_json::json!({"t":null});
         }
         let Ok(ns) = x
             .split_whitespace()
@@ -225,6 +229,21 @@ pub async fn watch(a: Ax) {
 #[cfg(test)]
 mod gpu_telemetry_tests {
     use super::*;
+
+    #[test]
+    fn duplicate_numeric_samples_are_unavailable() {
+        for sample in [
+            "cpu 8\ncpu 64",
+            "mem 16000 100\nmem 16000 8000",
+            "temp invalid\ntemp 50",
+            "temp 50\ntemp invalid",
+            "load 1\nload 2",
+            "disk 100 20\ndisk 100 90",
+        ] {
+            assert!(hw(sample)["t"].is_null());
+        }
+        assert!(hw("cpu 8\nload 1\nmem 16000 8000")["t"].is_i64());
+    }
 
     #[test]
     fn malformed_numeric_samples_are_not_reinterpreted() {
