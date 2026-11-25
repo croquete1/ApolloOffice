@@ -20,6 +20,24 @@ fn actionable_request(
     head: &str,
     author: &str,
 ) -> Option<(i64, String, i64)> {
+    // Incomplete identity on a potentially eligible request must not
+    // silently authorize an older request from the same maintainer.
+    for review in reviews.iter().filter(|r| {
+        r["state"] == "CHANGES_REQUESTED"
+            && r["commit_id"] == head
+            && ALLOWED_REVIEWERS.contains(&r["author_association"].as_str().unwrap_or(""))
+    }) {
+        let user = &review["user"];
+        if user["type"] == "Bot" {
+            continue;
+        }
+        if user["type"] != "User"
+            || !user["id"].as_i64().is_some_and(|id| id > 0)
+            || user["login"].as_str().is_none_or(str::is_empty)
+        {
+            return None;
+        }
+    }
     let mut requests = reviews
         .iter()
         .filter(|r| r["state"] == "CHANGES_REQUESTED" && r["commit_id"] == head)
@@ -484,6 +502,29 @@ mod tests {
         other["submitted_at"] = json!("2026-11-09T13:00:01+01:00");
         assert_eq!(
             actionable_request(&[request, other], &[], head, "author")
+                .unwrap()
+                .0,
+            92
+        );
+    }
+
+    #[test]
+    fn incomplete_maintainer_identity_blocks_older_request() {
+        let head = "0123456789012345678901234567890123456789";
+        let request = json!({"id":91,"state":"CHANGES_REQUESTED","commit_id":head,
+            "submitted_at":"2026-11-09T12:00:00Z","author_association":"OWNER",
+            "user":{"login":"maintainer","type":"User","id":12},"body":"Fix regression"});
+        let mut newer = request.clone();
+        newer["id"] = json!(92);
+        newer["submitted_at"] = json!("2026-11-09T13:00:00Z");
+        newer["user"]["id"] = Value::Null;
+        assert!(
+            actionable_request(&[request.clone(), newer.clone()], &[], head, "author")
+                .is_none()
+        );
+        newer["user"]["id"] = json!(12);
+        assert_eq!(
+            actionable_request(&[request, newer], &[], head, "author")
                 .unwrap()
                 .0,
             92
