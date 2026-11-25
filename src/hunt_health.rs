@@ -56,7 +56,10 @@ pub fn status(a: &Ax, repo: &str) -> Value {
     if a.hunt_storage_holds.lock().unwrap().contains(repo) {
         return json!({"blocked":true,"failures":null,"until":null,"stage":"storage_write_failed","exit_code":null});
     }
-    match a.db.try_all("select k from kv where k=?", crate::pa![hold_key(repo)]) {
+    match a
+        .db
+        .try_all("select k from kv where k=?", crate::pa![hold_key(repo)])
+    {
         Ok(rows) if !rows.is_empty() => {
             return json!({"blocked":true,"failures":null,"until":null,"stage":"storage_write_failed","exit_code":null});
         }
@@ -202,11 +205,10 @@ pub fn success(a: &Ax, repo: &str) {
 pub fn reset(a: &Ax, repo: &str) -> rusqlite::Result<()> {
     {
         let _transition = a.update_transition.lock().unwrap();
-        let deleted =
-            a.db.0
-                .lock()
-                .unwrap()
-                .execute("delete from kv where k in (?,?)", [key(repo), hold_key(repo)]);
+        let deleted = a.db.0.lock().unwrap().execute(
+            "delete from kv where k in (?,?)",
+            [key(repo), hold_key(repo)],
+        );
         if let Err(error) = deleted {
             hold_storage(a, repo);
             crate::app::chg();
