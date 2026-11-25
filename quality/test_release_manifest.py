@@ -6,20 +6,34 @@ from pathlib import Path
 from scripts.release_manifest import EXPECTED_ASSETS, manifest
 
 
+# Independent contract: changing the production constant must not change fixtures.
+REQUIRED_BINARIES = frozenset({
+    "apollo-office-windows-x64.exe",
+    "apollo-office-windows-arm64.exe",
+    "apollo-office-linux-x64",
+    "apollo-office-linux-arm64",
+    "apollo-office-macos-arm64",
+    "apollo-office-macos-x64",
+})
+
+
 class ReleaseManifestTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        for name in EXPECTED_ASSETS:
+        for name in REQUIRED_BINARIES:
             (self.root / name).write_bytes(name.encode())
+
+    def test_inventory_contract(self):
+        self.assertEqual(EXPECTED_ASSETS, REQUIRED_BINARIES)
 
     def test_complete_inventory_and_hashes(self):
         result = manifest(self.root, "v0.10.15")
         self.assertEqual(result["v"], "0.10.15")
         self.assertEqual(result["files"], {
             name: hashlib.sha256(name.encode()).hexdigest()
-            for name in EXPECTED_ASSETS
+            for name in REQUIRED_BINARIES
         })
 
     def test_missing_asset_rejected(self):
