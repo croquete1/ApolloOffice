@@ -250,6 +250,11 @@ fn publish_probe_results(
         if !probes.publish(k, ticket, now()) {
             continue;
         }
+        // A failed check may be debounced for the UI, but must never
+        // provide fresh positive evidence to the admission gates.
+        if !ok {
+            probes.checked.remove(k);
+        }
         if let Some(sample) = sample {
             l.hst.insert(k.clone(), sample);
         }
@@ -589,6 +594,40 @@ mod gpu_telemetry_tests {
             PROBES.lock().unwrap().invalidate(key);
             FAIL.lock().unwrap().remove(key);
         }
+    }
+
+    #[tokio::test]
+    async fn first_probe_failure_cannot_authorize_work() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            47300,
+            "apollo-office".into(),
+        ));
+        let host = "fixture-probe-first-failure";
+        a.db.run(
+            "insert into hs(id,on_) values(?,1)",
+            crate::pa![host.to_string()],
+        );
+        let a_ref = &a;
+        let result = need_once_with(&a, &[host], |keys| async move {
+            let ticket = begin_probe(host);
+            publish_probe_results(a_ref, &keys, vec![ticket], vec![(false, None)]);
+        })
+        .await;
+        assert!(matches!(result, Err(X::Defer(_))));
+        assert!(!fresh(host));
+        assert_eq!(a.lv.lock().unwrap().o.net.get(host), Some(&true));
+
+        let result = need_once_with(&a, &[host], |keys| async move {
+            let ticket = begin_probe(host);
+            publish_probe_results(a_ref, &keys, vec![ticket], vec![(true, None)]);
+        })
+        .await;
+        assert!(result.is_ok());
+        assert!(fresh(host));
+        PROBES.lock().unwrap().invalidate(host);
+        FAIL.lock().unwrap().remove(host);
     }
 
     #[tokio::test]
