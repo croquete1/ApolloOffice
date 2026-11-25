@@ -914,7 +914,7 @@ impl Db {
         {
             return Ok(());
         }
-        tx.execute("insert or ignore into watcher_outbox(id,repo,num,author,body,state,created,updated) values(?,?,?,?,?,'pending',?,?)",rusqlite::params![key,repo,number,author,body,at,at])?;
+        tx.execute("insert or ignore into watcher_outbox(id,repo,num,author,body,state,created,updated) select ?,?,?,?,?,'pending',?,? where exists(select 1 from rp where full=? and on_=1)",rusqlite::params![key,repo,number,author,body,at,at,repo])?;
         Ok(())
     }
 
