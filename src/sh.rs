@@ -1721,6 +1721,33 @@ mod tests {
         assert_eq!(super::clip("short", 6000), "short");
     }
 
+    #[tokio::test]
+    async fn spawn_evidence_distinguishes_missing_executable_from_process_failure() {
+        let missing = std::env::current_exe().unwrap().join("not-an-executable");
+        let (out, started) = super::run_with_spawn(
+            missing.to_str().unwrap(),
+            &[],
+            super::Rq {
+                t: 5,
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(!started);
+        assert_ne!(out.c, 0);
+        let (out, started) = super::run_with_spawn(
+            "git",
+            &["not-an-apollo-git-command".into()],
+            super::Rq {
+                t: 10,
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(started);
+        assert_ne!(out.c, 0);
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn timeout_kills_child_processes() {
