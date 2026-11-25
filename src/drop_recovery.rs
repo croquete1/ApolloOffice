@@ -84,8 +84,21 @@ fn cache_default_head(a: &Ax, repo: &str, head: &Value) -> Result<(), String> {
     Ok(())
 }
 
+async fn recovery_remote(args: Vec<String>, timeout: u64) -> Result<Value, String> {
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    ghj(&refs, timeout).await
+}
+
 /// Só recoloca uma issue após confirmar o estado do GitHub e o HEAD real.
 pub async fn retry_manual(a: &Ax, id: i64) -> Result<bool, String> {
+    retry_manual_with(a, id, recovery_remote).await
+}
+
+async fn retry_manual_with<F, Fut>(a: &Ax, id: i64, mut remote: F) -> Result<bool, String>
+where
+    F: FnMut(Vec<String>, u64) -> Fut,
+    Fut: std::future::Future<Output = Result<Value, String>>,
+{
     let (job, updated) =
         recovery_job(a, id).ok_or("Trabalho inexistente ou metadados inválidos")?;
     if !eligible(&job, false) {
@@ -93,12 +106,12 @@ pub async fn retry_manual(a: &Ax, id: i64) -> Result<bool, String> {
     }
     if job.num > 0 {
         let issue_path = format!("repos/{}/issues/{}", job.repo, job.num);
-        let issue = ghj(&["api", &issue_path], 40).await?;
+        let issue = remote(vec!["api".into(), issue_path], 40).await?;
         if !open_issue(&issue, job.num) {
             return Err("Issue já não está aberta no GitHub".into());
         }
-        let prs = ghj(
-            &[
+        let prs = remote(
+            [
                 "pr",
                 "list",
                 "-R",
@@ -109,7 +122,10 @@ pub async fn retry_manual(a: &Ax, id: i64) -> Result<bool, String> {
                 "200",
                 "--json",
                 "number,title,body",
-            ],
+            ]
+            .iter()
+            .map(|arg| arg.to_string())
+            .collect(),
             90,
         )
         .await?;
@@ -124,7 +140,7 @@ pub async fn retry_manual(a: &Ax, id: i64) -> Result<bool, String> {
     // Evita que uma cache anterior bloqueie uma nova tentativa depois de a
     // branch principal mudar. Mantém as provas cired que ainda correspondem.
     let path = format!("repos/{}/commits/HEAD", job.repo);
-    let head = ghj(&["api", &path, "--jq", "{s: .sha}"], 60).await?;
+    let head = remote(vec!["api".into(), path, "--jq".into(), "{s: .sha}".into()], 60).await?;
     cache_default_head(a, &job.repo, &head)?;
     retry_snapshot(a, &job, updated, false).map_err(|error| error.to_string())
 }
@@ -312,6 +328,14 @@ fn commit_retry(
 /// Drops deliberados, com publicação, alterações de código ou sem provas
 /// de segurança ficam intactos para análise manual.
 pub async fn scan(a: &Ax, repo: &str, prs: &[Value]) {
+    scan_with(a, repo, prs, recovery_remote).await;
+}
+
+async fn scan_with<F, Fut>(a: &Ax, repo: &str, prs: &[Value], mut remote: F)
+where
+    F: FnMut(Vec<String>, u64) -> Fut,
+    Fut: std::future::Future<Output = Result<Value, String>>,
+{
     if a.hold("watcher") || a.drain.load(std::sync::atomic::Ordering::Relaxed) {
         return;
     }
@@ -349,7 +373,7 @@ pub async fn scan(a: &Ax, repo: &str, prs: &[Value]) {
             // A issue tem de continuar aberta no GitHub. Erros de leitura
             // bloqueiam a recuperação, sem qualquer escrita ou requeue.
             let path = format!("repos/{repo}/issues/{}", job.num);
-            let issue = match ghj(&["api", &path], 40).await {
+            let issue = match remote(vec!["api".into(), path], 40).await {
                 Ok(value) => value,
                 Err(_) => continue,
             };
@@ -670,6 +694,74 @@ mod tests {
             assert_eq!(retry_snapshot(&a, &job, updated, automatic), Ok(false));
             a.db.run("update jobs set d='{}' where id=?", pa![id]);
             assert_eq!(retry_snapshot(&a, &job, updated, automatic), Ok(true));
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_entry_points_preserve_the_snapshot_during_io() {
+        for automatic in [false, true] {
+            for mutation in ["num", "timestamp", "metadata", "none"] {
+                let a = setup();
+                let id = dropped(&a, "machine kept failing: timed out", json!({}));
+                let kill = format!("kill:{id}");
+                if !automatic {
+                    a.db.ks(&kill, &json!(true));
+                }
+                let mut calls = 0;
+                let remote = |args: Vec<String>, _: u64| {
+                    calls += 1;
+                    let response = match args[0].as_str() {
+                        "api" if args[1] == "repos/org/repo/issues/42" => {
+                            match mutation {
+                                "num" => {
+                                    a.db.run("update jobs set num=43 where id=?", pa![id]);
+                                }
+                                "timestamp" => {
+                                    a.db.run("update jobs set t1=t1+1 where id=?", pa![id]);
+                                }
+                                "metadata" => {
+                                    a.db.run(
+                                        "update jobs set d=json_set(d,'$.fixture',1) where id=?",
+                                        pa![id],
+                                    );
+                                }
+                                _ => {}
+                            }
+                            if automatic && mutation != "none" {
+                                a.db.ks(&kill, &json!(true));
+                            }
+                            json!({"number":42,"state":"open"})
+                        }
+                        "pr" => json!([]),
+                        "api" if args[1] == "repos/org/repo/commits/HEAD" => {
+                            json!({"s":"a".repeat(40)})
+                        }
+                        _ => panic!("unexpected fixture request: {args:?}"),
+                    };
+                    std::future::ready(Ok(response))
+                };
+                if automatic {
+                    scan_with(&a, "org/repo", &[], remote).await;
+                    assert_eq!(calls, 1);
+                } else {
+                    assert_eq!(
+                        retry_manual_with(&a, id, remote).await.unwrap(),
+                        mutation == "none"
+                    );
+                    assert_eq!(calls, 3);
+                }
+                let job = a.db.jg(id).unwrap();
+                if mutation == "none" {
+                    assert_eq!(job.st, "ready");
+                    assert_eq!(attempts(&job), Some(u64::from(automatic)));
+                    assert!(a.db.kg(&kill).is_null());
+                } else {
+                    assert_eq!(job.st, "drop");
+                    assert_eq!(attempts(&job), Some(0));
+                    assert_eq!(a.db.kg(&kill), true);
+                    assert!(job.d["drop_history"].is_null());
+                }
+            }
         }
     }
 

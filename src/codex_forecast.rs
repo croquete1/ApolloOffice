@@ -1,6 +1,7 @@
 //! Projeção indicativa de esgotamento da quota semanal Codex.
 //! Apenas observações de consumo e timestamps; nunca tokens ou credenciais.
 use crate::db::Db;
+use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 
 const KEY: &str = "codex_weekly_usage_history_v1";
@@ -129,7 +130,37 @@ pub fn update(db: &Db, snapshot: &mut Value) {
         return;
     }
 
-    let stored = db.kg(KEY);
+    let result = update_history(db, now_ms, rem, reset_sec, reset_ms);
+    snapshot["weekly_forecast"] = result.unwrap_or_else(|_| note("unavailable", 0.0, None));
+}
+
+fn update_history(
+    db: &Db,
+    now_ms: i64,
+    rem: f64,
+    reset_sec: i64,
+    reset_ms: i64,
+) -> rusqlite::Result<Value> {
+    let mut connection = db.0.lock().unwrap();
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let raw: Option<String> = tx
+        .query_row("select v from kv where k=?", [KEY], |row| row.get(0))
+        .optional()?;
+    let stored = match raw {
+        Some(raw) => {
+            serde_json::from_str::<Value>(&raw).map_err(|_| rusqlite::Error::InvalidQuery)?
+        }
+        None => Value::Null,
+    };
+    // Legacy history has only sample timestamps. Preserve their latest
+    // observation as the initial watermark, even across quota windows.
+    let latest_sample = stored["samples"]
+        .as_array()
+        .and_then(|rows| rows.iter().filter_map(|row| row[0].as_i64()).max());
+    let watermark = stored["observed_at"].as_i64().max(latest_sample);
+    if watermark.is_some_and(|at| now_ms <= at) {
+        return Ok(note("insufficient", 0.0, None));
+    }
     let mut samples: Vec<Sample> = if stored["reset_at"] == reset_sec {
         stored["samples"]
             .as_array()
@@ -166,9 +197,18 @@ pub fn update(db: &Db, snapshot: &mut Value) {
             let excess = samples.len() - MAX_SAMPLES;
             samples.drain(..excess);
         }
-        let saved: Vec<Value> = samples.iter().map(|s| json!([s.at, s.used])).collect();
-        db.ks(KEY, &json!({"reset_at":reset_sec,"samples":saved}));
     }
+    // Persist ordering even when the sampling interval has not elapsed.
+    let saved: Vec<Value> = samples.iter().map(|s| json!([s.at, s.used])).collect();
+    let state = json!({"reset_at":reset_sec,"samples":saved,"observed_at":now_ms});
+    let changed = tx.execute(
+        "insert into kv(k,v) values(?,?) on conflict(k) do update set v=excluded.v",
+        rusqlite::params![KEY, state.to_string()],
+    )?;
+    if changed != 1 {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    tx.commit()?;
 
     // Usa o valor mais recente na previsão, mesmo quando a captura
     // persistente ainda não atingiu os 15 minutos.
@@ -176,7 +216,7 @@ pub fn update(db: &Db, snapshot: &mut Value) {
     if observed.last().is_none_or(|last| last.at < now_ms) {
         observed.push(current);
     }
-    snapshot["weekly_forecast"] = forecast(&observed, rem, reset_ms, now_ms);
+    Ok(forecast(&observed, rem, reset_ms, now_ms))
 }
 
 #[cfg(test)]
@@ -259,6 +299,44 @@ mod tests {
         update(&db, &mut new_window);
         assert_eq!(new_window["weekly_forecast"]["status"], "insufficient");
         assert_eq!(db.kg(KEY)["samples"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn delayed_or_duplicate_observation_cannot_replace_history() {
+        let db = Db::mem();
+        let reset = NOW + 24 * H;
+        let mut first = state(NOW, 20.0, reset);
+        update(&db, &mut first);
+        let mut recent = state(NOW + 60_000, 20.1, reset);
+        update(&db, &mut recent);
+        let saved = db.kg(KEY);
+        assert_eq!(saved["samples"].as_array().unwrap().len(), 1);
+        assert_eq!(saved["observed_at"], NOW + 60_000);
+        for (at, window) in [(NOW + 30_000, reset), (NOW + 60_000, reset + H)] {
+            let mut late = state(at, 90.0, window);
+            update(&db, &mut late);
+            assert_eq!(late["weekly_forecast"]["status"], "insufficient");
+            assert_eq!(db.kg(KEY), saved);
+        }
+        let mut next = state(NOW + H, 25.0, reset);
+        update(&db, &mut next);
+        assert_eq!(db.kg(KEY)["samples"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn failed_history_write_does_not_publish_a_forecast() {
+        let db = Db::mem();
+        let reset = NOW + 24 * H;
+        let mut initial = state(NOW, 20.0, reset);
+        update(&db, &mut initial);
+        let saved = db.kg(KEY);
+        db.0.lock().unwrap().execute_batch(
+            "create trigger reject_forecast before update on kv begin select raise(abort,'fixture failure'); end;"
+        ).unwrap();
+        let mut next = state(NOW + H, 30.0, reset);
+        update(&db, &mut next);
+        assert_eq!(next["weekly_forecast"]["status"], "unavailable");
+        assert_eq!(db.kg(KEY), saved);
     }
 
     #[test]
