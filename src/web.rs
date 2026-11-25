@@ -2076,7 +2076,7 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                     js(json!({"full": r, "ci": c, "setup": s, "cfg": cfg(a)}))
                 }
                 "set" => {
-                    if with_update_transition(&a, || save_repo_settings(&a.db, &r, &b)).is_err() {
+                    if with_update_transition(a, || save_repo_settings(&a.db, &r, &b)).is_err() {
                         return er(StatusCode::CONFLICT, "repository settings were not saved");
                     }
                     a.sw.notify_one();
