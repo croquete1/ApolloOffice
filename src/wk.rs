@@ -1078,7 +1078,10 @@ pub(crate) fn admit_vet(a: &Ax, id: i64) -> bool {
     if a.drain.load(std::sync::atomic::Ordering::SeqCst)
         || a.hold("vet")
         || !matches!(
-            a.db.try_n("select count(*) from jobs where id=? and st='vet'", pa![id]),
+            a.db.try_n(
+                "select count(*) from jobs where id=? and st='vet' and exists(select 1 from rp where full=jobs.repo and on_=1)",
+                pa![id]
+            ),
             Ok(1)
         )
     {
