@@ -8,6 +8,12 @@ use serde_json::{json, Value};
 
 const ALLOWED_REVIEWERS: &[&str] = &["OWNER", "MEMBER", "COLLABORATOR"];
 
+// Compare actual instants, not RFC3339 strings (offsets and fractional
+// seconds can sort differently). Ambiguous revocations block automation.
+fn review_time(review: &Value) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    chrono::DateTime::parse_from_rfc3339(review["submitted_at"].as_str()?).ok()
+}
+
 fn actionable_request(
     reviews: &[Value],
     comments: &[Value],
@@ -26,15 +32,19 @@ fn actionable_request(
                 && !user.ends_with("[bot]")
         })
         // Não reutilizar uma objeção se o mesmo revisor a aprovou/revogou depois.
-        .filter(|r| {
+        .filter_map(|r| review_time(r).map(|at| (r, at)))
+        .filter(|(r, at)| {
+            let reviewer = r["user"]["login"].as_str().unwrap_or("");
             !reviews.iter().any(|other| {
-                other["user"]["login"] == r["user"]["login"]
-                    && other["submitted_at"].as_str().unwrap_or("")
-                        > r["submitted_at"].as_str().unwrap_or("")
+                other["user"]["login"]
+                    .as_str()
+                    .is_some_and(|login| login.eq_ignore_ascii_case(reviewer))
                     && (other["state"] == "APPROVED" || other["state"] == "DISMISSED")
+                    && review_time(other).is_none_or(|other_at| other_at >= *at)
             })
         })
-        .max_by(|a, b| a["submitted_at"].as_str().cmp(&b["submitted_at"].as_str()))?;
+        .max_by_key(|(_, at)| *at)?
+        .0;
     let id = last["id"].as_i64().filter(|id| *id > 0)?;
     let since = chrono::DateTime::parse_from_rfc3339(last["submitted_at"].as_str()?)
         .ok()?
@@ -356,6 +366,40 @@ mod tests {
             actionable_request(&[review, newer], &[], head, "author").is_none(),
             "uma aprovação posterior torna a objeção obsoleta"
         );
+    }
+
+    #[test]
+    fn review_revocations_use_actual_instants_and_fail_closed() {
+        let head = "0123456789012345678901234567890123456789";
+        let request = json!({"id":91,"state":"CHANGES_REQUESTED","commit_id":head,
+            "submitted_at":"2026-11-09T12:00:00Z","author_association":"OWNER",
+            "user":{"login":"maintainer","type":"User"},"body":"Fix the regression"});
+        let mut approval = request.clone();
+        approval["id"] = json!(92);
+        approval["state"] = json!("APPROVED");
+        approval["user"]["login"] = json!("Maintainer");
+        for at in [
+            json!("2026-11-09T11:30:00-01:00"),
+            json!("2026-11-09T12:00:00Z"),
+            json!("invalid"),
+            Value::Null,
+        ] {
+            approval["submitted_at"] = at;
+            assert!(actionable_request(
+                &[request.clone(), approval.clone()],
+                &[],
+                head,
+                "author"
+            )
+            .is_none());
+        }
+        approval["submitted_at"] = json!("2026-11-09T13:30:00+02:00");
+        assert!(actionable_request(&[request.clone(), approval], &[], head, "author").is_some());
+        let mut newer = request.clone();
+        newer["id"] = json!(93);
+        newer["submitted_at"] = json!("2026-11-09T11:30:00-01:00");
+        let selected = actionable_request(&[request, newer], &[], head, "author").unwrap();
+        assert_eq!(selected.0, 93);
     }
 
     #[test]
