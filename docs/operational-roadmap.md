@@ -358,3 +358,5 @@ CI #132 (45577754592): quatro falhas em ambas as plataformas. A migração míni
 
 
 #92 integrada em `f414ec655b90f0cc2c5bd522a6b4488d7a49df9e`; CI #134 (45578182551) verde em Ubuntu/Windows, incluindo Docker/SSH. Sem revisão externa registada. Próximo lote F04/F09: autorização local na transação de receção, tentativa e admissão/ack de reviews abertas. Fixtures diretos e partilhados atualizados; regressão de desativação/remoção. Não cobre identidade após recriação nem followups de PR merged. CI pendente.
+
+CI #136 (45579300017): 358/359 Ubuntu e 312/313 Windows; fixture de rebase não registava repositório. Corrigido e acrescentada prova de rejeição com repositório desativado, sem criar jobs. Aprendizagem: inventariar todos os consumidores de helpers partilhados, incluindo rebase, antes de alterar autorização. Revalidação integral pendente.
