@@ -129,6 +129,36 @@ impl ProbeBook {
 static PROBES: std::sync::LazyLock<std::sync::Mutex<ProbeBook>> =
     std::sync::LazyLock::new(Default::default);
 
+// An in-flight check owns its key until publication, cancellation or down.
+// Dropping a cancelled future must not leave the key permanently pending.
+struct ProbeLease {
+    key: String,
+    ticket: u64,
+}
+
+impl Drop for ProbeLease {
+    fn drop(&mut self) {
+        let mut probes = PROBES.lock().unwrap();
+        if probes.pending.get(&self.key) == Some(&self.ticket) {
+            probes.invalidate(&self.key);
+        }
+    }
+}
+
+fn try_begin_probe(key: &str) -> Option<ProbeLease> {
+    let mut probes = PROBES.lock().unwrap();
+    if probes.pending.contains_key(key) {
+        return None;
+    }
+    let ticket = NEXT_PROBE.fetch_add(1, Ordering::Relaxed);
+    probes.begin(key, ticket);
+    Some(ProbeLease {
+        key: key.to_string(),
+        ticket,
+    })
+}
+
+#[cfg(test)]
 fn begin_probe(key: &str) -> u64 {
     let mut probes = PROBES.lock().unwrap();
     let ticket = NEXT_PROBE.fetch_add(1, Ordering::Relaxed);
@@ -188,15 +218,16 @@ where
     F: Fn(String) -> Fut,
     Fut: std::future::Future<Output = (bool, Option<serde_json::Value>)>,
 {
-    let tickets: Vec<_> = ks.iter().map(|k| begin_probe(k)).collect();
-    // Publish each key as soon as its own check completes. Slow unrelated
-    // providers must not delay an already completed worker observation.
-    futures::future::join_all(ks.iter().zip(tickets).map(|(key, ticket)| {
+    // Do not supersede an already running check. Independent keys still
+    // proceed, and cancelled leases release only their own generation.
+    futures::future::join_all(ks.iter().filter_map(|key| {
+        let lease = try_begin_probe(key)?;
         let check = check(key.clone());
-        async move {
+        Some(async move {
             let result = check.await;
-            publish_probe_results(a, std::slice::from_ref(key), vec![ticket], vec![result]);
-        }
+            publish_probe_results(a, std::slice::from_ref(key), vec![lease.ticket], vec![result]);
+            drop(lease);
+        })
     }))
     .await;
 }
@@ -424,6 +455,54 @@ mod gpu_telemetry_tests {
         assert!(!fresh(host));
         PROBES.lock().unwrap().invalidate(host);
         FAIL.lock().unwrap().remove(host);
+    }
+
+    #[test]
+    fn overlapping_leases_do_not_supersede_or_leak_pending_keys() {
+        let key = "fixture-probe-lease";
+        let first = try_begin_probe(key).unwrap();
+        assert!(try_begin_probe(key).is_none());
+        assert!(!fresh(key));
+        drop(first);
+        assert!(!PROBES.lock().unwrap().pending.contains_key(key));
+        assert!(!fresh(key));
+
+        let old = try_begin_probe(key).unwrap();
+        PROBES.lock().unwrap().invalidate(key);
+        let new = try_begin_probe(key).unwrap();
+        drop(old);
+        assert_eq!(PROBES.lock().unwrap().pending.get(key), Some(&new.ticket));
+        drop(new);
+        assert!(!PROBES.lock().unwrap().pending.contains_key(key));
+    }
+
+    #[tokio::test]
+    async fn overlapping_probe_does_not_start_a_duplicate_check() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            47300,
+            "apollo-office".into(),
+        ));
+        let key = "fixture-probe-single-flight";
+        let keys = [key.to_string()];
+        let release = tokio::sync::Notify::new();
+        let work = probe_with(&a, &keys, |_| async {
+            release.notified().await;
+            (true, Some(hw("cpu 8")))
+        });
+        tokio::pin!(work);
+        assert!(futures::poll!(work.as_mut()).is_pending());
+        probe_with(&a, &keys, |_| async {
+            panic!("duplicate check started");
+        })
+        .await;
+        assert!(!fresh(key));
+        release.notify_one();
+        work.await;
+        assert!(fresh(key));
+        PROBES.lock().unwrap().invalidate(key);
+        FAIL.lock().unwrap().remove(key);
     }
 
     #[tokio::test]
