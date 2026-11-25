@@ -23,7 +23,16 @@ fn hold_file(a: &Ax, repo: &str) -> std::path::PathBuf {
 }
 
 fn write_file_hold(a: &Ax, repo: &str) -> std::io::Result<()> {
-    std::fs::File::create(hold_file(a, repo))?.sync_all()?;
+    // Never truncate or follow a preexisting marker (including a symlink).
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(hold_file(a, repo))
+    {
+        Ok(file) => file.sync_all()?,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
     #[cfg(unix)]
     std::fs::File::open(&a.dd)?.sync_all()?;
     Ok(())
@@ -435,6 +444,11 @@ mod tests {
         let a = make();
         assert!(blocked(&a, repo));
         assert!(!blocked(&a, "example/two"));
+        reset(&a, repo).unwrap();
+        assert!(!blocked(&a, repo));
+        assert!(!hold_file(&a, repo).exists());
+        write_file_hold(&a, repo).unwrap();
+        assert!(blocked(&a, repo));
         // Simulate a prior unlink whose directory sync was interrupted.
         std::fs::remove_file(hold_file(&a, repo)).unwrap();
         a.db.ks(&hold_key(repo), &json!(true));
@@ -444,6 +458,26 @@ mod tests {
         drop(a);
         let a = make();
         assert!(!blocked(&a, repo));
+        drop(a);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_symlink_marker_does_not_truncate_target() {
+        let dir = std::env::temp_dir().join(format!("apollo-hunter-link-{}", rand::random::<u64>()));
+        std::fs::create_dir(&dir).unwrap();
+        let a = Arc::new(App::new(Db::mem(), dir.clone(), 0, dir.join("apollo")));
+        let target = dir.join("target");
+        std::fs::write(&target, b"untouched").unwrap();
+        let repo = "example/one";
+        std::os::unix::fs::symlink(&target, hold_file(&a, repo)).unwrap();
+        write_file_hold(&a, repo).unwrap();
+        assert!(blocked(&a, repo));
+        assert_eq!(std::fs::read(&target).unwrap(), b"untouched");
+        reset(&a, repo).unwrap();
+        assert!(!blocked(&a, repo));
+        assert_eq!(std::fs::read(&target).unwrap(), b"untouched");
         drop(a);
         std::fs::remove_dir_all(dir).unwrap();
     }
