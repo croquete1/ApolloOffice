@@ -13,13 +13,31 @@ fn key(repo: &str) -> String {
     format!("hunt-fail:{repo}")
 }
 
+// An absent record is healthy; malformed or unreadable evidence is not.
+fn read_health(db: &crate::db::Db, repo: &str) -> rusqlite::Result<Value> {
+    let rows = db.try_all("select v from kv where k=?", crate::pa![key(repo)])?;
+    let Some(row) = rows.first() else {
+        return Ok(json!({"failures":0,"until":0}));
+    };
+    let raw = row["v"].as_str().ok_or(rusqlite::Error::InvalidQuery)?;
+    let value: Value = serde_json::from_str(raw).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let failures = value["failures"].as_i64().filter(|n| *n >= 0);
+    let until = value["until"].as_i64().filter(|n| *n >= 0);
+    if failures.is_none() || until.is_none() {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(value)
+}
+
 /// Devolve as falhas acumuladas e a suspensão efetiva da pesquisa.
 pub fn status(a: &Ax, repo: &str) -> Value {
-    let v = a.db.kg(&key(repo));
+    let Ok(v) = read_health(&a.db, repo) else {
+        return json!({"blocked":true,"failures":null,"until":null,"stage":"state_unavailable","exit_code":null});
+    };
     let until = v["until"].as_i64().unwrap_or(0);
     json!({
         "blocked": until > now(),
-        "failures": v["failures"].as_i64().unwrap_or(0),
+        "failures": v["failures"],
         "until": until,
         "stage": v["stage"],
         "exit_code": v["exit_code"],
@@ -56,21 +74,31 @@ pub fn fail(a: &Ax, repo: &str, stage: &str, code: i32) {
     let (failures, until, was_blocked) = {
         let _transition = a.update_transition.lock().unwrap();
         let before = status(a, repo);
-        let failures = before["failures"].as_i64().unwrap_or(0).saturating_add(1);
+        let Some(previous) = before["failures"].as_i64() else {
+            a.say("hunter", &format!("{repo}: failure state unavailable; Hunter held"), None);
+            return;
+        };
+        let failures = previous.saturating_add(1);
         let until = if failures >= LIMIT {
             now().saturating_add(COOLDOWN_MS)
         } else {
             0
         };
-        a.db.ks(
-            &key(repo),
-            &json!({
-                "failures": failures,
-                "until": until,
-                "stage": stage,
-                "exit_code": code,
-            }),
+        let state = json!({
+            "failures": failures,
+            "until": until,
+            "stage": stage,
+            "exit_code": code,
+        });
+        let written = a.db.0.lock().unwrap().execute(
+            "insert into kv(k,v) values(?,?) on conflict(k) do update set v=excluded.v",
+            rusqlite::params![key(repo), state.to_string()],
         );
+        if !matches!(written, Ok(1)) {
+            a.say("hunter", &format!("{repo}: could not persist failure counter"), None);
+            return;
+        }
+        crate::app::chg();
         (failures, until, before["blocked"] == true)
     };
     if failures == LIMIT || (until > 0 && !was_blocked) {
@@ -214,6 +242,22 @@ mod tests {
         success(&a, "example/one");
         assert!(!blocked(&a, "example/one"));
         assert_eq!(status(&a, "example/one")["failures"], 0);
+    }
+
+    #[test]
+    fn invalid_or_unreadable_breaker_state_holds_hunter_until_manual_reset() {
+        let a = app();
+        assert!(!blocked(&a, "example/one"));
+        a.db.ks(&key("example/one"), &json!({"failures":"bad","until":0}));
+        assert!(blocked(&a, "example/one"));
+        assert!(status(&a, "example/one")["failures"].is_null());
+        fail(&a, "example/one", "setup", 1);
+        success(&a, "example/one");
+        assert!(blocked(&a, "example/one"));
+        reset(&a, "example/one");
+        assert!(!blocked(&a, "example/one"));
+        a.db.run("drop table kv", vec![]);
+        assert!(blocked(&a, "example/one"));
     }
 
     #[tokio::test]
