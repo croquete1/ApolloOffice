@@ -20,6 +20,9 @@ struct Sample {
 
 fn valid_sample(v: &Value, now_ms: i64) -> Option<Sample> {
     let a = v.as_array()?;
+    if a.len() != 2 {
+        return None;
+    }
     let at = a.first()?.as_i64()?;
     let used = a.get(1)?.as_f64()?;
     if at > now_ms
@@ -165,12 +168,15 @@ fn update_history(
         stored["samples"]
             .as_array()
             .map(|rows| {
+                // Reject malformed rows as a group: silently removing a
+                // broken observation could hide a quota discontinuity.
                 rows.iter()
-                    .filter_map(|v| valid_sample(v, now_ms))
-                    // A matching reset label is not enough: samples must
-                    // actually belong to that seven-day quota window.
-                    .filter(|sample| sample.at >= reset_ms - WEEK_MS)
-                    .collect()
+                    .filter(|row| {
+                        !row[0].as_i64().is_some_and(|at| at < reset_ms - WEEK_MS)
+                    })
+                    .map(|row| valid_sample(row, now_ms))
+                    .collect::<Option<Vec<_>>>()
+                    .unwrap_or_default()
             })
             .unwrap_or_default()
     } else {
@@ -367,6 +373,30 @@ mod tests {
         update(&db, &mut current);
         assert_eq!(current["weekly_forecast"]["status"], "insufficient");
         assert_eq!(db.kg(KEY)["samples"], json!([[NOW, 40.0]]));
+    }
+
+    #[test]
+    fn malformed_persisted_row_invalidates_otherwise_usable_history() {
+        let db = Db::mem();
+        let reset = NOW + 24 * H;
+        for malformed in [
+            json!([NOW - 3 * H, "invalid"]),
+            json!([NOW - 3 * H, 25.0, "extra"]),
+            json!([NOW - 3 * H, 101.0]),
+        ] {
+            db.ks(
+                KEY,
+                &json!({
+                    "reset_at":reset / 1000,
+                    "samples":[[NOW - 4 * H,20.0],malformed,[NOW - 2 * H,30.0]],
+                    "observed_at":NOW - 2 * H
+                }),
+            );
+            let mut current = state(NOW, 40.0, reset);
+            update(&db, &mut current);
+            assert_eq!(current["weekly_forecast"]["status"], "insufficient");
+            assert_eq!(db.kg(KEY)["samples"], json!([[NOW, 40.0]]));
+        }
     }
 
     #[test]
