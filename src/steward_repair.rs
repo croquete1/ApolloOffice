@@ -20,7 +20,7 @@ fn actionable_request(
     head: &str,
     author: &str,
 ) -> Option<(i64, String, i64)> {
-    let last = reviews
+    let mut requests = reviews
         .iter()
         .filter(|r| r["state"] == "CHANGES_REQUESTED" && r["commit_id"] == head)
         .filter(|r| ALLOWED_REVIEWERS.contains(&r["author_association"].as_str().unwrap_or("")))
@@ -31,20 +31,26 @@ fn actionable_request(
                 && r["user"]["type"] != "Bot"
                 && !user.ends_with("[bot]")
         })
-        // Não reutilizar uma objeção se o mesmo revisor a aprovou/revogou depois.
-        .filter_map(|r| review_time(r).map(|at| (r, at)))
-        .filter(|(r, at)| {
-            let reviewer = r["user"]["login"].as_str().unwrap_or("");
-            !reviews.iter().any(|other| {
-                other["user"]["login"]
-                    .as_str()
-                    .is_some_and(|login| login.eq_ignore_ascii_case(reviewer))
-                    && (other["state"] == "APPROVED" || other["state"] == "DISMISSED")
-                    && review_time(other).is_none_or(|other_at| other_at >= *at)
-            })
+        // A malformed eligible request might supersede a valid older one.
+        // Reject ambiguous chronology rather than silently dropping it.
+        .map(|r| Some((r, review_time(r)?)))
+        .collect::<Option<Vec<_>>>()?;
+    // Não reutilizar uma objeção se o mesmo revisor a aprovou/revogou depois.
+    requests.retain(|(r, at)| {
+        let reviewer = r["user"]["login"].as_str().unwrap_or("");
+        !reviews.iter().any(|other| {
+            other["user"]["login"]
+                .as_str()
+                .is_some_and(|login| login.eq_ignore_ascii_case(reviewer))
+                && (other["state"] == "APPROVED" || other["state"] == "DISMISSED")
+                && review_time(other).is_none_or(|other_at| other_at >= *at)
         })
-        .max_by_key(|(_, at)| *at)?
-        .0;
+    });
+    requests.sort_by_key(|(_, at)| *at);
+    let (last, at) = requests.pop()?;
+    if requests.last().is_some_and(|(_, other_at)| *other_at == at) {
+        return None;
+    }
     let id = last["id"].as_i64().filter(|id| *id > 0)?;
     let since = chrono::DateTime::parse_from_rfc3339(last["submitted_at"].as_str()?)
         .ok()?
@@ -397,6 +403,35 @@ mod tests {
         newer["submitted_at"] = json!("2026-11-09T11:30:00-01:00");
         let selected = actionable_request(&[request, newer], &[], head, "author").unwrap();
         assert_eq!(selected.0, 93);
+    }
+
+    #[test]
+    fn ambiguous_change_requests_cannot_authorize_older_work() {
+        let head = "0123456789012345678901234567890123456789";
+        let request = json!({"id":91,"state":"CHANGES_REQUESTED","commit_id":head,
+            "submitted_at":"2026-11-09T12:00:00Z","author_association":"OWNER",
+            "user":{"login":"maintainer","type":"User"},"body":"Fix the regression"});
+        let mut other = request.clone();
+        other["id"] = json!(92);
+        other["body"] = json!("Use a different fix");
+        for at in [
+            json!("invalid"),
+            Value::Null,
+            json!("2026-11-09T13:00:00+01:00"),
+        ] {
+            other["submitted_at"] = at;
+            assert!(
+                actionable_request(&[request.clone(), other.clone()], &[], head, "author")
+                    .is_none()
+            );
+        }
+        other["submitted_at"] = json!("2026-11-09T13:00:01+01:00");
+        assert_eq!(
+            actionable_request(&[request, other], &[], head, "author")
+                .unwrap()
+                .0,
+            92
+        );
     }
 
     #[test]
