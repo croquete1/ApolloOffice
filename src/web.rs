@@ -1979,7 +1979,9 @@ async fn api(a: &Ax, m: &Method, p: &str, q: &str, b: Value) -> Response<Body> {
                     {
                         return er(StatusCode::BAD_REQUEST, "unknown repository");
                     }
-                    crate::hunt_health::reset(a, repo);
+                    if crate::hunt_health::reset(a, repo).is_err() {
+                        return er(StatusCode::CONFLICT, "Hunter reset was not saved");
+                    }
                 }
                 "pause" => {
                     let on = b["on"].as_bool().unwrap_or(false);
