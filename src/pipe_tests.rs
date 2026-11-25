@@ -198,6 +198,37 @@ mod t {
     }
 
     #[test]
+    fn actual_git_lease_rejects_branch_created_or_changed_after_observation(){
+        let root=std::env::temp_dir().join(format!("apollo-lease-{}",hex::encode(rand::random::<[u8;8]>())));
+        std::fs::create_dir_all(&root).unwrap();
+        let git=|args:&[&str]| std::process::Command::new("git").args(args).current_dir(&root).output().unwrap();
+        let ok=|args:&[&str]| {
+            let out=git(args);
+            assert!(out.status.success(),"{args:?}: {}",String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        ok(&["init","-q","-b","main","work"]);
+        ok(&["init","-q","--bare","remote.git"]);
+        ok(&["-C","work","-c","user.name=fixture","-c","user.email=fixture@example.test","commit","-q","--allow-empty","-m","first"]);
+        let first=ok(&["-C","work","rev-parse","HEAD"]);
+        ok(&["-C","work","-c","user.name=fixture","-c","user.email=fixture@example.test","commit","-q","--allow-empty","-m","second"]);
+        let second=ok(&["-C","work","rev-parse","HEAD"]);
+        let branch="fix/1";
+        let target="refs/heads/fix/1";
+        let absent=remote_branch_sha(&ok(&["-C","work","ls-remote","--refs","../remote.git",target]),branch).unwrap();
+        assert!(absent.is_none());
+        let lease=submit_branch_lease("fix",branch,absent.as_deref(),&second,"").unwrap().unwrap();
+        ok(&["-C","work","push","-q","../remote.git",&format!("{first}:{target}")]);
+        assert!(!git(&["-C","work","push","-q",&lease,"../remote.git",&format!("{second}:{target}")]).status.success());
+        assert_eq!(ok(&["--git-dir=remote.git","rev-parse",target]),first);
+        let lease=submit_branch_lease("review",branch,Some(&first),&second,&first).unwrap().unwrap();
+        ok(&["-C","work","push","-q",&lease,"../remote.git",&format!("{second}:{target}")]);
+        assert!(!git(&["-C","work","push","-q",&lease,"../remote.git",&format!("{first}:{target}")]).status.success());
+        assert_eq!(ok(&["--git-dir=remote.git","rev-parse",target]),second);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn review_publication_requires_original_open_pr_and_exact_head(){
         let source="a".repeat(40);
         let candidate="b".repeat(40);
