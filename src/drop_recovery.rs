@@ -35,7 +35,7 @@ fn attempts(j: &Job) -> Option<u64> {
 }
 
 fn eligible(j: &Job, automatic: bool) -> bool {
-    if j.st != "drop" || j.kind != "fix" || published_or_approved(j) {
+    if j.st != "drop" || j.kind != "fix" || !j.d.is_object() || published_or_approved(j) {
         return false;
     }
     if !automatic {
@@ -47,6 +47,14 @@ fn eligible(j: &Job, automatic: bool) -> bool {
         && !j.d["br"].is_string()
         && j.d["rs"] != true
         && j.d["rp"] != true
+}
+
+fn recovery_job(a: &Ax, id: i64) -> Option<Job> {
+    let rows =
+        a.db.try_all("select * from jobs where id=?", pa![id])
+            .ok()?;
+    let row = rows.into_iter().next()?;
+    row["d"].is_object().then(|| Job::of(row))
 }
 
 fn open_issue(issue: &Value, number: i64) -> bool {
@@ -74,7 +82,7 @@ fn cache_default_head(a: &Ax, repo: &str, head: &Value) -> Result<(), String> {
 
 /// Só recoloca uma issue após confirmar o estado do GitHub e o HEAD real.
 pub async fn retry_manual(a: &Ax, id: i64) -> Result<bool, String> {
-    let job = a.db.jg(id).ok_or("Trabalho inexistente")?;
+    let job = recovery_job(a, id).ok_or("Trabalho inexistente ou metadados inválidos")?;
     if !eligible(&job, false) {
         return Err("Drop não elegível para recuperação segura".into());
     }
@@ -119,7 +127,7 @@ pub async fn retry_manual(a: &Ax, id: i64) -> Result<bool, String> {
 /// Nova tentativa desde o início, com limpeza de provas e autorizações antigas.
 /// A escrita condicional impede duas recuperações do mesmo drop em simultâneo.
 pub fn retry(a: &Ax, id: i64, automatic: bool) -> Result<bool, &'static str> {
-    let j = a.db.jg(id).ok_or("Trabalho inexistente")?;
+    let j = recovery_job(a, id).ok_or("Trabalho inexistente ou metadados inválidos")?;
     if !eligible(&j, automatic) {
         return Err("Drop não elegível para recuperação segura");
     }
@@ -160,7 +168,7 @@ pub fn retry(a: &Ax, id: i64, automatic: bool) -> Result<bool, &'static str> {
     let mut data = j.d.clone();
     let mut history = data["drop_history"].as_array().cloned().unwrap_or_default();
     if history.len() >= 8 {
-        history.remove(0);
+        history = history.split_off(history.len() - 7);
     }
     history.push(json!({"at":now(),"reason":j.why.clone(),"automatic":automatic}));
     data["drop_history"] = json!(history);
@@ -245,6 +253,8 @@ fn commit_retry(
         "update jobs set st=?1,why=?2,d=?3,t1=?4
          where id=?5 and st='drop' and kind='fix' and pr is null
            and t1=?6 and why=?7
+           and case when typeof(jobs.d)='text' and json_valid(jobs.d)
+                    then json_type(jobs.d)='object' else 0 end
            and not exists(select fullkey,type,atom from json_tree(jobs.d)
              except select fullkey,type,atom from json_tree(?8))
            and not exists(select fullkey,type,atom from json_tree(?8)
@@ -310,7 +320,7 @@ pub async fn scan(a: &Ax, repo: &str, prs: &[Value]) {
             break;
         }
         if let Some(id) = item["id"].as_i64() {
-            let Some(job) = a.db.jg(id) else {
+            let Some(job) = recovery_job(a, id) else {
                 continue;
             };
             let age = now().saturating_sub(item["t1"].as_i64().unwrap_or(0));
@@ -348,15 +358,16 @@ pub fn report(a: &Ax, repo: &str) -> Value {
     );
     let rows: Vec<Value> =
         a.db.all(
-            "select * from jobs where repo=? and st='drop' order by t1 desc limit 25",
+            "select *, case when typeof(d)='text' and json_valid(d) then json_type(d)='object' else 0 end as valid_metadata from jobs where repo=? and st='drop' order by t1 desc limit 25",
             pa![repo.to_string()],
         )
         .into_iter()
         .map(|row| {
+            let valid_metadata = row["valid_metadata"] == 1;
             let j = Job::of(row);
             let cause = category(&j.why);
-            let can_retry = eligible(&j, true);
-            let used = attempts(&j);
+            let can_retry = valid_metadata && eligible(&j, true);
+            let used = if valid_metadata { attempts(&j) } else { None };
             json!({
                 "id": j.id,
                 "title": j.title,
@@ -409,6 +420,37 @@ mod tests {
             pa![now() - RETRY_DELAY_MS - 1, id],
         );
         id
+    }
+
+    #[test]
+    fn recovery_rejects_nonobject_metadata() {
+        let a = setup();
+        let id = dropped(&a, "machine kept failing: timed out", json!({}));
+        for raw in ["null", "[]", "\"bad\"", "1", "{invalid"] {
+            a.db.run("update jobs set d=? where id=?", pa![raw.to_string(), id]);
+            assert!(recovery_job(&a, id).is_none());
+            assert!(retry(&a, id, false).is_err());
+            assert!(retry(&a, id, true).is_err());
+            assert_eq!(a.db.jg(id).unwrap().st, "drop");
+            assert_eq!(report(&a, "org/repo")["jobs"][0]["safe_auto"], false);
+        }
+    }
+
+    #[test]
+    fn recovery_trims_oversized_legacy_history() {
+        let a = setup();
+        let history: Vec<_> = (0..20).map(|i| json!({"at":i})).collect();
+        let id = dropped(
+            &a,
+            "machine kept failing: timed out",
+            json!({"drop_history":history}),
+        );
+        assert_eq!(retry(&a, id, true), Ok(true));
+        let job = a.db.jg(id).unwrap();
+        let history = job.d["drop_history"].as_array().unwrap();
+        assert_eq!(history.len(), 8);
+        assert_eq!(history[0]["at"], 13);
+        assert_eq!(history[7]["automatic"], true);
     }
 
     #[test]
