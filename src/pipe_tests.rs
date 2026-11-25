@@ -1278,6 +1278,33 @@ mod t {
     }
 
     #[test]
+    fn publication_intent_rechecks_cancellation_inside_transaction() {
+        let (db,j,publication,_) = submission_fixture();
+        assert!(!cancellation_requested(&db,j.id).unwrap());
+        db.ks(&format!("kill:{}",j.id),&json!(true));
+        assert!(begin_submit_publication(&db,&j,"Title",&publication,None).is_err());
+        assert!(load_submit_publication(&db,&j).unwrap().is_none());
+        db.ks(&format!("kill:{}",j.id),&json!("invalid"));
+        assert!(begin_submit_publication(&db,&j,"Title",&publication,None).is_err());
+        db.ks(&format!("kill:{}",j.id),&json!(false));
+        assert!(begin_submit_publication(&db,&j,"Title",&publication,None).is_ok());
+    }
+
+    #[test]
+    fn proven_unstarted_intent_can_retry_but_confirmed_receipt_cannot_be_cleared() {
+        let (db,j,publication,remote) = submission_fixture();
+        let first = begin_submit_publication(&db,&j,"Title",&publication,None).unwrap();
+        release_unstarted_publication(&db,&j,&first).unwrap();
+        assert!(load_submit_publication(&db,&j).unwrap().is_none());
+        let mut second = begin_submit_publication(&db,&j,"Title",&publication,None).unwrap();
+        save_submit_number(&db,&j,&mut second,12).unwrap();
+        assert!(release_unstarted_publication(&db,&j,&first).is_err());
+        assert!(release_unstarted_publication(&db,&j,&second).is_err());
+        assert_eq!(persist_submit_receipt(&db,&j,&second,&remote).unwrap().1,12);
+        assert!(begin_submit_publication(&db,&j,"Title",&publication,None).is_err());
+    }
+
+    #[test]
     fn ambiguous_publication_intent_never_allows_another_creation() {
         let (db,j,publication,remote) = submission_fixture();
         begin_submit_publication(&db,&j,"Title",&publication,None).unwrap();
