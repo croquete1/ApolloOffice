@@ -88,8 +88,9 @@ fn persist_staged_receipt(db: &crate::db::Db, receipt: &Value) -> rusqlite::Resu
         .query_row("select v from kv where k='upd'", [], |row| row.get(0))
         .optional()?;
     let mut state = match raw {
-        Some(raw) => serde_json::from_str::<Value>(&raw)
-            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+        Some(raw) => {
+            serde_json::from_str::<Value>(&raw).map_err(|_| rusqlite::Error::InvalidQuery)?
+        }
         None => json!({}),
     };
     let fields = state.as_object_mut().ok_or(rusqlite::Error::InvalidQuery)?;
@@ -658,8 +659,7 @@ mod t {
         let receipt = json!({"ready":"1.0.0","sha":"fixture"});
         assert!(persist_staged_receipt(&db, &receipt).is_err());
         assert_eq!(db.kg("upd")["ready"], "0.9.0");
-        db.0
-            .lock()
+        db.0.lock()
             .unwrap()
             .execute_batch("drop trigger reject_update_receipt")
             .unwrap();
