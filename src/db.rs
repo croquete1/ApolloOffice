@@ -6,6 +6,13 @@ use std::sync::{Arc, Mutex};
 #[derive(Clone)]
 pub struct Db(pub Arc<Mutex<Connection>>);
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum HunterFinding {
+    Queued,
+    Duplicate,
+    Revoked,
+}
+
 pub enum ProviderAdmission {
     Ready,
     Probe(String),
@@ -1388,13 +1395,13 @@ impl Db {
     /// candidate is active. Different locations and subsequent regressions
     /// after a completed/dropped candidate remain eligible for human triage.
     /// The originating hunt must still be active and authorized. A revoked
-    /// policy is an error, not an exact-duplicate result.
+    /// policy has its own outcome, distinct from duplicates and database errors.
     pub fn queue_hunter_find(
         &self,
         repo: &str,
         hunt_id: i64,
         data: &Value,
-    ) -> rusqlite::Result<bool> {
+    ) -> rusqlite::Result<HunterFinding> {
         let title = data["title"]
             .as_str()
             .map(str::trim)
@@ -1424,7 +1431,7 @@ impl Db {
             |row| row.get(0),
         )?;
         if !authorized {
-            return Err(rusqlite::Error::InvalidQuery);
+            return Ok(HunterFinding::Revoked);
         }
         let changed = tx.execute(
             "insert into jobs(repo,num,kind,title,url,st,why,d,prio,t0,t1)
@@ -1449,7 +1456,11 @@ impl Db {
         if changed != 0 {
             crate::app::chg();
         }
-        Ok(changed == 1)
+        Ok(if changed == 1 {
+            HunterFinding::Queued
+        } else {
+            HunterFinding::Duplicate
+        })
     }
 
     // Column order deliberately mirrors the jobs table.
@@ -2218,17 +2229,32 @@ mod hunter_duplicate_tests {
     fn exact_hunter_duplicate_is_atomic_and_scoped_to_repo_and_location() {
         let db = seed();
         let mut data = json!({"title":"Broken parser","body":"reproduction","hunt":{"where":"src/parser.rs","proof":"test failed for expected bug"}});
-        assert!(db.queue_hunter_find("o/r", 100, &data).unwrap());
+        assert_eq!(
+            db.queue_hunter_find("o/r", 100, &data).unwrap(),
+            HunterFinding::Queued
+        );
         data["title"] = json!(" broken PARSER ");
-        assert!(!db.queue_hunter_find("o/r", 100, &data).unwrap());
-        assert!(db.queue_hunter_find("o/s", 101, &data).unwrap());
+        assert_eq!(
+            db.queue_hunter_find("o/r", 100, &data).unwrap(),
+            HunterFinding::Duplicate
+        );
+        assert_eq!(
+            db.queue_hunter_find("o/s", 101, &data).unwrap(),
+            HunterFinding::Queued
+        );
         data["hunt"]["where"] = json!("src/other.rs");
-        assert!(db.queue_hunter_find("o/r", 100, &data).unwrap());
+        assert_eq!(
+            db.queue_hunter_find("o/r", 100, &data).unwrap(),
+            HunterFinding::Queued
+        );
         db.run(
             "update jobs set st='done' where repo='o/r' and kind='fix'",
             vec![],
         );
-        assert!(db.queue_hunter_find("o/r", 100, &data).unwrap());
+        assert_eq!(
+            db.queue_hunter_find("o/r", 100, &data).unwrap(),
+            HunterFinding::Queued
+        );
         data["hunt"]["where"] = json!("");
         assert!(db.queue_hunter_find("o/r", 100, &data).is_err());
         assert_eq!(
@@ -2241,8 +2267,14 @@ mod hunter_duplicate_tests {
     fn hunter_find_requires_active_authorized_origin() {
         let db = seed();
         let data = json!({"title":"Broken parser","body":"reproduction","hunt":{"where":"src/parser.rs","proof":"test failed for expected bug"}});
-        assert!(db.queue_hunter_find("o/r", 101, &data).is_err());
-        assert!(db.queue_hunter_find("o/r", 999, &data).is_err());
+        assert_eq!(
+            db.queue_hunter_find("o/r", 101, &data).unwrap(),
+            HunterFinding::Revoked
+        );
+        assert_eq!(
+            db.queue_hunter_find("o/r", 999, &data).unwrap(),
+            HunterFinding::Revoked
+        );
         for (revoke, restore) in [
             (
                 "update rp set on_=0 where full='o/r'",
@@ -2262,16 +2294,25 @@ mod hunter_duplicate_tests {
             ),
         ] {
             db.run(revoke, vec![]);
-            assert!(db.queue_hunter_find("o/r", 100, &data).is_err());
+            assert_eq!(
+                db.queue_hunter_find("o/r", 100, &data).unwrap(),
+                HunterFinding::Revoked
+            );
             db.run(restore, vec![]);
         }
         db.run("delete from rp where full='o/r'", vec![]);
-        assert!(db.queue_hunter_find("o/r", 100, &data).is_err());
+        assert_eq!(
+            db.queue_hunter_find("o/r", 100, &data).unwrap(),
+            HunterFinding::Revoked
+        );
         assert_eq!(
             db.n("select count(*) from jobs where kind='fix'", vec![]),
             0
         );
-        assert!(db.queue_hunter_find("o/s", 101, &data).unwrap());
+        assert_eq!(
+            db.queue_hunter_find("o/s", 101, &data).unwrap(),
+            HunterFinding::Queued
+        );
     }
 }
 
