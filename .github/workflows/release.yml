@@ -23,7 +23,9 @@ jobs:
           - { os: macos-latest, target: x86_64-apple-darwin, name: apollo-office-macos-x64 }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - shell: bash
         run: |
           v=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
@@ -54,18 +56,27 @@ jobs:
       contents: write
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_KEY: ${{ secrets.RELEASE_KEY }}
+        shell: bash
         run: |
+          set -euo pipefail
+          umask 077
+          manifest_script="$PWD/scripts/release_manifest.py"
           mkdir dist && cd dist
           gh release download "${GITHUB_REF_NAME}" -R "${GITHUB_REPOSITORY}" -p 'apollo-office-*'
-          python3 - <<'PY'
-          import hashlib, json, os
-          f = {n: hashlib.sha256(open(n, "rb").read()).hexdigest() for n in sorted(os.listdir(".")) if n.startswith("apollo-office-")}
-          open("latest.json", "w").write(json.dumps({"v": os.environ["GITHUB_REF_NAME"].lstrip("v"), "files": f}))
-          PY
-          printf '%s\n' "$RELEASE_KEY" > ../k.pem
-          openssl pkeyutl -sign -inkey ../k.pem -rawin -in latest.json | base64 -w0 > latest.json.sig
-          rm ../k.pem
+          python3 "$manifest_script" > latest.json
+          test -n "$RELEASE_KEY"
+          key=$(mktemp "$RUNNER_TEMP/apollo-release-key.XXXXXX")
+          trap 'rm -f -- "$key"' EXIT
+          printf '%s\n' "$RELEASE_KEY" > "$key"
+          unset RELEASE_KEY
+          openssl pkeyutl -sign -inkey "$key" -rawin -in latest.json -out latest.json.sig.raw
+          base64 -w0 latest.json.sig.raw > latest.json.sig
+          test -s latest.json.sig
+          rm -f -- "$key" latest.json.sig.raw
           gh release upload "${GITHUB_REF_NAME}" -R "${GITHUB_REPOSITORY}" latest.json latest.json.sig --clobber
