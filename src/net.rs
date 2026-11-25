@@ -1,7 +1,8 @@
 use crate::app::{sl, Ax, R, X};
 use crate::db::now;
 use crate::sh::{gh, ho, hosts, hraw};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const HW: &str = r#"o=$(uname -s); echo "os $o"
 if [ "$o" = Darwin ]; then echo "cpu $(sysctl -n hw.ncpu)"; echo "load $(sysctl -n vm.loadavg | awk '{print $2}')"; p=$(pagesize); echo "mem $(($(sysctl -n hw.memsize)/1048576)) $(vm_stat | awk -v p=$p '/Pages (free|inactive|speculative)/{gsub(/[.]/,"",$NF);s+=$NF} END{print int(s*p/1048576)}')"
@@ -86,23 +87,76 @@ fn gpu_sample(line: &str) -> Option<serde_json::Value> {
     )
 }
 
-static LAST: AtomicI64 = AtomicI64::new(0);
 static FAIL: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, u32>>> =
     std::sync::LazyLock::new(Default::default);
 
-async fn ck(a: &Ax, k: &str) -> bool {
+static NEXT_PROBE: AtomicU64 = AtomicU64::new(1);
+#[derive(Default)]
+struct ProbeBook {
+    pending: HashMap<String, u64>,
+    checked: HashMap<String, i64>,
+}
+
+impl ProbeBook {
+    fn begin(&mut self, key: &str, ticket: u64) {
+        self.pending.insert(key.to_string(), ticket);
+    }
+
+    fn publish(&mut self, key: &str, ticket: u64, at: i64) -> bool {
+        if self.pending.get(key) != Some(&ticket) {
+            return false;
+        }
+        self.pending.remove(key);
+        self.checked.insert(key.to_string(), at);
+        true
+    }
+
+    fn invalidate(&mut self, key: &str) {
+        self.pending.remove(key);
+        self.checked.remove(key);
+    }
+
+    fn fresh(&self, key: &str, at: i64) -> bool {
+        !self.pending.contains_key(key)
+            && self
+                .checked
+                .get(key)
+                .and_then(|last| at.checked_sub(*last))
+                .is_some_and(|age| (0..=20_000).contains(&age))
+    }
+}
+
+static PROBES: std::sync::LazyLock<std::sync::Mutex<ProbeBook>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn begin_probe(key: &str) -> u64 {
+    let mut probes = PROBES.lock().unwrap();
+    let ticket = NEXT_PROBE.fetch_add(1, Ordering::Relaxed);
+    probes.begin(key, ticket);
+    ticket
+}
+
+fn fresh(key: &str) -> bool {
+    PROBES.lock().unwrap().fresh(key, now())
+}
+
+async fn ck(a: &Ax, k: &str) -> (bool, Option<serde_json::Value>) {
     match k {
-        "gh" => gh(&["api", "rate_limit", "--jq", ".rate.remaining"], 30)
-            .await
-            .is_ok(),
-        "an" if crate::routing::enabled(a) => true,
-        "an" => {
+        "gh" => (
+            gh(&["api", "rate_limit", "--jq", ".rate.remaining"], 30)
+                .await
+                .is_ok(),
+            None,
+        ),
+        "an" if crate::routing::enabled(a) => (true, None),
+        "an" => (
             a.hc.get("https://api.anthropic.com/")
                 .timeout(std::time::Duration::from_secs(15))
                 .send()
                 .await
-                .is_ok()
-        }
+                .is_ok(),
+            None,
+        ),
         h => match ho(a, h) {
             Some(x) => {
                 let dkcheck = format!(
@@ -118,21 +172,35 @@ async fn ck(a: &Ax, k: &str) -> bool {
                     45,
                 )
                 .await;
-                if o.c == 0 {
-                    a.lv.lock().unwrap().hst.insert(h.to_string(), hw(&o.o));
-                }
-                o.c == 0
+                (o.c == 0, (o.c == 0).then(|| hw(&o.o)))
             }
-            None => false,
+            None => (false, None),
         },
     }
 }
 
 pub async fn probe(a: &Ax, ks: &[String]) {
+    let tickets: Vec<_> = ks.iter().map(|k| begin_probe(k)).collect();
     let v = futures::future::join_all(ks.iter().map(|k| ck(a, k))).await;
+    publish_probe_results(a, ks, tickets, v);
+}
+
+fn publish_probe_results(
+    a: &Ax,
+    ks: &[String],
+    tickets: Vec<u64>,
+    v: Vec<(bool, Option<serde_json::Value>)>,
+) {
     let mut l = a.lv.lock().unwrap();
+    let mut probes = PROBES.lock().unwrap();
     let mut f = FAIL.lock().unwrap();
-    for (k, ok) in ks.iter().zip(v) {
+    for ((k, ticket), (ok, sample)) in ks.iter().zip(tickets).zip(v) {
+        if !probes.publish(k, ticket, now()) {
+            continue;
+        }
+        if let Some(sample) = sample {
+            l.hst.insert(k.clone(), sample);
+        }
         let n = if ok {
             0
         } else {
@@ -148,11 +216,11 @@ pub async fn probe(a: &Ax, ks: &[String]) {
         }
     }
     l.o.off = !*l.o.net.get("gh").unwrap_or(&true) || !*l.o.net.get("an").unwrap_or(&true);
-    LAST.store(now(), Ordering::Relaxed);
 }
 
 pub fn down(a: &Ax, k: &str) {
     let mut l = a.lv.lock().unwrap();
+    PROBES.lock().unwrap().invalidate(k);
     FAIL.lock().unwrap().insert(k.to_string(), 2);
     l.hst.remove(k);
     l.o.net.insert(k.to_string(), false);
@@ -167,15 +235,28 @@ pub async fn all(a: &Ax) {
 /// Single availability check for an explicitly restartable phase boundary.
 /// Unlike need(), this never occupies a lane through exponential sleep.
 pub async fn need_once(a: &Ax, ks: &[&str]) -> R<()> {
+    need_once_with(a, ks, |keys| async move { probe(a, &keys).await }).await
+}
+
+async fn need_once_with<F, Fut>(a: &Ax, ks: &[&str], probe_keys: F) -> R<()>
+where
+    F: FnOnce(Vec<String>) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
     let keys = ks
         .iter()
         .filter(|k| !k.is_empty())
         .map(|k| k.to_string())
         .collect::<Vec<_>>();
-    if now() - LAST.load(Ordering::Relaxed) > 20_000 || keys.iter().any(|k| !a.net(k)) {
-        probe(a, &keys).await;
+    if keys.iter().any(|k| !fresh(k) || !a.net(k)) {
+        probe_keys(keys.clone()).await;
     }
-    let missing = keys.into_iter().filter(|k| !a.net(k)).collect::<Vec<_>>();
+    // An overlapping newer probe owns the decision. Defer conservatively
+    // rather than authorizing work with a rejected older result.
+    let missing = keys
+        .into_iter()
+        .filter(|k| !fresh(k) || !a.net(k))
+        .collect::<Vec<_>>();
     if missing.is_empty() {
         return Ok(());
     }
@@ -198,10 +279,14 @@ pub async fn need(a: &Ax, w: &str, ks: &[&str]) -> R<()> {
         .map(|k| k.to_string())
         .collect();
     loop {
-        if now() - LAST.load(Ordering::Relaxed) > 20_000 || ks.iter().any(|k| !a.net(k)) {
+        if ks.iter().any(|k| !fresh(k) || !a.net(k)) {
             probe(a, &ks).await;
         }
-        let miss: Vec<String> = ks.iter().filter(|k| !a.net(k)).cloned().collect();
+        let miss: Vec<String> = ks
+            .iter()
+            .filter(|k| !fresh(k) || !a.net(k))
+            .cloned()
+            .collect();
         if miss.is_empty() {
             return Ok(());
         }
@@ -250,12 +335,116 @@ mod gpu_telemetry_tests {
             live.hst.insert(host.into(), hw("cpu 8"));
             live.hst.insert(other.into(), hw("cpu 4"));
         }
+        let old = begin_probe(host);
+        let latest = begin_probe(host);
+        assert_ne!(old, latest);
+        assert_eq!(PROBES.lock().unwrap().pending.get(host), Some(&latest));
         down(&a, host);
+        assert!(!PROBES.lock().unwrap().pending.contains_key(host));
+        assert!(!fresh(host));
         let live = a.lv.lock().unwrap();
         assert!(!live.hst.contains_key(host));
         assert!(live.hst.contains_key(other));
         assert_eq!(live.o.net.get(host), Some(&false));
         drop(live);
+        FAIL.lock().unwrap().remove(host);
+    }
+
+    #[test]
+    fn stale_probe_cannot_refresh_its_key_or_another_worker() {
+        let mut book = ProbeBook::default();
+        book.begin("a", 1);
+        book.begin("a", 2);
+        assert!(book.publish("a", 2, 1_000));
+        assert!(book.fresh("a", 20_000));
+        assert!(!book.publish("a", 1, 20_000));
+        assert!(!book.fresh("a", 21_001));
+        book.begin("b", 3);
+        assert!(book.publish("b", 3, 21_001));
+        assert!(book.fresh("b", 21_001));
+        assert!(!book.fresh("a", 21_001));
+        book.begin("a", 4);
+        book.begin("a", 5);
+        assert!(!book.publish("a", 4, 22_000));
+        assert!(!book.fresh("a", 22_000));
+        assert!(book.publish("a", 5, 22_001));
+        assert!(book.fresh("a", 22_001));
+        assert!(!book.fresh("a", 22_000));
+        book.invalidate("a");
+        assert!(!book.fresh("a", 22_001));
+        assert!(book.fresh("b", 22_001));
+    }
+
+    #[test]
+    fn stale_probe_cannot_publish_after_newer_result_or_down() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            47300,
+            "apollo-office".into(),
+        ));
+        let host = "fixture-probe-publication";
+        let keys = [host.to_string()];
+        let older = begin_probe(host);
+        let newer = begin_probe(host);
+        let sample = hw("cpu 8");
+        publish_probe_results(&a, &keys, vec![newer], vec![(true, Some(sample.clone()))]);
+        publish_probe_results(&a, &keys, vec![older], vec![(false, None)]);
+        {
+            let live = a.lv.lock().unwrap();
+            assert_eq!(live.hst.get(host), Some(&sample));
+            assert_eq!(live.o.net.get(host), Some(&true));
+            assert_eq!(FAIL.lock().unwrap().get(host), Some(&0));
+        }
+        let late = begin_probe(host);
+        down(&a, host);
+        publish_probe_results(&a, &keys, vec![late], vec![(true, Some(hw("cpu 64")))]);
+        {
+            let live = a.lv.lock().unwrap();
+            assert!(!live.hst.contains_key(host));
+            assert_eq!(live.o.net.get(host), Some(&false));
+            assert_eq!(FAIL.lock().unwrap().get(host), Some(&2));
+        }
+        assert!(!fresh(host));
+        PROBES.lock().unwrap().invalidate(host);
+        FAIL.lock().unwrap().remove(host);
+    }
+
+    #[tokio::test]
+    async fn need_once_defers_until_newer_probe_publishes() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            47300,
+            "apollo-office".into(),
+        ));
+        let host = "fixture-overlapping-probe";
+        a.db.run(
+            "insert into hs(id,on_) values(?,1)",
+            crate::pa![host.to_string()],
+        );
+        let newer = std::cell::Cell::new(0);
+        let a_ref = &a;
+        let newer_ref = &newer;
+        let result = need_once_with(&a, &[host], |keys| async move {
+            let older = begin_probe(host);
+            newer_ref.set(begin_probe(host));
+            publish_probe_results(a_ref, &keys, vec![older], vec![(true, Some(hw("cpu 8")))]);
+        })
+        .await;
+        assert!(matches!(result, Err(X::Defer(_))));
+        assert_eq!(PROBES.lock().unwrap().pending.get(host), Some(&newer.get()));
+        assert!(!fresh(host));
+        let keys = [host.to_string()];
+        publish_probe_results(
+            &a,
+            &keys,
+            vec![newer.get()],
+            vec![(true, Some(hw("cpu 16")))],
+        );
+        assert!(need_once(&a, &[host]).await.is_ok());
+        assert_eq!(a.lv.lock().unwrap().hst[host]["cpu"], 16.0);
+        PROBES.lock().unwrap().invalidate(host);
         FAIL.lock().unwrap().remove(host);
     }
 

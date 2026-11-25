@@ -86,7 +86,8 @@ fn cache_default_head(a: &Ax, repo: &str, head: &Value) -> Result<(), String> {
 
 /// Só recoloca uma issue após confirmar o estado do GitHub e o HEAD real.
 pub async fn retry_manual(a: &Ax, id: i64) -> Result<bool, String> {
-    let (job, updated) = recovery_job(a, id).ok_or("Trabalho inexistente ou metadados inválidos")?;
+    let (job, updated) =
+        recovery_job(a, id).ok_or("Trabalho inexistente ou metadados inválidos")?;
     if !eligible(&job, false) {
         return Err("Drop não elegível para recuperação segura".into());
     }
@@ -132,16 +133,12 @@ pub async fn retry_manual(a: &Ax, id: i64) -> Result<bool, String> {
 /// A escrita condicional impede duas recuperações do mesmo drop em simultâneo.
 #[cfg(test)]
 fn retry(a: &Ax, id: i64, automatic: bool) -> Result<bool, &'static str> {
-    let (job, updated) = recovery_job(a, id).ok_or("Trabalho inexistente ou metadados inválidos")?;
+    let (job, updated) =
+        recovery_job(a, id).ok_or("Trabalho inexistente ou metadados inválidos")?;
     retry_snapshot(a, &job, updated, automatic)
 }
 
-fn retry_snapshot(
-    a: &Ax,
-    j: &Job,
-    updated: i64,
-    automatic: bool,
-) -> Result<bool, &'static str> {
+fn retry_snapshot(a: &Ax, j: &Job, updated: i64, automatic: bool) -> Result<bool, &'static str> {
     let id = j.id;
     if !eligible(j, automatic) {
         return Err("Drop não elegível para recuperação segura");
@@ -666,7 +663,10 @@ mod tests {
             a.db.run("update jobs set t1=t1+1 where id=?", pa![id]);
             assert_eq!(retry_snapshot(&a, &job, updated, automatic), Ok(false));
             a.db.run("update jobs set t1=? where id=?", pa![updated, id]);
-            a.db.run("update jobs set d='{\"recovery_attempts\":1}' where id=?", pa![id]);
+            a.db.run(
+                "update jobs set d='{\"recovery_attempts\":1}' where id=?",
+                pa![id],
+            );
             assert_eq!(retry_snapshot(&a, &job, updated, automatic), Ok(false));
             a.db.run("update jobs set d='{}' where id=?", pa![id]);
             assert_eq!(retry_snapshot(&a, &job, updated, automatic), Ok(true));
