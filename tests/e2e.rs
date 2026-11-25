@@ -133,6 +133,8 @@ async fn full_run(pv: bool) {
         .unwrap());
     let o = format!("http://127.0.0.1:{port}");
     let c = reqwest::Client::builder()
+        // All fixture HTTP requests are loopback; never use a host proxy.
+        .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(2))
         .timeout(Duration::from_secs(10))
@@ -158,6 +160,11 @@ async fn full_run(pv: bool) {
         .args(["--data", &data.display().to_string(), "login-link"])
         .output()
         .unwrap();
+    assert!(
+        l.status.success(),
+        "login-link command failed: {}",
+        String::from_utf8_lossy(&l.stderr)
+    );
     let l = String::from_utf8_lossy(&l.stdout)
         .lines()
         .find(|x| x.starts_with("http"))
