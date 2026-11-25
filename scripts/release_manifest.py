@@ -30,5 +30,28 @@ def manifest(directory: Path, tag: str) -> dict:
     return {"v": tag[1:], "files": files}
 
 
+def verify_staged(directory: Path, tag: str) -> None:
+    expected = EXPECTED_ASSETS | {"latest.json", "latest.json.sig"}
+    if {p.name for p in directory.iterdir()} != expected:
+        raise ValueError("invalid staged release inventory")
+    for name in ("latest.json", "latest.json.sig"):
+        path = directory / name
+        if path.is_symlink() or not path.is_file() or path.stat().st_size == 0:
+            raise ValueError(f"invalid metadata: {name}")
+    if json.loads((directory / "latest.json").read_text()) != manifest(directory, tag):
+        raise ValueError("manifest does not match staged binaries")
+    import base64
+    signature = base64.b64decode((directory / "latest.json.sig").read_bytes(), validate=True)
+    if len(signature) != 64:
+        raise ValueError("invalid Ed25519 signature length")
+
+
 if __name__ == "__main__":
-    print(json.dumps(manifest(Path.cwd(), os.environ["GITHUB_REF_NAME"])))
+    import sys
+    tag = os.environ["GITHUB_REF_NAME"]
+    if len(sys.argv) == 3 and sys.argv[1] == "--verify":
+        verify_staged(Path(sys.argv[2]), tag)
+    elif len(sys.argv) == 1:
+        print(json.dumps(manifest(Path.cwd(), tag)))
+    else:
+        raise SystemExit("usage: release_manifest.py [--verify directory]")
