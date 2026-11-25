@@ -3,7 +3,7 @@ use crate::app::{drop, e, sl, Ax, Rn, R, X};
 use crate::db::{now, Job};
 use crate::net::need;
 use crate::pa;
-use crate::sh::{gh, gh_input, ghj, hb, hbid, ho, hosts, hx, hxl, q, Out};
+use crate::sh::{gh, ghj, hb, hbid, ho, hosts, hx, hxl, q, Out};
 use regex::Regex;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -3469,6 +3469,170 @@ fn auto_merge_requested(prior: Option<&Value>, newly_created: bool, j: &Job, rep
 }
 
 
+// Read and merge metadata in the same SQLite transaction. Submit owns its
+// publication fields, not the Watcher's observation or comment cursor.
+fn record_submitted_pr(db: &crate::db::Db, j: &Job, number: i64, title: &str, url: &str, newly_created: bool, publication: Value) -> rusqlite::Result<()> {
+    use rusqlite::OptionalExtension;
+    if number <= 0 || !crate::db::valid_git_sha(publication["head_sha"].as_str().unwrap_or("")) {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let fields = publication.as_object().ok_or(rusqlite::Error::InvalidQuery)?;
+    let mut c = db.0.lock().unwrap();
+    let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let repo_enabled: bool = tx.query_row(
+        "select coalesce(merge,1)=1 from rp where full=? and on_=1",
+        [&j.repo], |row| row.get(0),
+    )?;
+    let existing: Option<(String, String)> = tx.query_row(
+        "select st,d from prs where repo=? and num=?",
+        rusqlite::params![j.repo,number], |row| Ok((row.get(0)?,row.get(1)?)),
+    ).optional()?;
+    let prior = match existing {
+        Some((state, raw)) if state == "open" => {
+            let parsed: Value = serde_json::from_str(&raw).map_err(|_| rusqlite::Error::InvalidQuery)?;
+            if !parsed.is_object() { return Err(rusqlite::Error::InvalidQuery); }
+            Some(parsed)
+        }
+        Some(_) => return Err(rusqlite::Error::InvalidQuery),
+        None => None,
+    };
+    let enabled = auto_merge_requested(prior.as_ref(), newly_created, j, repo_enabled);
+    let mut pd = prior.unwrap_or_else(|| json!({}));
+    let same_head = pd["head_sha"] == publication["head_sha"];
+    // Explicit allowlist: a caller cannot overwrite watcher-owned fields.
+    for key in ["job","test_cmd","tests","branch","head","head_sha","base_branch"] {
+        pd[key] = fields.get(key).cloned().ok_or(rusqlite::Error::InvalidQuery)?;
+    }
+    pd["auto_merge"] = json!(enabled);
+    if enabled {
+        if !same_head || pd["merge_status"].is_null() {
+            pd["merge_status"] = json!("waiting");
+            pd["merge_reason"] = json!("Waiting for GitHub status checks.");
+            pd.as_object_mut().unwrap().remove("merge_attempt_head");
+            pd.as_object_mut().unwrap().remove("merge_attempt_at");
+            pd.as_object_mut().unwrap().remove("merge_enabled_head");
+        }
+    } else {
+        pd["merge_status"] = json!("off");
+        pd.as_object_mut().unwrap().remove("merge_reason");
+    }
+    tx.execute(
+        "insert into prs(repo,num,st,title,url,upd,d,t0) values(?,?,'open',?,?,?,?,?) on conflict(repo,num) do update set d=excluded.d where prs.st='open'",
+        rusqlite::params![j.repo,number,title,url,chrono::Utc::now().to_rfc3339(),pd.to_string(),now()],
+    )?;
+    tx.commit()?;
+    crate::app::chg();
+    Ok(())
+}
+
+// Persist an intent before calling GitHub. An unknown outcome is not permission
+// to create another PR. The independent key survives job checkpoint rewrites.
+fn submit_publication_key(j: &Job) -> String {
+    format!("submit_publication:{}", j.id)
+}
+
+fn load_submit_publication(db: &crate::db::Db, j: &Job) -> rusqlite::Result<Option<Value>> {
+    use rusqlite::OptionalExtension;
+    let c = db.0.lock().unwrap();
+    let raw: Option<String> = c.query_row("select v from kv where k=?", [submit_publication_key(j)], |r| r.get(0)).optional()?;
+    raw.map(|raw| serde_json::from_str(&raw).map_err(|_| rusqlite::Error::InvalidQuery)).transpose()
+}
+
+fn begin_submit_publication(db: &crate::db::Db, j: &Job, title: &str, publication: &Value, existing: Option<i64>) -> rusqlite::Result<Value> {
+    let mut c = db.0.lock().unwrap();
+    let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let repo_enabled: bool = tx.query_row("select coalesce(merge,1)=1 from rp where full=? and on_=1", [&j.repo], |r| r.get(0))?;
+    let active: bool = tx.query_row("select exists(select 1 from jobs where id=? and repo=? and st='submit')",rusqlite::params![j.id,j.repo],|r| r.get(0))?;
+    if !active { return Err(rusqlite::Error::InvalidQuery); }
+    let cancellation: String = tx.query_row("select coalesce((select v from kv where k=?),'false')",[format!("kill:{}",j.id)],|r|r.get(0))?;
+    if serde_json::from_str::<bool>(&cancellation).map_err(|_|rusqlite::Error::InvalidQuery)? { return Err(rusqlite::Error::InvalidQuery); }
+    let checkpoint = json!({"repo":j.repo,"title":title,"publication":publication,"auto_merge":auto_merge_requested(None,existing.is_none(),j,repo_enabled),"number":existing});
+    tx.execute("insert into kv(k,v) values(?,?)",rusqlite::params![submit_publication_key(j),checkpoint.to_string()])?;
+    tx.commit()?;
+    Ok(checkpoint)
+}
+
+fn save_submit_number(db: &crate::db::Db, j: &Job, checkpoint: &mut Value, number: i64) -> rusqlite::Result<()> {
+    if number<=0 || !checkpoint["number"].is_null() { return Err(rusqlite::Error::InvalidQuery); }
+    let previous = checkpoint.to_string();
+    let mut next = checkpoint.clone();
+    next["number"] = json!(number);
+    let c = db.0.lock().unwrap();
+    if c.execute("update kv set v=? where k=? and v=?",rusqlite::params![next.to_string(),submit_publication_key(j),previous])? != 1 {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    *checkpoint = next;
+    Ok(())
+}
+
+// Delete only the exact unconfirmed intent when the caller has proof that
+// no process started (or did not invoke it). Never clear ambiguous outcomes.
+fn release_unstarted_publication(db: &crate::db::Db, j: &Job, checkpoint: &Value) -> rusqlite::Result<()> {
+    if !checkpoint["number"].is_null() { return Err(rusqlite::Error::InvalidQuery); }
+    let c = db.0.lock().unwrap();
+    if c.execute("delete from kv where k=? and v=?",rusqlite::params![submit_publication_key(j),checkpoint.to_string()])? != 1 {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(())
+}
+
+fn submitted_pr_url(repo: &str, number: i64) -> String {
+    format!("https://github.com/{repo}/pull/{number}")
+}
+
+fn exact_submit_target(pr: &Value, repo: &str, number: i64, publication: &Value) -> bool {
+    ["head","branch","base_branch"].iter().all(|key| publication[*key].as_str().is_some_and(|s| !s.trim().is_empty()))
+        && pr["number"].as_i64() == Some(number)
+        && number > 0
+        && pr["html_url"].as_str().is_some_and(|url| url.eq_ignore_ascii_case(&submitted_pr_url(repo,number)))
+        && pr["base"]["repo"]["full_name"].as_str().is_some_and(|name| name.eq_ignore_ascii_case(repo))
+        && pr["base"]["ref"].as_str().is_some_and(|name| Some(name)==publication["base_branch"].as_str())
+        && pr["head"]["repo"]["full_name"].as_str().is_some_and(|name| publication["head"].as_str().is_some_and(|expected| name.eq_ignore_ascii_case(expected)))
+        && pr["head"]["ref"].as_str().is_some_and(|name| Some(name)==publication["branch"].as_str())
+        && crate::db::valid_git_sha(publication["head_sha"].as_str().unwrap_or(""))
+        && pr["head"]["sha"]==publication["head_sha"]
+}
+
+// A complete, well-formed empty inventory is different from missing evidence.
+fn select_submit_pr(rows: &[Value], repo: &str, publication: &Value) -> R<Option<i64>> {
+    let mut numbers = BTreeSet::new();
+    let mut found = None;
+    for pr in rows {
+        let n = pr["number"].as_i64().filter(|n| *n>0).ok_or_else(|| X::Defer("invalid PR inventory number".into()))?;
+        let head_ref = pr["head"]["ref"].as_str().filter(|v| !v.is_empty()).ok_or_else(|| X::Defer("incomplete PR inventory ref".into()))?;
+        if !numbers.insert(n) || pr["state"]!="open" { return Err(X::Defer("inconsistent PR inventory".into())); }
+        if Some(head_ref)!=publication["branch"].as_str() { continue; }
+        let head_repo = pr["head"]["repo"]["full_name"].as_str().filter(|name| !name.trim().is_empty()).ok_or_else(|| X::Defer("incomplete matching PR repository".into()))?;
+        if !publication["head"].as_str().is_some_and(|expected| head_repo.eq_ignore_ascii_case(expected)) { continue; }
+        if !exact_submit_target(pr,repo,n,publication) || found.replace(n).is_some() {
+            return Err(X::Defer("ambiguous or changed publication target; manual review required".into()));
+        }
+    }
+    Ok(found)
+}
+
+fn persist_submit_receipt(db: &crate::db::Db, j: &Job, checkpoint: &Value, remote: &Value) -> R<(String,i64)> {
+    let number = checkpoint["number"].as_i64().filter(|n| *n>0).ok_or_else(|| X::Defer("PR creation outcome uncertain; manual reconciliation required; no resend".into()))?;
+    let publication = &checkpoint["publication"];
+    if checkpoint["repo"]!=j.repo || publication["job"].as_i64()!=Some(j.id) || !exact_submit_target(remote,&j.repo,number,publication) {
+        return Err(X::Defer("published PR identity changed; manual reconciliation required".into()));
+    }
+    if remote["state"]!="open" {
+        return Err(X::Defer("published PR no longer open; manual reconciliation required; no resend".into()));
+    }
+    let title = checkpoint["title"].as_str().ok_or_else(|| X::Defer("publication title missing".into()))?;
+    let enabled = checkpoint["auto_merge"].as_bool().ok_or_else(|| X::Defer("publication preference missing".into()))?;
+    let url = submitted_pr_url(&j.repo,number);
+    record_submitted_pr(db,j,number,title,&url,enabled,publication.clone()).map_err(|error| X::Defer(format!("could not persist submitted PR: {error}")))?;
+    Ok((url,number))
+}
+
+async fn recover_submit_publication(a: &Ax, j: &Job, checkpoint: &Value) -> R<(String,i64)> {
+    let number = checkpoint["number"].as_i64().filter(|n| *n>0).ok_or_else(|| X::Defer("PR creation outcome uncertain; manual reconciliation required; no resend".into()))?;
+    let remote = ghj(&["api",&format!("repos/{}/pulls/{number}",j.repo)],60).await.map_err(|e| X::Defer(format!("published PR verification unavailable: {e}")))?;
+    persist_submit_receipt(&a.db,j,checkpoint,&remote)
+}
+
 fn needs_owner_approval(a:&Ax,j:&Job)->bool {
     (crate::routing::enabled(a) || (j.kind=="fix" && rp(a,&j.repo)["mode"]!="auto"))
         && j.d["ap"]!=true
@@ -3524,6 +3688,9 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
     a.db.jset(j.id, &[("st", json!("submit"))]);
     a.st("submit", "work", Some(j.id), "");
     a.flow("reviewer", "submit", &j.tag());
+    if let Some(checkpoint) = load_submit_publication(&a.db,j).map_err(|e| X::Defer(format!("publication checkpoint unavailable: {e}")))? {
+        return recover_submit_publication(a,j,&checkpoint).await;
+    }
     crate::net::need_once(a,&["gh",&j.h()]).await?;
     // The original bound SHA must also survive checkpoint/recovery paths.
     check_review_checkout(j,&j.s("old"))?;
@@ -3782,69 +3949,44 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
         return Ok((u, pn));
     }
     let hd = if hr == j.repo { br.clone() } else { format!("{}:{br}", hr.split('/').next().unwrap_or(&me)) };
-    let ex = ghj(&["pr", "list", "-R", &j.repo, "--head", &br, "--state", "open", "--json", "number,url,headRepositoryOwner"], 60).await.map_err(X::E)?;
-    let ex = ex.as_array().cloned().unwrap_or_default().into_iter().find(|p| p["headRepositoryOwner"]["login"].as_str() == hr.split('/').next());
-    let newly_created = ex.is_none();
-    let (u, n) = match ex {
-        Some(p) => (
-            p["url"].as_str().unwrap_or("").to_string(),
-            p["number"].as_i64().unwrap_or(0),
-        ),
-        None => {
-            let o = gh_input(
-                &[
-                    "pr",
-                    "create",
-                    "-R",
-                    &j.repo,
-                    "--head",
-                    &hd,
-                    "--base",
-                    &j.s("mn"),
-                    "--title",
-                    &ti,
-                    "--body-file",
-                    "-",
-                ],
-                120,
-                Some(pb.clone()),
-            )
-            .await
-            .map_err(X::E)?;
-            let u = o.trim().lines().last().unwrap_or("").to_string();
-            let n = u
-                .rsplit('/')
-                .next()
-                .and_then(|x| x.parse().ok())
-                .unwrap_or(0);
-            (u, n)
-        }
-    };
-    let prior = a.db.one("select d from prs where repo=? and num=?", pa![j.repo.clone(), n]);
-    let mut pd = prior.as_ref().map(|p| p["d"].clone()).filter(Value::is_object).unwrap_or_else(|| json!({}));
-    let enabled = auto_merge_requested(prior.as_ref().map(|p| &p["d"]), newly_created, j, rp(a, &j.repo)["merge"].as_i64().unwrap_or(1) == 1);
-    let same_head = pd["head_sha"].as_str() == Some(sha.trim());
-    pd["job"] = json!(j.id);
-    pd["test_cmd"] = f["test_cmd"].clone();
-    pd["tests"] = f["tests"].clone();
-    pd["branch"] = json!(br);
-    pd["head"] = json!(hr);
-    pd["head_sha"] = json!(sha.trim());
-    pd["base_branch"] = json!(j.s("mn"));
-    pd["auto_merge"] = json!(enabled);
-    if enabled {
-        if !same_head || pd["merge_status"].is_null() {
-            pd["merge_status"] = json!("waiting");
-            pd["merge_reason"] = json!("Waiting for GitHub status checks.");
-            pd.as_object_mut().unwrap().remove("merge_attempt_head");
-            pd.as_object_mut().unwrap().remove("merge_attempt_at");
-            pd.as_object_mut().unwrap().remove("merge_enabled_head");
-        }
-    } else {
-        pd["merge_status"] = json!("off");
-        pd.as_object_mut().unwrap().remove("merge_reason");
+    let publication = json!({
+        "job": j.id, "test_cmd": f["test_cmd"], "tests": f["tests"],
+        "branch": br, "head": hr, "head_sha": sha.trim(), "base_branch": j.s("mn")
+    });
+    let endpoint = format!("repos/{}/pulls?state=open&sort=created&direction=asc&per_page=100",j.repo);
+    let first = crate::sh::apip_unique(&endpoint).await.map_err(X::Defer)?;
+    let second = crate::sh::apip_unique(&endpoint).await.map_err(X::Defer)?;
+    let existing = select_submit_pr(&first,&j.repo,&publication)?;
+    if existing != select_submit_pr(&second,&j.repo,&publication)? {
+        return Err(X::Defer("PR inventory changed during scan".into()));
     }
-    a.db.run("insert into prs(repo,num,st,title,url,upd,d,t0) values(?,?,?,?,?,?,?,?) on conflict do update set st=excluded.st, d=excluded.d", pa![j.repo.clone(), n, "open".to_string(), ti.clone(), u.clone(), chrono::Utc::now().to_rfc3339(), pd.to_string(), now()]);
+    kill(a,j)?;
+    let mut checkpoint = begin_submit_publication(&a.db,j,&ti,&publication,existing)
+        .map_err(|e| X::Defer(format!("could not persist PR publication intent: {e}")))?;
+    if existing.is_none() {
+        // Check cancellation again after the durable intent. If it is already
+        // cancelled, no process was invoked and the exact intent can be released.
+        if let Err(error) = kill(a,j) {
+            release_unstarted_publication(&a.db,j,&checkpoint).map_err(|e|X::Defer(format!("could not release unstarted intent: {e}")))?;
+            return Err(error);
+        }
+        let output = match crate::sh::gh_input_with_spawn(&[
+            "pr","create","-R",&j.repo,"--head",&hd,"--base",&j.s("mn"),
+            "--title",&ti,"--body-file","-",
+        ],120,Some(pb.clone())).await {
+            Ok(output)=>output,
+            Err((error,false))=>{
+                release_unstarted_publication(&a.db,j,&checkpoint).map_err(|e|X::Defer(format!("could not release unstarted intent: {e}")))?;
+                return Err(X::Defer(format!("GitHub CLI did not start: {error}")));
+            }
+            Err((error,true))=>return Err(X::Defer(format!("PR creation outcome uncertain: {error}; no resend"))),
+        };
+        let url = output.trim().lines().last().unwrap_or("");
+        let number = url.rsplit('/').next().and_then(|n| n.parse::<i64>().ok()).filter(|n| *n>0 && url.eq_ignore_ascii_case(&submitted_pr_url(&j.repo,*n)))
+            .ok_or_else(|| X::Defer("invalid creation receipt; manual reconciliation required; no resend".into()))?;
+        save_submit_number(&a.db,j,&mut checkpoint,number).map_err(|e| X::Defer(format!("could not persist PR creation receipt: {e}; no resend")))?;
+    }
+    let (u,n) = recover_submit_publication(a,j,&checkpoint).await?;
     a.say("submit", &format!("PR opened: {u}"), Some(j.id));
     a.note("PR opened", &format!("{} → {ti}\n{u}", j.tag()), 3);
     Ok((u, n))
@@ -4180,7 +4322,15 @@ async fn go(a: &Ax, id: i64, h: &str) {
             mergecheck(a, &mut j).await?;
             return Ok(());
         }
-        if j.st == "submit" {
+        // Reconciliation of an already attempted publication is not a new
+        // push. Never rebase/rebuild its original proof or depend on checkout.
+        let recovering_publication = load_submit_publication(&a.db,&j)
+            .map_err(|e|X::Defer(format!("publication checkpoint unavailable: {e}")))?.is_some();
+        if recovering_publication {
+            if j.st!="submit" || needs_owner_approval(a,&j) {
+                return Err(X::Defer("existing publication requires reconciliation under its original authorization".into()));
+            }
+        } else if j.st == "submit" {
             ok(a, &j, &format!("git checkout -q {}", q(&j.s("br"))), 120).await?;
             stage(a, "submit", || {
                 let mut jj = j.clone();
@@ -4376,7 +4526,9 @@ async fn go(a: &Ax, id: i64, h: &str) {
             );
         }
         a.st("submit", "idle", None, "ok");
-        clean(a, &j).await;
+        if !recovering_publication {
+            clean(a, &j).await;
+        }
         Ok(())
     }
     .await;
@@ -4518,8 +4670,18 @@ pub fn recover(a: &Ax) -> rusqlite::Result<()> {
         if !d.is_object() {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        if st == "submit" && d["ap"].as_bool().unwrap_or(false) {
-            continue;
+        if st == "submit" {
+            // A durable publication intent belongs to reconciliation, not to
+            // a new preparation attempt. Preserve submit even without manual
+            // approval; go/submit still enforce the current approval policy.
+            let publication_exists: bool = tx.query_row(
+                "select exists(select 1 from kv where k=?)",
+                [format!("submit_publication:{id}")],
+                |row| row.get(0),
+            )?;
+            if publication_exists || d["ap"].as_bool().unwrap_or(false) {
+                continue;
+            }
         }
         if kd == "fix" && ["ci", "review", "gate", "submit"].contains(&st.as_str()) && d["h"].is_string() && d["br"].is_string() {
             d["rs"] = json!(true);

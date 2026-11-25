@@ -198,6 +198,11 @@ fn worker_secret(name: &str) -> bool {
 }
 
 pub async fn run(p: &str, a: &[String], r: Rq<'_>) -> Out {
+    run_with_spawn(p, a, r).await.0
+}
+
+// The boolean is set only by a successful OS spawn, never inferred from stderr.
+async fn run_with_spawn(p: &str, a: &[String], r: Rq<'_>) -> (Out, bool) {
     let mut c = cmd(p, a);
     c.stdin(if r.i.is_some() {
         Stdio::piped()
@@ -240,11 +245,14 @@ pub async fn run(p: &str, a: &[String], r: Rq<'_>) -> Out {
     let mut ch = match c.spawn() {
         Ok(x) => x,
         Err(e) => {
-            return Out {
-                c: -1,
-                o: String::new(),
-                e: format!("{p}: {e}"),
-            }
+            return (
+                Out {
+                    c: -1,
+                    o: String::new(),
+                    e: format!("{p}: {e}"),
+                },
+                false,
+            );
         }
     };
     let pid = ch.id().unwrap_or(0);
@@ -306,7 +314,7 @@ pub async fn run(p: &str, a: &[String], r: Rq<'_>) -> Out {
         let st = ch.wait().await;
         (o, e, st)
     };
-    match tokio::time::timeout(Duration::from_secs(r.t), w).await {
+    let result = match tokio::time::timeout(Duration::from_secs(r.t), w).await {
         Ok((o, e, st)) => {
             #[cfg(unix)]
             {
@@ -326,7 +334,8 @@ pub async fn run(p: &str, a: &[String], r: Rq<'_>) -> Out {
                 e: format!("timeout after {} s", r.t),
             }
         }
-    }
+    };
+    (result, true)
 }
 
 fn tail(s: &str) -> String {
@@ -927,8 +936,19 @@ pub async fn gh(a: &[&str], t: u64) -> Result<String, String> {
 }
 
 pub async fn gh_input(a: &[&str], t: u64, input: Option<String>) -> Result<String, String> {
+    gh_input_with_spawn(a, t, input)
+        .await
+        .map_err(|(message, _)| message)
+}
+
+/// An error includes whether a process started; only false permits a safe retry.
+pub async fn gh_input_with_spawn(
+    a: &[&str],
+    t: u64,
+    input: Option<String>,
+) -> Result<String, (String, bool)> {
     let v: Vec<String> = a.iter().map(|x| x.to_string()).collect();
-    let r = run(
+    let (r, started) = run_with_spawn(
         &tool("gh"),
         &v,
         Rq {
@@ -944,18 +964,21 @@ pub async fn gh_input(a: &[&str], t: u64, input: Option<String>) -> Result<Strin
     )
     .await;
     if r.c != 0 {
-        return Err(format!(
-            "gh {}: {}",
-            a.iter().take(3).cloned().collect::<Vec<_>>().join(" "),
-            if r.e.trim().is_empty() {
-                r.o.trim()
-            } else {
-                r.e.trim()
-            }
-        )
-        .chars()
-        .take(400)
-        .collect());
+        return Err((
+            format!(
+                "gh {}: {}",
+                a.iter().take(3).cloned().collect::<Vec<_>>().join(" "),
+                if r.e.trim().is_empty() {
+                    r.o.trim()
+                } else {
+                    r.e.trim()
+                }
+            )
+            .chars()
+            .take(400)
+            .collect(),
+            started,
+        ));
     }
     Ok(r.o)
 }
@@ -1696,6 +1719,33 @@ mod tests {
         assert!(c.ends_with("FAILED test_offset\n[exit 1]"));
         assert!(c.contains("bytes omitted"));
         assert_eq!(super::clip("short", 6000), "short");
+    }
+
+    #[tokio::test]
+    async fn spawn_evidence_distinguishes_missing_executable_from_process_failure() {
+        let missing = std::env::current_exe().unwrap().join("not-an-executable");
+        let (out, started) = super::run_with_spawn(
+            missing.to_str().unwrap(),
+            &[],
+            super::Rq {
+                t: 5,
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(!started);
+        assert_ne!(out.c, 0);
+        let (out, started) = super::run_with_spawn(
+            "git",
+            &["not-an-apollo-git-command".into()],
+            super::Rq {
+                t: 10,
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(started);
+        assert_ne!(out.c, 0);
     }
 
     #[cfg(unix)]

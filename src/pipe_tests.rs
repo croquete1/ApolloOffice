@@ -1205,6 +1205,160 @@ mod t {
     }
 
     #[test]
+    fn submitted_pr_preserves_latest_watcher_observation_and_pending_reply() {
+        let db = crate::db::Db::mem();
+        let head = "a".repeat(40);
+        let published = "b".repeat(40);
+        let j = Job::of(json!({"id":7,"repo":"o/r","kind":"fix","d":{}}));
+        db.run("insert into rp(full) values('o/r')", pa![]);
+        db.run("insert into prs(repo,num,st,upd,d) values('o/r',1,'open','fresh',?)",pa![json!({"watcher_head":head,"comment_seen_at":"fresh","seen":true,"auto_merge":false,"head_sha":head}).to_string()]);
+        db.ack_pr_comments_with_reply("o/r",1,"fresh",&head,&["r1".into()],&json!({"author":"owner","body":"Thanks"})).unwrap();
+        let publication = json!({"job":7,"test_cmd":"cargo test","tests":["regression"],"branch":"fix","head":"o/r","head_sha":published,"base_branch":"main","watcher_head":"stale","comment_seen_at":"old","auto_merge":true});
+        record_submitted_pr(&db,&j,1,"Title","https://example.test",false,publication.clone()).unwrap();
+        let row = db.one("select * from prs where repo='o/r' and num=1",pa![]).unwrap();
+        assert_eq!(row["upd"],"fresh");
+        assert_eq!(row["d"]["watcher_head"],head);
+        assert_eq!(row["d"]["comment_seen_at"],"fresh");
+        assert_eq!(row["d"]["head_sha"],published);
+        assert_eq!(row["d"]["auto_merge"],false);
+        assert_eq!(db.watcher_outbox_counts().unwrap()["pending"],1);
+        db.run("update prs set st='merged' where repo='o/r' and num=1",pa![]);
+        assert!(record_submitted_pr(&db,&j,1,"Title","https://example.test",false,publication).is_err());
+        assert_eq!(db.one("select st from prs where num=1",pa![]).unwrap()["st"],"merged");
+    }
+
+    #[test]
+    fn submitted_pr_rejects_corrupt_metadata_or_revoked_repository() {
+        let db = crate::db::Db::mem();
+        let j = Job::of(json!({"id":7,"repo":"o/r","kind":"fix","d":{}}));
+        let publication = json!({"job":7,"test_cmd":"cargo test","tests":["regression"],"branch":"fix","head":"o/r","head_sha":"a".repeat(40),"base_branch":"main"});
+        db.run("insert into rp(full) values('o/r')",pa![]);
+        record_submitted_pr(&db,&j,1,"Title","https://example.test",true,publication.clone()).unwrap();
+        assert_eq!(db.one("select d from prs where num=1",pa![]).unwrap()["d"]["auto_merge"],true);
+        db.run("update prs set d='invalid' where num=1",pa![]);
+        assert!(record_submitted_pr(&db,&j,1,"Title","https://example.test",false,publication.clone()).is_err());
+        db.run("update rp set on_=0 where full='o/r'",pa![]);
+        assert!(record_submitted_pr(&db,&j,2,"Title","https://example.test",true,publication).is_err());
+        assert_eq!(db.n("select count(*) from prs",pa![]),1);
+    }
+
+    fn submission_fixture() -> (crate::db::Db, Job, Value, Value) {
+        let db = crate::db::Db::mem();
+        let j = Job::of(json!({"id":7,"repo":"o/r","kind":"fix","d":{}}));
+        db.run("insert into rp(full) values('o/r')",pa![]);
+        db.run("insert into jobs(id,repo,kind,st) values(7,'o/r','fix','submit')",pa![]);
+        let sha = "a".repeat(40);
+        let publication = json!({"job":7,"test_cmd":"cargo test","tests":["regression"],"branch":"fix","head":"o/r","head_sha":sha,"base_branch":"main"});
+        let remote = json!({"id":123,"number":12,"state":"open","html_url":"https://github.com/o/r/pull/12","base":{"repo":{"full_name":"o/r"},"ref":"main"},"head":{"repo":{"full_name":"o/r"},"ref":"fix","sha":sha}});
+        (db,j,publication,remote)
+    }
+
+    #[test]
+    fn publication_receipt_survives_failed_registration_without_second_creation() {
+        let (db,j,publication,remote) = submission_fixture();
+        let mut checkpoint = begin_submit_publication(&db,&j,"Title",&publication,None).unwrap();
+        assert!(checkpoint["number"].is_null());
+        assert_eq!(checkpoint["auto_merge"],true);
+        assert!(begin_submit_publication(&db,&j,"Title",&publication,None).is_err());
+        // Simulate successful creation once, followed by failure of local registration.
+        save_submit_number(&db,&j,&mut checkpoint,12).unwrap();
+        db.run("create trigger fail_registration before insert on prs begin select raise(abort,'injected failure'); end",pa![]);
+        assert!(persist_submit_receipt(&db,&j,&checkpoint,&remote).is_err());
+        let recovered = load_submit_publication(&db,&j).unwrap().unwrap();
+        assert_eq!(recovered["number"],12);
+        assert_eq!(recovered["auto_merge"],true);
+        assert!(begin_submit_publication(&db,&j,"Title",&publication,None).is_err());
+        db.run("drop trigger fail_registration",pa![]);
+        assert_eq!(persist_submit_receipt(&db,&j,&recovered,&remote).unwrap(),("https://github.com/o/r/pull/12".into(),12));
+        assert_eq!(db.one("select d from prs where num=12",pa![]).unwrap()["d"]["auto_merge"],true);
+        let mut closed = remote.clone();
+        closed["state"] = json!("closed");
+        assert!(persist_submit_receipt(&db,&j,&recovered,&closed).is_err());
+        assert!(begin_submit_publication(&db,&j,"Title",&publication,None).is_err());
+    }
+
+    #[test]
+    fn startup_preserves_auto_publication_receipt_without_granting_approval() {
+        let (db,j,publication,remote) = submission_fixture();
+        db.run("update rp set mode='auto' where full='o/r'",pa![]);
+        let mut checkpoint = begin_submit_publication(&db,&j,"Title",&publication,None).unwrap();
+        save_submit_number(&db,&j,&mut checkpoint,12).unwrap();
+        let a = std::sync::Arc::new(crate::app::App::new(db,std::env::temp_dir(),1,"x".into()));
+        recover(&a).unwrap();
+        let resumed = a.db.jg(j.id).unwrap();
+        assert_eq!(resumed.st,"submit");
+        assert_ne!(resumed.d["ap"],true);
+        assert!(!needs_owner_approval(&a,&resumed));
+        let saved = load_submit_publication(&a.db,&resumed).unwrap().unwrap();
+        assert_eq!(saved,checkpoint);
+        assert!(begin_submit_publication(&a.db,&resumed,"Title",&publication,None).is_err());
+        assert_eq!(persist_submit_receipt(&a.db,&resumed,&saved,&remote).unwrap().1,12);
+        assert_eq!(a.db.n("select count(*) from prs",pa![]),1);
+        a.db.run("update rp set mode='manual' where full='o/r'",pa![]);
+        recover(&a).unwrap();
+        let resumed = a.db.jg(j.id).unwrap();
+        assert_eq!(resumed.st,"submit");
+        assert!(needs_owner_approval(&a,&resumed));
+        assert_ne!(resumed.d["ap"],true);
+        assert_eq!(load_submit_publication(&a.db,&resumed).unwrap().unwrap(),checkpoint);
+    }
+
+    #[test]
+    fn publication_intent_rechecks_cancellation_inside_transaction() {
+        let (db,j,publication,_) = submission_fixture();
+        assert!(!cancellation_requested(&db,j.id).unwrap());
+        db.ks(&format!("kill:{}",j.id),&json!(true));
+        assert!(begin_submit_publication(&db,&j,"Title",&publication,None).is_err());
+        assert!(load_submit_publication(&db,&j).unwrap().is_none());
+        db.ks(&format!("kill:{}",j.id),&json!("invalid"));
+        assert!(begin_submit_publication(&db,&j,"Title",&publication,None).is_err());
+        db.ks(&format!("kill:{}",j.id),&json!(false));
+        assert!(begin_submit_publication(&db,&j,"Title",&publication,None).is_ok());
+    }
+
+    #[test]
+    fn proven_unstarted_intent_can_retry_but_confirmed_receipt_cannot_be_cleared() {
+        let (db,j,publication,remote) = submission_fixture();
+        let first = begin_submit_publication(&db,&j,"Title",&publication,None).unwrap();
+        release_unstarted_publication(&db,&j,&first).unwrap();
+        assert!(load_submit_publication(&db,&j).unwrap().is_none());
+        let mut second = begin_submit_publication(&db,&j,"Title",&publication,None).unwrap();
+        save_submit_number(&db,&j,&mut second,12).unwrap();
+        assert!(release_unstarted_publication(&db,&j,&first).is_err());
+        assert!(release_unstarted_publication(&db,&j,&second).is_err());
+        assert_eq!(persist_submit_receipt(&db,&j,&second,&remote).unwrap().1,12);
+        assert!(begin_submit_publication(&db,&j,"Title",&publication,None).is_err());
+    }
+
+    #[test]
+    fn ambiguous_publication_intent_never_allows_another_creation() {
+        let (db,j,publication,remote) = submission_fixture();
+        begin_submit_publication(&db,&j,"Title",&publication,None).unwrap();
+        let recovered = load_submit_publication(&db,&j).unwrap().unwrap();
+        assert!(persist_submit_receipt(&db,&j,&recovered,&remote).is_err());
+        assert!(begin_submit_publication(&db,&j,"Title",&publication,None).is_err());
+        assert_eq!(db.n("select count(*) from prs",pa![]),0);
+    }
+
+    #[test]
+    fn submitted_pr_inventory_rejects_ambiguous_and_incomplete_targets() {
+        let (_,_,publication,remote) = submission_fixture();
+        assert_eq!(select_submit_pr(&[],"o/r",&publication).unwrap(),None);
+        assert_eq!(select_submit_pr(std::slice::from_ref(&remote),"o/r",&publication).unwrap(),Some(12));
+        assert!(select_submit_pr(&[json!({})],"o/r",&publication).is_err());
+        assert!(select_submit_pr(&[remote.clone(),remote.clone()],"o/r",&publication).is_err());
+        for (field,value) in [("sha",json!("b".repeat(40))),("repo",Value::Null),("repo",json!({"full_name":""}))] {
+            let mut changed=remote.clone();
+            changed["head"][field]=value;
+            assert!(select_submit_pr(&[changed],"o/r",&publication).is_err());
+        }
+        let mut another=remote.clone();
+        another["number"]=json!(13);
+        another["html_url"]=json!("https://github.com/o/r/pull/13");
+        assert!(select_submit_pr(&[remote,another],"o/r",&publication).is_err());
+    }
+
+    #[test]
     fn infra() {
         let o = "CI: 6 passed, FAILED at `deny`: cargo-deny is required in CI: cargo install cargo-deny --locked\nxtask ci: error: ci failed at `deny`\n[exit 1]";
         assert!(!lost(o));

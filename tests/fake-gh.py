@@ -1,4 +1,4 @@
-import json, os, sys
+import json, os, subprocess, sys, uuid
 
 D = os.environ["FAKE_GH_DIR"]
 a = sys.argv[1:]
@@ -22,8 +22,37 @@ def opt(k):
     return a[a.index(k) + 1] if k in a else None
 
 
-open(os.path.join(D, "calls.log"), "a").write(json.dumps(a) + "\n")
+# Multiple CLI processes can run concurrently. Publish each complete record
+# independently; append on Windows is not a reliable interprocess lock.
+calls = os.path.join(D, "calls")
+os.makedirs(calls, exist_ok=True)
+call_id = uuid.uuid4().hex
+temporary = os.path.join(calls, call_id + ".tmp")
+with open(temporary, "x", encoding="utf-8") as record:
+    json.dump(a, record)
+os.replace(temporary, os.path.join(calls, call_id + ".json"))
 R = os.environ.get("FAKE_GH_REPO", "o/r")
+
+
+def rest_pr(pr):
+    # Resolve the actual pushed SHA from the isolated bare Git fixture.
+    branch = pr["head"]
+    remote = os.path.join(os.path.dirname(D), "remotes", R + ".git")
+    sha = subprocess.check_output(
+        ["git", "--git-dir", remote, "rev-parse", "refs/heads/" + branch],
+        text=True,
+    ).strip()
+    return {
+        "id": pr["number"],
+        "number": pr["number"],
+        "state": pr.get("state", "open"),
+        "html_url": pr["url"],
+        "title": pr["title"],
+        "body": pr["body"],
+        "head": {"repo": {"full_name": R}, "ref": branch, "sha": sha},
+        "base": {"repo": {"full_name": R}, "ref": pr["base"]},
+    }
+
 if a[:2] == ["auth", "token"]:
     print("fake-token")
     sys.exit(0)
@@ -45,7 +74,33 @@ if a[0] == "api":
               "created_at": i.get("createdAt", i["updatedAt"]), "updated_at": i["updatedAt"]}
              for i in ld("issues.json", [])])
     if p.startswith(f"repos/{R}/pulls?state=open&"):
-        out([])
+        out([rest_pr(pr) for pr in ld("prs.json", []) if pr.get("state", "open") == "open"])
+    if p.startswith(f"repos/{R}/pulls/"):
+        # Exercise a transient verification failure after successful creation.
+        # Only the private fixture opts in; record the fault before returning.
+        marker = os.path.join(D, "receipt-fault.json")
+        if os.environ.get("FAKE_GH_FAIL_RECEIPT_ONCE") == "1" and not os.path.exists(marker):
+            # Move main to a conflicting commit after the original PR exists.
+            # Receipt recovery must not rebase or republish that PR.
+            seed = os.path.join(os.path.dirname(D), "seed")
+            remote = os.path.join(os.path.dirname(D), "remotes", R + ".git")
+            with open(os.path.join(seed, "add.sh"), "w") as changed:
+                changed.write("add() { echo $(( $1 * $2 )); }\n")
+            subprocess.check_call(["git", "-C", seed, "add", "add.sh"])
+            subprocess.check_call(
+                ["git", "-C", seed, "-c", "user.name=fixture", "-c",
+                 "user.email=fixture@example.test", "commit", "-qm", "conflicting main"]
+            )
+            subprocess.check_call(["git", "-C", seed, "push", "-q", remote, "main"])
+            sv("receipt-fault.json", {"endpoint": p, "main_advanced": True})
+            sys.stderr.write("HTTP 503: injected receipt verification failure")
+            sys.exit(1)
+        number = p.rsplit("/", 1)[-1]
+        for pr in ld("prs.json", []):
+            if str(pr["number"]) == number:
+                out(rest_pr(pr))
+        sys.stderr.write("HTTP 404: Not Found")
+        sys.exit(1)
     if "/timeline" in p or "/comments" in p or "/reviews" in p:
         out([[]] if "--slurp" in a else [])
     if "/contents/" in p:
