@@ -102,7 +102,10 @@ pub fn fail(a: &Ax, repo: &str, stage: &str, code: i32) {
             rusqlite::params![key(repo), state.to_string()],
         );
         if !matches!(written, Ok(1)) {
-            a.hunt_storage_holds.lock().unwrap().insert(repo.to_string());
+            a.hunt_storage_holds
+                .lock()
+                .unwrap()
+                .insert(repo.to_string());
             crate::app::chg();
             a.say(
                 "hunter",
@@ -138,11 +141,22 @@ pub fn success(a: &Ax, repo: &str) {
         if !failed {
             return;
         }
-        let deleted = a.db.0.lock().unwrap().execute("delete from kv where k=?", [key(repo)]);
+        let deleted =
+            a.db.0
+                .lock()
+                .unwrap()
+                .execute("delete from kv where k=?", [key(repo)]);
         if deleted.is_err() {
-            a.hunt_storage_holds.lock().unwrap().insert(repo.to_string());
+            a.hunt_storage_holds
+                .lock()
+                .unwrap()
+                .insert(repo.to_string());
             crate::app::chg();
-            a.say("hunter", &format!("{repo}: could not clear failure counter"), None);
+            a.say(
+                "hunter",
+                &format!("{repo}: could not clear failure counter"),
+                None,
+            );
             return;
         }
         crate::app::chg();
@@ -161,9 +175,16 @@ pub fn success(a: &Ax, repo: &str) {
 pub fn reset(a: &Ax, repo: &str) -> rusqlite::Result<()> {
     {
         let _transition = a.update_transition.lock().unwrap();
-        let deleted = a.db.0.lock().unwrap().execute("delete from kv where k=?", [key(repo)]);
+        let deleted =
+            a.db.0
+                .lock()
+                .unwrap()
+                .execute("delete from kv where k=?", [key(repo)]);
         if let Err(error) = deleted {
-            a.hunt_storage_holds.lock().unwrap().insert(repo.to_string());
+            a.hunt_storage_holds
+                .lock()
+                .unwrap()
+                .insert(repo.to_string());
             crate::app::chg();
             return Err(error);
         }
@@ -304,7 +325,11 @@ mod tests {
         success(&a, "example/one");
         assert!(reset(&a, "example/one").is_err());
         assert!(blocked(&a, "example/one"));
-        a.db.0.lock().unwrap().execute_batch("drop trigger reject_health_update; drop trigger reject_health_delete;").unwrap();
+        a.db.0
+            .lock()
+            .unwrap()
+            .execute_batch("drop trigger reject_health_update; drop trigger reject_health_delete;")
+            .unwrap();
         reset(&a, "example/one").unwrap();
         assert!(!blocked(&a, "example/one"));
     }
