@@ -31,14 +31,19 @@ fn write_file_hold(a: &Ax, repo: &str) -> std::io::Result<()> {
 
 fn remove_file_hold(a: &Ax, repo: &str) -> std::io::Result<()> {
     match std::fs::remove_file(hold_file(a, repo)) {
-        Ok(()) => {
-            #[cfg(unix)]
-            std::fs::File::open(&a.dd)?.sync_all()?;
-            Ok(())
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
     }
+    // Retry directory sync even when an earlier unlink already removed the
+    // marker. A missing marker alone does not prove a durable deletion.
+    #[cfg(unix)]
+    match std::fs::File::open(&a.dd) {
+        Ok(dir) => dir.sync_all()?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    Ok(())
 }
 
 fn hold_storage(a: &Ax, repo: &str) {
@@ -430,7 +435,14 @@ mod tests {
         let a = make();
         assert!(blocked(&a, repo));
         assert!(!blocked(&a, "example/two"));
+        // Simulate a prior unlink whose directory sync was interrupted.
+        std::fs::remove_file(hold_file(&a, repo)).unwrap();
+        a.db.ks(&hold_key(repo), &json!(true));
+        assert!(blocked(&a, repo));
         reset(&a, repo).unwrap();
+        assert!(!blocked(&a, repo));
+        drop(a);
+        let a = make();
         assert!(!blocked(&a, repo));
         drop(a);
         std::fs::remove_dir_all(dir).unwrap();
