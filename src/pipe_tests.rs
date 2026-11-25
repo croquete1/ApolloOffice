@@ -785,6 +785,59 @@ mod t {
     }
 
     #[tokio::test]
+    async fn policy_ineligible_ready_hunts_do_not_starve_other_repositories() {
+        for (revoke, restore) in [
+            ("update rp set hunt=0 where full='o/blocked'", "update rp set hunt=1 where full='o/blocked'"),
+            ("update rp set on_=0 where full='o/blocked'", "update rp set on_=1 where full='o/blocked'"),
+            ("update rp set ci=' ' where full='o/blocked'", "update rp set ci='true' where full='o/blocked'"),
+        ] {
+            let db = crate::db::Db::mem();
+            db.ks("set", &json!({"hunters": 1}));
+            db.run("insert into hs(id,ln,dk,on_) values('local',1,0,1)", pa![]);
+            db.run(
+                "insert into rp(full,ci,hunt,on_) values('o/blocked','true',1,1),('o/healthy','true',1,1)",
+                pa![],
+            );
+            let a = std::sync::Arc::new(crate::app::App::new(
+                db,
+                std::env::temp_dir(),
+                1,
+                "apollo-office".into(),
+            ));
+            let id = a.db.jnew(
+                "o/blocked",
+                0,
+                "hunt",
+                "waiting",
+                "",
+                "ready",
+                "",
+                json!({}),
+                None,
+                99.0,
+            );
+            assert!(!mk_hunt(&a));
+            a.db.run(revoke, pa![]);
+            // A reserved lane still occupies capacity, even after revocation.
+            a.lk.lock().unwrap().insert(id);
+            assert!(!mk_hunt(&a));
+            a.lk.lock().unwrap().remove(&id);
+            assert!(mk_hunt(&a));
+            assert!(!mk_hunt(&a));
+            assert_eq!(
+                a.db.n("select count(*) from jobs where kind='hunt' and repo='o/healthy'", pa![]),
+                1
+            );
+            assert_eq!(
+                a.db.n("select count(*) from jobs where kind='hunt' and repo='o/blocked' and st='ready'", pa![]),
+                1
+            );
+            a.db.run(restore, pa![]);
+            assert!(!mk_hunt(&a));
+        }
+    }
+
+    #[tokio::test]
     async fn idle_cache_cleanup_blocks_admission_and_releases_on_drop() {
         let db = crate::db::Db::mem();
         db.run("insert into rp(full) values('o/r')", pa![]);
