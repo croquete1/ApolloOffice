@@ -282,9 +282,10 @@ async fn full_run(pv: bool) {
     )
     .await;
     assert!(r["error"].is_null(), "{r}");
-    // Private fixtures inject a receipt failure after publication. Allow
-    // the real scheduler's backoff plus time for remote verification.
-    let submission_timeout = Duration::from_secs(if pv { 300 } else { 120 });
+    // Concurrent network probes can defer submission with 30/60/120s
+    // backoffs. Private fixtures also inject a receipt failure and may
+    // need the next 240s retry. Keep bounded deadlines and all assertions.
+    let submission_timeout = Duration::from_secs(if pv { 540 } else { 300 });
     let t0 = Instant::now();
     loop {
         let s = get("/api/state").await;
