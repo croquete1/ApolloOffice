@@ -3544,6 +3544,8 @@ fn begin_submit_publication(db: &crate::db::Db, j: &Job, title: &str, publicatio
     let repo_enabled: bool = tx.query_row("select coalesce(merge,1)=1 from rp where full=? and on_=1", [&j.repo], |r| r.get(0))?;
     let active: bool = tx.query_row("select exists(select 1 from jobs where id=? and repo=? and st='submit')",rusqlite::params![j.id,j.repo],|r| r.get(0))?;
     if !active { return Err(rusqlite::Error::InvalidQuery); }
+    let cancellation: String = tx.query_row("select coalesce((select v from kv where k=?),'false')",[format!("kill:{}",j.id)],|r|r.get(0))?;
+    if serde_json::from_str::<bool>(&cancellation).map_err(|_|rusqlite::Error::InvalidQuery)? { return Err(rusqlite::Error::InvalidQuery); }
     let checkpoint = json!({"repo":j.repo,"title":title,"publication":publication,"auto_merge":auto_merge_requested(None,existing.is_none(),j,repo_enabled),"number":existing});
     tx.execute("insert into kv(k,v) values(?,?)",rusqlite::params![submit_publication_key(j),checkpoint.to_string()])?;
     tx.commit()?;
@@ -3560,6 +3562,17 @@ fn save_submit_number(db: &crate::db::Db, j: &Job, checkpoint: &mut Value, numbe
         return Err(rusqlite::Error::InvalidQuery);
     }
     *checkpoint = next;
+    Ok(())
+}
+
+// Delete only the exact unconfirmed intent when the caller has proof that
+// no process started (or did not invoke it). Never clear ambiguous outcomes.
+fn release_unstarted_publication(db: &crate::db::Db, j: &Job, checkpoint: &Value) -> rusqlite::Result<()> {
+    if !checkpoint["number"].is_null() { return Err(rusqlite::Error::InvalidQuery); }
+    let c = db.0.lock().unwrap();
+    if c.execute("delete from kv where k=? and v=?",rusqlite::params![submit_publication_key(j),checkpoint.to_string()])? != 1 {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
     Ok(())
 }
 
@@ -3950,10 +3963,23 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
     let mut checkpoint = begin_submit_publication(&a.db,j,&ti,&publication,existing)
         .map_err(|e| X::Defer(format!("could not persist PR publication intent: {e}")))?;
     if existing.is_none() {
-        let output = gh_input(&[
+        // Check cancellation again after the durable intent. If it is already
+        // cancelled, no process was invoked and the exact intent can be released.
+        if let Err(error) = kill(a,j) {
+            release_unstarted_publication(&a.db,j,&checkpoint).map_err(|e|X::Defer(format!("could not release unstarted intent: {e}")))?;
+            return Err(error);
+        }
+        let output = match crate::sh::gh_input_with_spawn(&[
             "pr","create","-R",&j.repo,"--head",&hd,"--base",&j.s("mn"),
             "--title",&ti,"--body-file","-",
-        ],120,Some(pb.clone())).await.map_err(|e| X::Defer(format!("PR creation outcome uncertain: {e}; no resend")))?;
+        ],120,Some(pb.clone())).await {
+            Ok(output)=>output,
+            Err((error,false))=>{
+                release_unstarted_publication(&a.db,j,&checkpoint).map_err(|e|X::Defer(format!("could not release unstarted intent: {e}")))?;
+                return Err(X::Defer(format!("GitHub CLI did not start: {error}")));
+            }
+            Err((error,true))=>return Err(X::Defer(format!("PR creation outcome uncertain: {error}; no resend"))),
+        };
         let url = output.trim().lines().last().unwrap_or("");
         let number = url.rsplit('/').next().and_then(|n| n.parse::<i64>().ok()).filter(|n| *n>0 && url.eq_ignore_ascii_case(&submitted_pr_url(&j.repo,*n)))
             .ok_or_else(|| X::Defer("invalid creation receipt; manual reconciliation required; no resend".into()))?;
@@ -4295,7 +4321,15 @@ async fn go(a: &Ax, id: i64, h: &str) {
             mergecheck(a, &mut j).await?;
             return Ok(());
         }
-        if j.st == "submit" {
+        // Reconciliation of an already attempted publication is not a new
+        // push. Never rebase/rebuild its original proof or depend on checkout.
+        let recovering_publication = load_submit_publication(&a.db,&j)
+            .map_err(|e|X::Defer(format!("publication checkpoint unavailable: {e}")))?.is_some();
+        if recovering_publication {
+            if j.st!="submit" || needs_owner_approval(a,&j) {
+                return Err(X::Defer("existing publication requires reconciliation under its original authorization".into()));
+            }
+        } else if j.st == "submit" {
             ok(a, &j, &format!("git checkout -q {}", q(&j.s("br"))), 120).await?;
             stage(a, "submit", || {
                 let mut jj = j.clone();
@@ -4491,7 +4525,9 @@ async fn go(a: &Ax, id: i64, h: &str) {
             );
         }
         a.st("submit", "idle", None, "ok");
-        clean(a, &j).await;
+        if !recovering_publication {
+            clean(a, &j).await;
+        }
         Ok(())
     }
     .await;
