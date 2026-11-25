@@ -4,7 +4,7 @@ use base64::Engine;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -294,6 +294,12 @@ async fn get(a: &Ax, u: &str, limit: usize) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+fn write_synced_update(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut file = std::fs::File::create(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
 /// Stages only a signed, integrity-checked update for this installation.
 pub async fn check(a: &Ax) -> Result<Value, String> {
     let _g = CK.lock().await;
@@ -323,10 +329,7 @@ pub async fn check(a: &Ax) -> Result<Value, String> {
         }
         let f = staged(a);
         let tmp = f.with_extension("part");
-        std::fs::write(&tmp, &bin).map_err(|e| e.to_string())?;
-        std::fs::File::open(&tmp)
-            .and_then(|file| file.sync_all())
-            .map_err(|e| e.to_string())?;
+        write_synced_update(&tmp, &bin).map_err(|e| e.to_string())?;
         std::fs::rename(&tmp, &f).map_err(|e| e.to_string())?;
         #[cfg(unix)]
         std::fs::File::open(&a.dd)
@@ -648,6 +651,21 @@ pub fn cleanup(me: &Path) {
 mod t {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
+
+    #[test]
+    fn staged_write_syncs_the_writable_handle() {
+        let dir = std::env::temp_dir().join(format!("apollo-sync-{}", rand::random::<u64>()));
+        std::fs::create_dir(&dir).unwrap();
+        let temporary = dir.join("update.part");
+        let staged = dir.join("update.bin");
+        write_synced_update(&temporary, b"first candidate").unwrap();
+        write_synced_update(&temporary, b"new").unwrap();
+        std::fs::rename(&temporary, &staged).unwrap();
+        assert_eq!(std::fs::read(&staged).unwrap(), b"new");
+        assert!(!temporary.exists());
+        assert!(write_synced_update(&dir, b"invalid destination").is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn staging_receipt_reports_sqlite_write_failure() {
