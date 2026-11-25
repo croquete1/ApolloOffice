@@ -564,7 +564,7 @@ mod t {
     #[tokio::test]
     async fn a_blocked_hunt_cannot_be_admitted_and_active_hunts_do_not_overlap() {
         let db = crate::db::Db::mem();
-        db.run("insert into rp(full) values('o/r')", pa![]);
+        db.run("insert into rp(full,hunt,ci) values('o/r',1,'true')", pa![]);
         let first = db.jnew(
             "o/r",
             0,
@@ -633,7 +633,7 @@ mod t {
     #[tokio::test]
     async fn unblocked_ready_hunt_cannot_exceed_the_active_hunter_cap() {
         let db = crate::db::Db::mem();
-        db.run("insert into rp(full) values('o/blocked'),('o/healthy')", pa![]);
+        db.run("insert into rp(full,hunt,ci) values('o/blocked',1,'true'),('o/healthy',1,'true')", pa![]);
         db.ks("set", &json!({"hunters": 1}));
         db.run("insert into hs(id,ln,dk,on_) values('local',2,0,1)", pa![]);
         let blocked_id = db.jnew(
@@ -677,6 +677,35 @@ mod t {
         a.lk.lock().unwrap().clear();
         assert!(admit(&a, "o/blocked", "local", blocked_id));
         assert!(!admit(&a, "o/healthy", "local", healthy_id));
+    }
+
+    #[tokio::test]
+    async fn queued_hunt_rechecks_repository_policy_at_admission() {
+        let db = crate::db::Db::mem();
+        db.run(
+            "insert into rp(full,hunt,ci) values('o/r',1,'true')",
+            pa![],
+        );
+        db.run("insert into hs(id,ln,dk,on_) values('local',2,0,1)", pa![]);
+        let id = db.jnew("o/r", 0, "hunt", "fixture", "", "ready", "", json!({}), None, 99.0);
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::env::temp_dir(),
+            1,
+            "x".into(),
+        ));
+        for (revoke, restore) in [
+            ("update rp set on_=0", "update rp set on_=1"),
+            ("update rp set hunt=0", "update rp set hunt=1"),
+            ("update rp set ci=' '", "update rp set ci='true'"),
+        ] {
+            a.db.run(revoke, pa![]);
+            assert!(!admit(&a, "o/r", "local", id));
+            assert!(a.lk.lock().unwrap().is_empty());
+            assert!(a.act.lock().unwrap().is_empty());
+            a.db.run(restore, pa![]);
+        }
+        assert!(admit(&a, "o/r", "local", id));
     }
 
     #[tokio::test]
