@@ -27,13 +27,22 @@ fn hw(o: &str) -> serde_json::Value {
             }
             continue;
         }
-        let ns: Vec<f64> = x
+        if matches!(k, "os" | "up") {
+            v[k] = serde_json::json!(x.trim());
+            continue;
+        }
+        let Ok(ns) = x
             .split_whitespace()
-            .filter_map(|n| n.parse().ok())
-            .collect();
+            .map(str::parse::<f64>)
+            .collect::<Result<Vec<_>, _>>()
+        else {
+            continue;
+        };
+        if !ns.iter().all(|n| n.is_finite()) {
+            continue;
+        }
         match k {
-            "os" | "up" => v[k] = serde_json::json!(x.trim()),
-            "cpu" | "load" | "temp" if !ns.is_empty() => v[k] = serde_json::json!(ns[0]),
+            "cpu" | "load" | "temp" if ns.len() == 1 => v[k] = serde_json::json!(ns[0]),
             "mem" | "disk" if ns.len() == 2 => v[k] = serde_json::json!(ns),
             _ => {}
         }
@@ -216,6 +225,18 @@ pub async fn watch(a: Ax) {
 #[cfg(test)]
 mod gpu_telemetry_tests {
     use super::*;
+
+    #[test]
+    fn malformed_numeric_samples_are_not_reinterpreted() {
+        let v = hw("cpu 8 bad\nload NaN\ntemp 50 90\nmem 16000 invalid 8000\ndisk inf 100");
+        for key in ["cpu", "load", "temp", "mem", "disk"] {
+            assert!(v[key].is_null());
+        }
+        let valid = hw("cpu 8\nload 1.5\nmem 16000 8000");
+        assert_eq!(valid["cpu"], 8.0);
+        assert_eq!(valid["load"], 1.5);
+        assert_eq!(valid["mem"][1], 8000.0);
+    }
 
     #[test]
     fn gpu_metrics_are_optional_bounded_and_per_device() {
