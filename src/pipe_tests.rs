@@ -1205,6 +1205,44 @@ mod t {
     }
 
     #[test]
+    fn submitted_pr_preserves_latest_watcher_observation_and_pending_reply() {
+        let db = crate::db::Db::mem();
+        let head = "a".repeat(40);
+        let published = "b".repeat(40);
+        let j = Job::of(json!({"id":7,"repo":"o/r","kind":"fix","d":{}}));
+        db.run("insert into rp(full) values('o/r')", pa![]);
+        db.run("insert into prs(repo,num,st,upd,d) values('o/r',1,'open','fresh',?)",pa![json!({"watcher_head":head,"comment_seen_at":"fresh","seen":true,"auto_merge":false,"head_sha":head}).to_string()]);
+        db.ack_pr_comments_with_reply("o/r",1,"fresh",&head,&["r1".into()],&json!({"author":"owner","body":"Thanks"})).unwrap();
+        let publication = json!({"job":7,"test_cmd":"cargo test","tests":["regression"],"branch":"fix","head":"o/r","head_sha":published,"base_branch":"main","watcher_head":"stale","comment_seen_at":"old","auto_merge":true});
+        record_submitted_pr(&db,&j,1,"Title","https://example.test",false,publication.clone()).unwrap();
+        let row = db.one("select * from prs where repo='o/r' and num=1",pa![]).unwrap();
+        assert_eq!(row["upd"],"fresh");
+        assert_eq!(row["d"]["watcher_head"],head);
+        assert_eq!(row["d"]["comment_seen_at"],"fresh");
+        assert_eq!(row["d"]["head_sha"],published);
+        assert_eq!(row["d"]["auto_merge"],false);
+        assert_eq!(db.watcher_outbox_counts().unwrap()["pending"],1);
+        db.run("update prs set st='merged' where repo='o/r' and num=1",pa![]);
+        assert!(record_submitted_pr(&db,&j,1,"Title","https://example.test",false,publication).is_err());
+        assert_eq!(db.one("select st from prs where num=1",pa![]).unwrap()["st"],"merged");
+    }
+
+    #[test]
+    fn submitted_pr_rejects_corrupt_metadata_or_revoked_repository() {
+        let db = crate::db::Db::mem();
+        let j = Job::of(json!({"id":7,"repo":"o/r","kind":"fix","d":{}}));
+        let publication = json!({"job":7,"test_cmd":"cargo test","tests":["regression"],"branch":"fix","head":"o/r","head_sha":"a".repeat(40),"base_branch":"main"});
+        db.run("insert into rp(full) values('o/r')",pa![]);
+        record_submitted_pr(&db,&j,1,"Title","https://example.test",true,publication.clone()).unwrap();
+        assert_eq!(db.one("select d from prs where num=1",pa![]).unwrap()["d"]["auto_merge"],true);
+        db.run("update prs set d='invalid' where num=1",pa![]);
+        assert!(record_submitted_pr(&db,&j,1,"Title","https://example.test",false,publication.clone()).is_err());
+        db.run("update rp set on_=0 where full='o/r'",pa![]);
+        assert!(record_submitted_pr(&db,&j,2,"Title","https://example.test",true,publication).is_err());
+        assert_eq!(db.n("select count(*) from prs",pa![]),1);
+    }
+
+    #[test]
     fn infra() {
         let o = "CI: 6 passed, FAILED at `deny`: cargo-deny is required in CI: cargo install cargo-deny --locked\nxtask ci: error: ci failed at `deny`\n[exit 1]";
         assert!(!lost(o));
