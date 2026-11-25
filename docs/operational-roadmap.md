@@ -447,3 +447,24 @@ F16 — #105 integrada na main em 50ba062a31572e1922353c1cacce9a0a1d4ffa67; CI #
 F05 — #104: CI #240 (45656721251) aprovado no HEAD 860c5b4276018bf3c0805342edc42a34acfb7013; CodeRabbit solicitou teste da resposta HTTP 409 de reset-hunt. Integração pendente; retenção durável após reinício continua em falta.
 
 F05 — #104 integrada em f76b2d419eca7b27aaff0750faee224889c94850; CI #245 (45659737411) aprovado no HEAD 72bab8067145452fa66472be01dfad93f19c8a27: 387 Rust unitários Ubuntu (5 ignorados), 341 Windows, 2 e2e em ambas as plataformas, gates configurados aprovados. Teste reset_hunt_reports_conflict_and_keeps_hold_when_delete_fails aprovado nos logs de ambas as plataformas. CodeRabbit cobriu esse HEAD com allowance incluída, ambas as threads resolvidas. Bloqueio em memória perante falha de persistência não sobrevive a restart; recuperação durável pendente. CI da main #243 (45659534036) após #105 aprovado; CI após #104 ainda por confirmar.
+
+## Lote de integração #102–109 — 25/11/2026
+
+Evidências observadas no GitHub; nenhuma fase é encerrada apenas por estes merges.
+
+| PR | Merge em main | CI do HEAD aprovado | Revisão |
+|---|---|---|---|
+| #102 | `1351cbe18494a37e9f7a14333c11a76099cad4b4` | [#249](https://github.com/croquete1/ApolloOffice/actions/runs/45663363318) | HEAD exato revisto; duas threads documentais resolvidas |
+| #106 | `71b6437e216dce9646ea70c86722f634f713fb52` | [#250](https://github.com/croquete1/ApolloOffice/actions/runs/45665114034) | HEAD exato revisto; zero comentários acionáveis |
+| #107 | `00c0bd04b9af27b35cb3e0ba78e6d871a0cbfe47` | [#252](https://github.com/croquete1/ApolloOffice/actions/runs/45667633351) | HEAD exato revisto; evidência de testes publicada e thread resolvida |
+| #108 | `5232961c8e03919790c0f967dddd810dfeb2e39c` | [#253](https://github.com/croquete1/ApolloOffice/actions/runs/45667638596) | HEAD exato revisto; zero comentários acionáveis |
+| #109 | `ecba5861dce920bb8a82960c3d3c578c12f370de` | [#255](https://github.com/croquete1/ApolloOffice/actions/runs/45668641108) | CodeRabbit reviu `7a61003`; alteração subsequente `e7993a7` verificada manualmente contra os dois hunks Rustfmt, sem revisão automática do HEAD final |
+
+- CI pós-merge #251 e #256 aprovados; #257–259 em execução na última observação. Não atribuir sucesso antes do resultado final.
+- F02/F04: reconciliação do push por SHA exato na execução atual; reinício durável e identidade imutável continuam pendentes.
+- F04/F05: contador inválido de retry automático bloqueia novas tentativas; Hunter mantém hold persistente quando a BD aceita a chave separada. Indisponibilidade total da BD, crash antes de commit e teste real de restart continuam pendentes.
+- F11: parser de telemetria rejeita tokens inválidos e aridade incorreta. Hardware e pressão reais por validar.
+- F16: prova Ed25519 original revalidada antes da instalação; faltam persistência atómica integral, anti-rollback persistente, ensaio de instalação/recovery com chave de produção. Nenhuma release publicada.
+- CI #248 e #254: falhas Ubuntu apenas em Rustfmt, corrigidas sem reduzir gates; Windows aprovado nos dois runs. CI #250 e #255 validaram os HEADs corrigidos. Aprendizagem: aplicar todos os hunks do formatter, incluindo vírgulas finais; não confundir aprovação de uma plataforma com a matriz completa.
+- Próximo lote aberto: #110 metadados e histórico de recuperação; #111 limite de leitura do executável staged; #112 rejeição de telemetria numérica duplicada. Testes acrescentados, validação CI e revisão pendentes. Sem alterar representação dos agentes ou modelos.
+- Última quota observada do CodeRabbit: zero revisões incluídas restantes após #109; não foram solicitadas revisões pagas. Não declarar cobertura de commits não revistos pelo serviço.
