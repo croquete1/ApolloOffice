@@ -1251,7 +1251,7 @@ impl Db {
     /// second follow-up, and an already active follow-up leaves new input pending.
     // Late follow-ups must use the exact observed merged PR timestamp.
     const MERGED_SNAPSHOT: &'static str =
-        "select exists(select 1 from prs where repo=? and num=? and st='merged' and upd=?)";
+        "select exists(select 1 from prs where repo=? and num=? and st='merged' and upd=? and exists(select 1 from rp where full=prs.repo and on_=1))";
 
     fn ack_merged_in_tx(
         tx: &rusqlite::Transaction<'_>,
@@ -1631,6 +1631,7 @@ mod comment_cursor_tests {
     #[test]
     fn comment_ack_is_atomic_and_preserves_other_metadata() {
         let db = Db::mem();
+        db.run("insert into rp(full) values('a/b')", vec![]);
         let ids = vec!["review-1".to_string()];
         assert!(db.ack_merged_comments("a/b", 1, "new", &ids, true).is_err());
         assert_eq!(db.n("select count(*) from cm", vec![]), 0);
@@ -2002,6 +2003,7 @@ mod late_followup_tests {
     #[test]
     fn followup_commit_replay_and_pending_batch_are_atomic() {
         let db = Db::mem();
+        db.run("insert into rp(full) values('o/r')", vec![]);
         db.run(
             "insert into prs(repo,num,st,upd,d) values('o/r',1,'merged','t1','{}')",
             vec![],
@@ -2036,8 +2038,34 @@ mod late_followup_tests {
         assert!(!db.comment_acknowledged("o/r", "i3").unwrap());
     }
     #[test]
+    fn revoked_repository_cannot_consume_merged_comments() {
+        let db = Db::mem();
+        db.run("insert into rp(full) values('o/r')", vec![]);
+        db.run(
+            "insert into prs(repo,num,st,upd,d) values('o/r',1,'merged','t','{}')",
+            vec![],
+        );
+        let request = json!({"title":"follow-up","body":"verified request","url":"https://example.test","why":"maintainer"});
+        let ids = vec!["i1".into()];
+        for sql in ["update rp set on_=0", "delete from rp"] {
+            db.run(sql, vec![]);
+            assert!(db
+                .queue_followup_and_ack("o/r", 1, "t", &ids, &request, true)
+                .is_err());
+            for complete in [false, true] {
+                assert!(db
+                    .ack_merged_comments("o/r", 1, "t", &ids, complete)
+                    .is_err());
+            }
+            assert!(!db.comment_acknowledged("o/r", "i1").unwrap());
+            assert_eq!(db.n("select count(*) from jobs", vec![]), 0);
+        }
+    }
+
+    #[test]
     fn partial_merged_ack_preserves_cursor_until_complete() {
         let db = Db::mem();
+        db.run("insert into rp(full) values('o/r')", vec![]);
         db.run(
             "insert into prs(repo,num,st,upd,d) values('o/r',1,'merged','new',?)",
             crate::pa![json!({"comment_seen_at":"old"}).to_string()],
