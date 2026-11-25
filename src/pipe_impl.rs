@@ -4643,7 +4643,7 @@ pub(crate) fn admit(a: &Ax, repo: &str, host: &str, id: i64) -> bool {
         return false;
     }
     if is_hunt && (!matches!(
-        a.db.try_n("select count(*) from rp where full=? and on_=1 and hunt=1 and trim(ci)<>''",pa![repo]),
+        a.db.try_n("select count(*) from rp where full=? and on_=1 and hunt=1 and trim(ci)<>''",pa![repo.to_string()]),
         Ok(1)
     ) || crate::hunt_health::blocked(a, repo) || a.hunter_quota_blocked()) {
         return false;
