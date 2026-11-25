@@ -1,9 +1,11 @@
+import base64
 import hashlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.release_manifest import EXPECTED_ASSETS, manifest
+from scripts.release_manifest import EXPECTED_ASSETS, manifest, verify_staged
 
 
 # Independent contract: changing the production constant must not change fixtures.
@@ -61,3 +63,29 @@ class ReleaseManifestTests(unittest.TestCase):
         path.mkdir()
         with self.assertRaisesRegex(ValueError, "invalid release asset"):
             manifest(self.root, "v0.10.15")
+
+    def stage_metadata(self):
+        (self.root / "latest.json").write_text(json.dumps(manifest(self.root, "v0.10.15")))
+        (self.root / "latest.json.sig").write_bytes(base64.b64encode(bytes(64)))
+
+    def test_staged_release_matches_manifest(self):
+        self.stage_metadata()
+        verify_staged(self.root, "v0.10.15")
+
+    def test_staged_changed_binary_rejected(self):
+        self.stage_metadata()
+        (self.root / "apollo-office-linux-x64").write_bytes(b"changed")
+        with self.assertRaisesRegex(ValueError, "manifest does not match"):
+            verify_staged(self.root, "v0.10.15")
+
+    def test_staged_invalid_signature_rejected(self):
+        self.stage_metadata()
+        (self.root / "latest.json.sig").write_bytes(base64.b64encode(b"short"))
+        with self.assertRaisesRegex(ValueError, "signature length"):
+            verify_staged(self.root, "v0.10.15")
+
+    def test_staged_unexpected_metadata_rejected(self):
+        self.stage_metadata()
+        (self.root / "extra").write_bytes(b"extra")
+        with self.assertRaisesRegex(ValueError, "invalid staged release inventory"):
+            verify_staged(self.root, "v0.10.15")
