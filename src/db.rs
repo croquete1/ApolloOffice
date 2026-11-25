@@ -278,6 +278,24 @@ fn init(c: &mut Connection) -> anyhow::Result<()> {
         update watcher_outbox set state='cancelled',updated=cast(strftime('%s','now') as integer)*1000
           where state='pending' and not exists(select 1 from rp where full=watcher_outbox.repo and on_=1);
     ")?;
+    // Terminal or deleted PRs cannot send previously queued replies. Keep
+    // uncertain/sent deliveries for reconciliation; a reopen needs new work.
+    tx.execute_batch("
+        create trigger if not exists watcher_outbox_pr_terminal
+        after update of st on prs when new.st is not 'open' and old.st is not new.st
+        begin
+          update watcher_outbox set state='cancelled',updated=cast(strftime('%s','now') as integer)*1000
+            where repo=new.repo and num=new.num and state='pending';
+        end;
+        create trigger if not exists watcher_outbox_pr_deleted
+        after delete on prs
+        begin
+          update watcher_outbox set state='cancelled',updated=cast(strftime('%s','now') as integer)*1000
+            where repo=old.repo and num=old.num and state='pending';
+        end;
+        update watcher_outbox set state='cancelled',updated=cast(strftime('%s','now') as integer)*1000
+          where state='pending' and not exists(select 1 from prs where repo=watcher_outbox.repo and num=watcher_outbox.num and st='open');
+    ")?;
     // A fresh opaque token also fences deletion/recreation of a repository.
     // Existing permissions are preserved, but old jobs have no valid token.
     tx.execute_batch("
@@ -1116,7 +1134,7 @@ impl Db {
     /// ambiguous response must never automatically issue a second POST.
     pub fn claim_watcher_reply(&self, id: &str, author: &str) -> rusqlite::Result<bool> {
         let c = self.0.lock().unwrap();
-        let changed=c.execute("update watcher_outbox set state='uncertain',updated=? where id=? and author=? and state='pending' and exists(select 1 from rp where full=watcher_outbox.repo and on_=1)",rusqlite::params![now(),id,author])?;
+        let changed=c.execute("update watcher_outbox set state='uncertain',updated=? where id=? and author=? and state='pending' and exists(select 1 from rp where full=watcher_outbox.repo and on_=1) and exists(select 1 from prs where repo=watcher_outbox.repo and num=watcher_outbox.num and st='open')",rusqlite::params![now(),id,author])?;
         Ok(changed == 1)
     }
 
@@ -2453,6 +2471,25 @@ mod watcher_outbox_tests {
     }
 
     #[test]
+    fn terminal_or_deleted_pr_cancels_only_pending_replies() {
+        let db = Db::mem();
+        db.run("insert into rp(full) values('o/r')", vec![]);
+        db.run("insert into prs(repo,num,st,upd,d) values('o/r',1,'open','t','{}'),('o/r',2,'open','t','{}'),('o/r',3,'open','t','{}')",vec![]);
+        db.run("insert into watcher_outbox(id,repo,num,author,body,state,created,updated) values('a','o/r',1,'owner','reply','pending',1,1),('b','o/r',1,'owner','reply','uncertain',1,1),('c','o/r',2,'owner','reply','pending',1,1),('d','o/r',3,'owner','reply','pending',1,1),('e','o/r',99,'owner','reply','pending',1,1)",vec![]);
+        db.run("update prs set st='merged' where num=1", vec![]);
+        assert!(!db.claim_watcher_reply("a", "owner").unwrap());
+        db.run("update prs set st='open' where num=1", vec![]);
+        assert!(!db.claim_watcher_reply("a", "owner").unwrap());
+        db.run("delete from prs where num=2", vec![]);
+        assert!(!db.claim_watcher_reply("c", "owner").unwrap());
+        assert!(!db.claim_watcher_reply("e", "owner").unwrap());
+        assert!(db.claim_watcher_reply("d", "owner").unwrap());
+        assert_eq!(db.watcher_outbox_counts().unwrap()["cancelled"], 2);
+        assert_eq!(db.watcher_outbox_counts().unwrap()["uncertain"], 2);
+        assert!(db.finish_watcher_reply("b", "sent").unwrap());
+    }
+
+    #[test]
     fn revoked_repository_cannot_admit_or_acknowledge_review() {
         let db = Db::mem();
         let head = "a".repeat(40);
@@ -2504,6 +2541,10 @@ mod watcher_outbox_tests {
     fn owner_inventory_prioritizes_unresolved_and_cancel_cannot_race_claim() {
         let db = Db::mem();
         db.run("insert into rp(full) values('o/r')", vec![]);
+        db.run(
+            "insert into prs(repo,num,st,upd,d) values('o/r',1,'open','t','{}')",
+            vec![],
+        );
         for (id, state, at) in [("a", "sent", 3), ("b", "pending", 1), ("c", "uncertain", 2)] {
             db.run("insert into watcher_outbox(id,repo,num,author,body,state,created,updated) values(?,'o/r',1,'owner','reply',?,?,?)",crate::pa![id.to_string(),state.to_string(),at,at]);
         }
