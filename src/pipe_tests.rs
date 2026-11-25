@@ -169,6 +169,66 @@ mod t {
     }
 
     #[test]
+    fn remote_branch_inventory_requires_exact_single_valid_ref(){
+        let sha="a".repeat(40);
+        let good=format!("{sha}\trefs/heads/fix/1");
+        assert_eq!(remote_branch_sha(&good,"fix/1").unwrap(),Some(sha.clone()));
+        assert_eq!(remote_branch_sha("","fix/1").unwrap(),None);
+        for bad in [format!("{good}\n{good}"),format!("{sha}\trefs/heads/fix/2"),"bad\trefs/heads/fix/1".to_string(),format!("{sha} refs/heads/fix/1")] {
+            assert!(remote_branch_sha(&bad,"fix/1").is_err());
+        }
+    }
+
+    #[test]
+    fn publication_branch_lease_never_overwrites_unrelated_fix(){
+        let old="a".repeat(40);
+        let candidate="b".repeat(40);
+        let other="c".repeat(40);
+        assert_eq!(submit_branch_lease("fix","fix/1",None,&candidate,"").unwrap().as_deref(),Some("--force-with-lease=refs/heads/fix/1:"));
+        assert_eq!(submit_branch_lease("fix","fix/1",Some(&candidate),&candidate,"").unwrap(),None);
+        assert!(submit_branch_lease("fix","fix/1",Some(&old),&candidate,&old).is_err());
+        for kind in ["review","rebase"] {
+            assert_eq!(submit_branch_lease(kind,"fix/1",Some(&old),&candidate,&old).unwrap(),Some(format!("--force-with-lease=refs/heads/fix/1:{old}")));
+            assert_eq!(submit_branch_lease(kind,"fix/1",Some(&candidate),&candidate,&old).unwrap(),None);
+            assert!(submit_branch_lease(kind,"fix/1",None,&candidate,&old).is_err());
+            assert!(submit_branch_lease(kind,"fix/1",Some(&other),&candidate,&old).is_err());
+            assert!(submit_branch_lease(kind,"fix/1",Some(&old),&candidate,"").is_err());
+        }
+        assert!(submit_branch_lease("fix","fix/1",None,"invalid","").is_err());
+    }
+
+    #[test]
+    fn actual_git_lease_rejects_branch_created_or_changed_after_observation(){
+        let root=std::env::temp_dir().join(format!("apollo-lease-{}",hex::encode(rand::random::<[u8;8]>())));
+        std::fs::create_dir_all(&root).unwrap();
+        let git=|args:&[&str]| std::process::Command::new("git").args(args).current_dir(&root).output().unwrap();
+        let ok=|args:&[&str]| {
+            let out=git(args);
+            assert!(out.status.success(),"{args:?}: {}",String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        ok(&["init","-q","-b","main","work"]);
+        ok(&["init","-q","--bare","remote.git"]);
+        ok(&["-C","work","-c","user.name=fixture","-c","user.email=fixture@example.test","commit","-q","--allow-empty","-m","first"]);
+        let first=ok(&["-C","work","rev-parse","HEAD"]);
+        ok(&["-C","work","-c","user.name=fixture","-c","user.email=fixture@example.test","commit","-q","--allow-empty","-m","second"]);
+        let second=ok(&["-C","work","rev-parse","HEAD"]);
+        let branch="fix/1";
+        let target="refs/heads/fix/1";
+        let absent=remote_branch_sha(&ok(&["-C","work","ls-remote","--refs","../remote.git",target]),branch).unwrap();
+        assert!(absent.is_none());
+        let lease=submit_branch_lease("fix",branch,absent.as_deref(),&second,"").unwrap().unwrap();
+        ok(&["-C","work","push","-q","../remote.git",&format!("{first}:{target}")]);
+        assert!(!git(&["-C","work","push","-q",&lease,"../remote.git",&format!("{second}:{target}")]).status.success());
+        assert_eq!(ok(&["--git-dir=remote.git","rev-parse",target]),first);
+        let lease=submit_branch_lease("review",branch,Some(&first),&second,&first).unwrap().unwrap();
+        ok(&["-C","work","push","-q",&lease,"../remote.git",&format!("{second}:{target}")]);
+        assert!(!git(&["-C","work","push","-q",&lease,"../remote.git",&format!("{first}:{target}")]).status.success());
+        assert_eq!(ok(&["--git-dir=remote.git","rev-parse",target]),second);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn review_publication_requires_original_open_pr_and_exact_head(){
         let source="a".repeat(40);
         let candidate="b".repeat(40);

@@ -3652,6 +3652,70 @@ fn publish_approval(a: &Ax, j: &Job, reason: &str) -> R<()> {
     Ok(())
 }
 
+// A successful empty ls-remote is proof of absence, not a failed query.
+fn remote_branch_sha(output: &str, branch: &str) -> R<Option<String>> {
+    let output = output.trim();
+    if output.is_empty() {
+        return Ok(None);
+    }
+    let (sha, reference) = output.split_once('\t')
+        .ok_or_else(|| X::Defer("invalid remote branch inventory".into()))?;
+    if reference != format!("refs/heads/{branch}") || !crate::db::valid_git_sha(sha) {
+        return Err(X::Defer("invalid or ambiguous remote branch inventory".into()));
+    }
+    Ok(Some(sha.to_string()))
+}
+
+// New fixes may create a branch or recover an identical push, but may
+// never overwrite an unrelated branch. Existing PR operations require
+// an explicit lease on their already-verified original head.
+fn submit_branch_lease(kind: &str, branch: &str, remote: Option<&str>, candidate: &str, original: &str) -> R<Option<String>> {
+    if !crate::db::valid_git_sha(candidate) || remote.is_some_and(|sha| !crate::db::valid_git_sha(sha)) {
+        return Err(X::Defer("invalid publication branch SHA".into()));
+    }
+    if remote == Some(candidate) {
+        return Ok(None);
+    }
+    if matches!(kind, "review" | "rebase") {
+        if !crate::db::valid_git_sha(original) || remote != Some(original) {
+            return drop("original PR branch changed or disappeared; no push");
+        }
+        return Ok(Some(format!("--force-with-lease=refs/heads/{branch}:{original}")));
+    }
+    if remote.is_some() {
+        return drop("existing publication branch differs from candidate; no overwrite; manual review required");
+    }
+    Ok(Some(format!("--force-with-lease=refs/heads/{branch}:")))
+}
+
+// Never retry a possibly accepted write with a newly constructed candidate.
+fn confirm_submit_push(candidate: &str, observed: &str, receipt: R<String>) -> R<()> {
+    if candidate == observed && crate::db::valid_git_sha(candidate) {
+        return Ok(());
+    }
+    let reason = if receipt.is_err() {
+        "push outcome uncertain"
+    } else {
+        "push receipt lacks matching remote commit"
+    };
+    Err(X::Drop(format!("{reason}; manual reconciliation required; no resend")))
+}
+
+#[cfg(test)]
+#[test]
+fn submit_push_receipt_requires_exact_remote_confirmation() {
+    let candidate = "a".repeat(40);
+    let other = "b".repeat(40);
+    assert!(confirm_submit_push(&candidate, &candidate, Err(X::Net("connection reset".into()))).is_ok());
+    assert!(confirm_submit_push(&candidate, &candidate, Err(X::E("unexpected disconnect".into()))).is_ok());
+    assert!(confirm_submit_push(&candidate, &candidate, Ok(String::new())).is_ok());
+    for observed in ["", other.as_str()] {
+        assert!(matches!(confirm_submit_push(&candidate, observed, Err(X::Net("timeout".into()))), Err(X::Drop(_))));
+        assert!(matches!(confirm_submit_push(&candidate, observed, Ok(String::new())), Err(X::Drop(_))));
+    }
+    assert!(confirm_submit_push("", "", Ok(String::new())).is_err());
+}
+
 async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
     kill(a, j)?;
     // Every path, including recovery/resume, must pass this boundary before any
@@ -3867,31 +3931,28 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
     if !got {
         return e("could not take the commits from the build machine");
     }
-    let lr = |o: String| o.split_whitespace().next().unwrap_or("").to_string();
-    let rem = lr(lok(
+    let output = lok(
         a,
         &j.repo,
-        &["ls-remote", &url, &format!("refs/heads/{br}")],
+        &["ls-remote", "--refs", &url, &format!("refs/heads/{br}")],
         true,
         120,
     )
-    .await
-    .unwrap_or_default());
+    .await.map_err(|_| X::Defer("remote publication branch inventory unavailable; no push".into()))?;
+    let rem = remote_branch_sha(&output,&br)?;
     if let Some(source)=review_bound_head(j)?{
         let number=j.pr.filter(|n|*n>0).ok_or_else(||X::Drop("PR operation has no original PR number".into()))?;
         let remote=ghj(&["api",&format!("repos/{}/pulls/{number}",j.repo)],60).await.map_err(X::E)?;
         if !review_publish_target_matches(&remote,&hr,&br,source,&sha)
-            || remote["head"]["sha"].as_str()!=Some(rem.as_str()){
+            || remote["head"]["sha"].as_str()!=rem.as_deref(){
             return drop("PR operation publication target changed; no push; manual review required");
         }
     }
     kill(a, j)?;
-    if rem != sha {
-        let fo = if j.kind == "rebase" || j.kind == "review" {
-            format!("--force-with-lease=refs/heads/{br}:{}", j.s("old"))
-        } else {
-            "--force".into()
-        };
+    // A failed push receipt does not prove that the remote rejected the commit.
+    // Keep this exact candidate and reconcile by read-only queries before
+    // allowing any further publication or stage retry.
+    let push_result = if let Some(fo) = submit_branch_lease(&j.kind,&br,rem.as_deref(),&sha,&j.s("old"))? {
         lok(
             a,
             &j.repo,
@@ -3899,8 +3960,10 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
             true,
             600,
         )
-        .await?;
-    }
+        .await
+    } else {
+        Ok(String::new())
+    };
     let mut r2 = String::new();
     for i in 0..4 {
         if r2 == sha {
@@ -3909,18 +3972,22 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
         if i > 0 {
             sl(15_000).await;
         }
-        r2 = lr(lok(
+        if let Ok(output) = lok(
             a,
             &j.repo,
-            &["ls-remote", &url, &format!("refs/heads/{br}")],
+            &["ls-remote", "--refs", &url, &format!("refs/heads/{br}")],
             true,
             120,
-        )
-        .await
-        .unwrap_or_default());
+        ).await {
+            r2 = remote_branch_sha(&output, &br)
+                .map_err(|_| X::Drop("publication inventory invalid after push; manual reconciliation required; no resend".into()))?
+                .unwrap_or_default();
+        }
     }
-    if r2 != sha {
-        return e("push did not arrive");
+    let receipt_failed = push_result.is_err();
+    confirm_submit_push(&sha, &r2, push_result)?;
+    if receipt_failed {
+        a.say("submit", "push receipt failed but exact remote commit confirmed", Some(j.id));
     }
     // Apenas o SHA confirmado no GitHub pode ser usado por um futuro merge.
     j.d["published_sha"] = json!(sha);
