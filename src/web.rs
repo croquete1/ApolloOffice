@@ -139,9 +139,11 @@ fn remove_repository(db: &crate::db::Db, repo: &str) -> rusqlite::Result<()> {
 // a new reservation while removal is checking the existing reservations.
 fn repository_removal_idle(a: &Ax, repo: &str) -> bool {
     if a.drain.load(std::sync::atomic::Ordering::SeqCst)
-        || a.act.lock().unwrap().iter().any(|entry| {
-            entry.split_once(' ').is_some_and(|(r, _)| r == repo)
-        })
+        || a.act
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|entry| entry.split_once(' ').is_some_and(|(r, _)| r == repo))
         || a.merge_in_progress.lock().unwrap().contains(repo)
     {
         return false;
