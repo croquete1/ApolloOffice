@@ -13,6 +13,28 @@ fn key(repo: &str) -> String {
     format!("hunt-fail:{repo}")
 }
 
+fn hold_key(repo: &str) -> String {
+    format!("hunt-storage-hold:{repo}")
+}
+
+fn hold_storage(a: &Ax, repo: &str) {
+    a.hunt_storage_holds
+        .lock()
+        .unwrap()
+        .insert(repo.to_string());
+    let written = a.db.0.lock().unwrap().execute(
+        "insert into kv(k,v) values(?,'true') on conflict(k) do update set v=excluded.v",
+        [hold_key(repo)],
+    );
+    if written.is_err() {
+        a.say(
+            "hunter",
+            &format!("{repo}: storage hold could not be persisted"),
+            None,
+        );
+    }
+}
+
 // An absent record is healthy; malformed or unreadable evidence is not.
 fn read_health(db: &crate::db::Db, repo: &str) -> rusqlite::Result<Value> {
     let rows = db.try_all("select v from kv where k=?", crate::pa![key(repo)])?;
@@ -33,6 +55,18 @@ fn read_health(db: &crate::db::Db, repo: &str) -> rusqlite::Result<Value> {
 pub fn status(a: &Ax, repo: &str) -> Value {
     if a.hunt_storage_holds.lock().unwrap().contains(repo) {
         return json!({"blocked":true,"failures":null,"until":null,"stage":"storage_write_failed","exit_code":null});
+    }
+    match a
+        .db
+        .try_all("select k from kv where k=?", crate::pa![hold_key(repo)])
+    {
+        Ok(rows) if !rows.is_empty() => {
+            return json!({"blocked":true,"failures":null,"until":null,"stage":"storage_write_failed","exit_code":null});
+        }
+        Err(_) => {
+            return json!({"blocked":true,"failures":null,"until":null,"stage":"state_unavailable","exit_code":null});
+        }
+        _ => {}
     }
     let Ok(v) = read_health(&a.db, repo) else {
         return json!({"blocked":true,"failures":null,"until":null,"stage":"state_unavailable","exit_code":null});
@@ -78,10 +112,7 @@ pub fn fail(a: &Ax, repo: &str, stage: &str, code: i32) {
         let _transition = a.update_transition.lock().unwrap();
         let before = status(a, repo);
         let Some(previous) = before["failures"].as_i64() else {
-            a.hunt_storage_holds
-                .lock()
-                .unwrap()
-                .insert(repo.to_string());
+            hold_storage(a, repo);
             crate::app::chg();
             a.say(
                 "hunter",
@@ -107,10 +138,7 @@ pub fn fail(a: &Ax, repo: &str, stage: &str, code: i32) {
             rusqlite::params![key(repo), state.to_string()],
         );
         if !matches!(written, Ok(1)) {
-            a.hunt_storage_holds
-                .lock()
-                .unwrap()
-                .insert(repo.to_string());
+            hold_storage(a, repo);
             crate::app::chg();
             a.say(
                 "hunter",
@@ -152,10 +180,7 @@ pub fn success(a: &Ax, repo: &str) {
                 .unwrap()
                 .execute("delete from kv where k=?", [key(repo)]);
         if deleted.is_err() {
-            a.hunt_storage_holds
-                .lock()
-                .unwrap()
-                .insert(repo.to_string());
+            hold_storage(a, repo);
             crate::app::chg();
             a.say(
                 "hunter",
@@ -180,16 +205,12 @@ pub fn success(a: &Ax, repo: &str) {
 pub fn reset(a: &Ax, repo: &str) -> rusqlite::Result<()> {
     {
         let _transition = a.update_transition.lock().unwrap();
-        let deleted =
-            a.db.0
-                .lock()
-                .unwrap()
-                .execute("delete from kv where k=?", [key(repo)]);
+        let deleted = a.db.0.lock().unwrap().execute(
+            "delete from kv where k in (?,?)",
+            [key(repo), hold_key(repo)],
+        );
         if let Err(error) = deleted {
-            a.hunt_storage_holds
-                .lock()
-                .unwrap()
-                .insert(repo.to_string());
+            hold_storage(a, repo);
             crate::app::chg();
             return Err(error);
         }
@@ -352,6 +373,10 @@ mod tests {
         fail(&a, "example/one", "setup", 1);
         assert!(blocked(&a, "example/one"));
         assert_eq!(status(&a, "example/one")["stage"], "storage_write_failed");
+        assert!(!blocked(&a, "example/two"));
+        // Simulate loss of process-local state after the separate marker committed.
+        a.hunt_storage_holds.lock().unwrap().clear();
+        assert!(blocked(&a, "example/one"));
         assert!(!blocked(&a, "example/two"));
         success(&a, "example/one");
         assert!(reset(&a, "example/one").is_err());
