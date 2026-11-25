@@ -59,17 +59,28 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - env:
+      - name: Download release binaries
+        env:
           GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir dist
+          gh release download "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" -p 'apollo-office-*' -D dist
+      - name: Validate inventory and generate manifest
+        working-directory: dist
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 ../scripts/release_manifest.py > latest.json
+      - name: Sign validated manifest
+        working-directory: dist
+        env:
           RELEASE_KEY: ${{ secrets.RELEASE_KEY }}
         shell: bash
         run: |
           set -euo pipefail
           umask 077
-          manifest_script="$PWD/scripts/release_manifest.py"
-          mkdir dist && cd dist
-          gh release download "${GITHUB_REF_NAME}" -R "${GITHUB_REPOSITORY}" -p 'apollo-office-*'
-          python3 "$manifest_script" > latest.json
           test -n "$RELEASE_KEY"
           key=$(mktemp "$RUNNER_TEMP/apollo-release-key.XXXXXX")
           trap 'rm -f -- "$key"' EXIT
@@ -79,4 +90,13 @@ jobs:
           base64 -w0 latest.json.sig.raw > latest.json.sig
           test -s latest.json.sig
           rm -f -- "$key" latest.json.sig.raw
-          gh release upload "${GITHUB_REF_NAME}" -R "${GITHUB_REPOSITORY}" latest.json latest.json.sig --clobber
+      - name: Upload signed manifest
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s latest.json
+          test -s latest.json.sig
+          gh release upload "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" latest.json latest.json.sig --clobber
