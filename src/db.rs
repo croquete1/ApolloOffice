@@ -59,6 +59,7 @@ pub(crate) fn valid_git_sha(sha: &str) -> bool {
 // Version 0 includes legacy installations with any subset of these columns.
 // Inspect the schema rather than swallowing every ALTER TABLE error.
 const LEGACY_COLUMNS: &[(&str, &str, &str)] = &[
+    ("rp", "on_", "alter table rp add column on_ int default 0"),
     ("rp", "nm", "alter table rp add column nm int default 1"),
     ("hs", "no", "alter table hs add column no text default ''"),
     ("hs", "cpu", "alter table hs add column cpu int default 0"),
@@ -1868,6 +1869,10 @@ mod strict_db_tests {
             )
             .unwrap();
         assert_eq!(values, (1, 0, 0, 0, 0, 0));
+        let enabled: i64 = c
+            .query_row("select on_ from rp where full='o/r'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(enabled, 0);
         let version: i64 = c
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
@@ -2267,6 +2272,7 @@ mod watcher_outbox_tests {
     #[test]
     fn failed_ack_rolls_back_reply_and_replay_does_not_queue() {
         let db = Db::mem();
+        db.run("insert into rp(full) values('o/r')", vec![]);
         db.run(
             "insert into prs(repo,num,st,upd,d) values('o/r',1,'open','t','bad json')",
             vec![],
@@ -2578,6 +2584,7 @@ mod watcher_storage_failure_tests {
     const HEAD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     fn seed(db: &Db) {
+        db.run("insert into rp(full) values('o/r')", vec![]);
         db.run(
             "insert into prs(repo,num,st,upd,d) values('o/r',1,'open','t',?)",
             crate::pa![json!({"watcher_head":HEAD}).to_string()],
