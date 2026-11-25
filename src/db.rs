@@ -57,7 +57,7 @@ create index if not exists coderabbit_findings_pr on coderabbit_findings(repo,nu
 create table if not exists coderabbit_cycles(repo text not null, number integer not null, cycles integer not null check(cycles>=0), primary key(repo,number));
 ";
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 pub(crate) fn valid_git_sha(sha: &str) -> bool {
     sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit())
@@ -158,6 +158,11 @@ const LEGACY_COLUMNS: &[(&str, &str, &str)] = &[
         "seen",
         "why",
         "alter table seen add column why text default ''",
+    ),
+    (
+        "watcher_outbox",
+        "source_head",
+        "alter table watcher_outbox add column source_head text not null default ''",
     ),
 ];
 
@@ -295,6 +300,17 @@ fn init(c: &mut Connection) -> anyhow::Result<()> {
         end;
         update watcher_outbox set state='cancelled',updated=cast(strftime('%s','now') as integer)*1000
           where state='pending' and not exists(select 1 from prs where repo=watcher_outbox.repo and num=watcher_outbox.num and st='open');
+        create trigger if not exists watcher_outbox_pr_head_changed
+        after update of d on prs
+        begin
+          update watcher_outbox set state='cancelled',updated=cast(strftime('%s','now') as integer)*1000
+            where repo=new.repo and num=new.num and state='pending' and
+              (source_head='' or source_head is not case when json_valid(new.d) then json_extract(new.d,'$.watcher_head') end);
+        end;
+        update watcher_outbox set state='cancelled',updated=cast(strftime('%s','now') as integer)*1000
+          where state='pending' and (source_head='' or not exists(
+            select 1 from prs where repo=watcher_outbox.repo and num=watcher_outbox.num and st='open'
+              and case when json_valid(d) then json_extract(d,'$.watcher_head') end=watcher_outbox.source_head));
     ")?;
     // A fresh opaque token also fences deletion/recreation of a repository.
     // Existing permissions are preserved, but old jobs have no valid token.
@@ -890,6 +906,7 @@ impl Db {
         tx: &rusqlite::Transaction<'_>,
         repo: &str,
         number: i64,
+        head: &str,
         ids: &[String],
         reply: &Value,
     ) -> rusqlite::Result<()> {
@@ -940,7 +957,7 @@ impl Db {
         {
             return Ok(());
         }
-        tx.execute("insert or ignore into watcher_outbox(id,repo,num,author,body,state,created,updated) select ?,?,?,?,?,'pending',?,? where exists(select 1 from rp where full=? and on_=1)",rusqlite::params![key,repo,number,author,body,at,at,repo])?;
+        tx.execute("insert or ignore into watcher_outbox(id,repo,num,author,body,state,created,updated,source_head) select ?,?,?,?,?,'pending',?,?,? where exists(select 1 from rp where full=? and on_=1)",rusqlite::params![key,repo,number,author,body,at,at,head,repo])?;
         Ok(())
     }
 
@@ -1096,7 +1113,7 @@ impl Db {
         if consumed && !reply.is_null() {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        Self::queue_watcher_reply(&tx, repo, number, ids, reply)?;
+        Self::queue_watcher_reply(&tx, repo, number, head, ids, reply)?;
         Self::ack_comments_in_tx(&tx, repo, number, updated, ids)?;
         Self::finish_review_inbox(&tx, repo, number, head, ids)?;
         tx.commit()?;
@@ -1134,7 +1151,7 @@ impl Db {
     /// ambiguous response must never automatically issue a second POST.
     pub fn claim_watcher_reply(&self, id: &str, author: &str) -> rusqlite::Result<bool> {
         let c = self.0.lock().unwrap();
-        let changed=c.execute("update watcher_outbox set state='uncertain',updated=? where id=? and author=? and state='pending' and exists(select 1 from rp where full=watcher_outbox.repo and on_=1) and exists(select 1 from prs where repo=watcher_outbox.repo and num=watcher_outbox.num and st='open')",rusqlite::params![now(),id,author])?;
+        let changed=c.execute("update watcher_outbox set state='uncertain',updated=? where id=? and author=? and state='pending' and exists(select 1 from rp where full=watcher_outbox.repo and on_=1) and source_head<>'' and exists(select 1 from prs where repo=watcher_outbox.repo and num=watcher_outbox.num and st='open' and case when json_valid(d) then json_extract(d,'$.watcher_head') end=watcher_outbox.source_head)",rusqlite::params![now(),id,author])?;
         Ok(changed == 1)
     }
 
@@ -1264,7 +1281,7 @@ impl Db {
         let t = now();
         tx.execute("insert into jobs(repo,num,kind,title,url,st,why,d,pr,prio,t0,t1) values(?,?,'review',?,?,'ready',?,?,?,-1.0,?,?)",
             rusqlite::params![repo, number, title, url, change, json!(data).to_string(), number, t, t])?;
-        Self::queue_watcher_reply(&tx, repo, number, ids, &request["reply"])?;
+        Self::queue_watcher_reply(&tx, repo, number, head, ids, &request["reply"])?;
         Self::ack_comments_in_tx(&tx, repo, number, updated, ids)?;
         Self::finish_review_inbox(&tx, repo, number, head, ids)?;
         tx.commit()?;
@@ -2475,7 +2492,15 @@ mod watcher_outbox_tests {
         let db = Db::mem();
         db.run("insert into rp(full) values('o/r')", vec![]);
         db.run("insert into prs(repo,num,st,upd,d) values('o/r',1,'open','t','{}'),('o/r',2,'open','t','{}'),('o/r',3,'open','t','{}')",vec![]);
+        db.run(
+            "update prs set d=json_object('watcher_head',?)",
+            crate::pa!["a".repeat(40)],
+        );
         db.run("insert into watcher_outbox(id,repo,num,author,body,state,created,updated) values('a','o/r',1,'owner','reply','pending',1,1),('b','o/r',1,'owner','reply','uncertain',1,1),('c','o/r',2,'owner','reply','pending',1,1),('d','o/r',3,'owner','reply','pending',1,1),('e','o/r',99,'owner','reply','pending',1,1)",vec![]);
+        db.run(
+            "update watcher_outbox set source_head=?",
+            crate::pa!["a".repeat(40)],
+        );
         db.run("update prs set st='merged' where num=1", vec![]);
         assert!(!db.claim_watcher_reply("a", "owner").unwrap());
         db.run("update prs set st='open' where num=1", vec![]);
@@ -2487,6 +2512,54 @@ mod watcher_outbox_tests {
         assert_eq!(db.watcher_outbox_counts().unwrap()["cancelled"], 2);
         assert_eq!(db.watcher_outbox_counts().unwrap()["uncertain"], 2);
         assert!(db.finish_watcher_reply("b", "sent").unwrap());
+    }
+
+    #[test]
+    fn changed_head_revokes_pending_reply_without_revival() {
+        let db = Db::mem();
+        let head = "a".repeat(40);
+        let next = "b".repeat(40);
+        db.run("insert into rp(full) values('o/r')", vec![]);
+        db.run(
+            "insert into prs(repo,num,st,upd,d) values('o/r',1,'open','t',?)",
+            crate::pa![json!({"watcher_head":head}).to_string()],
+        );
+        let reply = json!({"author":"owner","body":"Thanks"});
+        db.ack_pr_comments_with_reply("o/r", 1, "t", &head, &["r1".into()], &reply)
+            .unwrap();
+        let row = db.one("select * from watcher_outbox", vec![]).unwrap();
+        let id = row["id"].as_str().unwrap();
+        db.run("update prs set d=json_set(d,'$.seen',json('true'))", vec![]);
+        assert_eq!(db.watcher_outbox_counts().unwrap()["pending"], 1);
+        db.run(
+            "update prs set d=?",
+            crate::pa![json!({"watcher_head":next}).to_string()],
+        );
+        assert_eq!(db.watcher_outbox_counts().unwrap()["cancelled"], 1);
+        db.run(
+            "update prs set d=?",
+            crate::pa![json!({"watcher_head":head}).to_string()],
+        );
+        assert!(!db.claim_watcher_reply(id, "owner").unwrap());
+    }
+
+    #[test]
+    fn startup_cancels_legacy_unbound_pending_but_keeps_history() {
+        let db = Db::mem();
+        db.run("insert into rp(full) values('o/r')", vec![]);
+        db.run(
+            "insert into prs(repo,num,st,upd,d) values('o/r',1,'open','t',?)",
+            crate::pa![json!({"watcher_head":"a".repeat(40)}).to_string()],
+        );
+        db.run("insert into watcher_outbox(id,repo,num,author,body,state,created,updated) values('a','o/r',1,'owner','reply','pending',1,1),('b','o/r',1,'owner','reply','uncertain',1,1),('c','o/r',1,'owner','reply','sent',1,1)",vec![]);
+        {
+            let mut c = db.0.lock().unwrap();
+            init(&mut c).unwrap();
+        }
+        let counts = db.watcher_outbox_counts().unwrap();
+        assert_eq!(counts["cancelled"], 1);
+        assert_eq!(counts["uncertain"], 1);
+        assert_eq!(counts["sent"], 1);
     }
 
     #[test]
@@ -2545,9 +2618,17 @@ mod watcher_outbox_tests {
             "insert into prs(repo,num,st,upd,d) values('o/r',1,'open','t','{}')",
             vec![],
         );
+        db.run(
+            "update prs set d=json_object('watcher_head',?)",
+            crate::pa!["a".repeat(40)],
+        );
         for (id, state, at) in [("a", "sent", 3), ("b", "pending", 1), ("c", "uncertain", 2)] {
             db.run("insert into watcher_outbox(id,repo,num,author,body,state,created,updated) values(?,'o/r',1,'owner','reply',?,?,?)",crate::pa![id.to_string(),state.to_string(),at,at]);
         }
+        db.run(
+            "update watcher_outbox set source_head=?",
+            crate::pa!["a".repeat(40)],
+        );
         let rows = db.watcher_outbox_page(0).unwrap();
         assert_eq!(
             rows.iter()
