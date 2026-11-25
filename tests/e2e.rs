@@ -112,6 +112,7 @@ async fn full_run(pv: bool) {
         ("APOLLO_OFFICE_FAST", "1".into()),
         ("FAKE_GH_DIR", fk.display().to_string()),
         ("FAKE_GH_PRIVATE", if pv { "1".into() } else { "0".into() }),
+        ("FAKE_GH_FAIL_RECEIPT_ONCE", if pv { "1".into() } else { "0".into() }),
     ];
     let _k = K(Command::new(exe)
         .args([
@@ -295,6 +296,23 @@ async fn full_run(pv: bool) {
     let ps: Value =
         serde_json::from_str(&std::fs::read_to_string(fk.join("prs.json")).unwrap()).unwrap();
     assert_eq!(ps.as_array().unwrap().len(), 1);
+    let calls: Vec<Vec<String>> = std::fs::read_to_string(fk.join("calls.log"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        calls.iter().filter(|args| args.starts_with(&["pr".into(), "create".into()])).count(),
+        1,
+        "retry must not create another PR"
+    );
+    if pv {
+        assert!(fk.join("receipt-fault.json").exists());
+        assert!(
+            calls.iter().filter(|args| args.starts_with(&["api".into(), "repos/o/r/pulls/100".into()])).count() >= 2,
+            "recovery must verify the original PR again"
+        );
+    }
     assert_eq!(ps[0]["base"], "main");
     assert_eq!(ps[0]["title"], "Make add sum its arguments");
     let submitted_body = ps[0]["body"].as_str().unwrap();
