@@ -837,6 +837,33 @@ mod t {
         }
     }
 
+    #[test]
+    fn hunter_revocation_is_terminal_but_database_failure_is_retryable() {
+        let db = crate::db::Db::mem();
+        db.run("insert into rp(full,hunt,ci) values('o/r',1,'true')", pa![]);
+        db.run(
+            "insert into jobs(id,repo,kind,st) values(100,'o/r','hunt','hunt')",
+            pa![],
+        );
+        let data = json!({"title":"Bug","body":"reproduction","hunt":{"where":"src/lib.rs","proof":"failed test"}});
+        assert!(hunter_finding_result(db.queue_hunter_find("o/r", 100, &data)).unwrap());
+        assert!(!hunter_finding_result(db.queue_hunter_find("o/r", 100, &data)).unwrap());
+        db.run("update rp set hunt=0 where full='o/r'", pa![]);
+        assert!(matches!(
+            hunter_finding_result(db.queue_hunter_find("o/r", 100, &data)),
+            Err(X::Drop(_))
+        ));
+        assert_eq!(
+            db.n("select count(*) from jobs where kind='fix'", pa![]),
+            1
+        );
+        db.run("drop table rp", pa![]);
+        assert!(matches!(
+            hunter_finding_result(db.queue_hunter_find("o/r", 100, &data)),
+            Err(X::Defer(_))
+        ));
+    }
+
     #[tokio::test]
     async fn idle_cache_cleanup_blocks_admission_and_releases_on_drop() {
         let db = crate::db::Db::mem();
