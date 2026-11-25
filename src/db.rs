@@ -931,7 +931,7 @@ impl Db {
         if !valid_git_sha(head) {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        tx.query_row("select exists(select 1 from prs where repo=? and num=? and st='open' and upd=? and json_extract(d,'$.watcher_head')=?)",rusqlite::params![repo,number,updated,head],|r|r.get(0))
+        tx.query_row("select exists(select 1 from prs where repo=? and num=? and st='open' and upd=? and json_extract(d,'$.watcher_head')=? and exists(select 1 from rp where full=prs.repo and on_=1))",rusqlite::params![repo,number,updated,head],|r|r.get(0))
     }
 
     /// Record receipt before invoking Guard/Watcher. Only identifiers are stored;
@@ -1655,6 +1655,7 @@ mod comment_cursor_tests {
     #[test]
     fn review_admission_and_ack_share_one_transaction_and_defer_active_work() {
         let db = Db::mem();
+        db.run("insert into rp(full) values('a/b')", vec![]);
         let ids = vec!["review-1".to_string()];
         let request = json!({"title":"Fix","url":"https://github.com/a/b/pull/1","change":"Correct bug","data":{"source_head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}});
         assert!(db
@@ -1695,6 +1696,7 @@ mod comment_cursor_tests {
     #[test]
     fn review_rejects_partial_replay_and_other_active_pr_operations() {
         let db = Db::mem();
+        db.run("insert into rp(full) values('a/b')", vec![]);
         db.run(
             "insert into prs(repo,num,st,upd,d) values('a/b',1,'open','next',?)",
             crate::pa![
@@ -2228,8 +2230,34 @@ mod watcher_outbox_tests {
     }
 
     #[test]
+    fn revoked_repository_cannot_admit_or_acknowledge_review() {
+        let db = Db::mem();
+        let head = "a".repeat(40);
+        let ids = vec!["r1".into()];
+        db.run("insert into rp(full) values('o/r')", vec![]);
+        db.run(
+            "insert into prs(repo,num,st,upd,d) values('o/r',1,'open','t',?)",
+            crate::pa![json!({"watcher_head":head}).to_string()],
+        );
+        db.receive_review_batch("o/r", 1, "t", &head, &ids).unwrap();
+        let request = json!({"title":"Fix","url":"https://example.test","change":"Correct bug","data":{"source_head":head}});
+        for sql in ["update rp set on_=0", "delete from rp"] {
+            db.run(sql, vec![]);
+            assert!(db
+                .queue_review_and_ack("o/r", 1, "t", &ids, &request)
+                .is_err());
+            assert!(db
+                .ack_pr_comments_with_reply("o/r", 1, "t", &head, &ids, &Value::Null)
+                .is_err());
+            assert!(!db.comment_acknowledged("o/r", "r1").unwrap());
+            assert_eq!(db.n("select count(*) from jobs", vec![]), 0);
+        }
+    }
+
+    #[test]
     fn stale_snapshot_cannot_acknowledge_or_enqueue_review() {
         let db = Db::mem();
+        db.run("insert into rp(full) values('o/r')", vec![]);
         let head = "a".repeat(40);
         let newer = "b".repeat(40);
         db.run(
@@ -2326,6 +2354,7 @@ mod watcher_inbox_tests {
     #[test]
     fn receipt_survives_failed_ack_and_replay_is_idempotent() {
         let db = Db::mem();
+        db.run("insert into rp(full) values('o/r')", vec![]);
         db.run(
             "insert into prs(repo,num,st,upd,d) values('o/r',1,'open','t',?)",
             crate::pa![json!({"watcher_head":HEAD}).to_string()],
@@ -2371,6 +2400,7 @@ mod watcher_inbox_tests {
     #[test]
     fn new_head_supersedes_only_unfinished_old_receipts() {
         let db = Db::mem();
+        db.run("insert into rp(full) values('o/r')", vec![]);
         let next = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         db.run(
             "insert into prs(repo,num,st,upd,d) values('o/r',1,'open','t',?)",
@@ -2418,6 +2448,7 @@ mod watcher_retry_tests {
     #[test]
     fn retry_window_is_persistent_and_snapshot_scoped() {
         let db = Db::mem();
+        db.run("insert into rp(full) values('o/r')", vec![]);
         let head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         db.run(
             "insert into prs(repo,num,st,upd,d) values('o/r',1,'open','t',?)",
@@ -2459,6 +2490,7 @@ mod watcher_receipt_lifecycle_tests {
     const HEAD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     fn setup() -> Db {
         let db = Db::mem();
+        db.run("insert into rp(full) values('o/r')", vec![]);
         db.run(
             "insert into prs(repo,num,st,upd,d) values('o/r',1,'open','t',?)",
             crate::pa![json!({"watcher_head":HEAD}).to_string()],
