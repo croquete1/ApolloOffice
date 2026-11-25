@@ -35,7 +35,7 @@ fn attempts(j: &Job) -> Option<u64> {
 }
 
 fn eligible(j: &Job, automatic: bool) -> bool {
-    if j.st != "drop" || j.kind != "fix" || published_or_approved(j) {
+    if j.st != "drop" || j.kind != "fix" || !j.d.is_object() || published_or_approved(j) {
         return false;
     }
     if !automatic {
@@ -160,7 +160,7 @@ pub fn retry(a: &Ax, id: i64, automatic: bool) -> Result<bool, &'static str> {
     let mut data = j.d.clone();
     let mut history = data["drop_history"].as_array().cloned().unwrap_or_default();
     if history.len() >= 8 {
-        history.remove(0);
+        history = history.split_off(history.len() - 7);
     }
     history.push(json!({"at":now(),"reason":j.why.clone(),"automatic":automatic}));
     data["drop_history"] = json!(history);
@@ -409,6 +409,35 @@ mod tests {
             pa![now() - RETRY_DELAY_MS - 1, id],
         );
         id
+    }
+
+    #[test]
+    fn recovery_rejects_nonobject_metadata() {
+        let a = setup();
+        let id = dropped(&a, "machine kept failing: timed out", json!({}));
+        let mut job = a.db.jg(id).unwrap();
+        for value in [json!(null), json!([]), json!("bad"), json!(1)] {
+            job.d = value;
+            assert!(!eligible(&job, false));
+            assert!(!eligible(&job, true));
+        }
+    }
+
+    #[test]
+    fn recovery_trims_oversized_legacy_history() {
+        let a = setup();
+        let history: Vec<_> = (0..20).map(|i| json!({"at":i})).collect();
+        let id = dropped(
+            &a,
+            "machine kept failing: timed out",
+            json!({"drop_history":history}),
+        );
+        assert_eq!(retry(&a, id, true), Ok(true));
+        let job = a.db.jg(id).unwrap();
+        let history = job.d["drop_history"].as_array().unwrap();
+        assert_eq!(history.len(), 8);
+        assert_eq!(history[0]["at"], 13);
+        assert_eq!(history[7]["automatic"], true);
     }
 
     #[test]
