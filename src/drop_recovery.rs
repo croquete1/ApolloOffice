@@ -700,7 +700,10 @@ mod tests {
     #[tokio::test]
     async fn remote_entry_points_preserve_the_snapshot_during_io() {
         for automatic in [false, true] {
-            for mutation in ["num", "timestamp", "metadata", "none"] {
+            for mutation in ["num", "timestamp", "metadata", "none", "cancel"] {
+                if mutation == "cancel" && !automatic {
+                    continue;
+                }
                 let a = setup();
                 let id = dropped(&a, "machine kept failing: timed out", json!({}));
                 let kill = format!("kill:{id}");
@@ -727,7 +730,7 @@ mod tests {
                                 }
                                 _ => {}
                             }
-                            if automatic && mutation != "none" {
+                            if mutation == "cancel" {
                                 a.db.ks(&kill, &json!(true));
                             }
                             json!({"number":42,"state":"open"})
@@ -758,7 +761,11 @@ mod tests {
                 } else {
                     assert_eq!(job.st, "drop");
                     assert_eq!(attempts(&job), Some(0));
-                    assert_eq!(a.db.kg(&kill), true);
+                    if !automatic || mutation == "cancel" {
+                        assert_eq!(a.db.kg(&kill), true);
+                    } else {
+                        assert!(a.db.kg(&kill).is_null());
+                    }
                     assert!(job.d["drop_history"].is_null());
                 }
             }
