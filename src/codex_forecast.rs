@@ -174,11 +174,11 @@ fn update_history(
         Vec::new()
     };
     samples.sort_by_key(|s| s.at);
-    // Rejeita históricos que regrediram, por reinício da quota, conta
-    // diferente ou variações de uma janela de consumo deslizante.
+    // Duplicate timestamps are not independent observations. Discard
+    // ambiguous history, as with a quota regression or account change.
     if samples
         .windows(2)
-        .any(|pair| pair[1].used + 0.25 < pair[0].used)
+        .any(|pair| pair[0].at == pair[1].at || pair[1].used + 0.25 < pair[0].used)
     {
         samples.clear();
     }
@@ -321,6 +321,31 @@ mod tests {
         let mut next = state(NOW + H, 25.0, reset);
         update(&db, &mut next);
         assert_eq!(db.kg(KEY)["samples"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn duplicate_persisted_timestamps_cannot_inflate_forecast_confidence() {
+        let db = Db::mem();
+        let reset = NOW + 24 * H;
+        db.ks(
+            KEY,
+            &json!({
+                "reset_at":reset / 1000,
+                "samples":[[NOW - 4 * H,20.0],[NOW - 4 * H,20.0]],
+                "observed_at":NOW - 4 * H
+            }),
+        );
+        let mut current = state(NOW, 40.0, reset);
+        update(&db, &mut current);
+        assert_eq!(current["weekly_forecast"]["status"], "insufficient");
+        assert_eq!(db.kg(KEY)["samples"], json!([[NOW, 40.0]]));
+
+        let mut second = state(NOW + H, 45.0, reset);
+        update(&db, &mut second);
+        assert_eq!(second["weekly_forecast"]["status"], "insufficient");
+        let mut third = state(NOW + 2 * H, 50.0, reset);
+        update(&db, &mut third);
+        assert_eq!(third["weekly_forecast"]["status"], "at_risk");
     }
 
     #[test]
