@@ -3469,6 +3469,62 @@ fn auto_merge_requested(prior: Option<&Value>, newly_created: bool, j: &Job, rep
 }
 
 
+// Read and merge metadata in the same SQLite transaction. Submit owns its
+// publication fields, not the Watcher's observation or comment cursor.
+fn record_submitted_pr(db: &crate::db::Db, j: &Job, number: i64, title: &str, url: &str, newly_created: bool, publication: Value) -> rusqlite::Result<()> {
+    use rusqlite::OptionalExtension;
+    if number <= 0 || !crate::db::valid_git_sha(publication["head_sha"].as_str().unwrap_or("")) {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let fields = publication.as_object().ok_or(rusqlite::Error::InvalidQuery)?;
+    let mut c = db.0.lock().unwrap();
+    let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let repo_enabled: bool = tx.query_row(
+        "select coalesce(merge,1)=1 from rp where full=? and on_=1",
+        [&j.repo], |row| row.get(0),
+    )?;
+    let existing: Option<(String, String)> = tx.query_row(
+        "select st,d from prs where repo=? and num=?",
+        rusqlite::params![j.repo,number], |row| Ok((row.get(0)?,row.get(1)?)),
+    ).optional()?;
+    let prior = match existing {
+        Some((state, raw)) if state == "open" => {
+            let parsed: Value = serde_json::from_str(&raw).map_err(|_| rusqlite::Error::InvalidQuery)?;
+            if !parsed.is_object() { return Err(rusqlite::Error::InvalidQuery); }
+            Some(parsed)
+        }
+        Some(_) => return Err(rusqlite::Error::InvalidQuery),
+        None => None,
+    };
+    let enabled = auto_merge_requested(prior.as_ref(), newly_created, j, repo_enabled);
+    let mut pd = prior.unwrap_or_else(|| json!({}));
+    let same_head = pd["head_sha"] == publication["head_sha"];
+    // Explicit allowlist: a caller cannot overwrite watcher-owned fields.
+    for key in ["job","test_cmd","tests","branch","head","head_sha","base_branch"] {
+        pd[key] = fields.get(key).cloned().ok_or(rusqlite::Error::InvalidQuery)?;
+    }
+    pd["auto_merge"] = json!(enabled);
+    if enabled {
+        if !same_head || pd["merge_status"].is_null() {
+            pd["merge_status"] = json!("waiting");
+            pd["merge_reason"] = json!("Waiting for GitHub status checks.");
+            pd.as_object_mut().unwrap().remove("merge_attempt_head");
+            pd.as_object_mut().unwrap().remove("merge_attempt_at");
+            pd.as_object_mut().unwrap().remove("merge_enabled_head");
+        }
+    } else {
+        pd["merge_status"] = json!("off");
+        pd.as_object_mut().unwrap().remove("merge_reason");
+    }
+    tx.execute(
+        "insert into prs(repo,num,st,title,url,upd,d,t0) values(?,?,'open',?,?,?,?,?) on conflict(repo,num) do update set d=excluded.d where prs.st='open'",
+        rusqlite::params![j.repo,number,title,url,chrono::Utc::now().to_rfc3339(),pd.to_string(),now()],
+    )?;
+    tx.commit()?;
+    crate::app::chg();
+    Ok(())
+}
+
 fn needs_owner_approval(a:&Ax,j:&Job)->bool {
     (crate::routing::enabled(a) || (j.kind=="fix" && rp(a,&j.repo)["mode"]!="auto"))
         && j.d["ap"]!=true
@@ -3820,31 +3876,10 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
             (u, n)
         }
     };
-    let prior = a.db.one("select d from prs where repo=? and num=?", pa![j.repo.clone(), n]);
-    let mut pd = prior.as_ref().map(|p| p["d"].clone()).filter(Value::is_object).unwrap_or_else(|| json!({}));
-    let enabled = auto_merge_requested(prior.as_ref().map(|p| &p["d"]), newly_created, j, rp(a, &j.repo)["merge"].as_i64().unwrap_or(1) == 1);
-    let same_head = pd["head_sha"].as_str() == Some(sha.trim());
-    pd["job"] = json!(j.id);
-    pd["test_cmd"] = f["test_cmd"].clone();
-    pd["tests"] = f["tests"].clone();
-    pd["branch"] = json!(br);
-    pd["head"] = json!(hr);
-    pd["head_sha"] = json!(sha.trim());
-    pd["base_branch"] = json!(j.s("mn"));
-    pd["auto_merge"] = json!(enabled);
-    if enabled {
-        if !same_head || pd["merge_status"].is_null() {
-            pd["merge_status"] = json!("waiting");
-            pd["merge_reason"] = json!("Waiting for GitHub status checks.");
-            pd.as_object_mut().unwrap().remove("merge_attempt_head");
-            pd.as_object_mut().unwrap().remove("merge_attempt_at");
-            pd.as_object_mut().unwrap().remove("merge_enabled_head");
-        }
-    } else {
-        pd["merge_status"] = json!("off");
-        pd.as_object_mut().unwrap().remove("merge_reason");
-    }
-    a.db.run("insert into prs(repo,num,st,title,url,upd,d,t0) values(?,?,?,?,?,?,?,?) on conflict do update set st=excluded.st, d=excluded.d", pa![j.repo.clone(), n, "open".to_string(), ti.clone(), u.clone(), chrono::Utc::now().to_rfc3339(), pd.to_string(), now()]);
+    record_submitted_pr(&a.db, j, n, &ti, &u, newly_created, json!({
+        "job": j.id, "test_cmd": f["test_cmd"], "tests": f["tests"],
+        "branch": br, "head": hr, "head_sha": sha.trim(), "base_branch": j.s("mn")
+    })).map_err(|error| X::Defer(format!("could not persist submitted PR: {error}")))?;
     a.say("submit", &format!("PR opened: {u}"), Some(j.id));
     a.note("PR opened", &format!("{} → {ti}\n{u}", j.tag()), 3);
     Ok((u, n))
