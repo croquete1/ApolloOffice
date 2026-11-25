@@ -313,7 +313,10 @@ async fn full_run(pv: bool) {
         "retry must not create another PR"
     );
     if pv {
-        assert!(fk.join("receipt-fault.json").exists());
+        let fault: Value =
+            serde_json::from_str(&std::fs::read_to_string(fk.join("receipt-fault.json")).unwrap())
+                .unwrap();
+        assert_eq!(fault["main_advanced"], true);
         assert!(
             calls
                 .iter()
