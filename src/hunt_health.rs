@@ -75,7 +75,11 @@ pub fn fail(a: &Ax, repo: &str, stage: &str, code: i32) {
         let _transition = a.update_transition.lock().unwrap();
         let before = status(a, repo);
         let Some(previous) = before["failures"].as_i64() else {
-            a.say("hunter", &format!("{repo}: failure state unavailable; Hunter held"), None);
+            a.say(
+                "hunter",
+                &format!("{repo}: failure state unavailable; Hunter held"),
+                None,
+            );
             return;
         };
         let failures = previous.saturating_add(1);
@@ -95,7 +99,11 @@ pub fn fail(a: &Ax, repo: &str, stage: &str, code: i32) {
             rusqlite::params![key(repo), state.to_string()],
         );
         if !matches!(written, Ok(1)) {
-            a.say("hunter", &format!("{repo}: could not persist failure counter"), None);
+            a.say(
+                "hunter",
+                &format!("{repo}: could not persist failure counter"),
+                None,
+            );
             return;
         }
         crate::app::chg();
