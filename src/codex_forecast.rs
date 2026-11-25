@@ -167,6 +167,9 @@ fn update_history(
             .map(|rows| {
                 rows.iter()
                     .filter_map(|v| valid_sample(v, now_ms))
+                    // A matching reset label is not enough: samples must
+                    // actually belong to that seven-day quota window.
+                    .filter(|sample| sample.at >= reset_ms - WEEK_MS)
                     .collect()
             })
             .unwrap_or_default()
@@ -346,6 +349,24 @@ mod tests {
         let mut third = state(NOW + 2 * H, 50.0, reset);
         update(&db, &mut third);
         assert_eq!(third["weekly_forecast"]["status"], "at_risk");
+    }
+
+    #[test]
+    fn samples_before_weekly_window_do_not_contribute_to_forecast() {
+        let db = Db::mem();
+        let reset = NOW + WEEK_MS - 3 * H;
+        db.ks(
+            KEY,
+            &json!({
+                "reset_at":reset / 1000,
+                "samples":[[NOW - 5 * H,10.0],[NOW - 4 * H,20.0]],
+                "observed_at":NOW - 4 * H
+            }),
+        );
+        let mut current = state(NOW, 40.0, reset);
+        update(&db, &mut current);
+        assert_eq!(current["weekly_forecast"]["status"], "insufficient");
+        assert_eq!(db.kg(KEY)["samples"], json!([[NOW, 40.0]]));
     }
 
     #[test]
