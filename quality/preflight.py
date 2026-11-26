@@ -15,7 +15,8 @@ MAX_BYTES = 56000
 
 
 def git(*args):
-    return subprocess.check_output(['git', *args], timeout=15)
+    # Replacement refs must not substitute objects behind an exact base SHA.
+    return subprocess.check_output(['git', '--no-replace-objects', *args], timeout=15)
 
 
 def scan(base, issue):
