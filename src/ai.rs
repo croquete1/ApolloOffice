@@ -361,7 +361,12 @@ fn record_claude_terminal(status: &mut Option<bool>, event: &Value) {
     *status = Some(status.is_none() && success);
 }
 
-fn claude_result(txt: String, error: &str, terminal: Option<bool>, exit: i32) -> R<(String, Value)> {
+fn claude_result(
+    txt: String,
+    error: &str,
+    terminal: Option<bool>,
+    exit: i32,
+) -> R<(String, Value)> {
     if terminal != Some(true) || exit != 0 || txt.trim().is_empty() {
         if regex::Regex::new(LIM).unwrap().is_match(error) {
             return Err(X::Lim(crate::sh::head(error.trim(), 200)));
