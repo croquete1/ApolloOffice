@@ -5,11 +5,11 @@ Atualizado em 26/11/2026. Este é o backlog ativo do fork `croquete1/ApolloOffic
 ## Situação e prioridades
 
 - Nenhuma fase F01–F17 declarada concluída; implementação integrada não equivale a aceitação completa.
-- Lote #130 → #131 → #132 → #128 → #129 integrado sequencialmente. Main `f1bfbfcd156b407ed6e64a7c0543180b2c63fdb3`, [CI pós-merge #129](https://github.com/croquete1/ApolloOffice/actions/runs/45788900130): aprovado em Ubuntu e Windows. Os cinco CIs pós-merge passaram integralmente; a falha Windows anterior não se repetiu nesses runs, mas estabilidade continuada não está demonstrada.
+- Main observada `a8a20372e39171ef106513982004838788082386`, [CI pós-merge #138](https://github.com/croquete1/ApolloOffice/actions/runs/45821577773): aprovado em Ubuntu e Windows. Lote anterior #130 → #131 → #132 → #128 → #129 e novo lote #133 → #134 → #135 → #136 → #138 integrados sequencialmente. A repetição de CIs verdes não demonstra estabilidade continuada.
 - Prioridade P0: reconciliação durável, identidade imutável, SQLite e Steward. Investigar `src/drop_recovery.rs`: `retry_manual_with` escreve `head:{repo}` na cache antes de `retry_snapshot` confirmar a transação; uma tentativa rejeitada pode ainda substituir evidência de HEAD. Reproduzir corrida entre resposta remota, snapshot inválido e cache mais recente, inspecionar consumidores e testar correção sem publicar Rust até preflight oficial. Preservar testes e revisão independente.
 - Release anteriormente publicada: fork-v0.10.15; nenhuma nova release. Interface dos agentes e modelos inalterados. CodeRabbit apenas com allowance incluída confirmada; não solicitar consumo adicional.
 
-## Último lote integrado
+## Lote anterior integrado
 
 | PR | Entrega | CI do HEAD integrado | CI pós-merge |
 |---|---|---|---|
@@ -21,30 +21,42 @@ Atualizado em 26/11/2026. Este é o backlog ativo do fork `croquete1/ApolloOffic
 
 Revisões CodeRabbit concluídas sobre as alterações funcionais; findings corrigidos e threads resolvidas. Após sincronização das bases, #131/#132/#128/#129 conservaram os blobs funcionais já revistos; o CodeRabbit indicou ausência de novos ficheiros a rever. Isso não constitui aprovação formal de um novo SHA. A validação integral do CI foi repetida para cada HEAD sincronizado.
 
-Novas PRs em draft: #133 (este balanço) e [#134](https://github.com/croquete1/ApolloOffice/pull/134), inspeção literal de caminhos Git. #134: regressão reproduzida localmente no blob original e aprovada no candidato; CI completo e revisão independente pendentes. Critérios de aceitação abaixo permanecem abertos.
+## Último lote integrado (26/11/2026)
+
+| PR | Entrega | CI do HEAD integrado | CI pós-merge |
+|---|---|---|---|
+| [#133](https://github.com/croquete1/ApolloOffice/pull/133) | Balanço do roadmap e prioridade P0 | [45790119347](https://github.com/croquete1/ApolloOffice/actions/runs/45790119347) verde | [45793619118](https://github.com/croquete1/ApolloOffice/actions/runs/45793619118) verde |
+| [#134](https://github.com/croquete1/ApolloOffice/pull/134) | Caminhos Git literais, OIDs e testes de CRLF no blob | [45793693721](https://github.com/croquete1/ApolloOffice/actions/runs/45793693721) verde | [45795978968](https://github.com/croquete1/ApolloOffice/actions/runs/45795978968) verde |
+| [#135](https://github.com/croquete1/ApolloOffice/pull/135) | Integridade do estado final do snapshot, diretórios e nós especiais; isolamento das fixtures Git e erro real de enumeração | [45804303360](https://github.com/croquete1/ApolloOffice/actions/runs/45804303360) verde | [45807192773](https://github.com/croquete1/ApolloOffice/actions/runs/45807192773) verde |
+| [#136](https://github.com/croquete1/ApolloOffice/pull/136) | Sinalização de inventário incompleto, limites UTF-8 e bytes inválidos | [45807268823](https://github.com/croquete1/ApolloOffice/actions/runs/45807268823) verde | [45811820653](https://github.com/croquete1/ApolloOffice/actions/runs/45811820653) verde |
+| [#138](https://github.com/croquete1/ApolloOffice/pull/138) | Identidade do commit verificada antes da leitura de árvore/blobs; regressões SHA-1/SHA-256 | [45817343203](https://github.com/croquete1/ApolloOffice/actions/runs/45817343203) verde | [45821577773](https://github.com/croquete1/ApolloOffice/actions/runs/45821577773) verde |
+
+Revisão externa dos HEADs integrados sem findings acionáveis: [#133](https://github.com/croquete1/ApolloOffice/pull/133#issuecomment-7187452110), [#134](https://github.com/croquete1/ApolloOffice/pull/134#issuecomment-7187635146), [#135](https://github.com/croquete1/ApolloOffice/pull/135#issuecomment-7188095174), [#136](https://github.com/croquete1/ApolloOffice/pull/136#issuecomment-7188839647), [#138](https://github.com/croquete1/ApolloOffice/pull/138#issuecomment-7190953277). Findings anteriores corrigidos e threads resolvidas. CIs completos da matriz Ubuntu/Windows; as suites Python de qualidade e adaptadores executam em Ubuntu, não em Windows. Integridade do estado final não equivale a sandbox do sistema operativo.
+
+Frentes abertas na observação desta atualização: [#137](https://github.com/croquete1/ApolloOffice/pull/137) identidade efetiva do checkout no verificador (HEAD `ab2dc9a40405f92ae1681b691d1750bd2e24660e`, CI [45821851883](https://github.com/croquete1/ApolloOffice/actions/runs/45821851883), 46 quality + 29 adapters em Ubuntu); [#139](https://github.com/croquete1/ApolloOffice/pull/139) recusa de identificadores duplicados no catálogo free-only OpenCode (HEAD `03899b9004ad4a14e435f6de194fcb959741a176`, CI [45821937857](https://github.com/croquete1/ApolloOffice/actions/runs/45821937857), 42 quality + 33 adapters em Ubuntu). Ambas com CI verde, revisões finais solicitadas; não contar como integradas. Não houve teste real de faturação do fornecedor. Critérios de aceitação permanecem abertos.
 
 ## Balanço por fase
 
-Evidência integrada consolidada a partir do arquivo e do lote até #132. Não atribuir a main alterações apenas propostas.
+Evidência integrada consolidada a partir do arquivo e dos lotes até #138 (excluindo #137 ainda em draft). Não atribuir a main alterações apenas propostas.
 
 | Fase | Implementação parcial integrada (referências principais) | Trabalho por concluir |
 |---|---|---|
 | F01 / P0 | #49, #78: Docker, fnm, logs e CI isolado | Workers reais, seleção Node, retoma e caches |
-| F02 / P0 | #48/#61/#78/#92–94/#101–103/#115/#120/#125: admissão, outbox, recibos e recuperação conservadora | Inbox integral, identidade remota imutável, reconciliação autorizada e restart real |
+| F02 / P0 | #48/#61/#78/#92–94/#101–103/#115/#120/#125/#134–136/#138: admissão, outbox, recibos, recuperação conservadora e evidência de inspeção | Inbox integral, identidade remota imutável, reconciliação autorizada e restart real |
 | F03 / P0 | #52/#63/#78/#90–91/#95/#127–128: Steward, inventários, identidades e autorizações | Centralização integral e testes remotos de concorrência e revogação |
 | F04 / P0 | #51/#57/#62/#79–97/#101/#106/#118/#120/#125: transações, rollback, barreiras e holds | Escritores restantes, disco cheio, falha simultânea BD/disco, diagnóstico e recuperação real |
 | F05 / P1 | #54/#62/#78/#88–89/#103–104/#116/#118/#131–132: checkpoints, retoma, cancelamento e validade de rede | Chamadas de fornecedores, recuperação de processo, efeitos incertos e estabilidade recorrente |
 | F06 / P1 | #53/#58/#78: cooldowns e routing autorizado | Circuit breakers restantes e fornecedores reais |
 | F07 / P1 | #53/#56/#78/#121/#129: reserva, histórico transacional e observações distintas da quota | Identidade da conta, calibração e limites concorrentes reais |
 | F08 / P1 | #58: routing adaptativo opt-in do Fixer | Restantes papéis, calibração e eficácia medida |
-| F09 / P1 | #51/#52/#63/#78/#91–94/#97/#120/#125/#127: paginação, snapshots e inventários conservadores | Sync incremental, mutações remotas e identidade após recriação |
+| F09 / P1 | #51/#52/#63/#78/#91–94/#97/#120/#125/#127/#134/#136/#138: paginação, snapshots, inventários conservadores e identidade de commit | Sync incremental, mutações remotas e identidade após recriação |
 | F10 / P1 | #54/#56/#62/#78/#79/#82/#89–90/#97/#103: prioridades e dependências | Causa comum, agrupamento e cobertura integral de starvation |
 | F11 / P1 | #56/#78/#108/#122/#124: perfis, CI, telemetria e limites disco | Pressão em hardware real e prioridade de processos |
-| F12 / P1 | #61/#62/#78: mitigação de credenciais e Docker/SSH isolados | Isolamento por confiança/repo, caches executáveis e workers reais |
+| F12 / P1 | #61/#62/#78/#135: mitigação de credenciais, Docker/SSH isolados e integridade final do snapshot | Isolamento por confiança/repo, caches executáveis e workers reais |
 | F13 / P2 | #59: aprendizagem supervisionada | Eficácia, expiração e interação após reinício |
 | F14 / P2 | #56/#122/#124: perfis e limites adaptativos | Transições, persistência e pressão em máquinas reais |
 | F15 / P2 | #56/#58/#59/#78: diagnóstico e logs | Próxima tarefa elegível, histórico integral e regressão visual |
-| F16 / P2 | #58/#59/#96/#98/#105/#110–111/#117/#121: métricas, assinatura e staging | Anti-rollback persistente, chave de produção, instalação/recuperação e métricas comparáveis |
+| F16 / P2 | #58/#59/#96/#98/#105/#110–111/#117/#121/#134–136/#138: métricas, assinatura, staging e evidência de qualidade | Anti-rollback persistente, chave de produção, instalação/recuperação e métricas comparáveis |
 | F17 / P1 | #78 (inclui #76/#77): política, evidência consultiva e persistência | Confirmar OSS após trial, integração integral de findings e recuperação end-to-end |
 
 ## Fases e critérios de aceitação

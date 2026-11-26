@@ -42,6 +42,9 @@ Se faltar toolchain, ambiente ou acesso, preferir execução noutro ambiente aut
 - Não usar aumento de timeout como prova de causa resolvida; documentar backoff, limites e investigar falhas intermitentes. Um rerun verde não prova estabilidade.
 - Preservar autorização, Guard, Reviewer independente, custos e compatibilidade. Aprender com findings do CodeRabbit e CI: corrigir também padrões equivalentes nos restantes consumidores quando pertinente, acrescentar regressões e atualizar este ficheiro quando surgir uma regra reutilizável.
 
+- Evidência de identidade deve corresponder ao objeto realmente resolvido/observado (não repetir o identificador pedido como prova). Testes de rejeição devem verificar ausência de efeitos antes da validação: marcador no início da execução, antes de leituras que possam falhar; observação de chamadas reais; fixtures isoladas de variáveis Git e configurações herdadas. Testar permissões reais sem privilégios que mascarem erros.
+- Sinalizar explicitamente omissão, truncagem e descodificação com perda de informação; não extrapolar completude a partir de inventários limitados. Metadados de preço contraditórios ou duplicados não autorizam modelos gratuitos.
+
 ## 5. Revisão, merge e evidências
 
 - CI verde é necessário, não suficiente. Exigir CI integral no HEAD exato, revisão independente das alterações funcionais finais, resolução de findings e threads, base atual, ausência de conflitos/sobreposição e proteções existentes.
