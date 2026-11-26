@@ -46,7 +46,7 @@ When the actual work and command checks are complete, return {"final": YOUR_REQU
 '''
 
 
-def allowed_models(path=CATALOG, now=None):
+def catalog_json_options():
     def unique_object(pairs):
         result = {}
         for key, value in pairs:
@@ -63,9 +63,12 @@ def allowed_models(path=CATALOG, now=None):
             raise ValueError('Free-model catalog number underflow')
         return value
 
+    return {"object_pairs_hook": unique_object, "parse_float": bounded_float}
+
+
+def allowed_models(path=CATALOG, now=None):
     try:
-        catalog = json.loads(path.read_text(), object_pairs_hook=unique_object,
-                             parse_float=bounded_float)
+        catalog = json.loads(path.read_text(), **catalog_json_options())
     except RecursionError as exc:
         raise ValueError('Free-model catalog nesting too deep') from exc
     if not isinstance(catalog, dict) or type(catalog.get('updated_at')) not in (int, float):
