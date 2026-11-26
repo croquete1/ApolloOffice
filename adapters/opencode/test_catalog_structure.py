@@ -1,10 +1,13 @@
 """Reject malformed free-model catalogs with a controlled policy error."""
+import io
 import json
 from pathlib import Path
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock
 
-from opencode_bridge import allowed_models
+from opencode_bridge import Bridge, Handler, allowed_models
 
 
 class CatalogStructureTests(unittest.TestCase):
@@ -58,6 +61,30 @@ class CatalogStructureTests(unittest.TestCase):
         for ident in ('other/free', 'opencode/', 'free'):
             with self.subTest(ident=ident):
                 self.assertEqual(self.allowed({'updated_at': 100, 'models': [self.row(ident)]}), set())
+
+
+class CatalogAvailabilityTests(unittest.TestCase):
+    def test_unreadable_catalog_returns_service_unavailable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for path in (Path(directory) / 'missing.json', Path(directory)):
+                with self.subTest(path=path):
+                    factory = Mock(side_effect=AssertionError('Provider must not start'))
+                    bridge = Bridge(factory=factory, catalog=path)
+                    handler = Handler.__new__(Handler)
+                    handler.server = SimpleNamespace(bridge=bridge)
+                    handler.path = '/chat/completions'
+                    payload = json.dumps({'model': 'opencode/free',
+                                          'messages': [{'role': 'user', 'content': 'test'}]}).encode()
+                    handler.headers = {'Content-Length': str(len(payload))}
+                    handler.rfile = io.BytesIO(payload)
+                    handler.send_json = Mock()
+                    handler.do_POST()
+                    handler.send_json.assert_called_once_with(
+                        503, {'error': {'message': 'Free-model catalog unavailable'}}, None)
+                    factory.assert_not_called()
+                    self.assertIsNone(bridge.session)
+                    self.assertTrue(bridge.busy.acquire(blocking=False))
+                    bridge.busy.release()
 
 
 if __name__ == '__main__':
