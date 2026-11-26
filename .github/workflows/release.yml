@@ -13,6 +13,7 @@ concurrency:
 
 jobs:
   build:
+    if: github.repository == 'Silvertree2010/ApolloOffice'
     permissions:
       contents: read
     strategy:
@@ -56,6 +57,7 @@ jobs:
           retention-days: 7
 
   sign:
+    if: github.repository == 'Silvertree2010/ApolloOffice'
     needs: build
     permissions:
       contents: read
@@ -102,6 +104,7 @@ jobs:
           retention-days: 7
 
   publish:
+    if: github.repository == 'Silvertree2010/ApolloOffice'
     needs: sign
     permissions:
       contents: write

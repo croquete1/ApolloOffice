@@ -8,6 +8,22 @@ key="$APOLLO_SIGNING_KEY_FILE"
 [[ "$(stat -c %a "$key")" = "600" ]] || { echo "Exija chmod 600 para a chave privada"; exit 1; }
 [[ "$(uname -s)" = "Linux" && "$(uname -m)" = "x86_64" ]] || { echo "Apenas Linux x86_64"; exit 1; }
 for executable in git gh cargo python3 node openssl; do command -v "$executable" >/dev/null || exit 1; done
+# The client trust key must be supplied independently, never derived as authority from the signing key.
+trusted_key="$(python3 - "$key" "${APOLLO_OFFICE_UPDATE_PUBKEY:-}" <<'PYKEY'
+import re, subprocess, sys
+expected = sys.argv[2].strip().lower()
+if not re.fullmatch(r"[0-9a-f]{64}", expected):
+    raise SystemExit("Configure APOLLO_OFFICE_UPDATE_PUBKEY com a chave pública Ed25519 de confiança dos clientes")
+result = subprocess.run(["openssl", "pkey", "-in", sys.argv[1], "-pubout", "-outform", "DER"],
+                        capture_output=True, stdin=subprocess.DEVNULL)
+prefix = bytes.fromhex("302a300506032b6570032100")
+if result.returncode or len(result.stdout) != 44 or not result.stdout.startswith(prefix):
+    raise SystemExit("Chave privada Ed25519 inválida ou indisponível")
+if result.stdout[len(prefix):].hex() != expected:
+    raise SystemExit("A chave de assinatura não corresponde à chave de confiança dos clientes")
+print(expected)
+PYKEY
+)"
 [[ -f Cargo.toml && -f src/upd.rs ]] || { echo "Execute na raiz do fork"; exit 1; }
 [[ "$(git branch --show-current)" = main ]] || { echo "Publicar apenas a main"; exit 1; }
 [[ -z "$(git status --porcelain)" ]] || { echo "Working tree não está limpo"; exit 1; }
@@ -45,19 +61,17 @@ m = {'v':sys.argv[2],'files':{file.name:hashlib.sha256(file.read_bytes()).hexdig
 PY
 openssl pkeyutl -sign -inkey "$key" -rawin -in "$out/latest.json" -out "$out/latest.sig.bin"
 base64 -w0 "$out/latest.sig.bin" > "$out/latest.json.sig"
-openssl pkey -in "$key" -pubout -out "$out/public.pem"
-openssl pkeyutl -verify -pubin -inkey "$out/public.pem" -rawin -in "$out/latest.json" -sigfile "$out/latest.sig.bin"
-public_key="$(python3 - "$out/public.pem" <<'PY'
-import subprocess, sys
-raw=subprocess.check_output(['openssl','pkey','-pubin','-in',sys.argv[1],'-outform','DER'])
-assert len(raw)==44
-print(raw[-32:].hex())
-PY
-)"
+# Recheck the actual signed bytes against the independent trust key before GitHub writes.
+python3 - "$out" "$trusted_key" <<'PYVERIFY'
+from pathlib import Path
+import sys
+from scripts.release_manifest import verify_trusted_signature
+verify_trusted_signature(Path(sys.argv[1]), sys.argv[2])
+PYVERIFY
 gh release create "$tag" -R "$repo" --target "$sha" --title "Apollo Office fork $version" --latest \
   --notes "Compilação Linux x64 da main $sha. Manifesto Ed25519 próprio do fork." \
   "$out/apollo-office-linux-x64" "$out/latest.json" "$out/latest.json.sig"
 echo "RELEASE_PUBLICADA=$tag"
 echo "APOLLO_OFFICE_UPDATE_URL=https://github.com/$repo/releases/latest/download"
-echo "APOLLO_OFFICE_UPDATE_PUBKEY=$public_key"
+echo "APOLLO_OFFICE_UPDATE_PUBKEY=$trusted_key"
 echo "A chave privada permaneceu exclusivamente no computador local."

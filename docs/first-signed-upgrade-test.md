@@ -62,12 +62,15 @@ or exit 1
 grep '^version = "0.10.2"$' Cargo.toml
 or exit 1
 set -lx APOLLO_SIGNING_KEY_FILE "$HOME/.config/apollo-office/release-ed25519.pem"
+# Usar a chave pública hexadecimal já configurada nos clientes; não gerar outra.
+set -lx APOLLO_OFFICE_UPDATE_PUBKEY SUBSTITUIR_PELA_CHAVE_PUBLICA_JA_CONFIGURADA
 bash scripts/publish-signed-linux.sh
 ```
 
 Se o SHA não coincidir, parar e revalidar a `main`. O publicador
 volta a executar todos os gates, fixa o SHA da `main`, compila
-`release`, assina `latest.json` em Ed25519, verifica a assinatura localmente
+`release`, confirma a chave de confiança independente antes de aceder ao Git, assina
+`latest.json` em Ed25519, verifica os bytes assinados contra essa mesma chave
 e publica `fork-v0.10.2` sem GitHub Actions. Confirmar no terminal
 `RELEASE_PUBLICADA=fork-v0.10.2`. Não voltar a executar se a tag já existir.
 
