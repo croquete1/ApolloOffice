@@ -81,7 +81,7 @@ Evidência integrada consolidada a partir do arquivo e dos lotes até #139, incl
 ### F01 / P0 — Integração seletiva upstream
 - [ ] Validar #49: init, limites CPU daemon, stderr e contentores pausados; testes de retoma, volumes e cache npm. Sem recriar contentores com jobs ativos.
 - [ ] Portar fnm (upstream c464574) mantendo Node 24 do sistema por omissão; versão por repo sem alterar default partilhado. Testar repo Node 20 seguido de repo sem versão, versão inválida e configuração de setup.
-- [ ] Adaptar filtros/pesquisa e wrap dos logs do upstream à interface operacional.
+- [x] Adaptar filtros/pesquisa e wrap dos logs do upstream à interface operacional. Integrado na [#67](https://github.com/croquete1/ApolloOffice/pull/67) (merge `1feb1d510e4cd42f1e60542586da4052223dc746`); validado na main `41f90b70baafca03bfb1239e2e218f628f25bece` pelo [CI pós-merge 45836328664](https://github.com/croquete1/ApolloOffice/actions/runs/45836328664), cinco testes de `quality/job-log-filters.test.mjs` aprovados: pesquisa combinada, contagem/escape/wrap, refresh com preservação de filtros e falha de rede, deduplicação de refresh e sessão expirada. Não equivale a concluir a regressão visual integral F15.
 - [ ] Preservar canal Ed25519 exclusivo e não importar tags/releases upstream.
 
 ### F02 / P0 — Pedidos de revisão duráveis
