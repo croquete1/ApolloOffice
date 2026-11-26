@@ -438,7 +438,11 @@ class Bridge:
             self.busy.release()
 
     def complete(self, body):
-        args = request_args(body, allowed_models(self.catalog))
+        try:
+            allowed = allowed_models(self.catalog)
+        except OSError:
+            return 503, {'error': {'message': 'Free-model catalog unavailable'}}, None
+        args = request_args(body, allowed)
         aliases = {'apollo_' + t['function']['name']: t['function']['name'] for t in args['tools']}
         forward = {original: alias for alias, original in aliases.items()}
         args['tools'] = [dict(t, function={**t['function'], 'name': forward[t['function']['name']]}) for t in args['tools']]
