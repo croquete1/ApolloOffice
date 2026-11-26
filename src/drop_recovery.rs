@@ -49,16 +49,32 @@ fn eligible(j: &Job, automatic: bool) -> bool {
         && j.d["rp"] != true
 }
 
-fn recovery_job(a: &Ax, id: i64) -> Option<(Job, i64)> {
+struct RecoverySnapshot {
+    updated: i64,
+    activation: String,
+    ci: String,
+}
+
+fn recovery_job(a: &Ax, id: i64) -> Option<(Job, RecoverySnapshot)> {
     let rows =
         a.db.try_all(
-            "select * from jobs where id=? and not exists(select 1 from kv where k=?)",
+            "select jobs.*, rp.steward_activation as recovery_activation, rp.ci as recovery_ci
+             from jobs join rp on rp.full=jobs.repo
+             where jobs.id=? and not exists(select 1 from kv where k=?)",
             pa![id, format!("submit_publication:{id}")],
         )
         .ok()?;
     let row = rows.into_iter().next()?;
-    let updated = row["t1"].as_i64()?;
-    row["d"].is_object().then(|| (Job::of(row), updated))
+    let activation = row["recovery_activation"].as_str()?.to_owned();
+    if activation.is_empty() {
+        return None;
+    }
+    let snapshot = RecoverySnapshot {
+        updated: row["t1"].as_i64()?,
+        activation,
+        ci: row["recovery_ci"].as_str()?.to_owned(),
+    };
+    row["d"].is_object().then(|| (Job::of(row), snapshot))
 }
 
 fn open_issue(issue: &Value, number: i64) -> bool {
@@ -119,7 +135,7 @@ where
     F: FnMut(Vec<String>, u64) -> Fut,
     Fut: std::future::Future<Output = Result<Value, String>>,
 {
-    let (job, updated) =
+    let (job, snapshot) =
         recovery_job(a, id).ok_or("Trabalho inexistente ou metadados inválidos")?;
     if !eligible(&job, false) {
         return Err("Drop não elegível para recuperação segura".into());
@@ -163,19 +179,24 @@ where
     )
     .await?;
     cache_default_head(a, &job.repo, &head)?;
-    retry_snapshot(a, &job, updated, false).map_err(|error| error.to_string())
+    retry_snapshot(a, &job, &snapshot, false).map_err(|error| error.to_string())
 }
 
 /// Nova tentativa desde o início, com limpeza de provas e autorizações antigas.
 /// A escrita condicional impede duas recuperações do mesmo drop em simultâneo.
 #[cfg(test)]
 fn retry(a: &Ax, id: i64, automatic: bool) -> Result<bool, &'static str> {
-    let (job, updated) =
+    let (job, snapshot) =
         recovery_job(a, id).ok_or("Trabalho inexistente ou metadados inválidos")?;
-    retry_snapshot(a, &job, updated, automatic)
+    retry_snapshot(a, &job, &snapshot, automatic)
 }
 
-fn retry_snapshot(a: &Ax, j: &Job, updated: i64, automatic: bool) -> Result<bool, &'static str> {
+fn retry_snapshot(
+    a: &Ax,
+    j: &Job,
+    snapshot: &RecoverySnapshot,
+    automatic: bool,
+) -> Result<bool, &'static str> {
     let id = j.id;
     if !eligible(j, automatic) {
         return Err("Drop não elegível para recuperação segura");
@@ -203,7 +224,7 @@ fn retry_snapshot(a: &Ax, j: &Job, updated: i64, automatic: bool) -> Result<bool
     {
         return Err("Já existe outro trabalho ativo para a mesma issue");
     }
-    let age = now().saturating_sub(updated);
+    let age = now().saturating_sub(snapshot.updated);
     if automatic && age < RETRY_DELAY_MS {
         return Err("Aguarda intervalo de segurança");
     }
@@ -273,7 +294,7 @@ fn retry_snapshot(a: &Ax, j: &Job, updated: i64, automatic: bool) -> Result<bool
     };
     // Lock the policy and the exact dropped job snapshot together. A newer
     // cancellation, proof, retry or repository change cannot reuse this decision.
-    let changed = commit_retry(a, j, updated, automatic, next_state, &message, &data)
+    let changed = commit_retry(a, j, snapshot, automatic, next_state, &message, &data)
         .map_err(|_| "Falha ao guardar recuperação na base de dados")?;
     if !changed {
         return Ok(false);
@@ -286,7 +307,7 @@ fn retry_snapshot(a: &Ax, j: &Job, updated: i64, automatic: bool) -> Result<bool
 fn commit_retry(
     a: &Ax,
     job: &Job,
-    updated: i64,
+    snapshot: &RecoverySnapshot,
     automatic: bool,
     next_state: &str,
     message: &str,
@@ -307,6 +328,7 @@ fn commit_retry(
            and not exists(select fullkey,type,atom from json_tree(?8)
              except select fullkey,type,atom from json_tree(jobs.d))
            and exists(select 1 from rp where full=jobs.repo and on_=1
+             and steward_activation=?16 and ci=?17
              and trim(ci)<>'' and (?9=0 or auto_recover_drops=1))
            and (?9=0 or not exists(select 1 from kv where k=?10 and v<>'false'))
            and (jobs.num<=0 or not exists (
@@ -321,7 +343,7 @@ fn commit_retry(
             data.to_string(),
             now(),
             job.id,
-            updated,
+            snapshot.updated,
             job.why,
             job.d.to_string(),
             automatic,
@@ -330,7 +352,9 @@ fn commit_retry(
             job.num,
             job.t0,
             job.title,
-            job.url
+            job.url,
+            snapshot.activation,
+            snapshot.ci
         ],
     )?;
     if changed != 1 {
@@ -380,10 +404,10 @@ where
             break;
         }
         if let Some(id) = item["id"].as_i64() {
-            let Some((job, updated)) = recovery_job(a, id) else {
+            let Some((job, snapshot)) = recovery_job(a, id) else {
                 continue;
             };
-            let age = now().saturating_sub(updated);
+            let age = now().saturating_sub(snapshot.updated);
             if job.repo != repo
                 || !eligible(&job, true)
                 || !(RETRY_DELAY_MS..=MAX_AUTO_AGE_MS).contains(&age)
@@ -401,7 +425,7 @@ where
             if !open_issue(&issue, job.num) {
                 continue;
             }
-            if retry_snapshot(a, &job, updated, true) == Ok(true) {
+            if retry_snapshot(a, &job, &snapshot, true) == Ok(true) {
                 restarted += 1;
             }
         }
@@ -724,11 +748,8 @@ mod tests {
     fn retry_commit_fences_policy_cancellation_and_newer_proof() {
         let a = setup();
         let id = dropped(&a, "machine kept failing: timed out", json!({}));
-        let job = a.db.jg(id).unwrap();
-        let updated = a.db.one("select t1 from jobs where id=?", pa![id]).unwrap()["t1"]
-            .as_i64()
-            .unwrap();
-        let commit = || commit_retry(&a, &job, updated, true, "ready", "retry", &json!({}));
+        let (job, snapshot) = recovery_job(&a, id).unwrap();
+        let commit = || commit_retry(&a, &job, &snapshot, true, "ready", "retry", &json!({}));
         let publication = format!("submit_publication:{id}");
         a.db.ks(&publication, &json!(null));
         assert!(!commit().unwrap());
@@ -753,28 +774,30 @@ mod tests {
         for automatic in [false, true] {
             let a = setup();
             let id = dropped(&a, "machine kept failing: timed out", json!({}));
-            let (job, updated) = recovery_job(&a, id).unwrap();
+            let (job, snapshot) = recovery_job(&a, id).unwrap();
             a.db.run("update jobs set num=43 where id=?", pa![id]);
-            assert_eq!(retry_snapshot(&a, &job, updated, automatic), Ok(false));
+            assert_eq!(retry_snapshot(&a, &job, &snapshot, automatic), Ok(false));
             assert_eq!(a.db.jg(id).unwrap().st, "drop");
             a.db.run("update jobs set num=42 where id=?", pa![id]);
             a.db.run("update jobs set t1=t1+1 where id=?", pa![id]);
-            assert_eq!(retry_snapshot(&a, &job, updated, automatic), Ok(false));
-            a.db.run("update jobs set t1=? where id=?", pa![updated, id]);
+            assert_eq!(retry_snapshot(&a, &job, &snapshot, automatic), Ok(false));
+            a.db.run("update jobs set t1=? where id=?", pa![snapshot.updated, id]);
             a.db.run(
                 "update jobs set d='{\"recovery_attempts\":1}' where id=?",
                 pa![id],
             );
-            assert_eq!(retry_snapshot(&a, &job, updated, automatic), Ok(false));
+            assert_eq!(retry_snapshot(&a, &job, &snapshot, automatic), Ok(false));
             a.db.run("update jobs set d='{}' where id=?", pa![id]);
-            assert_eq!(retry_snapshot(&a, &job, updated, automatic), Ok(true));
+            assert_eq!(retry_snapshot(&a, &job, &snapshot, automatic), Ok(true));
         }
     }
 
     #[tokio::test]
     async fn remote_entry_points_preserve_the_snapshot_during_io() {
         for automatic in [false, true] {
-            for mutation in ["num", "timestamp", "metadata", "none", "cancel"] {
+            for mutation in [
+                "num", "timestamp", "metadata", "recreate", "reactivate", "ci", "none", "cancel",
+            ] {
                 if mutation == "cancel" && !automatic {
                     continue;
                 }
@@ -801,6 +824,20 @@ mod tests {
                                         "update jobs set d=json_set(d,'$.fixture',1) where id=?",
                                         pa![id],
                                     );
+                                }
+                                "recreate" => {
+                                    a.db.run("delete from rp where full='org/repo'", pa![]);
+                                    a.db.run(
+                                        "insert into rp(full,ci,on_,auto_recover_drops) values('org/repo','cargo test',1,1)",
+                                        pa![],
+                                    );
+                                }
+                                "reactivate" => {
+                                    a.db.run("update rp set on_=0", pa![]);
+                                    a.db.run("update rp set on_=1", pa![]);
+                                }
+                                "ci" => {
+                                    a.db.run("update rp set ci='cargo test --locked'", pa![]);
                                 }
                                 _ => {}
                             }
