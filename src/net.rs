@@ -90,6 +90,8 @@ fn gpu_sample(line: &str) -> Option<serde_json::Value> {
 static FAIL: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, u32>>> =
     std::sync::LazyLock::new(Default::default);
 
+const FRESH_MS: i64 = 20_000;
+
 static NEXT_PROBE: AtomicU64 = AtomicU64::new(1);
 #[derive(Default)]
 struct ProbeBook {
@@ -122,13 +124,43 @@ impl ProbeBook {
                 .checked
                 .get(key)
                 .and_then(|last| at.checked_sub(*last))
-                .is_some_and(|age| (0..=20_000).contains(&age))
+                .is_some_and(|age| (0..=FRESH_MS).contains(&age))
     }
 }
 
 static PROBES: std::sync::LazyLock<std::sync::Mutex<ProbeBook>> =
     std::sync::LazyLock::new(Default::default);
 
+// An in-flight check owns its key until publication, cancellation or down.
+// Dropping a cancelled future must not leave the key permanently pending.
+struct ProbeLease {
+    key: String,
+    ticket: u64,
+}
+
+impl Drop for ProbeLease {
+    fn drop(&mut self) {
+        let mut probes = PROBES.lock().unwrap();
+        if probes.pending.get(&self.key) == Some(&self.ticket) {
+            probes.invalidate(&self.key);
+        }
+    }
+}
+
+fn try_begin_probe(key: &str) -> Option<ProbeLease> {
+    let mut probes = PROBES.lock().unwrap();
+    if probes.pending.contains_key(key) {
+        return None;
+    }
+    let ticket = NEXT_PROBE.fetch_add(1, Ordering::Relaxed);
+    probes.begin(key, ticket);
+    Some(ProbeLease {
+        key: key.to_string(),
+        ticket,
+    })
+}
+
+#[cfg(test)]
 fn begin_probe(key: &str) -> u64 {
     let mut probes = PROBES.lock().unwrap();
     let ticket = NEXT_PROBE.fetch_add(1, Ordering::Relaxed);
@@ -136,6 +168,7 @@ fn begin_probe(key: &str) -> u64 {
     ticket
 }
 
+#[cfg(test)]
 fn fresh(key: &str) -> bool {
     PROBES.lock().unwrap().fresh(key, now())
 }
@@ -180,9 +213,31 @@ async fn ck(a: &Ax, k: &str) -> (bool, Option<serde_json::Value>) {
 }
 
 pub async fn probe(a: &Ax, ks: &[String]) {
-    let tickets: Vec<_> = ks.iter().map(|k| begin_probe(k)).collect();
-    let v = futures::future::join_all(ks.iter().map(|k| ck(a, k))).await;
-    publish_probe_results(a, ks, tickets, v);
+    probe_with(a, ks, |key| async move { ck(a, &key).await }).await;
+}
+
+async fn probe_with<F, Fut>(a: &Ax, ks: &[String], check: F)
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = (bool, Option<serde_json::Value>)>,
+{
+    // Do not supersede an already running check. Independent keys still
+    // proceed, and cancelled leases release only their own generation.
+    futures::future::join_all(ks.iter().filter_map(|key| {
+        let lease = try_begin_probe(key)?;
+        let check = check(key.clone());
+        Some(async move {
+            let result = check.await;
+            publish_probe_results(
+                a,
+                std::slice::from_ref(key),
+                vec![lease.ticket],
+                vec![result],
+            );
+            drop(lease);
+        })
+    }))
+    .await;
 }
 
 fn publish_probe_results(
@@ -197,6 +252,11 @@ fn publish_probe_results(
     for ((k, ticket), (ok, sample)) in ks.iter().zip(tickets).zip(v) {
         if !probes.publish(k, ticket, now()) {
             continue;
+        }
+        // A failed check may be debounced for the UI, but must never
+        // provide fresh positive evidence to the admission gates.
+        if !ok {
+            probes.checked.remove(k);
         }
         if let Some(sample) = sample {
             l.hst.insert(k.clone(), sample);
@@ -226,10 +286,63 @@ pub fn down(a: &Ax, k: &str) {
     l.o.net.insert(k.to_string(), false);
 }
 
-pub async fn all(a: &Ax) {
+fn all_keys(a: &Ax) -> Vec<String> {
     let mut ks: Vec<String> = vec!["gh".into(), "an".into()];
     ks.extend(hosts(a).into_iter().filter(|h| h.on).map(|h| h.id));
-    probe(a, &ks).await;
+    ks
+}
+
+fn missing_snapshot(a: &Ax, keys: &[String]) -> (Vec<String>, bool) {
+    // Match the publication/down lock order. Read availability and its
+    // freshness together, rather than combining two different generations.
+    let live = a.lv.lock().unwrap();
+    let probes = PROBES.lock().unwrap();
+    let at = now();
+    let missing: Vec<String> = keys
+        .iter()
+        .filter(|key| !probes.fresh(key, at) || live.o.net.get(*key) != Some(&true))
+        .cloned()
+        .collect();
+    // Only retry immediately when every missing key has an expired success.
+    // Failed, pending, unknown and future-dated observations still defer.
+    let expired_only = !missing.is_empty()
+        && missing.iter().all(|key| {
+            live.o.net.get(key) == Some(&true)
+                && !probes.pending.contains_key(key)
+                && probes
+                    .checked
+                    .get(key)
+                    .and_then(|last| at.checked_sub(*last))
+                    .is_some_and(|age| age > FRESH_MS)
+        });
+    (missing, expired_only)
+}
+
+fn missing_keys(a: &Ax, keys: &[String]) -> Vec<String> {
+    missing_snapshot(a, keys).0
+}
+
+async fn refresh_missing_with<F, Fut>(a: &Ax, keys: &[String], probe_keys: F) -> Vec<String>
+where
+    F: Fn(Vec<String>) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let mut missing = missing_keys(a, keys);
+    // A slow check may outlive the freshness of a faster one. Allow two
+    // immediate selective refreshes before applying ordinary backoff.
+    // The bound prevents an endless loop when no fresh overlap is possible.
+    for _ in 0..3 {
+        if missing.is_empty() {
+            break;
+        }
+        probe_keys(missing).await;
+        let (remaining, expired_only) = missing_snapshot(a, keys);
+        missing = remaining;
+        if !expired_only {
+            break;
+        }
+    }
+    missing
 }
 
 /// Single availability check for an explicitly restartable phase boundary.
@@ -240,7 +353,7 @@ pub async fn need_once(a: &Ax, ks: &[&str]) -> R<()> {
 
 async fn need_once_with<F, Fut>(a: &Ax, ks: &[&str], probe_keys: F) -> R<()>
 where
-    F: FnOnce(Vec<String>) -> Fut,
+    F: Fn(Vec<String>) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
     let keys = ks
@@ -248,15 +361,9 @@ where
         .filter(|k| !k.is_empty())
         .map(|k| k.to_string())
         .collect::<Vec<_>>();
-    if keys.iter().any(|k| !fresh(k) || !a.net(k)) {
-        probe_keys(keys.clone()).await;
-    }
     // An overlapping newer probe owns the decision. Defer conservatively
     // rather than authorizing work with a rejected older result.
-    let missing = keys
-        .into_iter()
-        .filter(|k| !fresh(k) || !a.net(k))
-        .collect::<Vec<_>>();
+    let missing = refresh_missing_with(a, &keys, probe_keys).await;
     if missing.is_empty() {
         return Ok(());
     }
@@ -272,6 +379,16 @@ where
 }
 
 pub async fn need(a: &Ax, w: &str, ks: &[&str]) -> R<()> {
+    need_with(a, w, ks, |keys| async move { probe(a, &keys).await }, sl).await
+}
+
+async fn need_with<F, Fut, W, Wait>(a: &Ax, w: &str, ks: &[&str], probe_keys: F, wait: W) -> R<()>
+where
+    F: Fn(Vec<String>) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+    W: Fn(u64) -> Wait,
+    Wait: std::future::Future<Output = ()>,
+{
     let mut b = 30_000u64;
     let ks: Vec<String> = ks
         .iter()
@@ -279,14 +396,7 @@ pub async fn need(a: &Ax, w: &str, ks: &[&str]) -> R<()> {
         .map(|k| k.to_string())
         .collect();
     loop {
-        if ks.iter().any(|k| !fresh(k) || !a.net(k)) {
-            probe(a, &ks).await;
-        }
-        let miss: Vec<String> = ks
-            .iter()
-            .filter(|k| !fresh(k) || !a.net(k))
-            .cloned()
-            .collect();
+        let miss = refresh_missing_with(a, &ks, &probe_keys).await;
         if miss.is_empty() {
             return Ok(());
         }
@@ -304,14 +414,19 @@ pub async fn need(a: &Ax, w: &str, ks: &[&str]) -> R<()> {
             ),
             None,
         );
-        sl(b).await;
+        wait(b).await;
         b = (b * 2).min(300_000);
     }
 }
 
 pub async fn watch(a: Ax) {
     loop {
-        all(&a).await;
+        // Periodic refresh must not invalidate still-fresh evidence merely
+        // because another key needs attention or the polling cadence is fast.
+        let missing = missing_keys(&a, &all_keys(&a));
+        if !missing.is_empty() {
+            probe(&a, &missing).await;
+        }
         sl(60_000).await;
     }
 }
@@ -406,6 +521,301 @@ mod gpu_telemetry_tests {
             assert_eq!(FAIL.lock().unwrap().get(host), Some(&2));
         }
         assert!(!fresh(host));
+        PROBES.lock().unwrap().invalidate(host);
+        FAIL.lock().unwrap().remove(host);
+    }
+
+    #[test]
+    fn overlapping_leases_do_not_supersede_or_leak_pending_keys() {
+        let key = "fixture-probe-lease";
+        let first = try_begin_probe(key).unwrap();
+        assert!(try_begin_probe(key).is_none());
+        assert!(!fresh(key));
+        drop(first);
+        assert!(!PROBES.lock().unwrap().pending.contains_key(key));
+        assert!(!fresh(key));
+
+        let old = try_begin_probe(key).unwrap();
+        PROBES.lock().unwrap().invalidate(key);
+        let new = try_begin_probe(key).unwrap();
+        drop(old);
+        assert_eq!(PROBES.lock().unwrap().pending.get(key), Some(&new.ticket));
+        drop(new);
+        assert!(!PROBES.lock().unwrap().pending.contains_key(key));
+    }
+
+    #[tokio::test]
+    async fn overlapping_probe_does_not_start_a_duplicate_check() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            47300,
+            "apollo-office".into(),
+        ));
+        let key = "fixture-probe-single-flight";
+        let keys = [key.to_string()];
+        let release = tokio::sync::Notify::new();
+        let work = probe_with(&a, &keys, |_| async {
+            release.notified().await;
+            (true, Some(hw("cpu 8")))
+        });
+        tokio::pin!(work);
+        assert!(futures::poll!(work.as_mut()).is_pending());
+        probe_with(&a, &keys, |_| async {
+            panic!("duplicate check started");
+        })
+        .await;
+        assert!(!fresh(key));
+        release.notify_one();
+        work.await;
+        assert!(fresh(key));
+        PROBES.lock().unwrap().invalidate(key);
+        FAIL.lock().unwrap().remove(key);
+    }
+
+    #[tokio::test]
+    async fn completed_probe_publishes_while_another_key_is_pending() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            47300,
+            "apollo-office".into(),
+        ));
+        let fast = "fixture-independent-fast";
+        let slow = "fixture-independent-slow";
+        let keys = [fast.to_string(), slow.to_string()];
+        let release = tokio::sync::Notify::new();
+        let release_ref = &release;
+        let work = probe_with(&a, &keys, |key| async move {
+            if key == slow {
+                release_ref.notified().await;
+            }
+            (true, Some(hw("cpu 8")))
+        });
+        tokio::pin!(work);
+        assert!(futures::poll!(work.as_mut()).is_pending());
+        assert!(fresh(fast));
+        assert!(!fresh(slow));
+        assert_eq!(a.lv.lock().unwrap().hst[fast]["cpu"], 8.0);
+        assert!(!a.lv.lock().unwrap().hst.contains_key(slow));
+
+        // A later invalidation must still fence a pending successful check.
+        down(&a, slow);
+        release.notify_one();
+        work.await;
+        assert!(fresh(fast));
+        assert!(!fresh(slow));
+        assert!(!a.lv.lock().unwrap().hst.contains_key(slow));
+        for key in [fast, slow] {
+            PROBES.lock().unwrap().invalidate(key);
+            FAIL.lock().unwrap().remove(key);
+        }
+    }
+
+    #[tokio::test]
+    async fn need_once_refreshes_only_missing_keys() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            47300,
+            "apollo-office".into(),
+        ));
+        let healthy = "fixture-selective-healthy";
+        let missing = "fixture-selective-missing";
+        let keys = [healthy.to_string()];
+        let ticket = begin_probe(healthy);
+        publish_probe_results(&a, &keys, vec![ticket], vec![(true, Some(hw("cpu 8")))]);
+        let a_ref = &a;
+        let result = need_once_with(&a, &[healthy, missing], |keys| async move {
+            assert_eq!(keys, vec![missing.to_string()]);
+            let ticket = begin_probe(missing);
+            publish_probe_results(a_ref, &keys, vec![ticket], vec![(true, Some(hw("cpu 4")))]);
+        })
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(a.lv.lock().unwrap().hst[healthy]["cpu"], 8.0);
+        for key in [healthy, missing] {
+            PROBES.lock().unwrap().invalidate(key);
+            FAIL.lock().unwrap().remove(key);
+        }
+    }
+
+    #[tokio::test]
+    async fn need_refreshes_expired_success_before_backoff() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            47300,
+            "apollo-office".into(),
+        ));
+        let fast = "fixture-expiry-fast";
+        let slow = "fixture-expiry-slow";
+        let rounds = std::cell::Cell::new(0);
+        let rounds_ref = &rounds;
+        let a_ref = &a;
+        let check = |keys: Vec<String>| async move {
+            let round = rounds_ref.get();
+            rounds_ref.set(round + 1);
+            if round == 0 {
+                assert_eq!(keys, vec![fast.to_string(), slow.to_string()]);
+                let ticket = begin_probe(fast);
+                let fast_keys = [fast.to_string()];
+                publish_probe_results(a_ref, &fast_keys, vec![ticket], vec![(true, None)]);
+                // Simulate completions at 1s and 25s without real sleeps.
+                PROBES
+                    .lock()
+                    .unwrap()
+                    .checked
+                    .insert(fast.to_string(), now() - 24_000);
+                let ticket = begin_probe(slow);
+                let slow_keys = [slow.to_string()];
+                publish_probe_results(a_ref, &slow_keys, vec![ticket], vec![(true, None)]);
+            } else {
+                assert_eq!(round, 1);
+                assert_eq!(keys, vec![fast.to_string()]);
+                let ticket = begin_probe(fast);
+                publish_probe_results(a_ref, &keys, vec![ticket], vec![(true, None)]);
+            }
+        };
+        let result = need_with(&a, "watcher", &[fast, slow], check, |_| async {
+            panic!("expired positive evidence must be refreshed before backoff");
+        })
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(rounds.get(), 2);
+        for key in [fast, slow] {
+            PROBES.lock().unwrap().invalidate(key);
+            FAIL.lock().unwrap().remove(key);
+        }
+    }
+
+    #[tokio::test]
+    async fn need_waits_for_pending_generation_before_authorizing() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            47300,
+            "apollo-office".into(),
+        ));
+        let host = "fixture-need-pending";
+        a.db.run(
+            "insert into hs(id,on_) values(?,1)",
+            crate::pa![host.to_string()],
+        );
+        let lease = try_begin_probe(host).unwrap();
+        let waits = std::cell::Cell::new(0);
+        let a_ref = &a;
+        let check = |keys: Vec<String>| async move {
+            assert_eq!(keys, vec![host.to_string()]);
+            probe_with(a_ref, &keys, |_| async {
+                panic!("pending generation must not be superseded");
+            })
+            .await;
+        };
+        let wait = |ms| {
+            assert_eq!(ms, 30_000);
+            assert_eq!(waits.get(), 0);
+            assert!(!fresh(host));
+            waits.set(1);
+            let keys = [host.to_string()];
+            publish_probe_results(&a, &keys, vec![lease.ticket], vec![(true, None)]);
+            std::future::ready(())
+        };
+        let result = need_with(&a, "watcher", &[host], check, wait).await;
+        assert!(result.is_ok());
+        assert_eq!(waits.get(), 1);
+        assert!(fresh(host));
+        drop(lease);
+        PROBES.lock().unwrap().invalidate(host);
+        FAIL.lock().unwrap().remove(host);
+    }
+
+    #[tokio::test]
+    async fn immediate_refresh_is_bounded_when_success_never_stays_fresh() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            47300,
+            "apollo-office".into(),
+        ));
+        let host = "fixture-expiry-bounded";
+        a.db.run(
+            "insert into hs(id,on_) values(?,1)",
+            crate::pa![host.to_string()],
+        );
+        let rounds = std::cell::Cell::new(0);
+        let rounds_ref = &rounds;
+        let a_ref = &a;
+        let result = need_once_with(&a, &[host], |keys| async move {
+            rounds_ref.set(rounds_ref.get() + 1);
+            assert_eq!(keys, vec![host.to_string()]);
+            let ticket = begin_probe(host);
+            publish_probe_results(a_ref, &keys, vec![ticket], vec![(true, None)]);
+            PROBES
+                .lock()
+                .unwrap()
+                .checked
+                .insert(host.to_string(), now() - FRESH_MS - 1);
+        })
+        .await;
+        assert!(matches!(result, Err(X::Defer(_))));
+        assert_eq!(rounds.get(), 3);
+        PROBES.lock().unwrap().invalidate(host);
+        FAIL.lock().unwrap().remove(host);
+    }
+
+    #[test]
+    fn freshness_requires_explicit_positive_availability() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            47300,
+            "apollo-office".into(),
+        ));
+        let key = "fixture-probe-explicit-availability";
+        let keys = [key.to_string()];
+        let ticket = begin_probe(key);
+        publish_probe_results(&a, &keys, vec![ticket], vec![(true, None)]);
+        assert!(missing_keys(&a, &keys).is_empty());
+
+        a.lv.lock().unwrap().o.net.remove(key);
+        assert!(fresh(key));
+        assert_eq!(missing_keys(&a, &keys), keys.to_vec());
+
+        PROBES.lock().unwrap().invalidate(key);
+        FAIL.lock().unwrap().remove(key);
+    }
+
+    #[tokio::test]
+    async fn first_probe_failure_cannot_authorize_work() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            47300,
+            "apollo-office".into(),
+        ));
+        let host = "fixture-probe-first-failure";
+        a.db.run(
+            "insert into hs(id,on_) values(?,1)",
+            crate::pa![host.to_string()],
+        );
+        let a_ref = &a;
+        let result = need_once_with(&a, &[host], |keys| async move {
+            let ticket = begin_probe(host);
+            publish_probe_results(a_ref, &keys, vec![ticket], vec![(false, None)]);
+        })
+        .await;
+        assert!(matches!(result, Err(X::Defer(_))));
+        assert!(!fresh(host));
+        assert_eq!(a.lv.lock().unwrap().o.net.get(host), Some(&true));
+
+        let result = need_once_with(&a, &[host], |keys| async move {
+            let ticket = begin_probe(host);
+            publish_probe_results(a_ref, &keys, vec![ticket], vec![(true, None)]);
+        })
+        .await;
+        assert!(result.is_ok());
+        assert!(fresh(host));
         PROBES.lock().unwrap().invalidate(host);
         FAIL.lock().unwrap().remove(host);
     }
