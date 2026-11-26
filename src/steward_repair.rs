@@ -8,13 +8,37 @@ use serde_json::{json, Value};
 
 const ALLOWED_REVIEWERS: &[&str] = &["OWNER", "MEMBER", "COLLABORATOR"];
 
+// Compare actual instants, not RFC3339 strings (offsets and fractional
+// seconds can sort differently). Ambiguous revocations block automation.
+fn review_time(review: &Value) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    chrono::DateTime::parse_from_rfc3339(review["submitted_at"].as_str()?).ok()
+}
+
 fn actionable_request(
     reviews: &[Value],
     comments: &[Value],
     head: &str,
     author: &str,
 ) -> Option<(i64, String, i64)> {
-    let last = reviews
+    // Incomplete identity on a potentially eligible request must not
+    // silently authorize an older request from the same maintainer.
+    for review in reviews.iter().filter(|r| {
+        r["state"] == "CHANGES_REQUESTED"
+            && r["commit_id"] == head
+            && ALLOWED_REVIEWERS.contains(&r["author_association"].as_str().unwrap_or(""))
+    }) {
+        let user = &review["user"];
+        if user["type"] == "Bot" {
+            continue;
+        }
+        if user["type"] != "User"
+            || !user["id"].as_i64().is_some_and(|id| id > 0)
+            || user["login"].as_str().is_none_or(str::is_empty)
+        {
+            return None;
+        }
+    }
+    let mut requests = reviews
         .iter()
         .filter(|r| r["state"] == "CHANGES_REQUESTED" && r["commit_id"] == head)
         .filter(|r| ALLOWED_REVIEWERS.contains(&r["author_association"].as_str().unwrap_or("")))
@@ -22,23 +46,33 @@ fn actionable_request(
             let user = r["user"]["login"].as_str().unwrap_or("");
             !user.is_empty()
                 && !user.eq_ignore_ascii_case(author)
-                && r["user"]["type"] != "Bot"
-                && !user.ends_with("[bot]")
+                && r["user"]["type"] == "User"
+                && r["user"]["id"].as_i64().is_some_and(|id| id > 0)
+                && !user.to_ascii_lowercase().ends_with("[bot]")
         })
-        // Não reutilizar uma objeção se o mesmo revisor a aprovou/revogou depois.
-        .filter(|r| {
-            !reviews.iter().any(|other| {
-                other["user"]["login"] == r["user"]["login"]
-                    && other["submitted_at"].as_str().unwrap_or("")
-                        > r["submitted_at"].as_str().unwrap_or("")
-                    && (other["state"] == "APPROVED" || other["state"] == "DISMISSED")
-            })
+        // A malformed eligible request might supersede a valid older one.
+        // Reject ambiguous chronology rather than silently dropping it.
+        .map(|r| Some((r, review_time(r)?)))
+        .collect::<Option<Vec<_>>>()?;
+    // Não reutilizar uma objeção se o mesmo revisor a aprovou/revogou depois.
+    requests.retain(|(r, at)| {
+        let reviewer = r["user"]["login"].as_str().unwrap_or("");
+        !reviews.iter().any(|other| {
+            (other["user"]["id"] == r["user"]["id"]
+                || other["user"]["login"]
+                    .as_str()
+                    .is_some_and(|login| login.eq_ignore_ascii_case(reviewer)))
+                && (other["state"] == "APPROVED" || other["state"] == "DISMISSED")
+                && review_time(other).is_none_or(|other_at| other_at >= *at)
         })
-        .max_by(|a, b| a["submitted_at"].as_str().cmp(&b["submitted_at"].as_str()))?;
+    });
+    requests.sort_by_key(|(_, at)| *at);
+    let (last, at) = requests.pop()?;
+    if requests.last().is_some_and(|(_, other_at)| *other_at == at) {
+        return None;
+    }
     let id = last["id"].as_i64().filter(|id| *id > 0)?;
-    let since = chrono::DateTime::parse_from_rfc3339(last["submitted_at"].as_str()?)
-        .ok()?
-        .timestamp_millis();
+    let since = at.timestamp_millis();
     let reviewer = last["user"]["login"].as_str()?;
     let mut parts = Vec::new();
     if let Some(body) = last["body"].as_str().filter(|s| !s.trim().is_empty()) {
@@ -47,8 +81,16 @@ fn actionable_request(
     for c in comments
         .iter()
         .filter(|c| c["pull_request_review_id"].as_i64() == Some(id))
-        .filter(|c| c["user"]["login"].as_str() == Some(reviewer))
     {
+        // An inline comment must belong to the same human account.
+        if c["user"]["id"] != last["user"]["id"]
+            || c["user"]["type"] != "User"
+            || !c["user"]["login"]
+                .as_str()
+                .is_some_and(|login| login.eq_ignore_ascii_case(reviewer))
+        {
+            return None;
+        }
         if let Some(body) = c["body"].as_str().filter(|s| !s.trim().is_empty()) {
             let path = c["path"].as_str().unwrap_or("ficheiro");
             parts.push(format!("{path}: {}", body.trim()));
@@ -64,6 +106,52 @@ fn actionable_request(
         return None;
     }
     Some((id, request, since))
+}
+
+fn permission_matches_reviewer(permission: &Value, reviewer: &Value) -> bool {
+    reviewer["id"].as_i64().is_some_and(|id| id > 0)
+        && permission["user"]["id"] == reviewer["id"]
+        && permission["user"]["type"] == "User"
+        && permission["user"]["login"]
+            .as_str()
+            .zip(reviewer["login"].as_str())
+            .is_some_and(|(actual, expected)| actual.eq_ignore_ascii_case(expected))
+        && matches!(
+            permission["permission"].as_str(),
+            Some("admin" | "write" | "maintain")
+        )
+}
+
+fn reviewer_login(reviewer: &Value) -> Option<&str> {
+    reviewer["login"].as_str().filter(|login| {
+        !login.is_empty()
+            && login
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+    })
+}
+
+async fn reviewer_still_authorized(
+    repo: &str,
+    reviews: &[Value],
+    rid: i64,
+) -> Result<bool, String> {
+    let Some(review) = reviews.iter().find(|r| r["id"].as_i64() == Some(rid)) else {
+        return Ok(false);
+    };
+    let reviewer = &review["user"];
+    let Some(login) = reviewer_login(reviewer) else {
+        return Ok(false);
+    };
+    let permission = ghj(
+        &[
+            "api",
+            &format!("repos/{repo}/collaborators/{login}/permission"),
+        ],
+        45,
+    )
+    .await?;
+    Ok(permission_matches_reviewer(&permission, reviewer))
 }
 
 fn eligible(pr: &Value, assessed: &Value) -> bool {
@@ -205,6 +293,9 @@ async fn enqueue(
     let Some((rid, request, since)) = actionable_request(&reviews, &comments, head, me) else {
         return Ok(false);
     };
+    if !reviewer_still_authorized(repo, &reviews, rid).await? {
+        return Ok(false);
+    }
     let key = format!("steward:repair:{repo}#{number}:{head}:{rid}");
     if !a.db.kg(&key).is_null() {
         return Ok(false);
@@ -230,6 +321,9 @@ async fn enqueue(
     if actionable_request(&current_reviews, &current_comments, head, me)
         != Some((rid, request.clone(), since))
     {
+        return Ok(false);
+    }
+    if !reviewer_still_authorized(repo, &current_reviews, rid).await? {
         return Ok(false);
     }
     let fresh = ghj(&["api", &format!("repos/{repo}/pulls/{number}")], 45).await?;
@@ -329,8 +423,8 @@ mod tests {
         let head = "0123456789012345678901234567890123456789";
         let review = json!({"id":91,"state":"CHANGES_REQUESTED","commit_id":head,
             "submitted_at":"2026-11-09T12:00:00Z","author_association":"COLLABORATOR",
-            "user":{"login":"reviewer","type":"User"},"body":"Rever tratamento de null"});
-        let comments = json!([{"pull_request_review_id":91,"user":{"login":"reviewer"},
+            "user":{"login":"reviewer","type":"User","id":11},"body":"Rever tratamento de null"});
+        let comments = json!([{"pull_request_review_id":91,"user":{"login":"reviewer","type":"User","id":11},
             "path":"src/form.ts","body":"Adicionar teste de regressão"}]);
         let req = actionable_request(
             std::slice::from_ref(&review),
@@ -359,11 +453,143 @@ mod tests {
     }
 
     #[test]
+    fn review_revocations_use_actual_instants_and_fail_closed() {
+        let head = "0123456789012345678901234567890123456789";
+        let request = json!({"id":91,"state":"CHANGES_REQUESTED","commit_id":head,
+            "submitted_at":"2026-11-09T12:00:00Z","author_association":"OWNER",
+            "user":{"login":"maintainer","type":"User","id":12},"body":"Fix the regression"});
+        let mut approval = request.clone();
+        approval["id"] = json!(92);
+        approval["state"] = json!("APPROVED");
+        approval["user"]["login"] = json!("Maintainer");
+        for at in [
+            json!("2026-11-09T11:30:00-01:00"),
+            json!("2026-11-09T12:00:00Z"),
+            json!("invalid"),
+            Value::Null,
+        ] {
+            approval["submitted_at"] = at;
+            assert!(
+                actionable_request(&[request.clone(), approval.clone()], &[], head, "author")
+                    .is_none()
+            );
+        }
+        approval["submitted_at"] = json!("2026-11-09T13:30:00+02:00");
+        assert!(actionable_request(&[request.clone(), approval], &[], head, "author").is_some());
+        let mut newer = request.clone();
+        newer["id"] = json!(93);
+        newer["submitted_at"] = json!("2026-11-09T11:30:00-01:00");
+        let selected = actionable_request(&[request, newer], &[], head, "author").unwrap();
+        assert_eq!(selected.0, 93);
+    }
+
+    #[test]
+    fn ambiguous_change_requests_cannot_authorize_older_work() {
+        let head = "0123456789012345678901234567890123456789";
+        let request = json!({"id":91,"state":"CHANGES_REQUESTED","commit_id":head,
+            "submitted_at":"2026-11-09T12:00:00Z","author_association":"OWNER",
+            "user":{"login":"maintainer","type":"User","id":12},"body":"Fix the regression"});
+        let mut other = request.clone();
+        other["id"] = json!(92);
+        other["body"] = json!("Use a different fix");
+        for at in [
+            json!("invalid"),
+            Value::Null,
+            json!("2026-11-09T13:00:00+01:00"),
+        ] {
+            other["submitted_at"] = at;
+            assert!(
+                actionable_request(&[request.clone(), other.clone()], &[], head, "author")
+                    .is_none()
+            );
+        }
+        other["submitted_at"] = json!("2026-11-09T13:00:01+01:00");
+        assert_eq!(
+            actionable_request(&[request, other], &[], head, "author")
+                .unwrap()
+                .0,
+            92
+        );
+    }
+
+    #[test]
+    fn incomplete_maintainer_identity_blocks_older_request() {
+        let head = "0123456789012345678901234567890123456789";
+        let request = json!({"id":91,"state":"CHANGES_REQUESTED","commit_id":head,
+            "submitted_at":"2026-11-09T12:00:00Z","author_association":"OWNER",
+            "user":{"login":"maintainer","type":"User","id":12},"body":"Fix regression"});
+        let mut newer = request.clone();
+        newer["id"] = json!(92);
+        newer["submitted_at"] = json!("2026-11-09T13:00:00Z");
+        newer["user"]["id"] = Value::Null;
+        assert!(
+            actionable_request(&[request.clone(), newer.clone()], &[], head, "author").is_none()
+        );
+        newer["user"]["id"] = json!(12);
+        assert_eq!(
+            actionable_request(&[request, newer], &[], head, "author")
+                .unwrap()
+                .0,
+            92
+        );
+    }
+
+    #[test]
+    fn enterprise_reviewer_login_is_a_safe_path_segment() {
+        for login in ["maintainer", "mona-cat_octo"] {
+            let reviewer = json!({"login":login,"id":12,"type":"User"});
+            assert_eq!(reviewer_login(&reviewer), Some(login));
+            let permission = json!({"permission":"write","user":reviewer.clone()});
+            assert!(permission_matches_reviewer(&permission, &reviewer));
+        }
+        for login in ["", "owner/reviewer", "owner%2freviewer", "a?b", "a#b", ".."] {
+            let reviewer = json!({"login":login,"id":12,"type":"User"});
+            assert!(reviewer_login(&reviewer).is_none());
+        }
+    }
+
+    #[test]
+    fn current_repository_permission_must_match_reviewer() {
+        let reviewer = json!({"login":"maintainer","id":12,"type":"User"});
+        let mut permission = json!({"permission":"write","user":reviewer.clone()});
+        assert!(permission_matches_reviewer(&permission, &reviewer));
+        permission["permission"] = json!("read");
+        assert!(!permission_matches_reviewer(&permission, &reviewer));
+        permission["permission"] = json!("admin");
+        permission["user"]["id"] = json!(13);
+        assert!(!permission_matches_reviewer(&permission, &reviewer));
+    }
+
+    #[test]
+    fn review_comments_require_the_same_human_identity() {
+        let head = "0123456789012345678901234567890123456789";
+        let review = json!({"id":91,"state":"CHANGES_REQUESTED","commit_id":head,
+            "submitted_at":"2026-11-09T12:00:00Z","author_association":"OWNER",
+            "user":{"login":"maintainer","type":"User","id":12},"body":"Fix regression"});
+        let mut comment = json!({"pull_request_review_id":91,
+            "user":{"login":"Maintainer","type":"User","id":12},
+            "path":"src/main.rs","body":"Add a test"});
+        let requests = std::slice::from_ref(&review);
+        assert!(actionable_request(requests, &[comment.clone()], head, "author").is_some());
+        comment["user"]["id"] = json!(13);
+        assert!(actionable_request(requests, &[comment], head, "author").is_none());
+        let mut invalid = review.clone();
+        invalid["user"]["type"] = Value::Null;
+        assert!(actionable_request(&[invalid], &[], head, "author").is_none());
+
+        let mut approval = review.clone();
+        approval["state"] = json!("APPROVED");
+        approval["submitted_at"] = json!("2026-11-09T13:00:00Z");
+        approval["user"]["login"] = json!("renamed-maintainer");
+        assert!(actionable_request(&[review, approval], &[], head, "author").is_none());
+    }
+
+    #[test]
     fn oversized_review_is_not_truncated_into_an_authorization() {
         let head = "0123456789012345678901234567890123456789";
         let review = json!({"id":91,"state":"CHANGES_REQUESTED","commit_id":head,
             "submitted_at":"2026-11-09T12:00:00Z","author_association":"OWNER",
-            "user":{"login":"maintainer","type":"User"},"body":"é".repeat(1751)});
+            "user":{"login":"maintainer","type":"User","id":12},"body":"é".repeat(1751)});
         assert!(actionable_request(&[review], &[], head, "author").is_none());
     }
 
@@ -415,7 +641,7 @@ mod tests {
         let head = "0123456789012345678901234567890123456789";
         let review = json!({"id":91,"state":"CHANGES_REQUESTED","commit_id":head,
             "submitted_at":"2026-11-09T12:00:00Z","author_association":"OWNER",
-            "user":{"login":"maintainer","type":"User"},"body":""});
+            "user":{"login":"maintainer","type":"User","id":12},"body":""});
         assert!(actionable_request(&[review], &[], head, "author").is_none());
     }
 }
