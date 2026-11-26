@@ -199,9 +199,11 @@ def scan(base, issue):
         else:
             tools[tool] = 'missing'
     tools['android_sdk'] = 'present' if any((pathlib.Path(os.environ.get(k, '/nonexistent'))/'platforms').is_dir() for k in ['ANDROID_HOME', 'ANDROID_SDK_ROOT']) else 'missing'
+    test_paths = [p for p in paths if re.search(r'(^|/)(tests?|__tests__)(/|\.)|test_', p)]
+    test_paths_omitted = max(0, len(test_paths) - 60)
     return {'base': base, 'files': files, 'tools': tools, 'min_sdk': sdk, 'library_desugaring_evidence': desugaring,
-            'unresolved_dependencies': unresolved, 'inventory_truncated': inventory_incomplete or len(wanted) > MAX_FILES or used >= MAX_BYTES,
-            'test_paths': [p for p in paths if re.search(r'(^|/)(tests?|__tests__)(/|\.)|test_', p)][:60]}
+            'unresolved_dependencies': unresolved, 'inventory_truncated': inventory_incomplete or len(wanted) > MAX_FILES or used >= MAX_BYTES or test_paths_omitted > 0,
+            'test_paths': test_paths[:60], 'test_paths_omitted': test_paths_omitted}
 
 
 if __name__ == '__main__':
