@@ -127,8 +127,29 @@ def scenario(source_binary):
 
         run_stage(binary, root, env, 'before-guard', lambda: pending(root) and (root / 'before-guard-guard').exists())
         assert_pending()
+        interrupted = query(root, 'select analysis_ticket,next_attempt_at from watcher_retry')
+        assert interrupted[0][0] and interrupted[0][1] > int(time.time() * 1000)
+        # Restart without advancing the deadline: recovery clears ownership but
+        # cannot launch the provider early. A read-only status command must not
+        # perform startup recovery.
+        subprocess.run([str(binary), '--data', str(root / 'data'), 'status'], env=env, cwd=root, check=True, capture_output=True, timeout=20)
+        assert query(root, 'select analysis_ticket,next_attempt_at from watcher_retry') == interrupted
+        (root / 'stage').write_text('restart-wait')
+        with running(binary, root, env) as process:
+            deadline = time.monotonic() + 45
+            while time.monotonic() < deadline:
+                if process.poll() is not None:
+                    raise AssertionError('Process exited during retry recovery')
+                if query(root, 'select analysis_ticket,next_attempt_at from watcher_retry') == [(None, interrupted[0][1])]:
+                    break
+                time.sleep(0.1)
+            else:
+                raise AssertionError('Interrupted analysis ticket was not recovered')
+        assert not list(root.glob('restart-wait-*'))
+        print('F02 inbox restart checkpoint: recovered-analysis-ticket', flush=True)
         run_stage(binary, root, env, 'provider-failure', lambda: (root / 'provider-failure-watcher').exists() and event(root, 'processing deferred'))
         assert_pending()
+        assert query(root, 'select analysis_ticket from watcher_retry') == [(None,)]
         # A valid JSON body cannot authorize work from a failed/ambiguous CLI run.
         def failed_verdict(stage):
             assert query(root, 'select count(*) from jobs') == [(0,)], f'{stage}: failed verdict admitted a job'
@@ -138,9 +159,10 @@ def scenario(source_binary):
         for stage in ('failed-terminal', 'failed-exit', 'duplicate-terminal'):
             run_stage(binary, root, env, stage, lambda: failed_verdict(stage))
             assert_pending()
+            assert query(root, 'select analysis_ticket from watcher_retry') == [(None,)]
         with closing(db_connection(root)) as db, db:
             db.execute("insert into jobs(repo,num,pr,kind,st,title,url,why,d,t0,t1) values('o/r',1,1,'review','approve','Active fixture','url','fixture','{}',1,1)")
-        run_stage(binary, root, env, 'active-job', lambda: event(root, 'new review deferred until active review finishes'))
+        run_stage(binary, root, env, 'active-job', lambda: event(root, 'new review deferred until active review finishes') and query(root, 'select analysis_ticket from watcher_retry') == [(None,)])
         assert_pending()
         assert query(root, 'select count(*) from jobs') == [(1,)]
         with closing(db_connection(root)) as db, db:
@@ -149,6 +171,7 @@ def scenario(source_binary):
         run_stage(binary, root, env, 'enqueue-failure', lambda: event(root, 'fixture ack failure'))
         assert_pending()
         assert query(root, 'select count(*) from jobs') == [(0,)]
+        assert query(root, 'select analysis_ticket from watcher_retry') == [(None,)]
         with closing(db_connection(root)) as db, db:
             db.execute('drop trigger fixture_ack_failure')
         run_stage(binary, root, env, 'recovery', lambda: query(root, 'select state from watcher_inbox') == [('done',)])

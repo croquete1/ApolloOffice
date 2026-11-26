@@ -19,6 +19,27 @@ pub enum ProviderAdmission {
     Blocked,
 }
 
+/// Ownership of one persisted analysis attempt. Dropping it leaves the
+/// retry deadline intact. A crash leaves the ticket for startup recovery.
+pub struct ReviewAttempt {
+    db: Db,
+    repo: String,
+    number: i64,
+    ticket: String,
+}
+
+impl Drop for ReviewAttempt {
+    fn drop(&mut self) {
+        let c = self.db.0.lock().unwrap();
+        if let Err(error) = c.execute(
+            "update watcher_retry set analysis_ticket=null where repo=? and num=? and analysis_ticket=?",
+            rusqlite::params![self.repo, self.number, self.ticket],
+        ) {
+            eprintln!("watcher attempt release failed; restart recovery required: {error}");
+        }
+    }
+}
+
 const SCH: &str = "
 create table if not exists kv(k text primary key, v text);
 create table if not exists ses(id text primary key, exp int);
@@ -39,7 +60,7 @@ create table if not exists tok(day text, w text, tin int default 0, tout int def
 create table if not exists seen(repo text, num int, upd text, primary key(repo, num));
 create table if not exists cm(id text primary key, t int);
 create table if not exists watcher_inbox(repo text not null,num integer not null,head text not null,comment_id text not null,snapshot text not null,state text not null check(state in ('received','done','superseded')),received_at integer not null,updated_at integer not null,primary key(repo,num,head,comment_id));
-create table if not exists watcher_retry(repo text not null,num integer not null,head text not null,snapshot text not null,attempts integer not null,next_attempt_at integer not null,primary key(repo,num));
+create table if not exists watcher_retry(repo text not null,num integer not null,head text not null,snapshot text not null,attempts integer not null,next_attempt_at integer not null,analysis_ticket text,primary key(repo,num));
 create index if not exists watcher_inbox_pending on watcher_inbox(repo,num,state,updated_at);
 create table if not exists watcher_outbox(id text primary key, repo text not null, num int not null, author text not null, body text not null, state text not null check(state in ('pending','uncertain','sent','cancelled')), created int not null, updated int not null);
 create index if not exists watcher_outbox_pending on watcher_outbox(state,updated);
@@ -57,7 +78,7 @@ create index if not exists coderabbit_findings_pr on coderabbit_findings(repo,nu
 create table if not exists coderabbit_cycles(repo text not null, number integer not null, cycles integer not null check(cycles>=0), primary key(repo,number));
 ";
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 pub(crate) fn valid_git_sha(sha: &str) -> bool {
     sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit())
@@ -158,6 +179,11 @@ const LEGACY_COLUMNS: &[(&str, &str, &str)] = &[
         "seen",
         "why",
         "alter table seen add column why text default ''",
+    ),
+    (
+        "watcher_retry",
+        "analysis_ticket",
+        "alter table watcher_retry add column analysis_ticket text",
     ),
     (
         "watcher_outbox",
@@ -1049,7 +1075,7 @@ impl Db {
         updated: &str,
         head: &str,
         at: i64,
-    ) -> rusqlite::Result<bool> {
+    ) -> rusqlite::Result<Option<ReviewAttempt>> {
         let mut c = self.0.lock().unwrap();
         let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         if !Self::review_snapshot_matches(&tx, repo, number, updated, head)? {
@@ -1061,10 +1087,26 @@ impl Db {
               head=excluded.head,snapshot=excluded.snapshot,
               attempts=case when watcher_retry.head<>excluded.head or watcher_retry.snapshot<>excluded.snapshot then 1 else min(watcher_retry.attempts+1,4) end,
               next_attempt_at=excluded.next_attempt_at-600000+case when watcher_retry.head<>excluded.head or watcher_retry.snapshot<>excluded.snapshot then 600000 else min(3600000,600000*(1 << min(watcher_retry.attempts,3))) end
-            where watcher_retry.head<>excluded.head or watcher_retry.snapshot<>excluded.snapshot or watcher_retry.next_attempt_at<=excluded.next_attempt_at-600000",
+            where watcher_retry.analysis_ticket is null and (watcher_retry.head<>excluded.head or watcher_retry.snapshot<>excluded.snapshot or watcher_retry.next_attempt_at<=excluded.next_attempt_at-600000)",
             rusqlite::params![repo,number,head,updated,at])?;
+        if changed != 1 {
+            return Ok(None);
+        }
+        let ticket = hex::encode(rand::random::<[u8; 16]>());
+        if tx.execute(
+            "update watcher_retry set analysis_ticket=? where repo=? and num=? and analysis_ticket is null",
+            rusqlite::params![ticket, repo, number],
+        )? != 1
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
         tx.commit()?;
-        Ok(changed == 1)
+        Ok(Some(ReviewAttempt {
+            db: self.clone(),
+            repo: repo.to_string(),
+            number,
+            ticket,
+        }))
     }
 
     fn finish_review_inbox(
@@ -2790,6 +2832,64 @@ mod watcher_inbox_tests {
 #[cfg(test)]
 mod watcher_retry_tests {
     use super::*;
+
+    #[test]
+    fn analysis_ticket_is_exclusive_and_stale_release_cannot_clear_replacement() {
+        let db = Db::mem();
+        let head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        db.run("insert into rp(full) values('o/r')", vec![]);
+        db.run(
+            "insert into prs(repo,num,st,upd,d) values('o/r',1,'open','t',?)",
+            crate::pa![json!({"watcher_head":head}).to_string()],
+        );
+        let first = db.claim_review_attempt("o/r", 1, "t", head, 0).unwrap().unwrap();
+        assert!(db.claim_review_attempt("o/r", 1, "t", head, 600000).unwrap().is_none());
+        let original = db.try_all("select * from watcher_retry", vec![]).unwrap();
+        assert_eq!(original[0]["analysis_ticket"], first.ticket);
+        assert_eq!(original[0]["next_attempt_at"], 600000);
+        // Use production startup recovery, not a simulated ticket update.
+        let app = std::sync::Arc::new(crate::app::App::new(
+            db.clone(), std::env::temp_dir(), 1, "apollo-office".into(),
+        ));
+        crate::pipe::recover(&app).unwrap();
+        let recovered = db.try_all("select * from watcher_retry", vec![]).unwrap();
+        assert!(recovered[0]["analysis_ticket"].is_null());
+        assert_eq!(recovered[0]["next_attempt_at"], 600000);
+        assert!(db.claim_review_attempt("o/r", 1, "t", head, 599999).unwrap().is_none());
+        let second = db.claim_review_attempt("o/r", 1, "t", head, 600000).unwrap().unwrap();
+        assert_ne!(first.ticket, second.ticket);
+        drop(first);
+        let active = db.try_all("select * from watcher_retry", vec![]).unwrap();
+        assert_eq!(active[0]["analysis_ticket"], second.ticket);
+        drop(second);
+        let waiting = db.try_all("select * from watcher_retry", vec![]).unwrap();
+        assert!(waiting[0]["analysis_ticket"].is_null());
+        assert_eq!(waiting[0]["next_attempt_at"], 1800000);
+    }
+
+    #[test]
+    fn legacy_retry_migration_preserves_deadline_and_does_not_clear_live_ticket() {
+        let mut c = Connection::open_in_memory().unwrap();
+        c.execute_batch(&SCH.replace("analysis_ticket text,", "")).unwrap();
+        c.execute_batch(
+            "pragma user_version=6;
+             insert into prs(repo,num,st) values('o/r',1,'open');
+             insert into watcher_retry values('o/r',1,'head','snapshot',3,1234567);",
+        ).unwrap();
+        init(&mut c).unwrap();
+        let row: (i64, i64, Option<String>) = c.query_row(
+            "select attempts,next_attempt_at,analysis_ticket from watcher_retry",
+            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).unwrap();
+        assert_eq!(row, (3, 1234567, None));
+        c.execute("update watcher_retry set analysis_ticket='live'", []).unwrap();
+        init(&mut c).unwrap();
+        let ticket: String = c.query_row(
+            "select analysis_ticket from watcher_retry", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(ticket, "live");
+    }
+
     #[test]
     fn retry_window_is_persistent_and_snapshot_scoped() {
         let db = Db::mem();
@@ -2802,23 +2902,31 @@ mod watcher_retry_tests {
         let ids = vec!["r1".to_string()];
         db.receive_review_batch("o/r", 1, "t", head, &ids).unwrap();
         assert!(db.has_pending_review("o/r", 1).unwrap());
-        assert!(db.claim_review_attempt("o/r", 1, "t", head, 0).unwrap());
+        assert!(db
+            .claim_review_attempt("o/r", 1, "t", head, 0)
+            .unwrap()
+            .is_some());
         assert!(!db
             .claim_review_attempt("o/r", 1, "t", head, 599999)
-            .unwrap());
+            .unwrap()
+            .is_some());
         assert!(db
             .claim_review_attempt("o/r", 1, "t", head, 600000)
-            .unwrap());
+            .unwrap()
+            .is_some());
         assert!(!db
             .claim_review_attempt("o/r", 1, "t", head, 1799999)
-            .unwrap());
+            .unwrap()
+            .is_some());
         assert!(db
             .claim_review_attempt("o/r", 1, "t", head, 1800000)
-            .unwrap());
+            .unwrap()
+            .is_some());
         db.run("update prs set upd='t2' where repo='o/r' and num=1", vec![]);
         assert!(db
             .claim_review_attempt("o/r", 1, "t2", head, 1800001)
-            .unwrap());
+            .unwrap()
+            .is_some());
         assert!(db
             .claim_review_attempt("o/r", 1, "t", head, 1800002)
             .is_err());
@@ -2851,7 +2959,7 @@ mod watcher_receipt_lifecycle_tests {
             .unwrap();
         db.receive_review_batch("o/r", 1, "t", HEAD, &["r2".into()])
             .unwrap();
-        db.claim_review_attempt("o/r", 1, "t", HEAD, 0).unwrap();
+        let _attempt = db.claim_review_attempt("o/r", 1, "t", HEAD, 0).unwrap();
         db.run(
             "update prs set st='closed' where repo='o/r' and num=1",
             vec![],
