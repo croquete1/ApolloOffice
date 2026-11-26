@@ -1,5 +1,4 @@
 """Bounded, non-executing repository inspection at an exact Git commit."""
-import configparser
 import hashlib
 import json
 import pathlib
@@ -85,27 +84,42 @@ def scan(base, issue):
         used += len(emitted)
     unresolved = []
     modules = next((f for f in files if f['path'] == '.gitmodules'), None)
-    parser = configparser.ConfigParser(interpolation=None)
+    sections = {}
     if modules is not None:
         try:
             if modules['truncated']:
-                raise configparser.Error('truncated .gitmodules')
-            parser.read_string(modules['content'])
-            if parser.defaults():
-                raise configparser.Error('inherited .gitmodules defaults')
-        except configparser.Error:
-            unresolved.append({'reason': 'unreadable or truncated .gitmodules; dependency constraints unresolved'})
-            parser = configparser.ConfigParser(interpolation=None)
+                raise ValueError('truncated .gitmodules')
+            # Git's syntax differs from INI (quoted values, case-insensitive
+            # section/key names and repeated keys). Read the exact tracked blob
+            # with the native parser; never load includes or working-tree config.
+            records = git('config', '--no-includes', '--null', '--list',
+                          '--blob', entries['.gitmodules'][1])
+            for record in records.decode('utf-8').split('\0'):
+                if not record:
+                    continue
+                key, separator, value = record.partition('\n')
+                if not key.startswith('submodule.'):
+                    continue
+                name, _, field = key[len('submodule.'):].rpartition('.')
+                if not name or field not in ('path', 'url'):
+                    continue
+                section = sections.setdefault(name, {})
+                if not separator or field in section:
+                    raise ValueError('ambiguous .gitmodules key')
+                section[field] = value
+        except (ValueError, subprocess.SubprocessError):
+            unresolved.append({'reason': 'unreadable, ambiguous or truncated .gitmodules; dependency constraints unresolved'})
+            sections = {}
     path_counts = {}
-    for section in parser.sections():
-        path = parser.get(section, 'path', fallback='')
+    for section in sections.values():
+        path = section.get('path', '')
         path_counts[path] = path_counts.get(path, 0) + 1
     accounted = set()
     # Read constants at the EXACT gitlink commit, not dependency default branch.
     # Credential-free GitHub raw HTTPS only, bounded files and timeouts.
-    for index, section in enumerate(parser.sections()):
-        path = parser.get(section, 'path', fallback='')
-        url = parser.get(section, 'url', fallback='')
+    for index, section in enumerate(sections.values()):
+        path = section.get('path', '')
+        url = section.get('url', '')
         match = re.fullmatch(r'https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?', url)
         entry = entries.get(path)
         if not entry or entry[0] != '160000':
