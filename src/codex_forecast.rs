@@ -20,6 +20,9 @@ struct Sample {
 
 fn valid_sample(v: &Value, now_ms: i64) -> Option<Sample> {
     let a = v.as_array()?;
+    if a.len() != 2 {
+        return None;
+    }
     let at = a.first()?.as_i64()?;
     let used = a.get(1)?.as_f64()?;
     if at > now_ms
@@ -165,25 +168,38 @@ fn update_history(
         stored["samples"]
             .as_array()
             .map(|rows| {
+                // Reject malformed rows as a group: silently removing a
+                // broken observation could hide a quota discontinuity.
                 rows.iter()
-                    .filter_map(|v| valid_sample(v, now_ms))
-                    .collect()
+                    .filter(|row| !row[0].as_i64().is_some_and(|at| at < reset_ms - WEEK_MS))
+                    .map(|row| valid_sample(row, now_ms))
+                    .collect::<Option<Vec<_>>>()
+                    .unwrap_or_default()
             })
             .unwrap_or_default()
     } else {
         Vec::new()
     };
     samples.sort_by_key(|s| s.at);
-    // Rejeita históricos que regrediram, por reinício da quota, conta
-    // diferente ou variações de uma janela de consumo deslizante.
+    // Duplicate timestamps are not independent observations. Discard
+    // ambiguous history, as with a quota regression or account change.
     if samples
         .windows(2)
-        .any(|pair| pair[1].used + 0.25 < pair[0].used)
+        .any(|pair| pair[0].at == pair[1].at || pair[1].used + 0.25 < pair[0].used)
     {
         samples.clear();
     }
     let used = 100.0 - rem;
-    if samples.last().is_some_and(|prev| used + 0.25 < prev.used) {
+    let previous_used = if stored["reset_at"] == reset_sec {
+        stored["observed_used"]
+            .as_f64()
+            .filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
+    } else {
+        None
+    };
+    if previous_used.is_some_and(|prev| used + 0.25 < prev)
+        || samples.last().is_some_and(|prev| used + 0.25 < prev.used)
+    {
         samples.clear();
     }
 
@@ -200,7 +216,9 @@ fn update_history(
     }
     // Persist ordering even when the sampling interval has not elapsed.
     let saved: Vec<Value> = samples.iter().map(|s| json!([s.at, s.used])).collect();
-    let state = json!({"reset_at":reset_sec,"samples":saved,"observed_at":now_ms});
+    let state = json!({
+        "reset_at":reset_sec,"samples":saved,"observed_at":now_ms,"observed_used":used
+    });
     let changed = tx.execute(
         "insert into kv(k,v) values(?,?) on conflict(k) do update set v=excluded.v",
         rusqlite::params![KEY, state.to_string()],
@@ -321,6 +339,88 @@ mod tests {
         let mut next = state(NOW + H, 25.0, reset);
         update(&db, &mut next);
         assert_eq!(db.kg(KEY)["samples"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn unsampled_observation_still_detects_consumption_regression() {
+        let db = Db::mem();
+        let reset = NOW + 24 * H;
+        for (at, used) in [(NOW - 2 * H, 20.0), (NOW - H, 30.0), (NOW, 40.0)] {
+            update(&db, &mut state(at, used, reset));
+        }
+        update(&db, &mut state(NOW + 60_000, 40.8, reset));
+        assert_eq!(db.kg(KEY)["samples"].as_array().unwrap().len(), 3);
+        let mut next = state(NOW + 120_000, 40.4, reset);
+        update(&db, &mut next);
+        assert_eq!(next["weekly_forecast"]["status"], "insufficient");
+        assert_eq!(db.kg(KEY)["samples"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn duplicate_persisted_timestamps_cannot_inflate_forecast_confidence() {
+        let db = Db::mem();
+        let reset = NOW + 24 * H;
+        db.ks(
+            KEY,
+            &json!({
+                "reset_at":reset / 1000,
+                "samples":[[NOW - 4 * H,20.0],[NOW - 4 * H,20.0]],
+                "observed_at":NOW - 4 * H
+            }),
+        );
+        let mut current = state(NOW, 40.0, reset);
+        update(&db, &mut current);
+        assert_eq!(current["weekly_forecast"]["status"], "insufficient");
+        assert_eq!(db.kg(KEY)["samples"], json!([[NOW, 40.0]]));
+
+        let mut second = state(NOW + H, 45.0, reset);
+        update(&db, &mut second);
+        assert_eq!(second["weekly_forecast"]["status"], "insufficient");
+        let mut third = state(NOW + 2 * H, 50.0, reset);
+        update(&db, &mut third);
+        assert_eq!(third["weekly_forecast"]["status"], "at_risk");
+    }
+
+    #[test]
+    fn samples_before_weekly_window_do_not_contribute_to_forecast() {
+        let db = Db::mem();
+        let reset = NOW + WEEK_MS - 3 * H;
+        db.ks(
+            KEY,
+            &json!({
+                "reset_at":reset / 1000,
+                "samples":[[NOW - 5 * H,10.0],[NOW - 4 * H,20.0]],
+                "observed_at":NOW - 4 * H
+            }),
+        );
+        let mut current = state(NOW, 40.0, reset);
+        update(&db, &mut current);
+        assert_eq!(current["weekly_forecast"]["status"], "insufficient");
+        assert_eq!(db.kg(KEY)["samples"], json!([[NOW, 40.0]]));
+    }
+
+    #[test]
+    fn malformed_persisted_row_invalidates_otherwise_usable_history() {
+        let db = Db::mem();
+        let reset = NOW + 24 * H;
+        for malformed in [
+            json!([NOW - 3 * H, "invalid"]),
+            json!([NOW - 3 * H, 25.0, "extra"]),
+            json!([NOW - 3 * H, 101.0]),
+        ] {
+            db.ks(
+                KEY,
+                &json!({
+                    "reset_at":reset / 1000,
+                    "samples":[[NOW - 4 * H,20.0],malformed,[NOW - 2 * H,30.0]],
+                    "observed_at":NOW - 2 * H
+                }),
+            );
+            let mut current = state(NOW, 40.0, reset);
+            update(&db, &mut current);
+            assert_eq!(current["weekly_forecast"]["status"], "insufficient");
+            assert_eq!(db.kg(KEY)["samples"], json!([[NOW, 40.0]]));
+        }
     }
 
     #[test]
