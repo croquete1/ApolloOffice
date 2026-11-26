@@ -1,15 +1,17 @@
 """Read OpenCode's actual verbose metadata; never infer pricing from model names."""
 import json,pathlib,subprocess,time,os,tempfile
-from opencode_bridge import CATALOG,allowed_models
+from opencode_bridge import CATALOG,allowed_models,catalog_json_options
 from launch import STATE
 
 def parse_models(text):
- decoder=json.JSONDecoder();rows=[];rest=text
+ decoder=json.JSONDecoder(**catalog_json_options());rows=[];rest=text
  while rest.strip():
   # `models --verbose` prints an ID line followed by its complete JSON object.
   start=rest.find('{')
   if start<0:break
-  value,used=decoder.raw_decode(rest[start:]);rest=rest[start+used:]
+  try:value,used=decoder.raw_decode(rest[start:])
+  except RecursionError as exc:raise ValueError('Free-model catalog nesting too deep') from exc
+  rest=rest[start+used:]
   if not isinstance(value,dict):raise ValueError('Expected model object')
   ident=value.get('id');provider=value.get('providerID')
   if isinstance(ident,str) and isinstance(provider,str):
