@@ -72,7 +72,8 @@ class CatalogHttpTests(unittest.TestCase):
         self.write_valid_catalog()
         for calls in ([None], [1], ['bad'], {'function': {'name': 'read'}},
                       [{'function': None}], [{'function': {'name': ''}}],
-                      [{'function': {'name': []}}]):
+                      [{'function': {'name': []}}], [{}], [{'id': ''}],
+                      [{'id': []}], [{'id': 'old', 'function': None}]):
             with self.subTest(calls=calls):
                 body = json.dumps({'model': 'opencode/free', 'messages': [
                     {'role': 'assistant', 'tool_calls': calls}]}).encode()
@@ -85,7 +86,7 @@ class CatalogHttpTests(unittest.TestCase):
     def test_valid_tool_history_is_preserved_by_request_validation(self):
         calls = [{'id': 'call-1', 'type': 'function',
                   'function': {'name': 'read', 'arguments': '{}'}}]
-        for history in (calls, [], None):
+        for history in (calls, [{'id': 'old'}], calls + [{'id': 'old'}], [], None):
             with self.subTest(history=history):
                 messages = [{'role': 'assistant', 'tool_calls': history}]
                 args = request_args({'model': 'opencode/free', 'messages': messages}, {'opencode/free'})
