@@ -2,6 +2,7 @@
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from opencode_bridge import allowed_models
 
@@ -39,6 +40,18 @@ class CatalogJsonTests(unittest.TestCase):
             with self.subTest(price=price):
                 self.assertEqual(self.allowed(self.catalog('{"input":' + price + ',"output":0}')),
                                  {'opencode/free'})
+
+    def test_deep_cost_metadata_does_not_overflow(self):
+        for price, expected in (('0', {'opencode/free'}), ('1', set())):
+            with self.subTest(price=price):
+                nested = '{"nested":' * 600 + price + '}' * 600
+                self.assertEqual(self.allowed(self.catalog(
+                    '{"input":0,"output":0,"cache":' + nested + '}')), expected)
+
+    def test_decoder_recursion_error_is_a_policy_error(self):
+        with patch('opencode_bridge.json.loads', side_effect=RecursionError):
+            with self.assertRaises(ValueError):
+                self.allowed(self.catalog('{"input":0,"output":0}'))
 
     def test_representable_nonzero_price_remains_excluded(self):
         self.assertEqual(self.allowed(self.catalog('{"input":1e-300,"output":0}')), set())
