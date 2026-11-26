@@ -56,8 +56,9 @@ def allowed_models(path=CATALOG, now=None):
         or not row['full_id'] for row in rows
     ):
         raise ValueError('Invalid free-model catalog inventory')
-    age = (time.time() if now is None else now) - catalog['updated_at']
-    if not 0 <= age <= 86400:
+    current = time.time() if now is None else now
+    # Compare bounds without converting an arbitrary-size JSON integer to float.
+    if not current - 86400 <= catalog['updated_at'] <= current:
         raise ValueError('Free-model catalog expired; refresh required')
     def zero(value):
         if isinstance(value, dict):
