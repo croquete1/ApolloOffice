@@ -33,9 +33,9 @@ class AcceptanceRevisionTests(unittest.TestCase):
         self.addCleanup(marker_dir.cleanup)
         self.marker = pathlib.Path(marker_dir.name) / 'verifier-ran'
         script = ('import os, pathlib\n'
+                  f'pathlib.Path({str(self.marker)!r}).write_text("ran")\n'
                   'root = pathlib.Path(os.environ["APOLLO_SOURCE_ROOT"])\n'
                   'assert (root / "fixture.txt").read_text() == "fixture"\n'
-                  f'pathlib.Path({str(self.marker)!r}).write_text("ran")\n'
                   'print("APOLLO_CHECK:revision:PASS")\n')
         self.encoded = base64.b64encode(json.dumps({'script': script}).encode()).decode()
 
