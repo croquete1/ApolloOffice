@@ -77,14 +77,17 @@ def scan(base, issue):
         files.append({'path': path, 'content': text, 'sha256': hashlib.sha256(raw).hexdigest(), 'truncated': truncated})
         used += len(emitted)
     unresolved = []
-    modules = next((f['content'] for f in files if f['path'] == '.gitmodules'), '')
+    modules = next((f for f in files if f['path'] == '.gitmodules'), None)
     parser = configparser.ConfigParser(interpolation=None)
-    if modules:
+    if modules is not None:
         try:
-            parser.read_string(modules)
+            if modules['truncated']:
+                raise configparser.Error('truncated .gitmodules')
+            parser.read_string(modules['content'])
         except configparser.Error:
             unresolved.append({'reason': 'unreadable or truncated .gitmodules; dependency constraints unresolved'})
             parser = configparser.ConfigParser(interpolation=None)
+    accounted = set()
     # Read constants at the EXACT gitlink commit, not dependency default branch.
     # Credential-free GitHub raw HTTPS only, bounded files and timeouts.
     for index, section in enumerate(parser.sections()):
@@ -92,9 +95,13 @@ def scan(base, issue):
         url = parser.get(section, 'url', fallback='')
         match = re.fullmatch(r'https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?', url)
         entry = entries.get(path)
-        if not match or not entry or entry[0] != '160000':
+        if not entry or entry[0] != '160000':
             continue
         revision = entry[1]
+        accounted.add(path)
+        if not match:
+            unresolved.append({'path': path, 'revision': revision, 'reason': 'unsupported pinned dependency URL'})
+            continue
         if index >= 2:
             inventory_incomplete = True
             unresolved.append({'path': path, 'revision': revision, 'reason': 'pinned dependency constants exceed inspection count budget'})
@@ -124,6 +131,18 @@ def scan(base, issue):
                 pass
         if not found:
             unresolved.append({'path': path, 'revision': revision, 'reason': reason})
+    # The tree is authoritative even if .gitmodules was missing or unreadable.
+    # Bound additional diagnostics without hiding the number of omitted gitlinks.
+    missing = 0
+    for path, (mode, revision) in entries.items():
+        if mode == '160000' and path not in accounted:
+            missing += 1
+            if missing <= MAX_FILES:
+                unresolved.append({'path': path, 'revision': revision, 'reason': 'pinned dependency configuration unavailable'})
+    if missing > MAX_FILES:
+        unresolved.append({'reason': 'additional unconfigured gitlinks omitted from diagnostics',
+                           'omitted_count': missing - MAX_FILES})
+    inventory_incomplete |= bool(unresolved)
     sdk = []
     desugaring = []
     for f in files:
