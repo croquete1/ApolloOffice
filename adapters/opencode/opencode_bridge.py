@@ -47,7 +47,24 @@ When the actual work and command checks are complete, return {"final": YOUR_REQU
 
 
 def allowed_models(path=CATALOG, now=None):
-    catalog = json.loads(path.read_text())
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('Ambiguous free-model catalog JSON key')
+            result[key] = value
+        return result
+
+    def bounded_float(raw):
+        value = float(raw)
+        # A nonzero JSON number must never become a free price by underflow.
+        mantissa = raw.lower().split('e', 1)[0]
+        if value == 0.0 and any(digit in mantissa for digit in '123456789'):
+            raise ValueError('Free-model catalog number underflow')
+        return value
+
+    catalog = json.loads(path.read_text(), object_pairs_hook=unique_object,
+                         parse_float=bounded_float)
     if not isinstance(catalog, dict) or type(catalog.get('updated_at')) not in (int, float):
         raise ValueError('Invalid free-model catalog timestamp or structure')
     rows = catalog.get('models')
