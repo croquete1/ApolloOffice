@@ -14,8 +14,9 @@ def parse_models(text):
   rest=rest[start+used:]
   if not isinstance(value,dict):raise ValueError('Expected model object')
   ident=value.get('id');provider=value.get('providerID')
-  if isinstance(ident,str) and isinstance(provider,str):
-   value['full_id']=provider+'/'+ident;rows.append(value)
+  if not isinstance(ident,str) or not ident.strip() or not isinstance(provider,str) or not provider.strip():
+   raise ValueError('Invalid model identity in returned metadata')
+  value['full_id']=provider+'/'+ident;rows.append(value)
  if not rows:raise ValueError('No model metadata returned')
  return rows
 
