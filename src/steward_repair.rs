@@ -175,7 +175,10 @@ fn admit_review(
 ) -> rusqlite::Result<bool> {
     let (repo, number, head) = scope;
     let (rid, since) = review;
-    if !crate::db::valid_git_sha(head) || body["source_head"] != head || body["steward_head"] != head {
+    if !crate::db::valid_git_sha(head)
+        || body["source_head"] != head
+        || body["steward_head"] != head
+    {
         return Err(rusqlite::Error::InvalidQuery);
     }
     let updated = body["source_updated_at"]
@@ -620,7 +623,10 @@ mod tests {
         let updated = "2026-11-26T12:00:00Z";
         db.run(
             "insert into prs(repo,num,st,upd,d) values('o/r',1,'open',?,?)",
-            pa![updated.to_string(), json!({"watcher_head":head}).to_string()],
+            pa![
+                updated.to_string(),
+                json!({"watcher_head":head}).to_string()
+            ],
         );
         let policy = db.one("select steward_activation from rp", vec![]).unwrap();
         let mut body = json!({"source_head":head,"steward_head":head,"source_updated_at":updated,"steward_activation":policy["steward_activation"]});
@@ -654,7 +660,9 @@ mod tests {
         mismatched["source_updated_at"] = json!("invalid");
         assert!(admit(&mismatched).is_err());
         assert_eq!(db.n("select count(*) from jobs", vec![]), 0);
-        assert!(db.kg(&format!("steward:repair:{repo}#1:{head}:91")).is_null());
+        assert!(db
+            .kg(&format!("steward:repair:{repo}#1:{head}:91"))
+            .is_null());
         db.run("update rp set steward_repair=0", vec![]);
         assert!(!admit(&body).unwrap());
         db.run("update rp set steward_repair=1", vec![]);
