@@ -84,9 +84,15 @@ def scan(base, issue):
             if modules['truncated']:
                 raise configparser.Error('truncated .gitmodules')
             parser.read_string(modules['content'])
+            if parser.defaults():
+                raise configparser.Error('inherited .gitmodules defaults')
         except configparser.Error:
             unresolved.append({'reason': 'unreadable or truncated .gitmodules; dependency constraints unresolved'})
             parser = configparser.ConfigParser(interpolation=None)
+    path_counts = {}
+    for section in parser.sections():
+        path = parser.get(section, 'path', fallback='')
+        path_counts[path] = path_counts.get(path, 0) + 1
     accounted = set()
     # Read constants at the EXACT gitlink commit, not dependency default branch.
     # Credential-free GitHub raw HTTPS only, bounded files and timeouts.
@@ -98,7 +104,12 @@ def scan(base, issue):
         if not entry or entry[0] != '160000':
             continue
         revision = entry[1]
+        if path in accounted:
+            continue
         accounted.add(path)
+        if path_counts[path] > 1:
+            unresolved.append({'path': path, 'revision': revision, 'reason': 'ambiguous pinned dependency configuration'})
+            continue
         if not match:
             unresolved.append({'path': path, 'revision': revision, 'reason': 'unsupported pinned dependency URL'})
             continue
