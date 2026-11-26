@@ -2842,21 +2842,36 @@ mod watcher_retry_tests {
             "insert into prs(repo,num,st,upd,d) values('o/r',1,'open','t',?)",
             crate::pa![json!({"watcher_head":head}).to_string()],
         );
-        let first = db.claim_review_attempt("o/r", 1, "t", head, 0).unwrap().unwrap();
-        assert!(db.claim_review_attempt("o/r", 1, "t", head, 600000).unwrap().is_none());
+        let first = db
+            .claim_review_attempt("o/r", 1, "t", head, 0)
+            .unwrap()
+            .unwrap();
+        assert!(db
+            .claim_review_attempt("o/r", 1, "t", head, 600000)
+            .unwrap()
+            .is_none());
         let original = db.try_all("select * from watcher_retry", vec![]).unwrap();
         assert_eq!(original[0]["analysis_ticket"], first.ticket);
         assert_eq!(original[0]["next_attempt_at"], 600000);
         // Use production startup recovery, not a simulated ticket update.
         let app = std::sync::Arc::new(crate::app::App::new(
-            db.clone(), std::env::temp_dir(), 1, "apollo-office".into(),
+            db.clone(),
+            std::env::temp_dir(),
+            1,
+            "apollo-office".into(),
         ));
         crate::pipe::recover(&app).unwrap();
         let recovered = db.try_all("select * from watcher_retry", vec![]).unwrap();
         assert!(recovered[0]["analysis_ticket"].is_null());
         assert_eq!(recovered[0]["next_attempt_at"], 600000);
-        assert!(db.claim_review_attempt("o/r", 1, "t", head, 599999).unwrap().is_none());
-        let second = db.claim_review_attempt("o/r", 1, "t", head, 600000).unwrap().unwrap();
+        assert!(db
+            .claim_review_attempt("o/r", 1, "t", head, 599999)
+            .unwrap()
+            .is_none());
+        let second = db
+            .claim_review_attempt("o/r", 1, "t", head, 600000)
+            .unwrap()
+            .unwrap();
         assert_ne!(first.ticket, second.ticket);
         drop(first);
         let active = db.try_all("select * from watcher_retry", vec![]).unwrap();
@@ -2870,23 +2885,29 @@ mod watcher_retry_tests {
     #[test]
     fn legacy_retry_migration_preserves_deadline_and_does_not_clear_live_ticket() {
         let mut c = Connection::open_in_memory().unwrap();
-        c.execute_batch(&SCH.replace("analysis_ticket text,", "")).unwrap();
+        c.execute_batch(&SCH.replace("analysis_ticket text,", ""))
+            .unwrap();
         c.execute_batch(
             "pragma user_version=6;
              insert into prs(repo,num,st) values('o/r',1,'open');
              insert into watcher_retry values('o/r',1,'head','snapshot',3,1234567);",
-        ).unwrap();
+        )
+        .unwrap();
         init(&mut c).unwrap();
-        let row: (i64, i64, Option<String>) = c.query_row(
-            "select attempts,next_attempt_at,analysis_ticket from watcher_retry",
-            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        ).unwrap();
+        let row: (i64, i64, Option<String>) = c
+            .query_row(
+                "select attempts,next_attempt_at,analysis_ticket from watcher_retry",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
         assert_eq!(row, (3, 1234567, None));
-        c.execute("update watcher_retry set analysis_ticket='live'", []).unwrap();
+        c.execute("update watcher_retry set analysis_ticket='live'", [])
+            .unwrap();
         init(&mut c).unwrap();
-        let ticket: String = c.query_row(
-            "select analysis_ticket from watcher_retry", [], |r| r.get(0),
-        ).unwrap();
+        let ticket: String = c
+            .query_row("select analysis_ticket from watcher_retry", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(ticket, "live");
     }
 
