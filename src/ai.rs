@@ -353,6 +353,31 @@ pub async fn cctok(a: &Ax) -> R<Option<String>> {
     Ok(Some(r.o.trim().to_string()))
 }
 
+// A result body is data, not proof of a successful provider invocation.
+fn record_claude_terminal(status: &mut Option<bool>, event: &Value) {
+    let success = event["subtype"] == "success" && event["is_error"].as_bool() == Some(false);
+    // Exactly one terminal result is expected. A duplicate cannot turn a
+    // previous failure (or an ambiguous stream) into a successful verdict.
+    *status = Some(status.is_none() && success);
+}
+
+fn claude_result(txt: String, error: &str, terminal: Option<bool>, exit: i32) -> R<(String, Value)> {
+    if terminal != Some(true) || exit != 0 || txt.trim().is_empty() {
+        if regex::Regex::new(LIM).unwrap().is_match(error) {
+            return Err(X::Lim(crate::sh::head(error.trim(), 200)));
+        }
+        if crate::app::netish(error) {
+            return Err(X::Net(crate::sh::head(error.trim(), 200)));
+        }
+        return Err(X::E(format!(
+            "claude did not complete successfully (exit {exit}, terminal {terminal:?}): {}",
+            crate::sh::head(error.trim(), 300)
+        )));
+    }
+    let js = pj(&txt);
+    Ok((txt, js))
+}
+
 async fn cc(a: &Ax, o: Ask) -> R<(String, Value)> {
     let e0 = a.dd.join("empty");
     let _ = std::fs::create_dir_all(&e0);
@@ -408,7 +433,7 @@ async fn cc(a: &Ax, o: Ask) -> R<(String, Value)> {
     a.st(o.w, "work", o.job, "");
     let txt = Mutex::new(String::new());
     let err = Mutex::new(String::new());
-    let done = Mutex::new(false);
+    let terminal = Mutex::new(None);
     let us = Mutex::new(([0i64; 4], None::<f64>));
     let ax = a.clone();
     let w = o.w;
@@ -458,14 +483,15 @@ async fn cc(a: &Ax, o: Ask) -> R<(String, Value)> {
                     ],
                     d["total_cost_usd"].as_f64(),
                 );
-                if d["is_error"].as_bool().unwrap_or(false) || d["subtype"] != "success" {
+                let mut status = terminal.lock().unwrap();
+                record_claude_terminal(&mut status, &d);
+                if *status != Some(true) {
                     *err.lock().unwrap() = format!(
                         "{} {}",
                         d["subtype"].as_str().unwrap_or(""),
                         d["result"].as_str().unwrap_or("")
                     );
                 }
-                *done.lock().unwrap() = true;
             }
             _ => {}
         }
@@ -530,22 +556,7 @@ async fn cc(a: &Ax, o: Ask) -> R<(String, Value)> {
         err.into_inner().unwrap(),
         crate::sh::last(&r.e, 500)
     );
-    let dn = done.into_inner().unwrap();
-    if regex::Regex::new(LIM).unwrap().is_match(&er) && txt.trim().is_empty() {
-        return Err(X::Lim(crate::sh::head(er.trim(), 200)));
-    }
-    if txt.trim().is_empty() {
-        if crate::app::netish(&er) {
-            return Err(X::Net(crate::sh::head(er.trim(), 200)));
-        }
-        return Err(X::E(format!(
-            "claude {}{}",
-            if dn { "" } else { "ended early: " },
-            crate::sh::head(er.trim(), 300)
-        )));
-    }
-    let js = pj(&txt);
-    Ok((txt, js))
+    claude_result(txt, &er, terminal.into_inner().unwrap(), r.c)
 }
 
 async fn codex(a: &Ax, o: Ask) -> R<(String, Value)> {
@@ -1042,6 +1053,49 @@ mod t {
             2
         );
         assert!(by_id(&json!({"1": {}}), &ids).is_none());
+    }
+
+    #[test]
+    fn claude_requires_single_successful_terminal_and_exit() {
+        let text = r#"{"act":true,"change":"fixture"}"#;
+        let success = json!({"subtype":"success","is_error":false});
+        let mut terminal = None;
+        record_claude_terminal(&mut terminal, &success);
+        assert_eq!(
+            claude_result(text.into(), "", terminal, 0).unwrap().1["act"],
+            true
+        );
+        assert!(claude_result(text.into(), "", terminal, 1).is_err());
+        assert!(claude_result(text.into(), "", None, 0).is_err());
+        assert!(claude_result(" ".into(), "", terminal, 0).is_err());
+        record_claude_terminal(&mut terminal, &success);
+        assert!(claude_result(text.into(), "", terminal, 0).is_err());
+
+        for event in [
+            json!({"subtype":"success","is_error":true}),
+            json!({"subtype":"error_max_turns","is_error":false}),
+            json!({"subtype":"success"}),
+            json!({"subtype":"success","is_error":"false"}),
+        ] {
+            let mut terminal = None;
+            record_claude_terminal(&mut terminal, &event);
+            assert!(claude_result(text.into(), "", terminal, 0).is_err());
+            record_claude_terminal(&mut terminal, &success);
+            assert!(claude_result(text.into(), "", terminal, 0).is_err());
+        }
+        assert!(matches!(
+            claude_result(text.into(), "usage limit reached", Some(false), 1),
+            Err(X::Lim(_))
+        ));
+        assert!(matches!(
+            claude_result(text.into(), "connection reset", Some(false), 1),
+            Err(X::Net(_))
+        ));
+        // Successful invocations retain existing handling of plain text.
+        assert!(claude_result("plain text".into(), "", Some(true), 0)
+            .unwrap()
+            .1
+            .is_null());
     }
 
     #[test]
