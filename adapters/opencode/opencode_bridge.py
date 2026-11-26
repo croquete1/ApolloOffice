@@ -121,12 +121,18 @@ def request_args(body, allowed):
         calls = message.get('tool_calls')
         if calls is None:
             continue
-        if not isinstance(calls, list) or any(
-            not isinstance(call, dict) or not isinstance(call.get('function'), dict)
-            or not isinstance(call['function'].get('name'), str)
-            or not call['function']['name'] for call in calls
-        ):
+        if not isinstance(calls, list):
             raise ValueError('Invalid tool call history')
+        for call in calls:
+            if not isinstance(call, dict):
+                raise ValueError('Invalid tool call history')
+            # Older controller transcripts may contain only the call ID.
+            # Preserve references without treating them as executable functions.
+            if 'function' not in call and isinstance(call.get('id'), str) and call['id'].strip():
+                continue
+            function = call.get('function')
+            if not isinstance(function, dict) or not isinstance(function.get('name'), str) or not function['name']:
+                raise ValueError('Invalid tool call history')
     tools = body.get('tools', [])
     if not isinstance(tools, list) or len(tools) > 32:
         raise ValueError('Invalid tool catalog')
