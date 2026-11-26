@@ -63,9 +63,17 @@ class DependencyBudgetTests(unittest.TestCase):
             self.git('add', str(directory))
         self.git('commit', '-qm', 'root')
         base = self.git('rev-parse', 'HEAD')
+        self.read_sizes = []
+        read_sizes = self.read_sizes
+
+        class RecordingResponse(io.BytesIO):
+            def read(self, size=-1):
+                read_sizes.append(size)
+                return super().read(size)
+
         with patch.object(self.preflight.shutil, 'which', return_value=None), \
              patch.object(self.preflight.urllib.request, 'urlopen',
-                          side_effect=[io.BytesIO(data) for data in responses]) as remote:
+                          side_effect=[RecordingResponse(data) for data in responses]) as remote:
             facts = self.preflight.scan(base, '')
         return facts, remote
 
@@ -87,6 +95,7 @@ class DependencyBudgetTests(unittest.TestCase):
         self.assert_bounded(facts)
         self.assert_omitted(facts, 'first')
         remote.assert_not_called()
+        self.assertEqual(self.read_sizes, [])
 
     def test_remote_blob_exceeding_remaining_bytes_is_omitted(self):
         self.modules('first')
@@ -95,6 +104,7 @@ class DependencyBudgetTests(unittest.TestCase):
         self.assert_bounded(facts)
         self.assert_omitted(facts, 'first')
         remote.assert_called_once()
+        self.assertEqual(self.read_sizes, [4])
 
     def test_two_dependencies_share_one_byte_budget(self):
         self.modules('first', 'second')
@@ -104,6 +114,7 @@ class DependencyBudgetTests(unittest.TestCase):
         self.assert_bounded(facts)
         self.assert_omitted(facts, 'second')
         self.assertEqual(remote.call_count, 2)
+        self.assertEqual(self.read_sizes, [6001, 2001])
         first = next(f for f in facts['files'] if f['path'] == 'deps/first/constants.gradle')
         self.assertEqual(first['dependency_revision'], self.revision)
         self.assertEqual(first['sha256'], hashlib.sha256(raw).hexdigest())
