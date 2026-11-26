@@ -64,6 +64,24 @@ class InventoryLimitTests(unittest.TestCase):
         self.assertFalse(facts['inventory_truncated'])
         self.assertEqual([item['value'] for item in facts['min_sdk']], [21, 35])
 
+    def test_untrusted_line_hint_preserves_bounded_evidence(self):
+        raw = ''.join(f'line {index:04d} ' + 'x' * 100 + '\n' for index in range(1, 401))
+        Path('Example.java').write_text(raw)
+        self.git('add', 'Example.java')
+        self.git('commit', '-qm', 'root')
+        base = self.git('rev-parse', 'HEAD')
+        with patch.object(preflight.shutil, 'which', return_value=None), \
+             patch.object(preflight.urllib.request, 'urlopen') as remote:
+            for hint in ('9' * 4500, '9999999999', '401', '0'):
+                with self.subTest(hint=hint[:20]):
+                    facts = preflight.scan(base, 'Example.java:' + hint)
+                    self.assertTrue(facts['inventory_truncated'])
+                    self.assertEqual(facts['files'][0]['content'], raw[:20000])
+            facts = preflight.scan(base, 'Example.java:200')
+            self.assertTrue(facts['inventory_truncated'])
+            self.assertEqual(facts['files'][0]['content'], ''.join(raw.splitlines(keepends=True)[135:])[:20000])
+        remote.assert_not_called()
+
     def workflows(self, count):
         directory = Path('.github/workflows')
         directory.mkdir(parents=True)
