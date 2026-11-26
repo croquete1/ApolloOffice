@@ -49,20 +49,24 @@ class QualityIntegration(unittest.TestCase):
         self.assertFalse(any(f['path']=='README.md' for f in facts['files']))
 
     def test_preflight_preserves_literal_tracked_paths(self):
-        manifests = {'módulo/build.gradle': 17, 'with space/build.gradle': 19}
+        manifests = {'módulo/build.gradle': 17, 'with space/build.gradle': 19,
+                     'module/build.gradle': 29}
+        self.git('config', 'core.autocrlf', 'true')
         if os.name != 'nt':
             manifests['line\nbreak/build.gradle'] = 23
+            manifests[':(literal)module/build.gradle'] = 31
         for path, version in manifests.items():
             target = self.repo / path
             target.parent.mkdir(parents=True)
-            target.write_text(f'minSdkVersion {version}\n', encoding='utf-8')
+            target.write_bytes(f'minSdkVersion {version}\r\n'.encode('utf-8'))
         base = self.commit()
         module = load('preflight')
         with patch.object(module.shutil, 'which', return_value=None):
             facts = module.scan(base, '')
         self.assertEqual({f['path']: f['value'] for f in facts['min_sdk']}, manifests)
         for f in facts['files']:
-            self.assertEqual(f['sha256'], hashlib.sha256((self.repo / f['path']).read_bytes()).hexdigest())
+            blob = subprocess.check_output(['git', 'cat-file', 'blob', f"{base}:{f['path']}"])
+            self.assertEqual(f['sha256'], hashlib.sha256(blob).hexdigest())
 
     def test_pinned_submodule_manifest_is_resolved_at_gitlink_not_main(self):
         dependency = self.commit_empty()
