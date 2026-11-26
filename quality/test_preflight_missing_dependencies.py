@@ -125,6 +125,38 @@ class MissingDependencyTests(unittest.TestCase):
         remote.assert_called_once()
         self.assertIn('/example/second/', remote.call_args.args[0].full_url)
 
+    def test_unrelated_section_is_not_submodule_evidence(self):
+        self.link('deps/first')
+        config = b'[unrelated]\npath = deps/first\nurl = https://github.com/example/first.git\n'
+        facts, remote = self.scan(config, io.BytesIO(b'minSdkVersion 21'))
+        self.assert_unresolved(facts, 'deps/first')
+        self.assertEqual(facts['min_sdk'], [])
+        remote.assert_not_called()
+
+    def test_native_git_syntax_preserves_valid_dependency(self):
+        self.link('deps/first')
+        config = (b'[Submodule "first.with.dot"]\npath = "deps/first"\n'
+                  b'url = "https://github.com/example/first.git" # comment\n')
+        facts, remote = self.scan(config, io.BytesIO(b'minSdkVersion 21'))
+        self.assertFalse(facts['inventory_truncated'])
+        self.assertEqual(facts['min_sdk'], [{'value': 21, 'path': 'deps/first/constants.gradle', 'revision': self.revision}])
+        remote.assert_called_once()
+
+    def test_duplicate_native_keys_fail_closed(self):
+        self.link('deps/first')
+        config = (b'[submodule "first"]\npath = deps/first\nurl = https://github.com/example/first.git\n'
+                  b'[Submodule "first"]\nurl = https://github.com/example/other.git\n')
+        facts, remote = self.scan(config, io.BytesIO(b'minSdkVersion 21'))
+        self.assert_unresolved(facts, 'deps/first')
+        remote.assert_not_called()
+
+    def test_invalid_git_config_syntax_is_not_evidence(self):
+        self.link('deps/first')
+        config = b'[submodule "first"]\npath: deps/first\nurl: https://github.com/example/first.git\n'
+        facts, remote = self.scan(config, io.BytesIO(b'minSdkVersion 21'))
+        self.assert_unresolved(facts, 'deps/first')
+        remote.assert_not_called()
+
     def test_valid_dependency_retains_pinned_evidence(self):
         self.link('deps/first')
         config = b'[submodule "first"]\npath = deps/first\nurl = https://github.com/example/first.git\n'
