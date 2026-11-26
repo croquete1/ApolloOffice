@@ -63,8 +63,11 @@ def allowed_models(path=CATALOG, now=None):
             raise ValueError('Free-model catalog number underflow')
         return value
 
-    catalog = json.loads(path.read_text(), object_pairs_hook=unique_object,
-                         parse_float=bounded_float)
+    try:
+        catalog = json.loads(path.read_text(), object_pairs_hook=unique_object,
+                             parse_float=bounded_float)
+    except RecursionError as exc:
+        raise ValueError('Free-model catalog nesting too deep') from exc
     if not isinstance(catalog, dict) or type(catalog.get('updated_at')) not in (int, float):
         raise ValueError('Invalid free-model catalog timestamp or structure')
     rows = catalog.get('models')
@@ -78,9 +81,16 @@ def allowed_models(path=CATALOG, now=None):
     if not current - 86400 <= catalog['updated_at'] <= current:
         raise ValueError('Free-model catalog expired; refresh required')
     def zero(value):
-        if isinstance(value, dict):
-            return bool(value) and all(zero(v) for v in value.values())
-        return type(value) in (int, float) and value == 0
+        pending = [value]
+        while pending:
+            item = pending.pop()
+            if isinstance(item, dict):
+                if not item:
+                    return False
+                pending.extend(item.values())
+            elif type(item) not in (int, float) or item != 0:
+                return False
+        return True
     # A model with multiple metadata rows is ambiguous, even if one row is free.
     seen, ambiguous = set(), set()
     for row in rows:
