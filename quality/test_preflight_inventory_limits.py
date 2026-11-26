@@ -82,6 +82,26 @@ class InventoryLimitTests(unittest.TestCase):
             self.assertEqual(facts['files'][0]['content'], ''.join(raw.splitlines(keepends=True)[135:])[:20000])
         remote.assert_not_called()
 
+    def test_replace_ref_cannot_substitute_requested_commit(self):
+        Path('build.gradle').write_text('minSdkVersion 21\n')
+        self.git('add', 'build.gradle')
+        self.git('commit', '-qm', 'original')
+        original = self.git('rev-parse', 'HEAD')
+        Path('build.gradle').write_text('minSdkVersion 35\n')
+        self.git('add', 'build.gradle')
+        self.git('commit', '-qm', 'replacement')
+        replacement = self.git('rev-parse', 'HEAD')
+        self.git('replace', original, replacement)
+        # Positive control: normal Git reads the substituted tree.
+        self.assertEqual(self.git('show', original + ':build.gradle'), 'minSdkVersion 35')
+        with patch.object(preflight.shutil, 'which', return_value=None), \
+             patch.object(preflight.urllib.request, 'urlopen') as remote:
+            facts = preflight.scan(original, '')
+        remote.assert_not_called()
+        self.assertEqual(facts['base'], original)
+        self.assertEqual(facts['min_sdk'], [{'value': 21, 'path': 'build.gradle', 'revision': original}])
+        self.assertEqual(facts['files'][0]['content'], 'minSdkVersion 21\n')
+
     def workflows(self, count):
         directory = Path('.github/workflows')
         directory.mkdir(parents=True)
