@@ -796,7 +796,14 @@ mod tests {
     async fn remote_entry_points_preserve_the_snapshot_during_io() {
         for automatic in [false, true] {
             for mutation in [
-                "num", "timestamp", "metadata", "recreate", "reactivate", "ci", "none", "cancel",
+                "num",
+                "timestamp",
+                "metadata",
+                "recreate",
+                "reactivate",
+                "ci",
+                "none",
+                "cancel",
             ] {
                 if mutation == "cancel" && !automatic {
                     continue;
