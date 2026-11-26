@@ -86,6 +86,21 @@ def run_stage(binary, root, env, stage, predicate):
             time.sleep(0.1)
         else:
             raise AssertionError(f'{stage} timed out: {query(root, "select w,m from ev order by id desc limit 8")}')
+        if stage == 'before-guard':
+            # The first actual server owns a live analysis reservation. A
+            # second server on another ephemeral port must fail before recovery.
+            receipt = query(root, 'select analysis_ticket,next_attempt_at from watcher_retry')
+            assert len(receipt) == 1 and receipt[0][0]
+            offset = (root / 'process.log').stat().st_size
+            with running(binary, root, env) as contender:
+                assert contender.wait(timeout=15) != 0
+            diagnostic = (root / 'process.log').read_bytes()[offset:]
+            assert b'data directory is already in use' in diagnostic, diagnostic
+            assert process.poll() is None, 'first server exited during contention'
+            assert query(root, 'select analysis_ticket,next_attempt_at from watcher_retry') == receipt
+            assert query(root, 'select count(*) from jobs') == [(0,)]
+            assert query(root, 'select count(*) from cm') == [(0,)]
+            print('F02 inbox restart checkpoint: concurrent-server-rejected', flush=True)
     print(f'F02 inbox restart checkpoint: {stage}', flush=True)
 
 
