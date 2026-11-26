@@ -61,6 +61,7 @@ jobs:
           }
           trap cleanup EXIT
           cargo test --locked real_docker_worker_lifecycle -- --ignored --nocapture
+          python3 quality/worker_node_acceptance.py
 
       - name: Real SSH worker transport (isolated loopback)
         if: runner.os == 'Linux'
