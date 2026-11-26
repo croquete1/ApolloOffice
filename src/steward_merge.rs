@@ -446,7 +446,7 @@ async fn merge_mode(
 /// Agenda apenas uma revalidação pendente por repositório.
 /// Sem provas não há merge: o worker executará testes reais e Reviewer no HEAD.
 fn queue_recheck(a: &Ax, repo: &str, number: i64, head: &str, base: &str, detail: &Value) -> bool {
-    if a.hold("watcher") {
+    if a.hold("watcher") || !crate::db::valid_git_sha(head) || !crate::db::valid_git_sha(base) {
         return false;
     }
     let original = a.db.one(
@@ -473,7 +473,14 @@ fn queue_recheck(a: &Ax, repo: &str, number: i64, head: &str, base: &str, detail
     let inserted = a.db.ch(
         "insert into jobs(repo,num,kind,title,url,st,why,d,pr,prio,t0,t1)
          select ?,?,'mergecheck',?,?,'ready','Revalidar CI e Reviewer antes de merge',?,?,-5.0,?,?
-         where not exists (
+         where exists (
+             select 1 from rp where full=? and on_=1 and auto_merge=1 and local_merge=1
+         )
+         and not exists (
+             select 1 from jobs where repo=? and pr=? and kind in ('review','rebase','mergecheck')
+               and st not in ('done','drop')
+         )
+         and not exists (
              select 1 from jobs where repo=? and kind='mergecheck' and st not in ('done','drop')
          )
          and not exists (
@@ -493,6 +500,9 @@ fn queue_recheck(a: &Ax, repo: &str, number: i64, head: &str, base: &str, detail
             number,
             t,
             t,
+            repo.to_string(),
+            repo.to_string(),
+            number,
             repo.to_string(),
             repo.to_string(),
             number,
@@ -1333,6 +1343,31 @@ mod tests {
             "head":{"ref":"fix/repro"},
             "body":"Teste de regressão"
         });
+        assert!(!queue_recheck(&a, repo, 42, head, base, &detail));
+        a.db.run(
+            "insert into rp(full,on_,auto_merge,local_merge) values(?,1,1,0)",
+            pa![repo.to_string()],
+        );
+        assert!(!queue_recheck(&a, repo, 42, head, base, &detail));
+        a.db.run("update rp set local_merge=1", pa![]);
+        assert!(!queue_recheck(&a, repo, 42, "invalid", base, &detail));
+        assert!(!queue_recheck(&a, repo, 42, head, "invalid", &detail));
+        for kind in ["review", "rebase"] {
+            a.db.run(
+                "insert into jobs(repo,pr,kind,st) values(?,42,?,'ready')",
+                pa![repo.to_string(), kind.to_string()],
+            );
+            assert!(!queue_recheck(&a, repo, 42, head, base, &detail));
+            a.db.run(
+                "update jobs set st='done' where repo=? and pr=42 and kind=?",
+                pa![repo.to_string(), kind.to_string()],
+            );
+        }
+        a.db.run("update rp set auto_merge=0", pa![]);
+        assert!(!queue_recheck(&a, repo, 42, head, base, &detail));
+        a.db.run("update rp set auto_merge=1,on_=0", pa![]);
+        assert!(!queue_recheck(&a, repo, 42, head, base, &detail));
+        a.db.run("update rp set on_=1", pa![]);
         assert!(queue_recheck(&a, repo, 42, head, base, &detail));
         assert!(!queue_recheck(&a, repo, 42, head, base, &detail));
         assert_eq!(
