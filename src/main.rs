@@ -64,14 +64,46 @@ enum C {
     Mcp { port: u16, token: String },
 }
 
-fn open(dd: &std::path::Path) -> anyhow::Result<db::Db> {
+fn prepare_data_dir(dd: &std::path::Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(dd)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(dd, std::fs::Permissions::from_mode(0o700));
     }
+    Ok(())
+}
+
+fn open(dd: &std::path::Path) -> anyhow::Result<db::Db> {
+    prepare_data_dir(dd)?;
     db::Db::open(&dd.join("office.db"))
+}
+
+// The server owns recovery and all worker lanes for this directory. A port
+// lock alone cannot prevent a second instance from recovering live work.
+fn lock_data_dir(dd: &std::path::Path) -> anyhow::Result<std::fs::File> {
+    prepare_data_dir(dd)?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dd.join("office.lock"))?;
+    let started = std::time::Instant::now();
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                // On Windows the replacement process may start just before
+                // its predecessor exits. Wait briefly without stealing a lock.
+                if started.elapsed() >= std::time::Duration::from_secs(5) {
+                    anyhow::bail!("Apollo Office data directory is already in use: {}", dd.display());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+        }
+    }
 }
 
 fn url(d: &db::Db, port: u16) -> anyhow::Result<String> {
@@ -122,6 +154,9 @@ async fn main() -> anyhow::Result<()> {
         }
         _ => {}
     }
+    // Keep the same file handle alive until process exit/reexec. Never
+    // remove the lock file: another process may already have opened it.
+    let _instance_lock = lock_data_dir(&dd)?;
     upd::cleanup(&me);
     let d = open(&dd)?;
     d.ks("port", &serde_json::json!(a.port));
