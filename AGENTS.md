@@ -45,6 +45,9 @@ Se faltar toolchain, ambiente ou acesso, preferir execução noutro ambiente aut
 - Evidência de identidade deve corresponder ao objeto realmente resolvido/observado (não repetir o identificador pedido como prova). Testes de rejeição devem verificar ausência de efeitos antes da validação: marcador no início da execução, antes de leituras que possam falhar; observação de chamadas reais; fixtures isoladas de variáveis Git e configurações herdadas. Testar permissões reais sem privilégios que mascarem erros.
 - Sinalizar explicitamente omissão, truncagem e descodificação com perda de informação; não extrapolar completude a partir de inventários limitados. Metadados de preço contraditórios ou duplicados não autorizam modelos gratuitos.
 
+- Testar os limites efetivamente pedidos a operações de I/O (argumentos e sequência de leituras), não apenas o tamanho do resultado; distinguir orçamento de dados emitidos do consumo real. Usar mutações controladas quando úteis para confirmar que a regressão é detetada.
+- Validar timestamps externos por limites seguros, incluindo números extremos, valores não finitos e fronteiras. Distinguir indisponibilidade de ficheiros essenciais de pedidos inválidos; rejeitar antes de reservar recursos ou iniciar fornecedores. Testar ausência de efeitos e não confundir testes de handlers simulados com transporte real.
+
 ## 5. Revisão, merge e evidências
 
 - CI verde é necessário, não suficiente. Exigir CI integral no HEAD exato, revisão independente das alterações funcionais finais, resolução de findings e threads, base atual, ausência de conflitos/sobreposição e proteções existentes.
