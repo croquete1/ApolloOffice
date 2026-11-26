@@ -16,7 +16,7 @@ class CatalogRefreshIdentityTests(unittest.TestCase):
         row = {'id': 'free', 'providerID': 'opencode', 'status': 'active',
                'cost': {'input': 0, 'output': 0}}
         row.update(overrides)
-        return 'opencode/free\n' + json.dumps(row) + '\n'
+        return f"{row['providerID']}/{row['id']}\n" + json.dumps(row) + '\n'
 
     def test_invalid_identity_rejects_entire_inventory(self):
         for overrides in ({'id': None}, {'providerID': None}, {'id': ''},
