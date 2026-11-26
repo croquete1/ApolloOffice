@@ -85,6 +85,46 @@ class MissingDependencyTests(unittest.TestCase):
         self.assertEqual(facts['unresolved_dependencies'][-1]['omitted_count'], 3)
         remote.assert_not_called()
 
+    def test_conflicting_duplicate_paths_are_refused_before_io(self):
+        self.link('deps/first')
+        config = (b'[submodule "first"]\npath = deps/first\nurl = https://github.com/example/first.git\n'
+                  b'[submodule "other"]\npath = deps/first\nurl = https://github.com/example/other.git\n')
+        facts, remote = self.scan(config, io.BytesIO(b'minSdkVersion 21'))
+        self.assert_unresolved(facts, 'deps/first')
+        self.assertEqual(len(facts['unresolved_dependencies']), 1)
+        self.assertIn('ambiguous', facts['unresolved_dependencies'][0]['reason'])
+        self.assertEqual(facts['min_sdk'], [])
+        remote.assert_not_called()
+
+    def test_identical_duplicate_paths_are_refused_before_io(self):
+        self.link('deps/first')
+        config = (b'[submodule "first"]\npath = deps/first\nurl = https://github.com/example/first.git\n'
+                  b'[submodule "other"]\npath = deps/first\nurl = https://github.com/example/first.git\n')
+        facts, remote = self.scan(config, io.BytesIO(b'minSdkVersion 21'))
+        self.assert_unresolved(facts, 'deps/first')
+        self.assertEqual(len(facts['unresolved_dependencies']), 1)
+        remote.assert_not_called()
+
+    def test_inherited_default_url_is_not_dependency_evidence(self):
+        self.link('deps/first')
+        config = (b'[DEFAULT]\nurl = https://github.com/example/first.git\n'
+                  b'[submodule "first"]\npath = deps/first\n')
+        facts, remote = self.scan(config, io.BytesIO(b'minSdkVersion 21'))
+        self.assert_unresolved(facts, 'deps/first')
+        remote.assert_not_called()
+
+    def test_ambiguity_does_not_discard_independent_valid_dependency(self):
+        self.link('deps/first')
+        self.link('deps/second')
+        config = (b'[submodule "first"]\npath = deps/first\nurl = https://github.com/example/first.git\n'
+                  b'[submodule "second"]\npath = deps/second\nurl = https://github.com/example/second.git\n'
+                  b'[submodule "other"]\npath = deps/first\nurl = https://github.com/example/other.git\n')
+        facts, remote = self.scan(config, io.BytesIO(b'minSdkVersion 22'))
+        self.assert_unresolved(facts, 'deps/first')
+        self.assertEqual(facts['min_sdk'], [{'value': 22, 'path': 'deps/second/constants.gradle', 'revision': self.revision}])
+        remote.assert_called_once()
+        self.assertIn('/example/second/', remote.call_args.args[0].full_url)
+
     def test_valid_dependency_retains_pinned_evidence(self):
         self.link('deps/first')
         config = b'[submodule "first"]\npath = deps/first\nurl = https://github.com/example/first.git\n'
