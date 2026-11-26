@@ -48,6 +48,9 @@ Se faltar toolchain, ambiente ou acesso, preferir execução noutro ambiente aut
 - Testar os limites efetivamente pedidos a operações de I/O (argumentos e sequência de leituras), não apenas o tamanho do resultado; distinguir orçamento de dados emitidos do consumo real. Usar mutações controladas quando úteis para confirmar que a regressão é detetada.
 - Validar timestamps externos por limites seguros, incluindo números extremos, valores não finitos e fronteiras. Distinguir indisponibilidade de ficheiros essenciais de pedidos inválidos; rejeitar antes de reservar recursos ou iniciar fornecedores. Testar ausência de efeitos e não confundir testes de handlers simulados com transporte real.
 
+- Antes de apertar validação de um protocolo, inventariar os formatos já aceites pelos consumidores e testes históricos (incluindo representações parciais legítimas, como referências a chamadas por ID sem função executável). Testar compatibilidade positiva e rejeição de estruturas inválidas sem alterar a semântica de testes históricos para obter verde. Executar a suite integral do componente quando disponível; um excerto isolado ou novos testes verdes não demonstram ausência de regressões.
+- Aplicar validação de identidade, completude e preços também na origem, antes de normalizar/serializar metadados; o consumidor não consegue recuperar informação perdida (chaves duplicadas, arredondamento para zero, registos descartados). Testar preservação do estado anterior quando uma atualização falha.
+
 ## 5. Revisão, merge e evidências
 
 - CI verde é necessário, não suficiente. Exigir CI integral no HEAD exato, revisão independente das alterações funcionais finais, resolução de findings e threads, base atual, ausência de conflitos/sobreposição e proteções existentes.
