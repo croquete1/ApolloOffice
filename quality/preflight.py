@@ -21,7 +21,21 @@ def git(*args):
 def scan(base, issue):
     if not re.fullmatch(r'[0-9a-f]{40,64}', base):
         raise ValueError('exact base commit required')
-    paths = git('ls-tree', '-r', '--name-only', base).decode('utf-8', 'replace').splitlines()
+    # NUL-delimited tree records preserve literal paths and their exact object IDs.
+    entries = {}
+    undecodable_paths = False
+    for record in git('ls-tree', '-r', '-z', base).split(b'\0'):
+        if not record:
+            continue
+        metadata, raw_path = record.split(b'\t', 1)
+        mode, _, oid = metadata.decode('ascii').split()
+        try:
+            path = raw_path.decode('utf-8')
+        except UnicodeDecodeError:
+            undecodable_paths = True
+            continue
+        entries[path] = (mode, oid)
+    paths = list(entries)
     manifests = {'pyproject.toml', 'package.json', 'Cargo.toml', 'go.mod', 'build.gradle',
                  'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts', 'constants.gradle',
                  'gradle.properties', 'Makefile', 'tox.ini', 'pytest.ini', '.gitmodules',
@@ -36,10 +50,9 @@ def scan(base, issue):
         if len(files) >= MAX_FILES or used >= MAX_BYTES:
             break
         # Reject symlinks/gitlinks; inspect tracked blobs, never local files.
-        entry = git('ls-tree', base, '--', path).decode().split()
-        if not entry or entry[0] not in ('100644', '100755'):
+        mode, oid = entries[path]
+        if mode not in ('100644', '100755'):
             continue
-        oid = entry[2]
         size = int(git('cat-file', '-s', oid))
         if size > 200000:
             continue
@@ -69,10 +82,10 @@ def scan(base, issue):
         path = parser.get(section, 'path', fallback='')
         url = parser.get(section, 'url', fallback='')
         match = re.fullmatch(r'https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?', url)
-        entry = git('ls-tree', base, '--', path).decode().split() if path else []
+        entry = entries.get(path)
         if not match or not entry or entry[0] != '160000':
             continue
-        revision = entry[2]
+        revision = entry[1]
         remote = match[1]
         found = False
         for name in ['constants.gradle']:
@@ -109,7 +122,7 @@ def scan(base, issue):
             tools[tool] = 'missing'
     tools['android_sdk'] = 'present' if any((pathlib.Path(os.environ.get(k, '/nonexistent'))/'platforms').is_dir() for k in ['ANDROID_HOME', 'ANDROID_SDK_ROOT']) else 'missing'
     return {'base': base, 'files': files, 'tools': tools, 'min_sdk': sdk, 'library_desugaring_evidence': desugaring,
-            'unresolved_dependencies': unresolved, 'inventory_truncated': len(wanted) > MAX_FILES or used >= MAX_BYTES,
+            'unresolved_dependencies': unresolved, 'inventory_truncated': undecodable_paths or len(wanted) > MAX_FILES or used >= MAX_BYTES,
             'test_paths': [p for p in paths if re.search(r'(^|/)(tests?|__tests__)(/|\.)|test_', p)][:60]}
 
 
