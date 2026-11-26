@@ -2906,7 +2906,9 @@ mod watcher_retry_tests {
             .unwrap();
         init(&mut c).unwrap();
         let ticket: String = c
-            .query_row("select analysis_ticket from watcher_retry", [], |r| r.get(0))
+            .query_row("select analysis_ticket from watcher_retry", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(ticket, "live");
     }

@@ -2109,10 +2109,9 @@ async fn watch_pr(
             .has_pending_review(&r, n)
             .map_err(|e| X::E(e.to_string()))?;
     let _attempt = if pending {
-        let Some(attempt) = a
-            .db
-            .claim_review_attempt(&r, n, &up, &source_head, now())
-            .map_err(|e| X::E(e.to_string()))?
+        let Some(attempt) =
+            a.db.claim_review_attempt(&r, n, &up, &source_head, now())
+                .map_err(|e| X::E(e.to_string()))?
         else {
             return Ok(());
         };
