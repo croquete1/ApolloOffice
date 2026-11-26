@@ -102,6 +102,28 @@ class InventoryLimitTests(unittest.TestCase):
         self.assertEqual(facts['min_sdk'], [{'value': 21, 'path': 'build.gradle', 'revision': original}])
         self.assertEqual(facts['files'][0]['content'], 'minSdkVersion 21\n')
 
+    def test_test_path_limit_reports_omitted_entries(self):
+        directory = Path('tests')
+        directory.mkdir()
+        for index in range(63):
+            (directory / f'test_{index:03}.py').write_text('pass\n')
+        self.git('add', 'tests')
+        facts = self.scan()
+        self.assertEqual(facts['test_paths'], [f'tests/test_{i:03}.py' for i in range(60)])
+        self.assertTrue(facts['inventory_truncated'])
+        self.assertEqual(facts['test_paths_omitted'], 3)
+
+    def test_exact_test_path_limit_is_complete(self):
+        directory = Path('tests')
+        directory.mkdir()
+        for index in range(60):
+            (directory / f'test_{index:03}.py').write_text('pass\n')
+        self.git('add', 'tests')
+        facts = self.scan()
+        self.assertEqual(len(facts['test_paths']), 60)
+        self.assertFalse(facts['inventory_truncated'])
+        self.assertEqual(facts['test_paths_omitted'], 0)
+
     def workflows(self, count):
         directory = Path('.github/workflows')
         directory.mkdir(parents=True)
