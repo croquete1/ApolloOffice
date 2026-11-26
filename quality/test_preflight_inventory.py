@@ -59,6 +59,13 @@ class PreflightInventoryTests(unittest.TestCase):
         self.assertTrue(facts['files'][0]['truncated'])
         self.assertTrue(facts['inventory_truncated'])
 
+    def test_invalid_utf8_below_limit_marks_inventory_incomplete(self):
+        pathlib.Path('build.gradle').write_bytes(b'\xff')
+        facts = self.scan()
+        self.assertEqual(facts['files'][0]['content'], '\ufffd')
+        self.assertTrue(facts['files'][0]['truncated'])
+        self.assertTrue(facts['inventory_truncated'])
+
     def test_multibyte_boundary_respects_content_budget(self):
         pathlib.Path('build.gradle').write_bytes(b' ' * 3999 + 'é'.encode('utf-8'))
         facts = self.scan()
