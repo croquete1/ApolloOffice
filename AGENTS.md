@@ -51,6 +51,9 @@ Se faltar toolchain, ambiente ou acesso, preferir execução noutro ambiente aut
 - Antes de apertar validação de um protocolo, inventariar os formatos já aceites pelos consumidores e testes históricos (incluindo representações parciais legítimas, como referências a chamadas por ID sem função executável). Testar compatibilidade positiva e rejeição de estruturas inválidas sem alterar a semântica de testes históricos para obter verde. Executar a suite integral do componente quando disponível; um excerto isolado ou novos testes verdes não demonstram ausência de regressões.
 - Aplicar validação de identidade, completude e preços também na origem, antes de normalizar/serializar metadados; o consumidor não consegue recuperar informação perdida (chaves duplicadas, arredondamento para zero, registos descartados). Testar preservação do estado anterior quando uma atualização falha.
 
+- Em inspeções de commits, impedir substituições de objetos Git e interpretar formatos de configuração segundo o parser nativo, com origem fixada e includes desativados. Validar referências numéricas antes da conversão e sinalizar limites também em listas auxiliares. Testar o destino HTTP realmente contactado; não aceitar redirecionamentos como prova da identidade de um objeto fixado.
+- Publicar alterações funcionais e fixtures interdependentes num commit atómico quando possível. Confirmar hashes dos ficheiros efetivamente testados, verificar HEAD remoto antes de publicar e, após erro de transporte, confirmar o estado antes de repetir a escrita.
+
 ## 5. Revisão, merge e evidências
 
 - CI verde é necessário, não suficiente. Exigir CI integral no HEAD exato, revisão independente das alterações funcionais finais, resolução de findings e threads, base atual, ausência de conflitos/sobreposição e proteções existentes.
