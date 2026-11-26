@@ -9,7 +9,7 @@ import time
 import unittest
 from unittest.mock import Mock
 
-from opencode_bridge import Bridge, Handler, Server
+from opencode_bridge import Bridge, Handler, Server, request_args
 
 
 @unittest.skipUnless(hasattr(socket, 'AF_UNIX'), 'Unix sockets required')
@@ -67,6 +67,29 @@ class CatalogHttpTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn('error', result)
         self.assert_no_provider()
+
+    def test_malformed_tool_history_returns_http_error(self):
+        self.write_valid_catalog()
+        for calls in ([None], [1], ['bad'], {'function': {'name': 'read'}},
+                      [{'function': None}], [{'function': {'name': ''}}],
+                      [{'function': {'name': []}}]):
+            with self.subTest(calls=calls):
+                body = json.dumps({'model': 'opencode/free', 'messages': [
+                    {'role': 'assistant', 'tool_calls': calls}]}).encode()
+                status, result = self.request('POST', '/chat/completions', body)
+                self.assertEqual(status, 400)
+                self.assertIn('error', result)
+                self.assert_no_provider()
+        self.assertEqual(self.request('GET', '/health'), (200, {'ok': True, 'free_models': ['opencode/free']}))
+
+    def test_valid_tool_history_is_preserved_by_request_validation(self):
+        calls = [{'id': 'call-1', 'type': 'function',
+                  'function': {'name': 'read', 'arguments': '{}'}}]
+        for history in (calls, [], None):
+            with self.subTest(history=history):
+                messages = [{'role': 'assistant', 'tool_calls': history}]
+                args = request_args({'model': 'opencode/free', 'messages': messages}, {'opencode/free'})
+                self.assertEqual(args['messages'], messages)
 
     def test_deep_request_is_rejected_and_health_remains_available(self):
         self.write_valid_catalog()
