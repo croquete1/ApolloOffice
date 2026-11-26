@@ -117,6 +117,16 @@ def request_args(body, allowed):
         raise ValueError('Invalid conversation')
     if any(not isinstance(m, dict) or m.get('role') not in ('system', 'user', 'assistant', 'tool') for m in messages):
         raise ValueError('Invalid message role')
+    for message in messages:
+        calls = message.get('tool_calls')
+        if calls is None:
+            continue
+        if not isinstance(calls, list) or any(
+            not isinstance(call, dict) or not isinstance(call.get('function'), dict)
+            or not isinstance(call['function'].get('name'), str)
+            or not call['function']['name'] for call in calls
+        ):
+            raise ValueError('Invalid tool call history')
     tools = body.get('tools', [])
     if not isinstance(tools, list) or len(tools) > 32:
         raise ValueError('Invalid tool catalog')
