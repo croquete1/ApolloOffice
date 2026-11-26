@@ -50,7 +50,7 @@ def child_limits():
 
 def run(ref, encoded):
     plan = json.loads(base64.b64decode(encoded))
-    if not re.fullmatch(r'[0-9a-f]{40,64}', ref):
+    if not re.fullmatch(r'(?:[0-9a-f]{40}|[0-9a-f]{64})', ref):
         raise ValueError('exact candidate commit required')
     with tempfile.TemporaryDirectory(prefix='apollo-accept-') as temporary:
         root = pathlib.Path(temporary)
@@ -62,6 +62,12 @@ def run(ref, encoded):
         # Copy objects, not hard links or shared gitdirs. No remote credentials.
         subprocess.run(['git', '-c', 'core.hooksPath=/dev/null', 'clone', '--quiet', '--no-checkout', '--no-hardlinks', '.', str(source)], env=environment, check=True, timeout=25, capture_output=True)
         subprocess.run(['git', '-C', str(source), '-c', 'core.hooksPath=/dev/null', 'checkout', '--quiet', '--detach', ref], env=environment, check=True, timeout=15, capture_output=True)
+        actual = subprocess.check_output(
+            ['git', '-C', str(source), 'rev-parse', '--verify', 'HEAD'],
+            env=environment, timeout=15, text=True,
+        ).strip()
+        if actual != ref:
+            raise ValueError('independent verifier revision mismatch')
         shutil.rmtree(source/'.git')
         original = fingerprint(source)
         verifier = root/'verify.py'
@@ -84,7 +90,7 @@ def run(ref, encoded):
             log.seek(max(0, size-20000))
             output = log.read().decode('utf-8', 'replace')
         clean = fingerprint(source) == original
-        return {'exit': code, 'output': output, 'source_clean': clean, 'revision': ref,
+        return {'exit': code, 'output': output, 'source_clean': clean, 'revision': actual,
                 'script_sha256': hashlib.sha256(plan['script'].encode()).hexdigest()}
 
 
