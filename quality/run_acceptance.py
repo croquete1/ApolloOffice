@@ -8,24 +8,36 @@ import re
 import resource
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
 
 
 def fingerprint(root):
+    if not stat.S_ISDIR(root.lstat().st_mode):
+        raise ValueError('snapshot root is not a directory')
     result = {}
-    for path in sorted(root.rglob('*')):
+    pending = [root]
+    while pending:
+        path = pending.pop()
         name = str(path.relative_to(root))
-        if path.is_symlink():
+        mode = path.lstat().st_mode
+        if stat.S_ISLNK(mode):
             target = os.readlink(path)
             if not path.resolve().is_relative_to(root.resolve()):
                 raise ValueError('snapshot symlink escapes source root')
             result[name] = ['symlink', target]
-        elif path.is_file():
-            result[name] = [path.stat().st_mode & 0o777, hashlib.sha256(path.read_bytes()).hexdigest()]
+        elif stat.S_ISDIR(mode):
+            result[name] = ['directory', stat.S_IMODE(mode)]
+            # Explicit traversal propagates errors instead of omitting unreadable paths.
+            pending.extend(path.iterdir())
+        elif stat.S_ISREG(mode):
+            result[name] = ['file', stat.S_IMODE(mode), hashlib.sha256(path.read_bytes()).hexdigest()]
+        else:
+            # Git snapshots contain no special nodes; record them without opening them.
+            result[name] = ['special', mode]
     return result
-
 
 def stop_handler(signum, frame):
     raise SystemExit(128+signum)

@@ -21,6 +21,13 @@ def load(name):
 
 class QualityIntegration(unittest.TestCase):
     def setUp(self):
+        # Never let a caller's Git context redirect temporary fixture operations.
+        env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+        env.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull,
+                   GIT_TERMINAL_PROMPT='0')
+        isolated = patch.dict(os.environ, env, clear=True)
+        isolated.start()
+        self.addCleanup(isolated.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.repo = pathlib.Path(self.temp.name)
