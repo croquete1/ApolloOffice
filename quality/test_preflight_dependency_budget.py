@@ -120,6 +120,20 @@ class DependencyBudgetTests(unittest.TestCase):
         self.assertEqual(first['sha256'], hashlib.sha256(raw).hexdigest())
         self.assertEqual(first['content'], raw.decode())
 
+    def test_dependency_count_limit_reports_all_omitted_gitlinks(self):
+        self.modules('first', 'second', 'third', 'fourth')
+        facts, remote = self.scan(b'minSdkVersion 21', b'minSdkVersion 22')
+        self.assert_bounded(facts)
+        self.assertEqual(remote.call_count, 2)
+        self.assertEqual(self.read_sizes, [8001, 8001])
+        self.assertEqual(facts['min_sdk'], [
+            {'value': 21, 'path': 'deps/first/constants.gradle', 'revision': self.revision},
+            {'value': 22, 'path': 'deps/second/constants.gradle', 'revision': self.revision},
+        ])
+        for name in ('third', 'fourth'):
+            self.assert_omitted(facts, name)
+        self.assertEqual(len(facts['unresolved_dependencies']), 2)
+
     def test_small_dependency_fits_and_retains_identity(self):
         self.modules('first')
         raw = 'minSdkVersion 21\n// café'.encode()
