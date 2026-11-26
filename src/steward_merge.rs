@@ -446,10 +446,7 @@ async fn merge_mode(
 /// Agenda apenas uma revalidação pendente por repositório.
 /// Sem provas não há merge: o worker executará testes reais e Reviewer no HEAD.
 fn queue_recheck(a: &Ax, repo: &str, number: i64, head: &str, base: &str, detail: &Value) -> bool {
-    if a.hold("watcher")
-        || !crate::db::valid_git_sha(head)
-        || !crate::db::valid_git_sha(base)
-    {
+    if a.hold("watcher") || !crate::db::valid_git_sha(head) || !crate::db::valid_git_sha(base) {
         return false;
     }
     let original = a.db.one(

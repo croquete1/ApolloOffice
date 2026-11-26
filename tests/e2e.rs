@@ -51,6 +51,45 @@ fn furl(p: &Path) -> String {
     }
 }
 
+// Diagnostics for the intermittent repo-registration timeout. Only count
+// the two fake CLI endpoints used by registration, never print arguments.
+fn repo_fixture_progress(root: &Path) -> String {
+    let mut counts = [(0usize, 0usize); 2];
+    if let Ok(entries) = std::fs::read_dir(root.join("calls")) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(raw) = std::fs::read(&path) else {
+                continue;
+            };
+            let Ok(args) = serde_json::from_slice::<Vec<String>>(&raw) else {
+                continue;
+            };
+            if args.first().map(String::as_str) != Some("api") {
+                continue;
+            }
+            let index = match args.get(1).map(String::as_str) {
+                Some("repos/o/r") => 0,
+                Some("repos/o/r/contents/") => 1,
+                _ => continue,
+            };
+            counts[index].0 += 1;
+            if path
+                .file_stem()
+                .is_some_and(|id| root.join("finished").join(id).is_file())
+            {
+                counts[index].1 += 1;
+            }
+        }
+    }
+    format!(
+        "fake metadata started/exit-handler={:?}; contents started/exit-handler={:?}",
+        counts[0], counts[1]
+    )
+}
+
 struct K(Child);
 impl Drop for K {
     fn drop(&mut self) {
@@ -203,7 +242,11 @@ async fn full_run(pv: bool) {
         let u = format!("{o}{p}");
         let ck = ck.clone();
         let o = o.clone();
+        let fixture = fk.clone();
+        let op = b["op"].as_str().unwrap_or("").to_string();
+        let endpoint = p.to_string();
         async move {
+            let started = Instant::now();
             c.post(u)
                 .header("cookie", ck)
                 .header("origin", o)
@@ -211,7 +254,13 @@ async fn full_run(pv: bool) {
                 .json(&b)
                 .send()
                 .await
-                .unwrap()
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "POST {endpoint} op={op} after {:?}: {error}; {}",
+                        started.elapsed(),
+                        repo_fixture_progress(&fixture)
+                    )
+                })
                 .json::<Value>()
                 .await
                 .unwrap()

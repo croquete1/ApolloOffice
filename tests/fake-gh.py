@@ -1,4 +1,4 @@
-import json, os, subprocess, sys, uuid
+import atexit, json, os, subprocess, sys, uuid
 
 D = os.environ["FAKE_GH_DIR"]
 a = sys.argv[1:]
@@ -31,6 +31,18 @@ temporary = os.path.join(calls, call_id + ".tmp")
 with open(temporary, "x", encoding="utf-8") as record:
     json.dump(a, record)
 os.replace(temporary, os.path.join(calls, call_id + ".json"))
+# Separate markers distinguish entry from reaching Python's exit handler.
+# Never store provider output, credentials or HTTP request bodies.
+finished = os.path.join(D, "finished")
+os.makedirs(finished, exist_ok=True)
+
+
+@atexit.register
+def record_exit():
+    with open(os.path.join(finished, call_id), "x"):
+        pass
+
+
 R = os.environ.get("FAKE_GH_REPO", "o/r")
 
 
