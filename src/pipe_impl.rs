@@ -4718,6 +4718,12 @@ async fn go(a: &Ax, id: i64, h: &str) {
 pub fn recover(a: &Ax) -> rusqlite::Result<()> {
     let mut c = a.db.0.lock().unwrap();
     let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    // Server startup recovery, not Db::open (status/login-link can open a
+    // running office's database). Preserve all retry deadlines and receipts.
+    tx.execute(
+        "update watcher_retry set analysis_ticket=null where analysis_ticket is not null",
+        [],
+    )?;
     let jobs = {
         let mut stmt = tx.prepare(
             "select id,st,kind,d from jobs where st in ('repro','fix','ci','review','gate','hunt','submit') order by id",

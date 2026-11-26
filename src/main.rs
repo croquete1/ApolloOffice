@@ -97,7 +97,10 @@ fn lock_data_dir(dd: &std::path::Path) -> anyhow::Result<std::fs::File> {
                 // On Windows the replacement process may start just before
                 // its predecessor exits. Wait briefly without stealing a lock.
                 if started.elapsed() >= std::time::Duration::from_secs(5) {
-                    anyhow::bail!("Apollo Office data directory is already in use: {}", dd.display());
+                    anyhow::bail!(
+                        "Apollo Office data directory is already in use: {}",
+                        dd.display()
+                    );
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
