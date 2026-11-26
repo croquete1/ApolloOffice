@@ -96,21 +96,30 @@ def scan(base, issue):
             continue
         revision = entry[1]
         remote = match[1]
+        if len(files) >= MAX_FILES or used >= MAX_BYTES:
+            inventory_incomplete = True
+            unresolved.append({'path': path, 'revision': revision, 'reason': 'pinned dependency constants exceed inspection budget'})
+            continue
+        limit = min(8000, MAX_BYTES - used)
+        reason = 'pinned dependency constants unavailable'
         found = False
         for name in ['constants.gradle']:
             try:
                 req = urllib.request.Request(f'https://raw.githubusercontent.com/{remote}/{revision}/{name}')
                 with urllib.request.urlopen(req, timeout=5) as res:
-                    raw = res.read(8001)
-                if len(raw) > 8000:
-                    raise ValueError('dependency manifest too large')
+                    raw = res.read(limit + 1)
+                if len(raw) > limit:
+                    inventory_incomplete = True
+                    reason = 'pinned dependency constants exceed inspection budget'
+                    continue
                 files.append({'path': f'{path}/{name}', 'content': raw.decode(), 'dependency_revision': revision,
                               'sha256': hashlib.sha256(raw).hexdigest(), 'truncated': False})
+                used += len(raw)
                 found = True
             except Exception:
                 pass
         if not found:
-            unresolved.append({'path': path, 'revision': revision, 'reason': 'pinned dependency constants unavailable'})
+            unresolved.append({'path': path, 'revision': revision, 'reason': reason})
     sdk = []
     desugaring = []
     for f in files:
