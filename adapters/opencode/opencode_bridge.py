@@ -46,25 +46,65 @@ When the actual work and command checks are complete, return {"final": YOUR_REQU
 '''
 
 
+def catalog_json_options():
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('Ambiguous free-model catalog JSON key')
+            result[key] = value
+        return result
+
+    def bounded_float(raw):
+        value = float(raw)
+        # A nonzero JSON number must never become a free price by underflow.
+        mantissa = raw.lower().split('e', 1)[0]
+        if value == 0.0 and any(digit in mantissa for digit in '123456789'):
+            raise ValueError('Free-model catalog number underflow')
+        return value
+
+    return {"object_pairs_hook": unique_object, "parse_float": bounded_float}
+
+
 def allowed_models(path=CATALOG, now=None):
-    catalog = json.loads(path.read_text())
-    age = (time.time() if now is None else now) - catalog['updated_at']
-    if not 0 <= age <= 86400:
+    try:
+        catalog = json.loads(path.read_text(), **catalog_json_options())
+    except RecursionError as exc:
+        raise ValueError('Free-model catalog nesting too deep') from exc
+    if not isinstance(catalog, dict) or type(catalog.get('updated_at')) not in (int, float):
+        raise ValueError('Invalid free-model catalog timestamp or structure')
+    rows = catalog.get('models')
+    if not isinstance(rows, list) or any(
+        not isinstance(row, dict) or not isinstance(row.get('full_id'), str)
+        or not row['full_id'] for row in rows
+    ):
+        raise ValueError('Invalid free-model catalog inventory')
+    current = time.time() if now is None else now
+    # Compare bounds without converting an arbitrary-size JSON integer to float.
+    if not current - 86400 <= catalog['updated_at'] <= current:
         raise ValueError('Free-model catalog expired; refresh required')
     def zero(value):
-        if isinstance(value, dict):
-            return bool(value) and all(zero(v) for v in value.values())
-        return type(value) in (int, float) and value == 0
+        pending = [value]
+        while pending:
+            item = pending.pop()
+            if isinstance(item, dict):
+                if not item:
+                    return False
+                pending.extend(item.values())
+            elif type(item) not in (int, float) or item != 0:
+                return False
+        return True
     # A model with multiple metadata rows is ambiguous, even if one row is free.
     seen, ambiguous = set(), set()
-    for row in catalog['models']:
+    for row in rows:
         ident = row.get('full_id')
         if isinstance(ident, str):
             if ident in seen:
                 ambiguous.add(ident)
             seen.add(ident)
-    return {row['full_id'] for row in catalog['models']
+    return {row['full_id'] for row in rows
             if row.get('providerID') == 'opencode' and row.get('status') == 'active'
+            and row['full_id'].startswith('opencode/') and len(row['full_id']) > len('opencode/')
             and isinstance(row.get('cost'), dict) and {'input', 'output'} <= row['cost'].keys()
             and zero(row['cost']) and row['full_id'] not in ambiguous}
 
@@ -77,6 +117,22 @@ def request_args(body, allowed):
         raise ValueError('Invalid conversation')
     if any(not isinstance(m, dict) or m.get('role') not in ('system', 'user', 'assistant', 'tool') for m in messages):
         raise ValueError('Invalid message role')
+    for message in messages:
+        calls = message.get('tool_calls')
+        if calls is None:
+            continue
+        if not isinstance(calls, list):
+            raise ValueError('Invalid tool call history')
+        for call in calls:
+            if not isinstance(call, dict):
+                raise ValueError('Invalid tool call history')
+            # Older controller transcripts may contain only the call ID.
+            # Preserve references without treating them as executable functions.
+            if 'function' not in call and isinstance(call.get('id'), str) and call['id'].strip():
+                continue
+            function = call.get('function')
+            if not isinstance(function, dict) or not isinstance(function.get('name'), str) or not function['name']:
+                raise ValueError('Invalid tool call history')
     tools = body.get('tools', [])
     if not isinstance(tools, list) or len(tools) > 32:
         raise ValueError('Invalid tool catalog')
@@ -428,7 +484,11 @@ class Bridge:
             self.busy.release()
 
     def complete(self, body):
-        args = request_args(body, allowed_models(self.catalog))
+        try:
+            allowed = allowed_models(self.catalog)
+        except OSError:
+            return 503, {'error': {'message': 'Free-model catalog unavailable'}}, None
+        args = request_args(body, allowed)
         aliases = {'apollo_' + t['function']['name']: t['function']['name'] for t in args['tools']}
         forward = {original: alias for alias, original in aliases.items()}
         args['tools'] = [dict(t, function={**t['function'], 'name': forward[t['function']['name']]}) for t in args['tools']]
@@ -576,7 +636,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not 0 < size <= MAX_BODY or self.headers.get('Transfer-Encoding'):
                 self.send_json(413, {'error': {'message': 'Request too large or unsupported framing'}})
                 return
-            body = json.loads(self.rfile.read(size))
+            try:
+                body = json.loads(self.rfile.read(size))
+            except RecursionError as exc:
+                raise ValueError('Request JSON nesting too deep') from exc
             status, result, retry = self.server.bridge.complete(body)
             self.send_json(status, result, retry)
         except (ValueError, KeyError, TypeError):

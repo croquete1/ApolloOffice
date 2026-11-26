@@ -1,19 +1,29 @@
 """Read OpenCode's actual verbose metadata; never infer pricing from model names."""
 import json,pathlib,subprocess,time,os,tempfile
-from opencode_bridge import CATALOG,allowed_models
+from opencode_bridge import CATALOG,allowed_models,catalog_json_options
 from launch import STATE
 
 def parse_models(text):
- decoder=json.JSONDecoder();rows=[];rest=text
+ decoder=json.JSONDecoder(**catalog_json_options());rows=[];rest=text
  while rest.strip():
   # `models --verbose` prints an ID line followed by its complete JSON object.
-  start=rest.find('{')
-  if start<0:break
-  value,used=decoder.raw_decode(rest[start:]);rest=rest[start+used:]
+  header,separator,body=rest.lstrip().partition('\n')
+  body=body.lstrip()
+  if not separator or not body.startswith('{'):
+   raise ValueError('Incomplete model metadata record')
+  try:value,used=decoder.raw_decode(body)
+  except RecursionError as exc:raise ValueError('Free-model catalog nesting too deep') from exc
+  rest=body[used:]
+  if rest.split('\n',1)[0].strip():
+   raise ValueError('Unexpected text after model metadata')
   if not isinstance(value,dict):raise ValueError('Expected model object')
   ident=value.get('id');provider=value.get('providerID')
-  if isinstance(ident,str) and isinstance(provider,str):
-   value['full_id']=provider+'/'+ident;rows.append(value)
+  if not isinstance(ident,str) or not ident.strip() or not isinstance(provider,str) or not provider.strip():
+   raise ValueError('Invalid model identity in returned metadata')
+  full_id=provider+'/'+ident
+  if header.strip()!=full_id:
+   raise ValueError('Model metadata identity does not match CLI header')
+  value['full_id']=full_id;rows.append(value)
  if not rows:raise ValueError('No model metadata returned')
  return rows
 

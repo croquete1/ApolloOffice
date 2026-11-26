@@ -56,8 +56,8 @@ Se faltar toolchain, ambiente ou acesso, preferir execução noutro ambiente aut
 
 ## 5. Revisão, merge e evidências
 
-- CI verde é necessário, não suficiente. Exigir CI integral no HEAD exato, revisão independente das alterações funcionais finais, resolução de findings e threads, base atual, ausência de conflitos/sobreposição e proteções existentes.
-- Solicitar revisões gratuitas quando elegíveis, sem duplicar pedidos nem confundir resumo, thread resolvida ou revisão de SHA anterior com aprovação do HEAD atual. Sem evidência suficiente manter draft. Não contornar branch protection.
+- Para manutenção deste fork, conforme autorização expressa do proprietário em 26/11/2026, integrar PRs com CI integral verde no HEAD exato, base atual, ausência de conflitos e sobreposição, findings conhecidos resolvidos e proteções existentes cumpridas. Revisão externa opcional não é motivo para adiar indefinidamente um merge elegível; registar quando não foi obtida. Esta regra não altera os gates internos de Guard/Reviewer/Steward, a autorização de jobs nem os requisitos de release.
+- Solicitar revisões gratuitas quando elegíveis, sem duplicar pedidos nem confundir resumo, thread resolvida ou revisão de SHA anterior com aprovação do HEAD atual. Manter draft quando faltam testes obrigatórios, existe risco material ou autorização insuficiente. Não contornar branch protection, dispensar revisão obrigatória da plataforma ou solicitar consumo com quota incerta.
 - Merges individuais e sequenciais apenas quando autorizados e elegíveis; confirmar CI pós-merge antes de avançar a integração seguinte. Trabalhos independentes podem continuar enquanto se aguarda validação.
 - Registar o SHA, links dos runs, plataformas, resultados, testes ignorados, revisão e estado pós-merge. Não apresentar testes escritos como executados, simulações como produção, nem fases parciais como concluídas.
 - Atualizações regulares em PT-PT: alterações efetivamente publicadas, erros, correções, testes, riscos, decisões e bloqueios. Pedir intervenção apenas perante acesso, autorização, risco material ou custo. Não prometer trabalho contínuo fora dos meios de execução disponíveis.
