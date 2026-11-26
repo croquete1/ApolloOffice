@@ -45,6 +45,7 @@ def scan(base, issue):
     wanted += sorted((p for p in paths if pathlib.PurePosixPath(p).name in manifests), key=lambda p: (p.count('/'), p))
     wanted += [p for p in paths if p.startswith('.github/workflows/') and p.endswith(('.yml', '.yaml'))][:4]
     files = []
+    inventory_incomplete = undecodable_paths
     used = 0
     for path in dict.fromkeys(wanted):
         if len(files) >= MAX_FILES or used >= MAX_BYTES:
@@ -55,6 +56,7 @@ def scan(base, issue):
             continue
         size = int(git('cat-file', '-s', oid))
         if size > 200000:
+            inventory_incomplete = True
             continue
         raw = git('cat-file', 'blob', oid)
         limit = min(20000 if pathlib.PurePosixPath(path).name in names else 4000, MAX_BYTES-used)
@@ -64,9 +66,13 @@ def scan(base, issue):
             lines = text.splitlines(keepends=True)
             start = max(0, int(location[1])-65)
             text = ''.join(lines[start:])
-        text = text.encode()[:limit].decode('utf-8', 'replace')
-        files.append({'path': path, 'content': text, 'sha256': hashlib.sha256(raw).hexdigest(), 'truncated': len(text.encode()) < len(raw)})
-        used += len(text.encode())
+        # The encoded text is valid UTF-8; ignore only an incomplete final codepoint.
+        text = text.encode()[:limit].decode('utf-8', 'ignore')
+        emitted = text.encode('utf-8')
+        truncated = emitted != raw
+        inventory_incomplete |= truncated
+        files.append({'path': path, 'content': text, 'sha256': hashlib.sha256(raw).hexdigest(), 'truncated': truncated})
+        used += len(emitted)
     unresolved = []
     modules = next((f['content'] for f in files if f['path'] == '.gitmodules'), '')
     parser = configparser.ConfigParser(interpolation=None)
@@ -122,7 +128,7 @@ def scan(base, issue):
             tools[tool] = 'missing'
     tools['android_sdk'] = 'present' if any((pathlib.Path(os.environ.get(k, '/nonexistent'))/'platforms').is_dir() for k in ['ANDROID_HOME', 'ANDROID_SDK_ROOT']) else 'missing'
     return {'base': base, 'files': files, 'tools': tools, 'min_sdk': sdk, 'library_desugaring_evidence': desugaring,
-            'unresolved_dependencies': unresolved, 'inventory_truncated': undecodable_paths or len(wanted) > MAX_FILES or used >= MAX_BYTES,
+            'unresolved_dependencies': unresolved, 'inventory_truncated': inventory_incomplete or len(wanted) > MAX_FILES or used >= MAX_BYTES,
             'test_paths': [p for p in paths if re.search(r'(^|/)(tests?|__tests__)(/|\.)|test_', p)][:60]}
 
 
