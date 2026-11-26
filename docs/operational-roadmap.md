@@ -5,8 +5,8 @@ Atualizado em 26/11/2026. Este é o backlog ativo do fork `croquete1/ApolloOffic
 ## Situação e prioridades
 
 - Nenhuma fase F01–F17 declarada concluída; implementação integrada não equivale a aceitação completa.
-- Lote #130 → #131 → #132 → #128 → #129 integrado sequencialmente. Main `f1bfbfcd156b407ed6e64a7c0543180b2c63fdb3`, [CI pós-merge #129](https://github.com/croquete1/ApolloOffice/actions/runs/45788900130): em execução; não declarar validação pós-merge concluída. Os quatro CIs pós-merge anteriores passaram integralmente; a falha Windows anterior não se repetiu nesses runs, mas estabilidade continuada não está demonstrada.
-- Prioridade P0: reconciliação durável, identidade imutável, SQLite e Steward. Investigar invalidação de evidência remota e recuperação após restart; preservar testes e revisão independente.
+- Lote #130 → #131 → #132 → #128 → #129 integrado sequencialmente. Main `f1bfbfcd156b407ed6e64a7c0543180b2c63fdb3`, [CI pós-merge #129](https://github.com/croquete1/ApolloOffice/actions/runs/45788900130): aprovado em Ubuntu e Windows. Os cinco CIs pós-merge passaram integralmente; a falha Windows anterior não se repetiu nesses runs, mas estabilidade continuada não está demonstrada.
+- Prioridade P0: reconciliação durável, identidade imutável, SQLite e Steward. Investigar `src/drop_recovery.rs`: `retry_manual_with` escreve `head:{repo}` na cache antes de `retry_snapshot` confirmar a transação; uma tentativa rejeitada pode ainda substituir evidência de HEAD. Reproduzir corrida entre resposta remota, snapshot inválido e cache mais recente, inspecionar consumidores e testar correção sem publicar Rust até preflight oficial. Preservar testes e revisão independente.
 - Release anteriormente publicada: fork-v0.10.15; nenhuma nova release. Interface dos agentes e modelos inalterados. CodeRabbit apenas com allowance incluída confirmada; não solicitar consumo adicional.
 
 ## Último lote integrado
@@ -17,11 +17,11 @@ Atualizado em 26/11/2026. Este é o backlog ativo do fork `croquete1/ApolloOffic
 | [#131](https://github.com/croquete1/ApolloOffice/pull/131) | Readiness, encerramento, login e orçamento E2E | [45719523882](https://github.com/croquete1/ApolloOffice/actions/runs/45719523882) verde | [45721623521](https://github.com/croquete1/ApolloOffice/actions/runs/45721623521) verde |
 | [#132](https://github.com/croquete1/ApolloOffice/pull/132) | Sondagens independentes, frescura, leases e recuo limitado | [45721683836](https://github.com/croquete1/ApolloOffice/actions/runs/45721683836) verde | [45784491538](https://github.com/croquete1/ApolloOffice/actions/runs/45784491538) verde |
 | [#128](https://github.com/croquete1/ApolloOffice/pull/128) | Steward: identidade, cronologia e permissões | [45784566339](https://github.com/croquete1/ApolloOffice/actions/runs/45784566339) verde | [45786620486](https://github.com/croquete1/ApolloOffice/actions/runs/45786620486) verde |
-| [#129](https://github.com/croquete1/ApolloOffice/pull/129) | Quota: observações distintas e regressão de consumo | [45786682252](https://github.com/croquete1/ApolloOffice/actions/runs/45786682252) verde | [45788900130](https://github.com/croquete1/ApolloOffice/actions/runs/45788900130): em execução; não declarar validação pós-merge concluída |
+| [#129](https://github.com/croquete1/ApolloOffice/pull/129) | Quota: observações distintas e regressão de consumo | [45786682252](https://github.com/croquete1/ApolloOffice/actions/runs/45786682252) verde | [45788900130](https://github.com/croquete1/ApolloOffice/actions/runs/45788900130): aprovado em Ubuntu e Windows |
 
 Revisões CodeRabbit concluídas sobre as alterações funcionais; findings corrigidos e threads resolvidas. Após sincronização das bases, #131/#132/#128/#129 conservaram os blobs funcionais já revistos; o CodeRabbit indicou ausência de novos ficheiros a rever. Isso não constitui aprovação formal de um novo SHA. A validação integral do CI foi repetida para cada HEAD sincronizado.
 
-Na observação não existiam PRs abertas. Critérios de aceitação abaixo permanecem abertos.
+Novas PRs em draft: #133 (este balanço) e [#134](https://github.com/croquete1/ApolloOffice/pull/134), inspeção literal de caminhos Git. #134: regressão reproduzida localmente no blob original e aprovada no candidato; CI completo e revisão independente pendentes. Critérios de aceitação abaixo permanecem abertos.
 
 ## Balanço por fase
 
@@ -129,7 +129,7 @@ Evidência integrada consolidada a partir do arquivo e do lote até #132. Não a
 ## Bloqueios transversais
 
 - CI Windows intermitente: distinguir falha funcional, fixture, backoff e infraestrutura; repetir em condições controladas e preservar todas as asserções.
-- Toolchain Rust local não confirmada: executar preflight conforme AGENTS.md em ambiente disponível; não afirmar validação inexistente.
+- Toolchain Rust local indisponível na sessão de 26/11: cargo, rustc e rustfmt não encontrados; resolução DNS de static.rust-lang.org falhou. Não publicar novas alterações Rust até dispor de validação oficial; trabalho Python/documental independente pode avançar.
 - Quota e identidade Codex: consulta atual não fornece identificador de conta; não misturar históricos por inferência nem ler credenciais.
 - CodeRabbit: confirmar elegibilidade gratuita após trial indicado para 08/12/2026, faturação OFF e instalação limitada a repositórios públicos autorizados. Última configuração registada: auto/incremental OFF, drafts/status ON, Assertive, pt-PT; revalidar antes de pedidos. Consultar evidências e critérios complementares F17 no arquivo (secção Registo complementar da PR #77).
 - Produção: testes reais de workers, hardware, fornecedores, restart, instalação/rollback e chave de confiança ainda necessários; ensaios isolados de CI não são validação de produção.
