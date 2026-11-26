@@ -12,7 +12,7 @@ class CatalogStructureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'catalog.json'
             path.write_text(json.dumps(catalog))
-            return allowed_models(path, now=100)
+            return allowed_models(path, now=100.0)
 
     def row(self, ident='opencode/free'):
         return {'full_id': ident, 'providerID': 'opencode', 'status': 'active',
@@ -31,6 +31,18 @@ class CatalogStructureTests(unittest.TestCase):
         for timestamp in (True, None, '100'):
             with self.subTest(timestamp=timestamp), self.assertRaises(ValueError):
                 self.allowed({'updated_at': timestamp, 'models': [self.row()]})
+
+    def test_out_of_range_timestamps_rejected(self):
+        for timestamp in (10**400, -10**400, float('nan'), float('inf'),
+                          float('-inf'), 100.01, -86300.01):
+            with self.subTest(timestamp=timestamp), self.assertRaises(ValueError):
+                self.allowed({'updated_at': timestamp, 'models': [self.row()]})
+
+    def test_freshness_boundaries_are_inclusive(self):
+        for timestamp in (100, -86300):
+            with self.subTest(timestamp=timestamp):
+                self.assertEqual(self.allowed({'updated_at': timestamp, 'models': [self.row()]}),
+                                 {'opencode/free'})
 
     def test_non_list_inventory_rejected(self):
         for rows in (None, {}, 'invalid'):
