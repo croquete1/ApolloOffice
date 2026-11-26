@@ -39,7 +39,7 @@ class MissingDependencyTests(unittest.TestCase):
             self.git('add', '.gitmodules')
         self.git('commit', '-qm', 'root')
         with patch.object(preflight.shutil, 'which', return_value=None), \
-             patch.object(preflight.urllib.request, 'urlopen', return_value=response) as remote:
+             patch.object(preflight, 'open_pinned', return_value=response) as remote:
             facts = preflight.scan(self.git('rev-parse', 'HEAD'), '')
         return facts, remote
 

@@ -31,7 +31,7 @@ class InventoryLimitTests(unittest.TestCase):
     def scan(self):
         self.git('commit', '-qm', 'root')
         with patch.object(preflight.shutil, 'which', return_value=None), \
-             patch.object(preflight.urllib.request, 'urlopen') as remote:
+             patch.object(preflight, 'open_pinned') as remote:
             facts = preflight.scan(self.git('rev-parse', 'HEAD'), '')
         remote.assert_not_called()
         return facts
@@ -49,7 +49,7 @@ class InventoryLimitTests(unittest.TestCase):
         self.git('add', 'build.gradle', 'Example.java')
         self.git('commit', '-qm', 'root')
         with patch.object(preflight.shutil, 'which', return_value=None), \
-             patch.object(preflight.urllib.request, 'urlopen') as remote:
+             patch.object(preflight, 'open_pinned') as remote:
             facts = preflight.scan(self.git('rev-parse', 'HEAD'), 'Example.java')
         remote.assert_not_called()
         self.assertTrue(facts['inventory_truncated'])
@@ -71,7 +71,7 @@ class InventoryLimitTests(unittest.TestCase):
         self.git('commit', '-qm', 'root')
         base = self.git('rev-parse', 'HEAD')
         with patch.object(preflight.shutil, 'which', return_value=None), \
-             patch.object(preflight.urllib.request, 'urlopen') as remote:
+             patch.object(preflight, 'open_pinned') as remote:
             for hint in ('9' * 4500, '9999999999', '401', '0'):
                 with self.subTest(hint=hint[:20]):
                     facts = preflight.scan(base, 'Example.java:' + hint)
@@ -95,7 +95,7 @@ class InventoryLimitTests(unittest.TestCase):
         # Positive control: normal Git reads the substituted tree.
         self.assertEqual(self.git('show', original + ':build.gradle'), 'minSdkVersion 35')
         with patch.object(preflight.shutil, 'which', return_value=None), \
-             patch.object(preflight.urllib.request, 'urlopen') as remote:
+             patch.object(preflight, 'open_pinned') as remote:
             facts = preflight.scan(original, '')
         remote.assert_not_called()
         self.assertEqual(facts['base'], original)

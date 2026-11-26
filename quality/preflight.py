@@ -18,6 +18,16 @@ def git(*args):
     return subprocess.check_output(['git', '--no-replace-objects', *args], timeout=15)
 
 
+class PinnedRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # Redirects cannot establish the identity of a pinned remote object.
+        return None
+
+
+def open_pinned(request, *, timeout):
+    return urllib.request.build_opener(PinnedRedirectHandler()).open(request, timeout=timeout)
+
+
 def scan(base, issue):
     if not re.fullmatch(r'(?:[0-9a-f]{40}|[0-9a-f]{64})', base):
         raise ValueError('exact base commit required')
@@ -149,7 +159,7 @@ def scan(base, issue):
         for name in ['constants.gradle']:
             try:
                 req = urllib.request.Request(f'https://raw.githubusercontent.com/{remote}/{revision}/{name}')
-                with urllib.request.urlopen(req, timeout=5) as res:
+                with open_pinned(req, timeout=5) as res:
                     raw = res.read(limit + 1)
                 if len(raw) > limit:
                     inventory_incomplete = True

@@ -72,7 +72,7 @@ class DependencyBudgetTests(unittest.TestCase):
                 return super().read(size)
 
         with patch.object(self.preflight.shutil, 'which', return_value=None), \
-             patch.object(self.preflight.urllib.request, 'urlopen',
+             patch.object(self.preflight, 'open_pinned',
                           side_effect=[RecordingResponse(data) for data in responses]) as remote:
             facts = self.preflight.scan(base, '')
         return facts, remote
