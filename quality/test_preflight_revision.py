@@ -52,6 +52,14 @@ class PreflightRevisionTests(unittest.TestCase):
         self.assertEqual(self.git('rev-parse', 'HEAD'), revision)
         self.assertEqual(self.git('status', '--porcelain'), '')
 
+    def assert_rejected_before_tree_read(self, revision):
+        with patch.object(self.preflight, 'git', wraps=self.preflight.git) as observed:
+            with self.assertRaisesRegex(ValueError, 'exact base commit required'):
+                self.scan(revision)
+        commands = [call.args[0] for call in observed.call_args_list]
+        self.assertNotIn('ls-tree', commands)
+        self.assertNotIn('cat-file', commands)
+
     def test_sha1_commit(self):
         self.assert_exact_commit(self.init_repo('sha1'))
 
@@ -60,8 +68,7 @@ class PreflightRevisionTests(unittest.TestCase):
 
     def test_sha256_prefix_is_not_exact_commit(self):
         revision = self.init_repo('sha256')
-        with self.assertRaisesRegex(ValueError, 'exact base commit required'):
-            self.scan(revision[:40])
+        self.assert_rejected_before_tree_read(revision[:40])
         self.assert_exact_commit(revision)
 
     def test_annotated_tag_object_is_not_exact_commit(self):
@@ -70,8 +77,7 @@ class PreflightRevisionTests(unittest.TestCase):
         tag = self.git('rev-parse', 'refs/tags/fixture-tag')
         self.assertNotEqual(tag, revision)
         self.assertEqual(self.git('cat-file', '-t', tag), 'tag')
-        with self.assertRaisesRegex(ValueError, 'exact base commit required'):
-            self.scan(tag)
+        self.assert_rejected_before_tree_read(tag)
         self.assert_exact_commit(revision)
 
 
