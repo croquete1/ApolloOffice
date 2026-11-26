@@ -29,9 +29,13 @@ class AcceptanceRevisionTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('run_acceptance', HERE / 'run_acceptance.py')
         self.runner = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.runner)
+        marker_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(marker_dir.cleanup)
+        self.marker = pathlib.Path(marker_dir.name) / 'verifier-ran'
         script = ('import os, pathlib\n'
                   'root = pathlib.Path(os.environ["APOLLO_SOURCE_ROOT"])\n'
                   'assert (root / "fixture.txt").read_text() == "fixture"\n'
+                  f'pathlib.Path({str(self.marker)!r}).write_text("ran")\n'
                   'print("APOLLO_CHECK:revision:PASS")\n')
         self.encoded = base64.b64encode(json.dumps({'script': script}).encode()).decode()
 
@@ -53,6 +57,7 @@ class AcceptanceRevisionTests(unittest.TestCase):
         self.assertEqual(result['exit'], 0, result['output'])
         self.assertIn('APOLLO_CHECK:revision:PASS', result['output'])
         self.assertTrue(result['source_clean'])
+        self.assertEqual(self.marker.read_text(), 'ran')
         self.assertEqual(self.git('rev-parse', 'HEAD'), revision)
         self.assertEqual(self.git('status', '--porcelain'), '')
 
@@ -67,6 +72,7 @@ class AcceptanceRevisionTests(unittest.TestCase):
         self.assertEqual(len(revision), 64)
         with self.assertRaisesRegex(ValueError, 'revision mismatch'):
             self.runner.run(revision[:40], self.encoded)
+        self.assertFalse(self.marker.exists())
         self.assert_exact_commit(revision)
 
     def test_annotated_tag_object_is_not_exact_commit(self):
@@ -77,6 +83,7 @@ class AcceptanceRevisionTests(unittest.TestCase):
         self.assertEqual(self.git('cat-file', '-t', tag), 'tag')
         with self.assertRaisesRegex(ValueError, 'revision mismatch'):
             self.runner.run(tag, self.encoded)
+        self.assertFalse(self.marker.exists())
         self.assert_exact_commit(revision)
 
 
