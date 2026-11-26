@@ -48,6 +48,14 @@ When the actual work and command checks are complete, return {"final": YOUR_REQU
 
 def allowed_models(path=CATALOG, now=None):
     catalog = json.loads(path.read_text())
+    if not isinstance(catalog, dict) or type(catalog.get('updated_at')) not in (int, float):
+        raise ValueError('Invalid free-model catalog timestamp or structure')
+    rows = catalog.get('models')
+    if not isinstance(rows, list) or any(
+        not isinstance(row, dict) or not isinstance(row.get('full_id'), str)
+        or not row['full_id'] for row in rows
+    ):
+        raise ValueError('Invalid free-model catalog inventory')
     age = (time.time() if now is None else now) - catalog['updated_at']
     if not 0 <= age <= 86400:
         raise ValueError('Free-model catalog expired; refresh required')
@@ -57,14 +65,15 @@ def allowed_models(path=CATALOG, now=None):
         return type(value) in (int, float) and value == 0
     # A model with multiple metadata rows is ambiguous, even if one row is free.
     seen, ambiguous = set(), set()
-    for row in catalog['models']:
+    for row in rows:
         ident = row.get('full_id')
         if isinstance(ident, str):
             if ident in seen:
                 ambiguous.add(ident)
             seen.add(ident)
-    return {row['full_id'] for row in catalog['models']
+    return {row['full_id'] for row in rows
             if row.get('providerID') == 'opencode' and row.get('status') == 'active'
+            and row['full_id'].startswith('opencode/') and len(row['full_id']) > len('opencode/')
             and isinstance(row.get('cost'), dict) and {'input', 'output'} <= row['cost'].keys()
             and zero(row['cost']) and row['full_id'] not in ambiguous}
 
