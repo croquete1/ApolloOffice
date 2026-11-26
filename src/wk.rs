@@ -2108,14 +2108,17 @@ async fn watch_pr(
         || a.db
             .has_pending_review(&r, n)
             .map_err(|e| X::E(e.to_string()))?;
-    if pending
-        && !a
-            .db
-            .claim_review_attempt(&r, n, &up, &source_head, now())
-            .map_err(|e| X::E(e.to_string()))?
-    {
-        return Ok(());
-    }
+    let _attempt = if pending {
+        let Some(attempt) =
+            a.db.claim_review_attempt(&r, n, &up, &source_head, now())
+                .map_err(|e| X::E(e.to_string()))?
+        else {
+            return Ok(());
+        };
+        Some(attempt)
+    } else {
+        None
+    };
     let mut batch_acked = false;
     let mut outbound = Value::Null;
     if first && !nw.is_empty() {
