@@ -46,9 +46,10 @@ def scan(base, issue):
     names = set(re.findall(r'[A-Za-z0-9_.-]+\.(?:java|kt|py|rs|go|js|ts|tsx|c|cpp|h)', issue))
     wanted = [p for p in paths if pathlib.PurePosixPath(p).name in names]
     wanted += sorted((p for p in paths if pathlib.PurePosixPath(p).name in manifests), key=lambda p: (p.count('/'), p))
-    wanted += [p for p in paths if p.startswith('.github/workflows/') and p.endswith(('.yml', '.yaml'))][:4]
+    workflows = [p for p in paths if p.startswith('.github/workflows/') and p.endswith(('.yml', '.yaml'))]
+    wanted += workflows[:4]
     files = []
-    inventory_incomplete = undecodable_paths
+    inventory_incomplete = undecodable_paths or len(workflows) > 4
     used = 0
     for path in dict.fromkeys(wanted):
         if len(files) >= MAX_FILES or used >= MAX_BYTES:
@@ -56,6 +57,7 @@ def scan(base, issue):
         # Reject symlinks/gitlinks; inspect tracked blobs, never local files.
         mode, oid = entries[path]
         if mode not in ('100644', '100755'):
+            inventory_incomplete = True
             continue
         size = int(git('cat-file', '-s', oid))
         if size > 200000:
