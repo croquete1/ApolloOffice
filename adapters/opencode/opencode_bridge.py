@@ -617,7 +617,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not 0 < size <= MAX_BODY or self.headers.get('Transfer-Encoding'):
                 self.send_json(413, {'error': {'message': 'Request too large or unsupported framing'}})
                 return
-            body = json.loads(self.rfile.read(size))
+            try:
+                body = json.loads(self.rfile.read(size))
+            except RecursionError as exc:
+                raise ValueError('Request JSON nesting too deep') from exc
             status, result, retry = self.server.bridge.complete(body)
             self.send_json(status, result, retry)
         except (ValueError, KeyError, TypeError):
