@@ -85,6 +85,22 @@ class AcceptanceSnapshotTests(unittest.TestCase):
         self.assertEqual((parent / '.git/config').read_bytes(), config)
         self.assertEqual((parent / '.git/index').read_bytes(), index)
 
+    @unittest.skipUnless(hasattr(os, 'geteuid') and os.geteuid() != 0,
+                         'requires an unprivileged POSIX user')
+    def test_fingerprint_propagates_directory_enumeration_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            blocked = root / 'blocked'
+            blocked.mkdir()
+            (blocked / 'tracked.txt').write_text('tracked\n')
+            blocked.chmod(0o300)
+            try:
+                with self.assertRaises(PermissionError):
+                    self.runner.fingerprint(root)
+            finally:
+                blocked.chmod(0o700)
+            self.assertIn('blocked/tracked.txt', self.runner.fingerprint(root))
+
     @unittest.skipUnless(hasattr(os, 'mkfifo'), 'FIFO support required')
     def test_fifo_creation_is_reported_without_reading_it(self):
         self.assertFalse(self.run_script('os.mkfifo(root / "unexpected-fifo")')['source_clean'])
