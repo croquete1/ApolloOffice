@@ -160,6 +160,11 @@ def scan(base, issue):
     desugaring = []
     for f in files:
         for value in re.findall(r'minSdk(?:Version)?\s*(?:[=:]\s*|\(\s*)?(\d+)', f['content']):
+            # Android API levels are positive signed 32-bit integers. Bound
+            # conversion of untrusted evidence before calling int().
+            if len(value) > 10 or not 1 <= int(value) <= 2147483647:
+                inventory_incomplete = True
+                continue
             sdk.append({'value': int(value), 'path': f['path'], 'revision': f.get('dependency_revision', base)})
         if re.search(r'coreLibraryDesugaring(?:Enabled)?\s*(?:[=(]\s*)?true|isCoreLibraryDesugaringEnabled\s*=\s*true', f['content']):
             desugaring.append(f['path'])
