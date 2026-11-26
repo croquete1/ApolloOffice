@@ -87,7 +87,7 @@ def scan(base, issue):
             parser = configparser.ConfigParser(interpolation=None)
     # Read constants at the EXACT gitlink commit, not dependency default branch.
     # Credential-free GitHub raw HTTPS only, bounded files and timeouts.
-    for section in parser.sections()[:2]:
+    for index, section in enumerate(parser.sections()):
         path = parser.get(section, 'path', fallback='')
         url = parser.get(section, 'url', fallback='')
         match = re.fullmatch(r'https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?', url)
@@ -95,6 +95,10 @@ def scan(base, issue):
         if not match or not entry or entry[0] != '160000':
             continue
         revision = entry[1]
+        if index >= 2:
+            inventory_incomplete = True
+            unresolved.append({'path': path, 'revision': revision, 'reason': 'pinned dependency constants exceed inspection count budget'})
+            continue
         remote = match[1]
         if len(files) >= MAX_FILES or used >= MAX_BYTES:
             inventory_incomplete = True
