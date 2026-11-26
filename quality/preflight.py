@@ -19,7 +19,10 @@ def git(*args):
 
 
 def scan(base, issue):
-    if not re.fullmatch(r'[0-9a-f]{40,64}', base):
+    if not re.fullmatch(r'(?:[0-9a-f]{40}|[0-9a-f]{64})', base):
+        raise ValueError('exact base commit required')
+    actual = git('rev-parse', '--verify', base + '^{commit}').decode('ascii').strip()
+    if actual != base:
         raise ValueError('exact base commit required')
     # NUL-delimited tree records preserve literal paths and their exact object IDs.
     entries = {}
