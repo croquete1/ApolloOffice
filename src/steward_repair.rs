@@ -175,6 +175,13 @@ fn admit_review(
 ) -> rusqlite::Result<bool> {
     let (repo, number, head) = scope;
     let (rid, since) = review;
+    if !crate::db::valid_git_sha(head) || body["source_head"] != head || body["steward_head"] != head {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let updated = body["source_updated_at"]
+        .as_str()
+        .filter(|value| chrono::DateTime::parse_from_rfc3339(value).is_ok())
+        .ok_or(rusqlite::Error::InvalidQuery)?;
     let key = format!("steward:repair:{repo}#{number}:{head}:{rid}");
     let activation = body["steward_activation"]
         .as_str()
@@ -184,10 +191,12 @@ fn admit_review(
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let eligible: bool = tx.query_row(
         "select exists(select 1 from rp where full=?1 and on_=1 and steward_repair=1 and steward_activation=?7)
-         and exists(select 1 from prs where repo=?1 and num=?2 and st='open')
+         and exists(select 1 from prs where repo=?1 and num=?2 and st='open'
+           and upd=?8 and json_extract(d,'$.watcher_head')=?4)
          and exists(select 1 from kv,json_each(kv.v,'$.prs') p where kv.k=?3
            and json_extract(p.value,'$.number')=?2
            and json_extract(p.value,'$.head_sha')=?4
+           and json_extract(p.value,'$.updated_at')=?8
            and json_extract(p.value,'$.state')='revisao_pendente'
            and json_type(p.value,'$.overlaps')='array' and json_array_length(p.value,'$.overlaps')=0
            and json_type(p.value,'$.possible_duplicates')='array' and json_array_length(p.value,'$.possible_duplicates')=0)
@@ -195,7 +204,7 @@ fn admit_review(
          and not exists(select 1 from jobs where repo=?1 and pr=?2
            and ((kind in ('review','rebase','mergecheck') and st not in ('done','drop'))
                 or (kind='review' and t0>=?6)))",
-        rusqlite::params![repo, number, format!("steward:{repo}"), head, key, since, activation],
+        rusqlite::params![repo, number, format!("steward:{repo}"), head, key, since, activation, updated],
         |row| row.get(0),
     )?;
     if !eligible {
@@ -271,7 +280,12 @@ async fn enqueue(
     let owner = detail["head"]["repo"]["owner"]["login"]
         .as_str()
         .unwrap_or("");
-    if head != pr["headRefOid"].as_str().unwrap_or("")
+    if !crate::db::valid_git_sha(head)
+        || head != pr["headRefOid"].as_str().unwrap_or("")
+        || detail["updated_at"] != pr["updatedAt"]
+        || !detail["updated_at"]
+            .as_str()
+            .is_some_and(|value| chrono::DateTime::parse_from_rfc3339(value).is_ok())
         || detail["user"]["login"].as_str() != Some(me)
         || detail["base"]["repo"]["full_name"] != repo
         || detail["state"] != "open"
@@ -352,7 +366,8 @@ async fn enqueue(
         "steward_review_id": rid,
         "steward_activation": activation,
         "steward_head": head,
-        "source_head": head
+        "source_head": head,
+        "source_updated_at": detail["updated_at"]
     });
     let inserted = admit_review(&a.db, (repo, number, head), (rid, since), title, url, &body)
         .map_err(|error| error.to_string())?;
@@ -602,17 +617,44 @@ mod tests {
             "insert into rp(full,on_,steward_repair) values('o/r',1,1)",
             vec![],
         );
+        let updated = "2026-11-26T12:00:00Z";
         db.run(
-            "insert into prs(repo,num,st,d) values('o/r',1,'open','{}')",
-            vec![],
+            "insert into prs(repo,num,st,upd,d) values('o/r',1,'open',?,?)",
+            pa![updated.to_string(), json!({"watcher_head":head}).to_string()],
         );
         let policy = db.one("select steward_activation from rp", vec![]).unwrap();
-        let mut body = json!({"source_head":head,"steward_head":head,"steward_activation":policy["steward_activation"]});
+        let mut body = json!({"source_head":head,"steward_head":head,"source_updated_at":updated,"steward_activation":policy["steward_activation"]});
         let admit = |body: &Value| admit_review(&db, (repo, 1, head), (91, 0), "PR", "url", body);
         assert!(!admit(&body).unwrap());
-        db.ks("steward:o/r", &json!({"prs":[{"number":1,"head_sha":head,"state":"revisao_pendente","overlaps":[2],"possible_duplicates":[]}]}));
+        db.ks("steward:o/r", &json!({"prs":[{"number":1,"head_sha":head,"updated_at":updated,"state":"revisao_pendente","overlaps":[2],"possible_duplicates":[]}]}));
         assert!(!admit(&body).unwrap());
-        db.ks("steward:o/r", &json!({"prs":[{"number":1,"head_sha":head,"state":"revisao_pendente","overlaps":[],"possible_duplicates":[]}]}));
+        db.ks("steward:o/r", &json!({"prs":[{"number":1,"head_sha":head,"updated_at":updated,"state":"revisao_pendente","overlaps":[],"possible_duplicates":[]}]}));
+        // A newer local Watcher observation invalidates the older report,
+        // even if the remote preflight previously matched it.
+        let newer = "2026-11-26T12:01:00Z";
+        db.run("update prs set upd=?", pa![newer.to_string()]);
+        assert!(!admit(&body).unwrap());
+        db.run("update prs set upd=?", pa![updated.to_string()]);
+        db.run(
+            "update prs set d=json_set(d,'$.watcher_head',?)",
+            pa!["a".repeat(40)],
+        );
+        assert!(!admit(&body).unwrap());
+        db.run(
+            "update prs set d=json_set(d,'$.watcher_head',?)",
+            pa![head.to_string()],
+        );
+        db.ks("steward:o/r", &json!({"prs":[{"number":1,"head_sha":head,"updated_at":newer,"state":"revisao_pendente","overlaps":[],"possible_duplicates":[]}]}));
+        assert!(!admit(&body).unwrap());
+        db.ks("steward:o/r", &json!({"prs":[{"number":1,"head_sha":head,"updated_at":updated,"state":"revisao_pendente","overlaps":[],"possible_duplicates":[]}]}));
+        let mut mismatched = body.clone();
+        mismatched["source_head"] = json!("b".repeat(40));
+        assert!(admit(&mismatched).is_err());
+        mismatched = body.clone();
+        mismatched["source_updated_at"] = json!("invalid");
+        assert!(admit(&mismatched).is_err());
+        assert_eq!(db.n("select count(*) from jobs", vec![]), 0);
+        assert!(db.kg(&format!("steward:repair:{repo}#1:{head}:91")).is_null());
         db.run("update rp set steward_repair=0", vec![]);
         assert!(!admit(&body).unwrap());
         db.run("update rp set steward_repair=1", vec![]);
