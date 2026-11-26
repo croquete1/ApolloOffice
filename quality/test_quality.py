@@ -91,7 +91,7 @@ class QualityIntegration(unittest.TestCase):
             urls.append(req.full_url)
             return Response()
         module = load('preflight')
-        with patch.object(module.urllib.request, 'urlopen', fetch):
+        with patch.object(module, 'open_pinned', fetch):
             facts = module.scan(base, '')
         self.assertIn('/'+dependency+'/constants.gradle', urls[0])
         self.assertEqual(facts['min_sdk'][0]['revision'], dependency)
