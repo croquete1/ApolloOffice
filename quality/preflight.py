@@ -69,8 +69,12 @@ def scan(base, issue):
         location = re.search(re.escape(pathlib.PurePosixPath(path).name)+r':(\d+)', issue)
         if location and len(raw)>limit:
             lines = text.splitlines(keepends=True)
-            start = max(0, int(location[1])-65)
-            text = ''.join(lines[start:])
+            # Issue line hints are untrusted. Keep the bounded prefix if the
+            # hint cannot identify an actual line; never convert huge integers.
+            hint = location[1]
+            if len(hint) <= 10 and 1 <= int(hint) <= len(lines):
+                start = max(0, int(hint)-65)
+                text = ''.join(lines[start:])
         # The encoded text is valid UTF-8; ignore only an incomplete final codepoint.
         text = text.encode()[:limit].decode('utf-8', 'ignore')
         emitted = text.encode('utf-8')
