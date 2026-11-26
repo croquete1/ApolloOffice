@@ -52,8 +52,14 @@ def provider():
     if stage == 'provider-failure' and role == 'watcher':
         print('fixture provider failed', file=sys.stderr)
         return 1
-    print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': json.dumps(result), 'usage': {}}), flush=True)
-    return 0
+    terminal = {'type': 'result', 'subtype': 'success', 'is_error': False, 'result': json.dumps(result), 'usage': {}}
+    if role == 'watcher' and stage == 'failed-terminal':
+        terminal['is_error'] = True
+        terminal['subtype'] = 'error_max_turns'
+    print(json.dumps(terminal), flush=True)
+    if role == 'watcher' and stage == 'duplicate-terminal':
+        print(json.dumps(terminal), flush=True)
+    return 1 if role == 'watcher' and stage == 'failed-exit' else 0
 
 
 def query(root, sql, args=()):
@@ -123,6 +129,15 @@ def scenario(source_binary):
         assert_pending()
         run_stage(binary, root, env, 'provider-failure', lambda: (root / 'provider-failure-watcher').exists() and event(root, 'processing deferred'))
         assert_pending()
+        # A valid JSON body cannot authorize work from a failed/ambiguous CLI run.
+        def failed_verdict(stage):
+            assert query(root, 'select count(*) from jobs') == [(0,)], f'{stage}: failed verdict admitted a job'
+            assert query(root, 'select count(*) from cm') == [(0,)], f'{stage}: failed verdict acknowledged a comment'
+            return (root / f'{stage}-watcher').exists() and event(root, 'claude did not complete successfully')
+
+        for stage in ('failed-terminal', 'failed-exit', 'duplicate-terminal'):
+            run_stage(binary, root, env, stage, lambda: failed_verdict(stage))
+            assert_pending()
         with closing(db_connection(root)) as db, db:
             db.execute("insert into jobs(repo,num,pr,kind,st,title,url,why,d,t0,t1) values('o/r',1,1,'review','approve','Active fixture','url','fixture','{}',1,1)")
         run_stage(binary, root, env, 'active-job', lambda: event(root, 'new review deferred until active review finishes'))
