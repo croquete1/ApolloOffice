@@ -52,13 +52,16 @@ class AcceptanceRevisionTests(unittest.TestCase):
         return self.git('rev-parse', 'HEAD')
 
     def assert_exact_commit(self, revision):
+        original_head = self.git('rev-parse', 'HEAD')
+        original_content = pathlib.Path('fixture.txt').read_bytes()
         result = self.runner.run(revision, self.encoded)
         self.assertEqual(result['revision'], revision)
         self.assertEqual(result['exit'], 0, result['output'])
         self.assertIn('APOLLO_CHECK:revision:PASS', result['output'])
         self.assertTrue(result['source_clean'])
         self.assertEqual(self.marker.read_text(), 'ran')
-        self.assertEqual(self.git('rev-parse', 'HEAD'), revision)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), original_head)
+        self.assertEqual(pathlib.Path('fixture.txt').read_bytes(), original_content)
         self.assertEqual(self.git('status', '--porcelain'), '')
 
     def test_sha1_commit(self):
@@ -66,6 +69,14 @@ class AcceptanceRevisionTests(unittest.TestCase):
 
     def test_sha256_commit(self):
         self.assert_exact_commit(self.init_repo('sha256'))
+
+    def test_earlier_commit_is_selected_without_changing_original_head(self):
+        revision = self.init_repo('sha1')
+        pathlib.Path('fixture.txt').write_text('newer content')
+        self.git('add', 'fixture.txt')
+        self.git('commit', '-qm', 'newer fixture')
+        self.assertNotEqual(self.git('rev-parse', 'HEAD'), revision)
+        self.assert_exact_commit(revision)
 
     def test_sha256_prefix_is_not_exact_commit(self):
         revision = self.init_repo('sha256')
