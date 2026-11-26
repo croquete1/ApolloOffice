@@ -43,6 +43,27 @@ class InventoryLimitTests(unittest.TestCase):
         self.assertEqual(facts['files'], [])
         self.assertTrue(facts['inventory_truncated'])
 
+    def test_extreme_sdk_value_does_not_abort_inspection(self):
+        Path('build.gradle').write_text('minSdkVersion 0\nminSdkVersion 2147483648\nminSdkVersion 21\n')
+        Path('Example.java').write_text('minSdkVersion ' + '9' * 4500 + '\n')
+        self.git('add', 'build.gradle', 'Example.java')
+        self.git('commit', '-qm', 'root')
+        with patch.object(preflight.shutil, 'which', return_value=None), \
+             patch.object(preflight.urllib.request, 'urlopen') as remote:
+            facts = preflight.scan(self.git('rev-parse', 'HEAD'), 'Example.java')
+        remote.assert_not_called()
+        self.assertTrue(facts['inventory_truncated'])
+        self.assertEqual(facts['min_sdk'], [
+            {'value': 21, 'path': 'build.gradle', 'revision': facts['base']},
+        ])
+
+    def test_valid_sdk_values_are_retained(self):
+        Path('build.gradle').write_text('minSdkVersion 21\nminSdk = 35\n')
+        self.git('add', 'build.gradle')
+        facts = self.scan()
+        self.assertFalse(facts['inventory_truncated'])
+        self.assertEqual([item['value'] for item in facts['min_sdk']], [21, 35])
+
     def workflows(self, count):
         directory = Path('.github/workflows')
         directory.mkdir(parents=True)
