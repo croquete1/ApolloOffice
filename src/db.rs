@@ -962,6 +962,28 @@ impl Db {
         self.jset(j.id, &[("d", j.d.clone())]);
     }
 
+    // INSERT OR IGNORE is idempotent only if the intended receipt exists.
+    fn persist_comment_ack(
+        tx: &rusqlite::Transaction<'_>,
+        repo: &str,
+        id: &str,
+    ) -> rusqlite::Result<()> {
+        let key = format!("{repo}:{id}");
+        tx.execute(
+            "insert or ignore into cm(id,t) values(?,?)",
+            rusqlite::params![key, now()],
+        )?;
+        let exists: bool = tx.query_row(
+            "select exists(select 1 from cm where id=?)",
+            [&key],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        Ok(())
+    }
+
     fn ack_comments_in_tx(
         tx: &rusqlite::Transaction<'_>,
         repo: &str,
@@ -970,10 +992,7 @@ impl Db {
         ids: &[String],
     ) -> rusqlite::Result<()> {
         for id in ids {
-            tx.execute(
-                "insert or ignore into cm(id,t) values(?,?)",
-                rusqlite::params![format!("{repo}:{id}"), now()],
-            )?;
+            Self::persist_comment_ack(tx, repo, id)?;
         }
         let changed = tx.execute("update prs set d=json_set(d, '$.seen', json('true'), '$.comment_seen_at', ?) where repo=? and num=?", rusqlite::params![updated, repo, number])?;
         if changed != 1 {
@@ -1455,10 +1474,7 @@ impl Db {
         } else {
             // Keep the old cursor so deferred input is observed again.
             for id in ids {
-                tx.execute(
-                    "insert or ignore into cm(id,t) values(?,?)",
-                    rusqlite::params![format!("{repo}:{id}"), now()],
-                )?;
+                Self::persist_comment_ack(tx, repo, id)?;
             }
         }
         Ok(())
@@ -2392,6 +2408,46 @@ mod late_followup_tests {
             }
             assert!(!db.comment_acknowledged("o/r", "i1").unwrap());
             assert_eq!(db.n("select count(*) from jobs", vec![]), 0);
+        }
+    }
+
+    #[test]
+    fn ignored_merged_ack_rolls_back_followup_and_preserves_cursor() {
+        for complete in [false, true] {
+            let db = Db::mem();
+            db.run("insert into rp(full) values('o/r')", vec![]);
+            db.run(
+                "insert into prs(repo,num,st,upd,d) values('o/r',1,'merged','new',?)",
+                crate::pa![json!({"comment_seen_at":"old"}).to_string()],
+            );
+            let request = json!({"title":"follow-up","body":"verified request","url":"https://example.test","why":"maintainer"});
+            let ids = vec!["i1".into(), "i2".into()];
+            db.0.lock()
+                .unwrap()
+                .execute_batch(
+                    "create trigger ignore_ack before insert on cm
+                     when new.id='o/r:i2' begin select raise(ignore); end;",
+                )
+                .unwrap();
+            assert!(db
+                .queue_followup_and_ack("o/r", 1, "new", &ids, &request, complete)
+                .is_err());
+            assert_eq!(db.n("select count(*) from jobs", vec![]), 0);
+            assert_eq!(db.n("select count(*) from cm", vec![]), 0);
+            assert_eq!(
+                db.one("select d from prs where repo='o/r' and num=1", vec![])
+                    .unwrap()["d"]["comment_seen_at"],
+                "old"
+            );
+            db.run("drop trigger ignore_ack", vec![]);
+            assert!(db
+                .queue_followup_and_ack("o/r", 1, "new", &ids, &request, complete)
+                .unwrap());
+            assert!(db
+                .queue_followup_and_ack("o/r", 1, "new", &ids, &request, complete)
+                .unwrap());
+            assert_eq!(db.n("select count(*) from jobs", vec![]), 1);
+            assert_eq!(db.n("select count(*) from cm", vec![]), 2);
         }
     }
 
@@ -3618,6 +3674,29 @@ mod watcher_storage_failure_tests {
             Some(rusqlite::ErrorCode::DiskFull)
         );
         assert_pending(&db);
+    }
+
+    #[test]
+    fn ignored_review_ack_rolls_back_job_reply_and_receipt() {
+        let db = Db::mem();
+        seed(&db);
+        db.0.lock()
+            .unwrap()
+            .execute_batch(
+                "create trigger ignore_ack before insert on cm begin select raise(ignore); end;",
+            )
+            .unwrap();
+        assert!(db
+            .queue_review_and_ack("o/r", 1, "t", &["r1".into()], &request())
+            .is_err());
+        assert_pending(&db);
+        db.run("drop trigger ignore_ack", vec![]);
+        assert!(db
+            .queue_review_and_ack("o/r", 1, "t", &["r1".into()], &request())
+            .unwrap());
+        assert!(db.comment_acknowledged("o/r", "r1").unwrap());
+        assert_eq!(db.n("select count(*) from jobs", vec![]), 1);
+        assert_eq!(db.n("select count(*) from watcher_outbox", vec![]), 1);
     }
 
     #[test]
