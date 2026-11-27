@@ -2434,7 +2434,21 @@ async fn deliver_watcher_outbox(a: &Ax, me: &str) -> R<()> {
             );
             continue;
         }
-        if row["state"] == "uncertain" {
+        let (Some(state), Some(previous)) = (row["state"].as_str(), row["updated"].as_i64()) else {
+            a.say("watcher", &format!("{tag}: invalid outbox rotation snapshot"), None);
+            continue;
+        };
+        // Persist rotation before remote I/O, including reconciliation and
+        // expiry. A failed row cannot authorize a POST or stop the batch.
+        match a.db.rotate_watcher_reply(id, author, state, previous, now()) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(error) => {
+                a.say("watcher", &format!("{tag}: outbox rotation failed: {error}"), None);
+                continue;
+            }
+        }
+        if state == "uncertain" {
             // Positive confirmation only: absence is not evidence that a POST failed.
             if let Ok(comments) = apip_unique(&format!(
                 "repos/{repo}/issues/{number}/comments?per_page=100"
@@ -2453,11 +2467,6 @@ async fn deliver_watcher_outbox(a: &Ax, me: &str) -> R<()> {
                     );
                 }
             }
-            // Rotate ambiguous rows rather than starve later rows.
-            a.db.run(
-                "update watcher_outbox set updated=? where id=? and state='uncertain'",
-                pa![now(), id.to_string()],
-            );
             continue;
         }
         if now().saturating_sub(row["created"].as_i64().unwrap_or(0)) >= 86_400_000 {
@@ -2474,10 +2483,6 @@ async fn deliver_watcher_outbox(a: &Ax, me: &str) -> R<()> {
             continue;
         }
         // Recheck the remote state before publishing previously queued content.
-        a.db.run(
-            "update watcher_outbox set updated=? where id=? and state='pending'",
-            pa![now(), id.to_string()],
-        );
         let Ok(pr) = ghj(
             &[
                 "pr",
