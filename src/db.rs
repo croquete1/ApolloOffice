@@ -28,14 +28,38 @@ pub struct ReviewAttempt {
     ticket: String,
 }
 
-impl Drop for ReviewAttempt {
-    fn drop(&mut self) {
-        let c = self.db.0.lock().unwrap();
-        if let Err(error) = c.execute(
+impl ReviewAttempt {
+    fn release_ticket(&self) -> rusqlite::Result<()> {
+        let mut c = self.db.0.lock().unwrap();
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
             "update watcher_retry set analysis_ticket=null where repo=? and num=? and analysis_ticket=?",
             rusqlite::params![self.repo, self.number, self.ticket],
-        ) {
-            eprintln!("watcher attempt release failed; restart recovery required: {error}");
+        )?;
+        let retained: bool = tx.query_row(
+            "select exists(select 1 from watcher_retry where repo=? and num=? and analysis_ticket=?)",
+            rusqlite::params![self.repo, self.number, self.ticket],
+            |row| row.get(0),
+        )?;
+        if retained {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        tx.commit()
+    }
+
+    pub(crate) fn release(mut self) -> rusqlite::Result<()> {
+        self.release_ticket()?;
+        self.ticket.clear();
+        Ok(())
+    }
+}
+
+impl Drop for ReviewAttempt {
+    fn drop(&mut self) {
+        if !self.ticket.is_empty() {
+            if let Err(error) = self.release_ticket() {
+                eprintln!("watcher attempt release failed; restart recovery required: {error}");
+            }
         }
     }
 }
@@ -3286,6 +3310,55 @@ mod watcher_retry_tests {
         let waiting = db.try_all("select * from watcher_retry", vec![]).unwrap();
         assert!(waiting[0]["analysis_ticket"].is_null());
         assert_eq!(waiting[0]["next_attempt_at"], 1800000);
+    }
+
+    #[test]
+    fn ignored_analysis_release_is_reported_and_keeps_retry_deadline() {
+        let db = Db::mem();
+        let head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        db.run("insert into rp(full) values('o/r')", vec![]);
+        db.run(
+            "insert into prs(repo,num,st,upd,d) values('o/r',1,'open','t',?)",
+            crate::pa![json!({"watcher_head":head}).to_string()],
+        );
+        let attempt = db
+            .claim_review_attempt("o/r", 1, "t", head, 0)
+            .unwrap()
+            .unwrap();
+        let before = db.try_all("select * from watcher_retry", vec![]).unwrap();
+        db.0.lock()
+            .unwrap()
+            .execute_batch(
+                "create trigger ignore_release before update on watcher_retry
+                 when new.analysis_ticket is null begin select raise(ignore); end;",
+            )
+            .unwrap();
+        assert!(attempt.release().is_err());
+        assert_eq!(db.try_all("select * from watcher_retry", vec![]).unwrap(), before);
+        assert!(db
+            .claim_review_attempt("o/r", 1, "t", head, 600000)
+            .unwrap()
+            .is_none());
+        db.run("drop trigger ignore_release", vec![]);
+        let app = std::sync::Arc::new(crate::app::App::new(
+            db.clone(),
+            std::env::temp_dir(),
+            1,
+            "apollo-office".into(),
+        ));
+        crate::pipe::recover(&app).unwrap();
+        assert!(db
+            .claim_review_attempt("o/r", 1, "t", head, 599999)
+            .unwrap()
+            .is_none());
+        let next = db
+            .claim_review_attempt("o/r", 1, "t", head, 600000)
+            .unwrap()
+            .unwrap();
+        next.release().unwrap();
+        let rows = db.try_all("select * from watcher_retry", vec![]).unwrap();
+        assert!(rows[0]["analysis_ticket"].is_null());
+        assert_eq!(rows[0]["next_attempt_at"], 1800000);
     }
 
     #[test]
