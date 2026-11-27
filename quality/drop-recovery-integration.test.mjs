@@ -12,7 +12,19 @@ test("requeue uses server-side guarded recovery rather than resetting a dropped 
   assert.match(web, /Job alterado durante a recuperação/);
   assert.doesNotMatch(web, /"requeue"\s*=>\s*\{\s*if let Some\(j\) = a\.db\.jg\(id\)/);
   assert.match(recovery, /has_related_pr\(list, job\.num\)/);
-  assert.match(recovery, /cache_default_head\(a, &job\.repo, &head\)\?/);
+  const manual = recovery.slice(recovery.indexOf("async fn retry_manual_with"), recovery.indexOf("fn retry_snapshot("));
+  assert.match(manual, /validate_default_head\(&head\)\?/);
+  assert.match(manual, /retry_snapshot_with_head\(a, &job, &snapshot, false, Some\(\(generation, &head\)\)\)/);
+  assert.doesNotMatch(manual, /publish_head_observation\(/);
+  const retry = recovery.slice(recovery.indexOf("fn retry_snapshot_with_head("), recovery.indexOf("fn commit_retry("));
+  assert.match(retry, /let changed = commit_retry\(/);
+  assert.match(retry, /if !changed \{\s*return Ok\(false\);\s*\}/);
+  const commit = retry.indexOf("let changed = commit_retry(");
+  const rejected = retry.indexOf("if !changed");
+  const publish = retry.indexOf("publish_head_observation(");
+  const notify = retry.indexOf("a.sw.notify_one()");
+  assert.ok(commit >= 0 && commit < rejected && rejected < publish && publish < notify,
+    "HEAD publication requires successful commit and precedes worker notification");
 });
 
 test("job details retain failure diagnostics and show blocked retry errors", () => {

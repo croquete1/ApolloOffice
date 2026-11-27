@@ -662,7 +662,9 @@ mod tests {
         let good = json!({"s":"a".repeat(40)});
         assert!(validate_default_head(&good).is_ok());
         let generation = crate::gh::begin_head_observation(&a, "org/repo");
-        assert!(crate::gh::publish_head_observation(&a, "org/repo", generation, &good));
+        assert!(crate::gh::publish_head_observation(
+            &a, "org/repo", generation, &good
+        ));
         assert_eq!(
             crate::gh::cg(&a, "head:org/repo", 60_000),
             Some(good.clone())
@@ -671,10 +673,16 @@ mod tests {
         assert!(validate_default_head(&json!({"s":"invalid"})).is_err());
         let newer = crate::gh::begin_head_observation(&a, "org/repo");
         assert!(!crate::gh::publish_head_observation(
-            &a, "org/repo", newer, &json!({"s":"invalid"})
+            &a,
+            "org/repo",
+            newer,
+            &json!({"s":"invalid"})
         ));
         assert!(!crate::gh::publish_head_observation(
-            &a, "org/repo", generation, &json!({"s":"b".repeat(40)})
+            &a,
+            "org/repo",
+            generation,
+            &json!({"s":"b".repeat(40)})
         ));
         assert_eq!(crate::gh::cg(&a, "head:org/repo", 60_000), Some(good));
     }
@@ -837,7 +845,10 @@ mod tests {
                 let generation = crate::gh::begin_head_observation(&a, "org/repo");
                 let original_head = json!({"s":"b".repeat(40)});
                 assert!(crate::gh::publish_head_observation(
-                    &a, "org/repo", generation, &original_head
+                    &a,
+                    "org/repo",
+                    generation,
+                    &original_head
                 ));
                 a.db.ks("cired:org/repo", &json!({"sha":"b".repeat(40)}));
                 let kill = format!("kill:{id}");
@@ -888,7 +899,10 @@ mod tests {
                             if mutation == "newer_head" {
                                 let newer = crate::gh::begin_head_observation(&a, "org/repo");
                                 assert!(crate::gh::publish_head_observation(
-                                    &a, "org/repo", newer, &json!({"s":"c".repeat(40)})
+                                    &a,
+                                    "org/repo",
+                                    newer,
+                                    &json!({"s":"c".repeat(40)})
                                 ));
                             }
                             json!({"s":"a".repeat(40)})
@@ -902,10 +916,7 @@ mod tests {
                     scan_with(&a, "org/repo", &[], remote).await;
                     assert_eq!(calls, 1);
                 } else {
-                    assert_eq!(
-                        retry_manual_with(&a, id, remote).await.unwrap(),
-                        accepted
-                    );
+                    assert_eq!(retry_manual_with(&a, id, remote).await.unwrap(), accepted);
                     assert_eq!(calls, 3);
                 }
                 let job = a.db.jg(id).unwrap();

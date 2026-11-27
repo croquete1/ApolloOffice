@@ -19,19 +19,16 @@ pub fn cs(a: &App, k: &str, v: &Value) {
 pub(crate) fn begin_head_observation(a: &App, repo: &str) -> u64 {
     let mut observations = a.head_observations.lock().unwrap();
     let generation = observations.entry(repo.to_owned()).or_default();
-    *generation = generation.checked_add(1).expect("HEAD observation generation exhausted");
+    *generation = generation
+        .checked_add(1)
+        .expect("HEAD observation generation exhausted");
     *generation
 }
 
 /// Reject malformed responses and results superseded by a later request.
 /// Keep the generation lock through the cache write so another request
 /// cannot begin between the check and publication.
-pub(crate) fn publish_head_observation(
-    a: &App,
-    repo: &str,
-    generation: u64,
-    head: &Value,
-) -> bool {
+pub(crate) fn publish_head_observation(a: &App, repo: &str, generation: u64, head: &Value) -> bool {
     if !head["s"].as_str().is_some_and(crate::db::valid_git_sha) {
         return false;
     }
