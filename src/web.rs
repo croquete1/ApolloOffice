@@ -852,7 +852,7 @@ fn rst(a: &Ax, r: &str) -> Value {
         )
         .map(|x| x["u"].as_f64().unwrap_or(0.0))
         .unwrap_or(0.0);
-    json!({"m14": m14, "op": o["op"], "old": o["old"], "is": is, "ik": ik, "q": q, "usd": usd, "hy": crate::pipe::hy(a, r), "iv": crate::wk::ivl(a, r) / 60_000, "red": !a.db.kg(&format!("cired:{r}")).is_null(), "hunt_health": crate::hunt_health::status(a, r)})
+    json!({"m14": m14, "op": o["op"], "old": o["old"], "is": is, "ik": ik, "q": q, "usd": usd, "hy": crate::pipe::hy(a, r), "iv": crate::wk::ivl(a, r) / 60_000, "red": crate::pipe::ci_storage_pending(a, r) || !a.db.kg(&format!("cired:{r}")).is_null(), "hunt_health": crate::hunt_health::status(a, r)})
 }
 
 fn costs(a: &Ax) -> Value {
