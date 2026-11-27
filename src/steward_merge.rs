@@ -682,19 +682,31 @@ fn observed_branch_update(
     Some(observed)
 }
 
-async fn reconcile_branch_update(
-    a: &Ax,
+fn load_branch_update(
+    db: &crate::db::Db,
     repo: &str,
     number: i64,
-) -> Result<(), String> {
-    let rows = a.db.try_all(
-        "select v from kv where k=?",
-        pa![format!("steward:update:{repo}#{number}")],
-    ).map_err(|error| format!("branch update reconciliation unavailable: {error}"))?;
-    let Some(row) = rows.first() else {
+) -> rusqlite::Result<Option<Value>> {
+    use rusqlite::OptionalExtension;
+    let c = db.0.lock().unwrap();
+    let raw: Option<String> = c
+        .query_row(
+            "select v from kv where k=?",
+            [format!("steward:update:{repo}#{number}")],
+            |row| row.get(0),
+        )
+        .optional()?;
+    raw.map(|value| serde_json::from_str(&value).map_err(|_| rusqlite::Error::InvalidQuery))
+        .transpose()
+}
+
+async fn reconcile_branch_update(a: &Ax, repo: &str, number: i64) -> Result<(), String> {
+    let Some(previous) = load_branch_update(&a.db, repo, number)
+        .map_err(|error| format!("branch update reconciliation unavailable: {error}"))?
+    else {
         return Ok(());
     };
-    let previous = &row["v"];
+    let previous = &previous;
     if !matches!(previous["status"].as_str(), Some("attempted" | "accepted" | "uncertain")) {
         return Ok(());
     }
@@ -1753,7 +1765,9 @@ mod tests {
         assert_eq!(observed["status"], "observed");
         assert_eq!(observed["observed_head"], head);
         assert_eq!(observed["at"], 100);
+        assert!(load_branch_update(&db, "o/r", 1).unwrap().is_none());
         db.ks(key, &previous);
+        assert_eq!(load_branch_update(&db, "o/r", 1).unwrap(), Some(previous.clone()));
         db.run("create trigger ignore_observation before update on kv when new.k glob 'steward:update:*' begin select raise(ignore); end;", pa![]);
         assert!(replace_branch_update_record(&db, "o/r", 1, &previous, &observed).is_err());
         assert_eq!(db.kg(key), previous);
