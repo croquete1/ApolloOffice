@@ -484,6 +484,34 @@ fn commit_subject_kind(title: &str, kind: &str) -> R<String> {
 // Recheck the live opt-in and the durable evidence at execution boundaries.
 // The CodeRabbit activation epoch is stored on each queued finding. Turning
 // the feature off and on must not revive a job from the previous activation.
+fn steward_rebase_authorized(db: &crate::db::Db, j: &Job) -> R<()> {
+    if j.kind != "rebase" {
+        return Ok(());
+    }
+    if j.d.get("steward_rebase_base_ref").is_none()
+        && j.d.get("steward_rebase_base_sha").is_none()
+        && j.d.get("steward_rebase_activation").is_none()
+    {
+        return Ok(());
+    }
+    let token = j.d["steward_rebase_activation"]
+        .as_str()
+        .filter(|s| s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or_else(|| X::Drop("Missing Steward rebase activation; manual review required".into()))?;
+    let number = j.pr.filter(|n| *n > 0).ok_or_else(|| {
+        X::Drop("Missing Steward rebase PR number; manual review required".into())
+    })?;
+    let authorized = db.try_n(
+        "select count(*) from rp where full=? and on_=1 and steward_activation=?
+         and exists(select 1 from prs where repo=rp.full and num=? and st='open')",
+        pa![j.repo.clone(), token.to_string(), number],
+    ).map_err(|error| X::Defer(format!("Steward rebase authorization unavailable: {error}")))?;
+    if authorized != 1 {
+        return drop("Steward rebase authorization revoked; manual review required");
+    }
+    Ok(())
+}
+
 fn automated_review_authorized(db: &crate::db::Db, j: &Job) -> R<()> {
     if j.kind != "review" {
         return Ok(());
@@ -565,6 +593,7 @@ fn kill(a: &Ax, j: &Job) -> R<()> {
     {
         return drop("dropped by the owner");
     }
+    steward_rebase_authorized(&a.db, j)?;
     automated_review_authorized(&a.db, j)
 }
 

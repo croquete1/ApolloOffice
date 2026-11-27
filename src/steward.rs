@@ -395,6 +395,9 @@ fn conflict_request(listed: &Value, fresh: &Value, saved: &Value, login: &str) -
     let base = listed["baseRefName"]
         .as_str()
         .filter(|s| !s.trim().is_empty())?;
+    let activation = saved["steward_activation"]
+        .as_str()
+        .filter(|s| s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit()))?;
     if login.trim().is_empty()
         || listed["mergeStateStatus"] != "DIRTY"
         || fresh["state"] != "OPEN"
@@ -412,6 +415,7 @@ fn conflict_request(listed: &Value, fresh: &Value, saved: &Value, login: &str) -
         || saved["d"]["watcher_head"] != head
         // The existing Fixer can only rebase onto the default branch.
         || saved["d"]["default_branch"] != base
+        || saved["d"]["base"] != base
     {
         return None;
     }
@@ -426,7 +430,8 @@ fn conflict_request(listed: &Value, fresh: &Value, saved: &Value, login: &str) -
     Some(json!({
         "title":title,"url":url,"why":format!("merge conflict with {base}"),
         "data":{"branch":branch,"head":format!("{login}/{source}"),"test_cmd":saved["d"]["test_cmd"],
-                "steward_rebase_base_ref":base,"steward_rebase_base_sha":base_sha}
+                "steward_rebase_base_ref":base,"steward_rebase_base_sha":base_sha,
+                "steward_rebase_activation":activation}
     }))
 }
 
@@ -448,7 +453,9 @@ async fn route_tracked_rebases(a: &Ax, repo: &str, listed: &[Value]) -> Result<(
         };
         let rows =
             a.db.try_all(
-                "select st,upd,d from prs where repo=? and num=? and st='open'",
+                "select prs.st,prs.upd,prs.d,rp.steward_activation
+                 from prs join rp on rp.full=prs.repo
+                 where prs.repo=? and prs.num=? and prs.st='open' and rp.on_=1",
                 pa![repo.to_string(), number],
             )
             .map_err(|error| error.to_string())?;
@@ -651,7 +658,14 @@ mod tests {
             "headRepositoryOwner":{"login":"owner"},"headRepository":{"name":"fork"},
             "headRefName":"fix","title":"PR","url":"https://github.com/o/r/pull/1"
         });
-        let saved = json!({"st":"open","upd":updated,"d":{"watcher_head":head,"test_cmd":"cargo test","default_branch":"main"}});
+        let db = crate::db::Db::mem();
+        db.run(
+            "insert into rp(full,on_,auto_merge,steward_repair) values('o/r',1,0,0)",
+            pa![],
+        );
+        let token = db.one("select steward_activation from rp", pa![]).unwrap()["steward_activation"].clone();
+        let saved = json!({"st":"open","upd":updated,"steward_activation":token,
+            "d":{"watcher_head":head,"test_cmd":"cargo test","default_branch":"main","base":"main"}});
         let request = conflict_request(&listed, &fresh, &saved, "owner").unwrap();
         assert_eq!(request["data"]["head"], "owner/fork");
         assert_eq!(request["data"]["test_cmd"], "cargo test");
@@ -687,17 +701,22 @@ mod tests {
         let mut changed = saved.clone();
         changed["d"]["watcher_head"] = json!("c".repeat(40));
         assert!(conflict_request(&listed, &fresh, &changed, "owner").is_none());
-        // Do not create a new permission or require auto-merge: the legacy
-        // owned tracked conflict route works independently of those options.
-        let db = crate::db::Db::mem();
-        db.run(
-            "insert into rp(full,on_,auto_merge,steward_repair) values('o/r',1,0,0)",
-            pa![],
-        );
+        // Preserve the legacy permission, but require the same activation
+        // and tracked base inside the admission transaction.
         db.run(
             "insert into prs(repo,num,st,upd,d) values('o/r',1,'open',?,?)",
             pa![updated.to_string(), saved["d"].to_string()],
         );
+        db.run("update prs set d=json_set(d,'$.default_branch','release')", pa![]);
+        assert!(db.queue_watcher_rebase("o/r", 1, updated, &head, &request).is_err());
+        db.run("update prs set d=json_set(d,'$.default_branch','main')", pa![]);
+        db.run("update rp set on_=0", pa![]);
+        db.run("update rp set on_=1", pa![]);
+        assert!(db.queue_watcher_rebase("o/r", 1, updated, &head, &request).is_err());
+        assert_eq!(db.n("select count(*) from jobs", pa![]), 0);
+        let mut saved = saved.clone();
+        saved["steward_activation"] = db.one("select steward_activation from rp", pa![]).unwrap()["steward_activation"].clone();
+        let request = conflict_request(&listed, &fresh, &saved, "owner").unwrap();
         assert!(db
             .queue_watcher_rebase("o/r", 1, updated, &head, &request)
             .unwrap());
