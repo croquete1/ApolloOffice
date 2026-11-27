@@ -155,6 +155,15 @@ fn stale_base_candidate(listed: &Value, assessed: &Value) -> Result<(i64, String
 
 /// Provas são recolhidas na CI e review do próprio ApolloOffice antes da publicação.
 /// A árvore Git é estável durante squash, ao contrário do SHA do commit.
+fn valid_merge_activation(value: &str) -> bool {
+    value.len() == 32 && value.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn mergecheck_proof_current(job: &Value, activation: &str) -> bool {
+    job["kind"] != "mergecheck"
+        || (valid_merge_activation(activation) && job["d"]["merge_activation"] == activation)
+}
+
 fn local_proof(job: &Value, head: &str, base: &str, tree: &str, ci: &str) -> bool {
     let d = &job["d"];
     let reviewed_by = d["last_review"]["model"].as_str().unwrap_or("");
@@ -533,11 +542,22 @@ fn admit_recheck(
     {
         return Ok(false);
     }
+    let activation: Option<String> = tx
+        .query_row(
+            "select merge_activation from rp where full=? and on_=1 and auto_merge=1 and local_merge=1",
+            [repo],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(activation) = activation.filter(|s| valid_merge_activation(s)) else {
+        return Ok(false);
+    };
     let data = json!({
         "head":repo,
         "branch":branch,
         "expected_head":head,
         "expected_base":base,
+        "merge_activation":activation,
         "author":author,
         "body":detail["body"]
     })
@@ -560,8 +580,9 @@ fn admit_recheck(
              select 1 from jobs where repo=?1 and pr=?2 and kind='mergecheck'
                and json_extract(d,'$.expected_head')=?3
                and json_extract(d,'$.expected_base')=?4
+               and json_extract(d,'$.merge_activation')=?5
          )",
-        rusqlite::params![repo, number, head, base],
+        rusqlite::params![repo, number, head, base, activation],
         |row| row.get(0),
     )?;
     if !eligible {
@@ -584,17 +605,18 @@ fn admit_recheck(
              select 1 from jobs where repo=? and pr=? and kind='mergecheck'
                and json_extract(d,'$.expected_head')=?
                and json_extract(d,'$.expected_base')=?
+               and json_extract(d,'$.merge_activation')=?
          )",
         rusqlite::params![
             repo, number, title, url, data, number, t, t, repo, repo, number, repo, repo, number,
-            head, base
+            head, base, activation
         ],
     )?;
     let job = tx.last_insert_rowid();
     let persisted: bool = tx.query_row(
         "select exists(select 1 from jobs where id=?1 and repo=?2 and num=?3 and pr=?3 and kind='mergecheck' and st='ready' and title=?4 and url=?5 and d=?6 and why='Revalidar CI e Reviewer antes de merge' and prio=-5.0 and t0=?7 and t1=?7)
-         and exists(select 1 from rp where full=?2 and on_=1 and auto_merge=1 and local_merge=1)",
-        rusqlite::params![job, repo, number, title, url, data, t],
+         and exists(select 1 from rp where full=?2 and on_=1 and auto_merge=1 and local_merge=1 and merge_activation=?8)",
+        rusqlite::params![job, repo, number, title, url, data, t, activation],
         |row| row.get(0),
     )?;
     if changed != 1 || !persisted {
@@ -887,7 +909,16 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
     if !review_threads_resolved(repo, number).await? || !review_gate(&reviews, &expected) {
         return Ok(false);
     }
+    let mut local_activation = None;
     if mode == MergeMode::Local {
+        let policy = a.db.try_all(
+            "select merge_activation from rp where full=? and on_=1 and auto_merge=1 and local_merge=1",
+            pa![repo.to_string()],
+        ).map_err(|error| format!("local merge activation unavailable: {error}"))?;
+        let Some(activation) = policy.first().and_then(|row| row["merge_activation"].as_str()).filter(|s| valid_merge_activation(s)) else {
+            return Ok(false);
+        };
+        local_activation = Some(activation.to_string());
         // A árvore testada tem de já conter a main atual como ancestral.
         // Caso contrário, o update-branch cria um commit normal (sem force-push),
         // e a PR será novamente testada e revista no próximo ciclo.
@@ -967,7 +998,7 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
         ).map_err(|error| format!("local merge proof database unavailable: {error}"))?;
         if !proven
             .iter()
-            .any(|job| local_proof(job, &head, base_sha, tree, &command))
+            .any(|job| mergecheck_proof_current(job, activation) && local_proof(job, &head, base_sha, tree, &command))
         {
             queue_recheck(a, repo, number, &head, base_sha, &detail);
             return Ok(false);
@@ -1025,6 +1056,15 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
             ) != 1)
     {
         return Ok(false);
+    }
+    if let Some(activation) = local_activation {
+        let current = a.db.try_n(
+            "select count(*) from rp where full=? and on_=1 and auto_merge=1 and local_merge=1 and merge_activation=?",
+            pa![repo.to_string(), activation],
+        ).map_err(|error| format!("local merge activation unavailable: {error}"))?;
+        if current != 1 {
+            return Ok(false);
+        }
     }
     // sha=HEAD impede integrar um commit da PR que tenha sido alterado.
     let merged = ghj(
@@ -1545,6 +1585,17 @@ mod tests {
                 .unwrap();
         assert_eq!(job["d"]["expected_head"], head);
         assert_eq!(job["d"]["expected_base"], base);
+        let first = job["d"]["merge_activation"].as_str().unwrap();
+        assert!(mergecheck_proof_current(&job, first));
+        a.db.run("update jobs set st='done' where kind='mergecheck'", pa![]);
+        a.db.run("update rp set local_merge=0", pa![]);
+        a.db.run("update rp set local_merge=1", pa![]);
+        let policy = a.db.one("select merge_activation from rp", pa![]).unwrap();
+        let current = policy["merge_activation"].as_str().unwrap();
+        assert_ne!(current, first);
+        assert!(!mergecheck_proof_current(&job, current));
+        assert!(queue_recheck(&a, repo, 42, head, base, &detail));
+        assert!(!queue_recheck(&a, repo, 42, head, base, &detail));
     }
 
     #[test]
