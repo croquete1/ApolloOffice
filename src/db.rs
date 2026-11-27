@@ -56,10 +56,11 @@ impl ReviewAttempt {
 
 impl Drop for ReviewAttempt {
     fn drop(&mut self) {
-        if !self.ticket.is_empty() {
-            if let Err(error) = self.release_ticket() {
-                eprintln!("watcher attempt release failed; restart recovery required: {error}");
-            }
+        if self.ticket.is_empty() {
+            return;
+        }
+        if let Err(error) = self.release_ticket() {
+            eprintln!("watcher attempt release failed; restart recovery required: {error}");
         }
     }
 }
@@ -3334,7 +3335,10 @@ mod watcher_retry_tests {
             )
             .unwrap();
         assert!(attempt.release().is_err());
-        assert_eq!(db.try_all("select * from watcher_retry", vec![]).unwrap(), before);
+        assert_eq!(
+            db.try_all("select * from watcher_retry", vec![]).unwrap(),
+            before
+        );
         assert!(db
             .claim_review_attempt("o/r", 1, "t", head, 600000)
             .unwrap()
