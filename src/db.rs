@@ -3682,7 +3682,9 @@ mod watcher_storage_failure_tests {
         seed(&db);
         db.0.lock()
             .unwrap()
-            .execute_batch("create trigger ignore_ack before insert on cm begin select raise(ignore); end;")
+            .execute_batch(
+                "create trigger ignore_ack before insert on cm begin select raise(ignore); end;",
+            )
             .unwrap();
         assert!(db
             .queue_review_and_ack("o/r", 1, "t", &["r1".into()], &request())
