@@ -3742,16 +3742,12 @@ mod watcher_storage_failure_tests {
             )
             .unwrap();
         let ids = vec!["r2".into(), "r3".into()];
-        assert!(db
-            .receive_review_batch("o/r", 1, "t", HEAD, &ids)
-            .is_err());
+        assert!(db.receive_review_batch("o/r", 1, "t", HEAD, &ids).is_err());
         assert_pending(&db);
         assert_eq!(db.n("select count(*) from watcher_inbox", vec![]), 1);
         db.run("drop trigger ignore_receipt", vec![]);
-        db.receive_review_batch("o/r", 1, "t", HEAD, &ids)
-            .unwrap();
-        db.receive_review_batch("o/r", 1, "t", HEAD, &ids)
-            .unwrap();
+        db.receive_review_batch("o/r", 1, "t", HEAD, &ids).unwrap();
+        db.receive_review_batch("o/r", 1, "t", HEAD, &ids).unwrap();
         assert_eq!(db.n("select count(*) from watcher_inbox", vec![]), 3);
     }
 
