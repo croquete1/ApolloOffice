@@ -137,7 +137,8 @@ mod t {
         ));
         let clear = |base: &str| {
             let expected = ci_marker_rows(&a.db.0.lock().unwrap(), "o/r", "@host")?;
-            clear_superseded_ci_markers(&a, "o/r", "@host", base, &expected)
+            let generation = crate::gh::begin_head_observation(&a, "o/r");
+            clear_superseded_ci_markers(&a, "o/r", "@host", base, &expected, Some(generation))
         };
         let base = "b".repeat(40);
         let old = json!({"sha":"a".repeat(40)});
@@ -173,7 +174,7 @@ mod t {
 
     #[tokio::test]
     async fn prepared_ci_cleanup_requires_fresh_default_head_and_unchanged_holds() {
-        for mutation in ["none", "stale_base", "invalid_head", "new_hold", "removed_hold"] {
+        for mutation in ["none", "stale_base", "invalid_head", "new_hold", "removed_hold", "newer_head", "pending_head"] {
             let a = std::sync::Arc::new(crate::app::App::new(
                 crate::db::Db::mem(),
                 std::env::temp_dir(),
@@ -194,6 +195,17 @@ mod t {
                     }
                     "removed_hold" => {
                         a.db.kd("cired:o/r");
+                        json!({"s":base})
+                    }
+                    "newer_head" => {
+                        let newer = crate::gh::begin_head_observation(&a, "o/r");
+                        assert!(crate::gh::publish_head_observation(
+                            &a, "o/r", newer, &json!({"s":"c".repeat(40)})
+                        ));
+                        json!({"s":base})
+                    }
+                    "pending_head" => {
+                        crate::gh::begin_head_observation(&a, "o/r");
                         json!({"s":base})
                     }
                     _ => json!({"s":base}),

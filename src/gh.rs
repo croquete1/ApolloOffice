@@ -105,12 +105,28 @@ pub(crate) fn with_cached_ci_head<T>(
     Some(result)
 }
 
+// Call only with the database already locked if the closure commits a
+// transaction. Never acquire the database or await while holding this lock.
+pub(crate) fn with_current_head_observation<T>(
+    a: &App,
+    repo: &str,
+    generation: u64,
+    action: impl FnOnce() -> T,
+) -> Option<T> {
+    let observations = a.head_observations.lock().unwrap();
+    let observation = observations.get(repo)?;
+    if observation.generation != generation
+        || observation.started.elapsed() >= Duration::from_secs(600)
+    {
+        return None;
+    }
+    let result = action();
+    drop(observations);
+    Some(result)
+}
+
 pub(crate) fn head_observation_is_current(a: &App, repo: &str, generation: u64) -> bool {
-    a.head_observations
-        .lock()
-        .unwrap()
-        .get(repo)
-        .is_some_and(|observation| observation.generation == generation)
+    with_current_head_observation(a, repo, generation, || ()).is_some()
 }
 
 pub async fn me(a: &App) -> Result<Value, String> {
