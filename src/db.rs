@@ -1509,13 +1509,30 @@ impl Db {
     }
 
     pub fn finish_watcher_reply(&self, id: &str, state: &str) -> rusqlite::Result<bool> {
-        let c = self.0.lock().unwrap();
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let source = match state {
+            "sent" => "uncertain",
+            "cancelled" => "pending",
+            _ => return Err(rusqlite::Error::InvalidQuery),
+        };
         let changed=match state{
-            "sent"=>c.execute("update watcher_outbox set state='sent',updated=? where id=? and state='uncertain'",rusqlite::params![now(),id])?,
-            "cancelled"=>c.execute("update watcher_outbox set state='cancelled',updated=? where id=? and state='pending'",rusqlite::params![now(),id])?,
+            "sent"=>tx.execute("update watcher_outbox set state='sent',updated=? where id=? and state='uncertain'",rusqlite::params![now(),id])?,
+            "cancelled"=>tx.execute("update watcher_outbox set state='cancelled',updated=? where id=? and state='pending'",rusqlite::params![now(),id])?,
             _=>return Err(rusqlite::Error::InvalidQuery)
         };
-        crate::app::chg();
+        let (still_eligible, persisted): (bool, bool) = tx.query_row(
+            "select exists(select 1 from watcher_outbox where id=? and state=?),exists(select 1 from watcher_outbox where id=? and state=?)",
+            rusqlite::params![id, source, id, state],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if still_eligible || (changed == 1 && !persisted) || changed > 1 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        tx.commit()?;
+        if changed == 1 {
+            crate::app::chg();
+        }
         Ok(changed == 1)
     }
 
@@ -3104,6 +3121,35 @@ mod watcher_outbox_tests {
             .queue_review_and_ack("o/r", 1, "next", &["r2".into()], &req)
             .unwrap());
         assert_eq!(db.n("select count(*) from watcher_outbox", vec![]), 1);
+    }
+
+    #[test]
+    fn ignored_reply_finish_is_an_error_and_never_requeues_uncertain_delivery() {
+        for (source, target) in [("uncertain", "sent"), ("pending", "cancelled")] {
+            let db = Db::mem();
+            {
+                let c = db.0.lock().unwrap();
+                c.execute(
+                    "insert into watcher_outbox(id,repo,num,author,body,state,created,updated) values('a','o/r',1,'owner','reply',?,1,1)",
+                    [source],
+                )
+                .unwrap();
+                c.execute_batch(
+                    "create trigger ignore_finish before update on watcher_outbox
+                     begin select raise(ignore); end;",
+                )
+                .unwrap();
+            }
+            assert!(db.finish_watcher_reply("a", target).is_err());
+            assert_eq!(db.watcher_outbox_counts().unwrap()[source], 1);
+            assert_eq!(db.watcher_outbox_counts().unwrap()[target], 0);
+            assert!(!db.finish_watcher_reply("missing", target).unwrap());
+            db.run("drop trigger ignore_finish", vec![]);
+            assert!(db.finish_watcher_reply("a", target).unwrap());
+            assert!(!db.finish_watcher_reply("a", target).unwrap());
+            assert_eq!(db.watcher_outbox_counts().unwrap()[target], 1);
+            assert!(!db.claim_watcher_reply("a", "owner").unwrap());
+        }
     }
 
     #[test]
