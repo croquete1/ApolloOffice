@@ -1690,39 +1690,34 @@ impl Db {
         }
         // The Steward's fresh read is not authorization if repository
         // activation or the tracked default branch changed before commit.
-        if data.contains_key("steward_rebase_base_ref")
-            || data.contains_key("steward_rebase_base_sha")
-            || data.contains_key("steward_rebase_activation")
+        let token = data
+            .get("steward_rebase_activation")
+            .and_then(Value::as_str)
+            .filter(|s| s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+            .ok_or(rusqlite::Error::InvalidQuery)?;
+        let base = data
+            .get("steward_rebase_base_ref")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .ok_or(rusqlite::Error::InvalidQuery)?;
+        if !data
+            .get("steward_rebase_base_sha")
+            .and_then(Value::as_str)
+            .is_some_and(valid_git_sha)
         {
-            let token = data
-                .get("steward_rebase_activation")
-                .and_then(Value::as_str)
-                .filter(|s| s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit()))
-                .ok_or(rusqlite::Error::InvalidQuery)?;
-            let base = data
-                .get("steward_rebase_base_ref")
-                .and_then(Value::as_str)
-                .filter(|s| !s.trim().is_empty())
-                .ok_or(rusqlite::Error::InvalidQuery)?;
-            if !data
-                .get("steward_rebase_base_sha")
-                .and_then(Value::as_str)
-                .is_some_and(valid_git_sha)
-            {
-                return Err(rusqlite::Error::InvalidQuery);
-            }
-            let current: bool = tx.query_row(
-                "select exists(select 1 from rp join prs on prs.repo=rp.full
-                 where rp.full=?1 and rp.on_=1 and rp.steward_activation=?2
-                 and prs.num=?3 and prs.st='open'
-                 and json_extract(prs.d,'$.default_branch')=?4
-                 and json_extract(prs.d,'$.base')=?4)",
-                rusqlite::params![repo, token, number, base],
-                |row| row.get(0),
-            )?;
-            if !current {
-                return Err(rusqlite::Error::InvalidQuery);
-            }
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let current: bool = tx.query_row(
+            "select exists(select 1 from rp join prs on prs.repo=rp.full
+             where rp.full=?1 and rp.on_=1 and rp.steward_activation=?2
+             and prs.num=?3 and prs.st='open'
+             and json_extract(prs.d,'$.default_branch')=?4
+             and json_extract(prs.d,'$.base')=?4)",
+            rusqlite::params![repo, token, number, base],
+            |row| row.get(0),
+        )?;
+        if !current {
+            return Err(rusqlite::Error::InvalidQuery);
         }
         data.insert("watcher_observed_head".into(), json!(head));
         data.insert("watcher_observed_at".into(), json!(updated));
@@ -4084,9 +4079,23 @@ mod watcher_rebase_admission_tests {
         db.run("insert into rp(full) values('o/r')", vec![]);
         db.run(
             "insert into prs(repo,num,st,upd,d) values('o/r',1,'open','t',?)",
-            crate::pa![json!({"watcher_head":HEAD}).to_string()],
+            crate::pa![json!({"watcher_head":HEAD,"base":"main","default_branch":"main"}).to_string()],
         );
-        let request = json!({"title":"PR","url":"https://github.com/o/r/pull/1","why":"conflict","data":{"branch":"fix","head":"o/r"}});
+        let token = db.one("select steward_activation from rp", vec![]).unwrap()["steward_activation"].clone();
+        let mut request = json!({"title":"PR","url":"https://github.com/o/r/pull/1","why":"conflict","data":{"branch":"fix","head":"o/r","steward_rebase_base_ref":"main","steward_rebase_base_sha":"b".repeat(40),"steward_rebase_activation":token}});
+        for keys in [
+            vec!["steward_rebase_base_ref"],
+            vec!["steward_rebase_base_sha"],
+            vec!["steward_rebase_activation"],
+            vec!["steward_rebase_base_ref", "steward_rebase_base_sha", "steward_rebase_activation"],
+        ] {
+            let mut incomplete = request.clone();
+            for key in keys {
+                incomplete["data"].as_object_mut().unwrap().remove(key);
+            }
+            assert!(db.queue_watcher_rebase("o/r", 1, "t", HEAD, &incomplete).is_err());
+        }
+        assert_eq!(db.n("select count(*) from jobs", vec![]), 0);
         assert!(db
             .queue_watcher_rebase("o/r", 1, "wrong", HEAD, &request)
             .is_err());
@@ -4096,6 +4105,13 @@ mod watcher_rebase_admission_tests {
             .is_err());
         assert_eq!(db.n("select count(*) from jobs", vec![]), 0);
         db.run("update rp set on_=1", vec![]);
+        assert!(db
+            .queue_watcher_rebase("o/r", 1, "t", HEAD, &request)
+            .is_err());
+        request["data"]["steward_rebase_activation"] = db
+            .one("select steward_activation from rp", vec![])
+            .unwrap()["steward_activation"]
+            .clone();
         let job = db.jnew(
             "o/r",
             1,
