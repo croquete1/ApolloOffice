@@ -1838,9 +1838,7 @@ fn branch_update_matches_pr(update: &Value, head: &Value, base: &Value) -> bool 
         }
         Some("observed") => same_sha(&update["observed_head"], head),
         // Legacy success records did not include the observed HEAD.
-        Some("updated") => {
-            same_sha(&update["head"], head) || same_sha(&update["base"], base)
-        }
+        Some("updated") => same_sha(&update["head"], head) || same_sha(&update["base"], base),
         _ => false,
     }
 }
@@ -1889,9 +1887,8 @@ fn steward_report(a: &Ax, repo: &str) -> Value {
             }).unwrap_or(Value::Null);
             let update = a.db.kg(&format!("steward:update:{repo}#{number}"));
             let blocked = a.db.kg(&format!("steward:update_blocked:{repo}#{number}"));
-            let matches = |record: &Value| {
-                branch_update_matches_pr(record, &pr["head_sha"], &pr["base_sha"])
-            };
+            let matches =
+                |record: &Value| branch_update_matches_pr(record, &pr["head_sha"], &pr["base_sha"]);
             pr["branch_update"] = if matches(&update) {
                 update
             } else if matches(&blocked) {
@@ -3566,9 +3563,13 @@ mod t {
         }
         a.db.ks(&blocked_key, &blocked);
         assert_eq!(steward_report(&a, repo)["prs"][0]["branch_update"], blocked);
-        let observed = json!({"status":"observed","head":old,"base":base,"observed_head":head,"at":now()});
+        let observed =
+            json!({"status":"observed","head":old,"base":base,"observed_head":head,"at":now()});
         a.db.ks(&key, &observed);
-        assert_eq!(steward_report(&a, repo)["prs"][0]["branch_update"], observed);
+        assert_eq!(
+            steward_report(&a, repo)["prs"][0]["branch_update"],
+            observed
+        );
         a.db.ks(
             &key,
             &json!({"status":"observed","head":old,"base":base,"observed_head":old}),
