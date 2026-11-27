@@ -3,6 +3,7 @@ use crate::db::now;
 use crate::pa;
 use crate::sh::{apip, ghj};
 use serde_json::{json, Value};
+use std::time::{Duration, Instant};
 
 pub fn cg(a: &App, k: &str, ttl: i64) -> Option<Value> {
     let c = a.cache.lock().unwrap();
@@ -15,29 +16,88 @@ pub fn cs(a: &App, k: &str, v: &Value) {
     a.cache.lock().unwrap().insert(k.into(), (now(), v.clone()));
 }
 
+pub(crate) struct HeadObservation {
+    generation: u64,
+    started: Instant,
+    ci_proof: Option<(Vec<(String, String)>, Value)>,
+}
+
 /// Order requests per repository without holding a mutex across remote I/O.
 pub(crate) fn begin_head_observation(a: &App, repo: &str) -> u64 {
     let mut observations = a.head_observations.lock().unwrap();
-    let generation = observations.entry(repo.to_owned()).or_default();
-    *generation = generation
+    let observation = observations.entry(repo.to_owned()).or_insert_with(|| HeadObservation {
+        generation: 0,
+        started: Instant::now(),
+        ci_proof: None,
+    });
+    observation.generation = observation
+        .generation
         .checked_add(1)
         .expect("HEAD observation generation exhausted");
-    *generation
+    observation.started = Instant::now();
+    observation.ci_proof = None;
+    observation.generation
 }
 
 /// Reject malformed responses and results superseded by a later request.
-/// Keep the generation lock through the cache write so another request
-/// cannot begin between the check and publication.
 pub(crate) fn publish_head_observation(a: &App, repo: &str, generation: u64, head: &Value) -> bool {
+    publish_head(a, repo, generation, head, None)
+}
+
+pub(crate) fn publish_ci_head_observation(
+    a: &App,
+    repo: &str,
+    generation: u64,
+    head: &Value,
+    markers: &[(String, String)],
+) -> bool {
+    publish_head(a, repo, generation, head, Some(markers))
+}
+
+fn publish_head(
+    a: &App,
+    repo: &str,
+    generation: u64,
+    head: &Value,
+    markers: Option<&[(String, String)]>,
+) -> bool {
     if !head["s"].as_str().is_some_and(crate::db::valid_git_sha) {
         return false;
     }
-    let observations = a.head_observations.lock().unwrap();
-    if observations.get(repo) != Some(&generation) {
+    let mut observations = a.head_observations.lock().unwrap();
+    let Some(observation) = observations.get_mut(repo) else {
+        return false;
+    };
+    if observation.generation != generation {
         return false;
     }
+    observation.ci_proof = markers.map(|rows| (rows.to_vec(), head.clone()));
     cs(a, &format!("head:{repo}"), head);
     true
+}
+
+/// Only reuse a scheduler observation made for these exact CI marker rows.
+/// Manual recovery observations are not proof of a particular marker snapshot.
+pub(crate) fn cached_ci_head(
+    a: &App,
+    repo: &str,
+    markers: &[(String, String)],
+) -> Option<(u64, Value)> {
+    let observations = a.head_observations.lock().unwrap();
+    let observation = observations.get(repo)?;
+    let (observed, head) = observation.ci_proof.as_ref()?;
+    if observation.started.elapsed() >= Duration::from_secs(600) || observed.as_slice() != markers {
+        return None;
+    }
+    Some((observation.generation, head.clone()))
+}
+
+pub(crate) fn head_observation_is_current(a: &App, repo: &str, generation: u64) -> bool {
+    a.head_observations
+        .lock()
+        .unwrap()
+        .get(repo)
+        .is_some_and(|observation| observation.generation == generation)
 }
 
 pub async fn me(a: &App) -> Result<Value, String> {

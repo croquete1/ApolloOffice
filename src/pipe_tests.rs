@@ -31,6 +31,38 @@ mod t {
         }
     }
 
+    #[tokio::test]
+    async fn scheduler_cache_is_bound_to_exact_holds_and_latest_generation() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            1,
+            "x".into(),
+        ));
+        let first = json!({"sha":"a".repeat(40),"t":1});
+        let head = json!({"s":"b".repeat(40)});
+        a.db.ks("cired:o/r", &first);
+        assert!(!red_with(&a, "o/r", "local", || std::future::ready(head.clone())).await);
+        assert!(!red_with(&a, "o/r", "local", || {
+            panic!("unchanged snapshot should use cached proof");
+            #[allow(unreachable_code)]
+            std::future::ready(Value::Null)
+        }).await);
+        // Same failing SHA with a new failure receipt must be observed again.
+        a.db.ks("cired:o/r", &json!({"sha":"a".repeat(40),"t":2}));
+        assert!(red_with(&a, "o/r", "local", || std::future::ready(json!({"s":"a".repeat(40)}))).await);
+        // A generic manual observation cannot authorize a scheduler hold.
+        let manual = crate::gh::begin_head_observation(&a, "o/r");
+        assert!(crate::gh::publish_head_observation(&a, "o/r", manual, &head));
+        assert!(red_with(&a, "o/r", "local", || std::future::ready(Value::Null)).await);
+        // A later in-flight observation supersedes the remote result.
+        assert!(red_with(&a, "o/r", "local", || {
+            crate::gh::begin_head_observation(&a, "o/r");
+            std::future::ready(head.clone())
+        }).await);
+        assert!(!red_with(&a, "o/r", "local", || std::future::ready(head.clone())).await);
+    }
+
     #[test]
     fn ci_hold_snapshot_includes_global_and_host_markers_and_rejects_invalid_json() {
         let a = std::sync::Arc::new(crate::app::App::new(
