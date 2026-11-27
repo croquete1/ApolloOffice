@@ -2095,7 +2095,7 @@ async fn watch_pr(
         || a.db
             .has_pending_review(&r, n)
             .map_err(|e| X::E(e.to_string()))?;
-    let _attempt = if pending {
+    let attempt = if pending {
         let Some(attempt) =
             a.db.claim_review_attempt(&r, n, &up, &source_head, now())
                 .map_err(|e| X::E(e.to_string()))?
@@ -2146,6 +2146,9 @@ async fn watch_pr(
             None,
         );
         if nw.is_empty() && ack_ids.is_empty() {
+            if let Some(attempt) = attempt {
+                attempt.release().map_err(|e| X::E(e.to_string()))?;
+            }
             return Ok(());
         }
     }
@@ -2292,6 +2295,9 @@ async fn watch_pr(
                         &format!("{tag}: new review deferred until active review finishes"),
                         None,
                     );
+                    if let Some(attempt) = attempt {
+                        attempt.release().map_err(|e| X::E(e.to_string()))?;
+                    }
                     return Ok(());
                 }
                 batch_acked = true;
@@ -2346,6 +2352,9 @@ async fn watch_pr(
             .map_err(|e| X::E(e.to_string()))?;
     }
 
+    if let Some(attempt) = attempt {
+        attempt.release().map_err(|e| X::E(e.to_string()))?;
+    }
     a.db.ks(&format!("ws:{tag}"), &json!(now()));
     Ok(())
 }
