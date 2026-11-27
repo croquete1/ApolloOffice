@@ -1526,6 +1526,46 @@ impl Db {
         Ok(true)
     }
 
+    // Rotate only the exact observed row. Do not resurrect a cancelled reply
+    // or move a newer observation backwards.
+    pub(crate) fn rotate_watcher_reply(
+        &self,
+        id: &str,
+        author: &str,
+        state: &str,
+        previous: i64,
+        at: i64,
+    ) -> rusqlite::Result<bool> {
+        if !matches!(state, "pending" | "uncertain") {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let eligible: bool = tx.query_row(
+            "select exists(select 1 from watcher_outbox where id=? and author=? and state=? and updated=?)",
+            rusqlite::params![id, author, state, previous],
+            |row| row.get(0),
+        )?;
+        if !eligible {
+            return Ok(false);
+        }
+        let at = at.max(previous);
+        let changed = tx.execute(
+            "update watcher_outbox set updated=? where id=? and author=? and state=? and updated=?",
+            rusqlite::params![at, id, author, state, previous],
+        )?;
+        let persisted: bool = tx.query_row(
+            "select exists(select 1 from watcher_outbox where id=? and author=? and state=? and updated=?)",
+            rusqlite::params![id, author, state, at],
+            |row| row.get(0),
+        )?;
+        if changed != 1 || !persisted {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
     pub fn finish_watcher_reply(&self, id: &str, state: &str) -> rusqlite::Result<bool> {
         let mut c = self.0.lock().unwrap();
         let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -3139,6 +3179,36 @@ mod watcher_outbox_tests {
             .queue_review_and_ack("o/r", 1, "next", &["r2".into()], &req)
             .unwrap());
         assert_eq!(db.n("select count(*) from watcher_outbox", vec![]), 1);
+    }
+
+    #[test]
+    fn outbox_rotation_checks_exact_snapshot_and_persisted_timestamp() {
+        for state in ["pending", "uncertain"] {
+            let db = Db::mem();
+            db.0.lock().unwrap().execute(
+                "insert into watcher_outbox(id,repo,num,author,body,state,created,updated) values('a','o/r',1,'owner','reply',?,1,1)",
+                [state],
+            ).unwrap();
+            for fault in [
+                "create trigger ignore_rotation before update on watcher_outbox begin select raise(ignore); end;",
+                "create trigger ignore_rotation after update on watcher_outbox when new.updated<>old.updated begin update watcher_outbox set updated=old.updated where id=new.id; end;",
+            ] {
+                db.0.lock().unwrap().execute_batch(fault).unwrap();
+                assert!(db.rotate_watcher_reply("a", "owner", state, 1, 20).is_err());
+                assert_eq!(db.one("select * from watcher_outbox", vec![]).unwrap()["updated"], 1);
+                db.run("drop trigger ignore_rotation", vec![]);
+            }
+            assert!(!db.rotate_watcher_reply("a", "other", state, 1, 20).unwrap());
+            assert!(db.rotate_watcher_reply("a", "owner", state, 1, 20).unwrap());
+            assert!(!db.rotate_watcher_reply("a", "owner", state, 1, 30).unwrap());
+            assert!(db.rotate_watcher_reply("a", "owner", state, 20, 10).unwrap());
+            let row = db.one("select * from watcher_outbox", vec![]).unwrap();
+            assert_eq!(row["updated"], 20);
+            assert_eq!(row["state"], state);
+            let target = if state == "pending" { "cancelled" } else { "sent" };
+            assert!(db.finish_watcher_reply("a", target).unwrap());
+            assert!(!db.rotate_watcher_reply("a", "owner", state, 20, 40).unwrap());
+        }
     }
 
     #[test]
