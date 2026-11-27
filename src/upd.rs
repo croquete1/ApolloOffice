@@ -848,7 +848,7 @@ mod t {
             PathBuf::from("/tmp/apollo-drain-test/apollo-office"),
         ));
         a.db.run(
-            "insert or ignore into rp(full) values('sample/repo')",
+            "insert or ignore into rp(full,ci) values('sample/repo','true'),('other/repo','true')",
             crate::pa![],
         );
         a.db.run(
@@ -885,7 +885,7 @@ mod t {
         cancel_watcher_drain(&a);
         assert!(!a.drain.load(std::sync::atomic::Ordering::SeqCst));
         a.db.run(
-            "insert or ignore into rp(full) values('sample/repo')",
+            "insert or ignore into rp(full,ci) values('sample/repo','true')",
             crate::pa![],
         );
         a.db.run(

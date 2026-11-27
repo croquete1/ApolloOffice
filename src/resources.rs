@@ -160,7 +160,10 @@ mod tests {
     #[test]
     fn night_and_pressure_limit_only_new_admissions() {
         let db = crate::db::Db::mem();
-        db.run("insert into rp(full) values('o/a'),('o/b'),('o/c')", vec![]);
+        db.run(
+            "insert into rp(full,ci) values('o/a','true'),('o/b','true'),('o/c','true')",
+            vec![],
+        );
         db.run("insert into hs(id,ln,on_) values('local',4,1)", vec![]);
         let a = std::sync::Arc::new(App::new(
             db,
