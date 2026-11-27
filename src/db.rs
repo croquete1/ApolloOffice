@@ -29,6 +29,25 @@ pub struct ReviewAttempt {
 }
 
 impl ReviewAttempt {
+    fn matches(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        db: &Db,
+        repo: &str,
+        number: i64,
+        updated: &str,
+        head: &str,
+    ) -> rusqlite::Result<bool> {
+        if !Arc::ptr_eq(&self.db.0, &db.0) || self.repo != repo || self.number != number {
+            return Ok(false);
+        }
+        tx.query_row(
+            "select exists(select 1 from watcher_retry where repo=? and num=? and head=? and snapshot=? and analysis_ticket=?)",
+            rusqlite::params![repo, number, head, updated, self.ticket],
+            |row| row.get(0),
+        )
+    }
+
     fn release_ticket(&self) -> rusqlite::Result<()> {
         let mut c = self.db.0.lock().unwrap();
         let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -1301,6 +1320,7 @@ impl Db {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn ack_pr_comments_with_reply(
         &self,
         repo: &str,
@@ -1308,6 +1328,33 @@ impl Db {
         updated: &str,
         head: &str,
         ids: &[String],
+        reply: &Value,
+    ) -> rusqlite::Result<()> {
+        self.ack_review_inner(repo, number, updated, head, (ids, None), reply)
+    }
+
+    pub(crate) fn ack_review_with_attempt(
+        &self,
+        repo: &str,
+        number: i64,
+        updated: &str,
+        head: &str,
+        batch: (&[String], Option<&ReviewAttempt>),
+        reply: &Value,
+    ) -> rusqlite::Result<()> {
+        if batch.1.is_none() && (!batch.0.is_empty() || !reply.is_null()) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        self.ack_review_inner(repo, number, updated, head, batch, reply)
+    }
+
+    fn ack_review_inner(
+        &self,
+        repo: &str,
+        number: i64,
+        updated: &str,
+        head: &str,
+        (ids, attempt): (&[String], Option<&ReviewAttempt>),
         reply: &Value,
     ) -> rusqlite::Result<()> {
         let mut c = self.0.lock().unwrap();
@@ -1319,6 +1366,22 @@ impl Db {
         if unique.len() != ids.len() || ids.iter().any(|id| id.trim().is_empty() || id.len() > 128)
         {
             return Err(rusqlite::Error::InvalidQuery);
+        }
+        if let Some(attempt) = attempt {
+            if !attempt.matches(&tx, self, repo, number, updated, head)? {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+        } else if ids.is_empty() {
+            // Empty observations must not consume a concurrent analysis or
+            // advance the cursor past receipts admitted since the observation.
+            let busy: bool = tx.query_row(
+                "select exists(select 1 from watcher_retry where repo=? and num=? and analysis_ticket is not null) or exists(select 1 from watcher_inbox where repo=? and num=? and state='received')",
+                rusqlite::params![repo, number, repo, number],
+                |row| row.get(0),
+            )?;
+            if busy {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
         }
         // Do not create an outbound action for a replayed or partially consumed batch.
         let mut consumed = false;
@@ -1481,6 +1544,7 @@ impl Db {
 
     /// Queue a review and acknowledge its source comments in the same transaction.
     /// If another review is active, do not acknowledge the batch: retry it later.
+    #[cfg(test)]
     pub fn queue_review_and_ack(
         &self,
         repo: &str,
@@ -1489,12 +1553,41 @@ impl Db {
         ids: &[String],
         request: &Value,
     ) -> rusqlite::Result<bool> {
+        self.queue_review_inner(repo, number, updated, ids, request, None)
+    }
+
+    pub(crate) fn queue_review_with_attempt(
+        &self,
+        repo: &str,
+        number: i64,
+        updated: &str,
+        ids: &[String],
+        request: &Value,
+        attempt: &ReviewAttempt,
+    ) -> rusqlite::Result<bool> {
+        self.queue_review_inner(repo, number, updated, ids, request, Some(attempt))
+    }
+
+    fn queue_review_inner(
+        &self,
+        repo: &str,
+        number: i64,
+        updated: &str,
+        ids: &[String],
+        request: &Value,
+        attempt: Option<&ReviewAttempt>,
+    ) -> rusqlite::Result<bool> {
         let mut c = self.0.lock().unwrap();
         let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let head = request["data"]["source_head"]
             .as_str()
             .ok_or(rusqlite::Error::InvalidQuery)?;
         let open = Self::review_snapshot_matches(&tx, repo, number, updated, head)?;
+        if let Some(attempt) = attempt {
+            if !attempt.matches(&tx, self, repo, number, updated, head)? {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+        }
         let unique = ids.iter().collect::<std::collections::HashSet<_>>();
         if !open
             || ids.is_empty()
@@ -3992,6 +4085,60 @@ mod watcher_storage_failure_tests {
         db.receive_review_batch("o/r", 1, "t", HEAD, &ids).unwrap();
         db.receive_review_batch("o/r", 1, "t", HEAD, &ids).unwrap();
         assert_eq!(db.n("select count(*) from watcher_inbox", vec![]), 3);
+    }
+
+    #[test]
+    fn reopened_pr_rejects_old_analysis_even_with_same_snapshot() {
+        for queue in [false, true] {
+            let db = Db::mem();
+            seed(&db);
+            let ids = vec!["r1".into()];
+            let old = db
+                .claim_review_attempt("o/r", 1, "t", HEAD, 0)
+                .unwrap()
+                .unwrap();
+            db.run("update prs set st='closed' where num=1", vec![]);
+            db.run("update prs set st='open' where num=1", vec![]);
+            db.receive_review_batch("o/r", 1, "t", HEAD, &ids).unwrap();
+            let current = db
+                .claim_review_attempt("o/r", 1, "t", HEAD, 0)
+                .unwrap()
+                .unwrap();
+            let req = request();
+            assert!(db
+                .queue_review_with_attempt("o/r", 1, "t", &ids, &req, &old)
+                .is_err());
+            assert!(db
+                .ack_review_with_attempt("o/r", 1, "t", HEAD, (&ids, Some(&old)), &req["reply"],)
+                .is_err());
+            assert_pending(&db);
+            assert!(db
+                .ack_review_with_attempt("o/r", 1, "t", HEAD, (&ids, None), &Value::Null)
+                .is_err());
+            assert!(db
+                .ack_review_with_attempt("o/r", 1, "t", HEAD, (&[], None), &Value::Null)
+                .is_err());
+            old.release().unwrap();
+            if queue {
+                assert!(db
+                    .queue_review_with_attempt("o/r", 1, "t", &ids, &req, &current)
+                    .unwrap());
+            } else {
+                db.ack_review_with_attempt(
+                    "o/r",
+                    1,
+                    "t",
+                    HEAD,
+                    (&ids, Some(&current)),
+                    &req["reply"],
+                )
+                .unwrap();
+            }
+            assert!(db.comment_acknowledged("o/r", "r1").unwrap());
+            assert_eq!(db.n("select count(*) from watcher_outbox", vec![]), 1);
+            assert_eq!(db.n("select count(*) from jobs", vec![]), i64::from(queue));
+            current.release().unwrap();
+        }
     }
 
     #[test]
