@@ -4816,7 +4816,7 @@ fn ci_marker_requires_two_valid_distinct_object_ids() {
 
 // Read both applicable holds together. Missing rows are distinct from
 // malformed JSON and database errors, which must not authorize dispatch.
-type CiMarkerRows = Vec<(String, String)>;
+type CiMarkerRows = Vec<crate::db::CiMarkerRow>;
 
 fn ci_marker_rows(
     connection: &rusqlite::Connection,
@@ -4825,16 +4825,23 @@ fn ci_marker_rows(
 ) -> rusqlite::Result<CiMarkerRows> {
     let global = format!("cired:{repo}");
     let scoped = format!("cired:{repo}{suffix}");
-    let mut statement = connection.prepare("select k,v from kv where k in (?1,?2) order by k")?;
+    let mut statement = connection.prepare(
+        "select kv.k,kv.v,e.token from kv left join ci_hold_epochs e on e.k=kv.k
+         where kv.k in (?1,?2) order by kv.k",
+    )?;
     let rows = statement.query_map(rusqlite::params![global, scoped], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        let token: String = row.get(2)?;
+        if token.len() != 32 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, token))
     })?;
     rows.collect()
 }
 
 fn parse_ci_markers(rows: &CiMarkerRows) -> rusqlite::Result<Vec<Value>> {
     rows.iter()
-        .map(|(_, raw)| serde_json::from_str(raw).map_err(|_| rusqlite::Error::InvalidQuery))
+        .map(|(_, raw, _)| serde_json::from_str(raw).map_err(|_| rusqlite::Error::InvalidQuery))
         .collect()
 }
 
@@ -4858,13 +4865,13 @@ fn clear_superseded_ci_markers(
     if &markers != expected {
         return Ok(false);
     }
-    for (_, raw) in &markers {
+    for (_, raw, _) in &markers {
         let marker: Value = serde_json::from_str(raw).map_err(|_| rusqlite::Error::InvalidQuery)?;
         if !ci_marker_superseded(&json!({"s":base}), &marker) {
             return Ok(false);
         }
     }
-    for (key, raw) in &markers {
+    for (key, raw, _) in &markers {
         if tx.execute("delete from kv where k=?1 and v=?2", rusqlite::params![key, raw])? != 1 {
             return Err(rusqlite::Error::InvalidQuery);
         }
