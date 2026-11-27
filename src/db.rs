@@ -1371,6 +1371,17 @@ impl Db {
             if !attempt.matches(&tx, self, repo, number, updated, head)? {
                 return Err(rusqlite::Error::InvalidQuery);
             }
+        } else if ids.is_empty() {
+            // Empty observations must not consume a concurrent analysis or
+            // advance the cursor past receipts admitted since the observation.
+            let busy: bool = tx.query_row(
+                "select exists(select 1 from watcher_retry where repo=? and num=? and analysis_ticket is not null) or exists(select 1 from watcher_inbox where repo=? and num=? and state='received')",
+                rusqlite::params![repo, number, repo, number],
+                |row| row.get(0),
+            )?;
+            if busy {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
         }
         // Do not create an outbound action for a replayed or partially consumed batch.
         let mut consumed = false;
@@ -4110,6 +4121,9 @@ mod watcher_storage_failure_tests {
             assert_pending(&db);
             assert!(db
                 .ack_review_with_attempt("o/r", 1, "t", HEAD, (&ids, None), &Value::Null)
+                .is_err());
+            assert!(db
+                .ack_review_with_attempt("o/r", 1, "t", HEAD, (&[], None), &Value::Null)
                 .is_err());
             old.release().unwrap();
             if queue {
