@@ -65,8 +65,10 @@ mod t {
 
     #[tokio::test]
     async fn failed_ci_receipt_write_blocks_admission_until_persisted() {
+        let path = std::env::temp_dir().join(format!("apollo-ci-receipt-{}", rand::random::<u64>()));
+        std::fs::create_dir(&path).unwrap();
         let a = std::sync::Arc::new(crate::app::App::new(
-            crate::db::Db::mem(), std::env::temp_dir(), 1, "x".into(),
+            crate::db::Db::mem(), path.clone(), 1, "x".into(),
         ));
         a.db.run("insert into rp(full,ci) values('o/r','true'),('o/other','true')", pa![]);
         a.db.run("insert into jobs(id,repo,kind,st) values(1,'o/r','fix','ready'),(2,'o/other','fix','ready')", pa![]);
@@ -95,6 +97,55 @@ mod t {
         crate::gh::begin_head_observation(&a, "o/r");
         assert!(!red_with(&a, "o/r", "local", || std::future::ready(json!({"s":"b".repeat(40)}))).await);
         assert!(record_ci_admission(&a, "o/r", "", 1, || {}).unwrap());
+        assert!(!ci_storage_pending(&a, "o/r"));
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ci_hold_journal_survives_app_restart_and_rejects_corruption() {
+        let path = std::env::temp_dir().join(format!("apollo-ci-journal-{}", rand::random::<u64>()));
+        std::fs::create_dir(&path).unwrap();
+        let file = path.join("state.db");
+        let marker = json!({"sha":"a".repeat(40),"t":1});
+        let scoped = json!({"sha":"b".repeat(40),"t":2});
+        {
+            let db = crate::db::Db::open(&file).unwrap();
+            db.run("insert into rp(full,ci) values('o/r','true')", pa![]);
+            db.run("insert into jobs(id,repo,kind,st) values(1,'o/r','fix','ready')", pa![]);
+            let a = std::sync::Arc::new(crate::app::App::new(db, path.clone(), 1, "x".into()));
+            a.db.run("create trigger fail_ci_journal before insert on kv when new.k glob 'cired:*' begin select raise(abort,'injected'); end", pa![]);
+            assert!(record_ci_failure(&a, "o/r", "", &marker).is_err());
+            assert!(record_ci_failure(&a, "o/r", "@host", &scoped).is_err());
+            assert!(ci_hold_journal(&a, "o/r").is_file());
+            assert!(a.db.kg("cired:o/r").is_null());
+        }
+        {
+            let db = crate::db::Db::open(&file).unwrap();
+            let a = std::sync::Arc::new(crate::app::App::new(db, path.clone(), 1, "x".into()));
+            assert!(a.pending_ci_holds.lock().unwrap().is_empty());
+            assert!(ci_storage_pending(&a, "o/r"));
+            assert!(!admit(&a, "o/r", "local", 1));
+            assert!(a.lk.lock().unwrap().is_empty());
+            a.db.run("drop trigger fail_ci_journal", pa![]);
+            assert!(red_with(&a, "o/r", "local", || std::future::ready(json!({"s":"a".repeat(40)}))).await);
+            assert_eq!(a.db.kg("cired:o/r"), marker);
+            assert_eq!(a.db.kg("cired:o/r@host"), scoped);
+            assert!(!ci_storage_pending(&a, "o/r"));
+            assert!(!admit(&a, "o/r", "local", 1));
+            // A damaged journal is not evidence that the repo is safe.
+            let journal = ci_hold_journal(&a, "o/r");
+            std::fs::write(&journal, b"{broken").unwrap();
+            assert!(ci_storage_pending(&a, "o/r"));
+            assert!(red_with(&a, "o/r", "local", || std::future::ready(json!({"s":"c".repeat(40)}))).await);
+            assert!(!admit(&a, "o/r", "local", 1));
+            assert_eq!(std::fs::read(&journal).unwrap(), b"{broken");
+            assert_eq!(a.db.n("select count(*) from job_schedule", pa![]), 0);
+            std::fs::remove_file(journal).unwrap();
+            crate::gh::begin_head_observation(&a, "o/r");
+            assert!(!red_with(&a, "o/r", "local", || std::future::ready(json!({"s":"c".repeat(40)}))).await);
+            assert!(record_ci_admission(&a, "o/r", "", 1, || {}).unwrap());
+        }
+        std::fs::remove_dir_all(path).unwrap();
     }
 
     #[tokio::test]

@@ -4841,15 +4841,125 @@ fn persist_pending_ci_holds(
     Ok(())
 }
 
+fn ci_hold_journal(a: &Ax, repo: &str) -> std::path::PathBuf {
+    use sha2::{Digest, Sha256};
+    a.dd.join(format!("ci-hold-pending-{}.json", hex::encode(Sha256::digest(repo))))
+}
+
+fn journal_error(error: std::io::Error) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+}
+
+fn invalid_journal() -> rusqlite::Error {
+    journal_error(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid CI hold journal"))
+}
+
+type PendingCiHolds = std::collections::HashMap<(String, String), Value>;
+
+// A journal may survive a crash after SQLite committed but before unlink.
+// Replaying it is conservative: the receipt identity rotates and old proof
+// must be obtained again. Invalid or unreadable evidence never authorizes work.
+fn load_ci_hold_journal(a: &Ax, repo: &str, pending: &mut PendingCiHolds) -> rusqlite::Result<bool> {
+    let path = ci_hold_journal(a, repo);
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() && metadata.len() <= 1_048_576 => {}
+        Ok(_) => return Err(invalid_journal()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(journal_error(error)),
+    }
+    let value: Value = serde_json::from_slice(&std::fs::read(&path).map_err(journal_error)?)
+        .map_err(|_| invalid_journal())?;
+    if value["repo"].as_str() != Some(repo) {
+        return Err(invalid_journal());
+    }
+    let rows: Vec<(String, Value)> = serde_json::from_value(value["holds"].clone())
+        .map_err(|_| invalid_journal())?;
+    if rows.is_empty() {
+        return Err(invalid_journal());
+    }
+    let mut seen = std::collections::HashSet::new();
+    for (suffix, marker) in &rows {
+        if (!suffix.is_empty() && !suffix.starts_with('@'))
+            || !marker.is_object() || !seen.insert(suffix)
+        {
+            return Err(invalid_journal());
+        }
+    }
+    for (suffix, marker) in rows {
+        pending.entry((repo.to_owned(), suffix)).or_insert(marker);
+    }
+    Ok(true)
+}
+
+fn write_ci_hold_journal(a: &Ax, repo: &str, pending: &PendingCiHolds) -> std::io::Result<()> {
+    use std::io::Write;
+    let path = ci_hold_journal(a, repo);
+    let rows: Vec<_> = pending.iter().filter(|((r, _), _)| r == repo)
+        .map(|((_, suffix), marker)| (suffix, marker)).collect();
+    let bytes = serde_json::to_vec(&json!({"repo":repo,"holds":rows}))?;
+    if bytes.len() > 1_048_576 {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "CI hold journal too large"));
+    }
+    let temp = path.with_extension(format!("tmp-{}", rand::random::<u64>()));
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp)?;
+    let result = (|| -> std::io::Result<()> {
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        std::mem::drop(file);
+        std::fs::rename(&temp, &path)?;
+        #[cfg(unix)]
+        std::fs::File::open(&a.dd)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
+fn remove_ci_hold_journal(a: &Ax, repo: &str) -> rusqlite::Result<()> {
+    match std::fs::remove_file(ci_hold_journal(a, repo)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(journal_error(error)),
+    }
+    #[cfg(unix)]
+    std::fs::File::open(&a.dd).and_then(|dir| dir.sync_all()).map_err(journal_error)?;
+    Ok(())
+}
+
+pub(crate) fn ci_storage_pending(a: &Ax, repo: &str) -> bool {
+    // Release the memory lock before any database access by callers.
+    let pending = a.pending_ci_holds.lock().unwrap().keys().any(|(r, _)| r == repo);
+    pending || match std::fs::symlink_metadata(ci_hold_journal(a, repo)) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        _ => true,
+    }
+}
+
 fn record_ci_failure(a: &Ax, repo: &str, suffix: &str, marker: &Value) -> rusqlite::Result<()> {
     let connection = a.db.0.lock().unwrap();
     let mut pending = a.pending_ci_holds.lock().unwrap();
     pending.insert((repo.to_owned(), suffix.to_owned()), marker.clone());
-    persist_pending_ci_holds(&connection, &mut pending, repo)
+    load_ci_hold_journal(a, repo, &mut pending)?;
+    // Write ahead, not only after SQLite fails. If the journal is unavailable,
+    // a successful SQLite commit is still durable; if both writes fail, keep
+    // the in-memory hold and emit the journal error as well.
+    if let Err(error) = write_ci_hold_journal(a, repo, &pending) {
+        eprintln!("{repo}: CI hold journal unavailable: {error}");
+    }
+    persist_pending_ci_holds(&connection, &mut pending, repo)?;
+    remove_ci_hold_journal(a, repo)
 }
 
 fn flush_ci_failures(a: &Ax, connection: &rusqlite::Connection, repo: &str) -> rusqlite::Result<()> {
-    persist_pending_ci_holds(connection, &mut a.pending_ci_holds.lock().unwrap(), repo)
+    let mut pending = a.pending_ci_holds.lock().unwrap();
+    let had_journal = load_ci_hold_journal(a, repo, &mut pending)?;
+    persist_pending_ci_holds(connection, &mut pending, repo)?;
+    if had_journal {
+        remove_ci_hold_journal(a, repo)?;
+    }
+    Ok(())
 }
 
 fn current_ci_marker_rows(a: &Ax, repo: &str, suffix: &str) -> rusqlite::Result<CiMarkerRows> {
@@ -5392,10 +5502,7 @@ fn repo_limit_reached(open: i64, daily: i64, max_open: i64, max_daily: i64) -> b
 }
 
 pub fn bl(a: &Ax, r: &str) -> i64 {
-    // Release the pending lock before touching SQLite: writers acquire
-    // these locks in database -> pending order.
-    let pending = a.pending_ci_holds.lock().unwrap().keys().any(|(repo, _)| repo == r);
-    if pending || !a.db.kg(&format!("cired:{r}")).is_null() {
+    if ci_storage_pending(a, r) || !a.db.kg(&format!("cired:{r}")).is_null() {
         return 0;
     }
     hosts(a)
