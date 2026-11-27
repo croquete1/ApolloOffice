@@ -1827,13 +1827,21 @@ fn rid(s: &str) -> Option<String> {
     }
 }
 
-#[cfg(test)]
 fn branch_update_matches_pr(update: &Value, head: &Value, base: &Value) -> bool {
-    let status = update["status"].as_str().unwrap_or("");
-    if matches!(status, "error" | "blocked") {
-        update["head"] == *head
-    } else {
-        update["head"] == *head || update["base"] == *base
+    let same_sha = |left: &Value, right: &Value| {
+        left.as_str()
+            .is_some_and(|sha| !sha.is_empty() && right.as_str() == Some(sha))
+    };
+    match update["status"].as_str() {
+        Some("attempted" | "accepted" | "uncertain" | "error" | "blocked") => {
+            same_sha(&update["head"], head)
+        }
+        Some("observed") => same_sha(&update["observed_head"], head),
+        // Legacy success records did not include the observed HEAD.
+        Some("updated") => {
+            same_sha(&update["head"], head) || same_sha(&update["base"], base)
+        }
+        _ => false,
     }
 }
 
@@ -1882,8 +1890,7 @@ fn steward_report(a: &Ax, repo: &str) -> Value {
             let update = a.db.kg(&format!("steward:update:{repo}#{number}"));
             let blocked = a.db.kg(&format!("steward:update_blocked:{repo}#{number}"));
             let matches = |record: &Value| {
-                record.is_object()
-                    && (record["head"] == pr["head_sha"] || record["base"] == pr["base_sha"])
+                branch_update_matches_pr(record, &pr["head_sha"], &pr["base_sha"])
             };
             pr["branch_update"] = if matches(&update) {
                 update
@@ -3543,6 +3550,39 @@ mod t {
         assert_eq!(report["prs"][0]["branch_update"]["status"], "updated");
         assert_eq!(report["prs"][1]["recheck"]["age_ms"], 25_000);
         assert_eq!(report["prs"][2]["recheck"]["age_ms"], 40_000);
+
+        let key = format!("steward:update:{repo}#42");
+        let blocked_key = format!("steward:update_blocked:{repo}#42");
+        let head = "a".repeat(40);
+        let base = "b".repeat(40);
+        let old = "c".repeat(40);
+        let blocked = json!({"status":"blocked","head":head,"base":base,"at":now()});
+        for status in ["attempted", "accepted", "uncertain", "error", "blocked"] {
+            a.db.ks(
+                &key,
+                &json!({"status":status,"head":old,"base":base,"at":now()}),
+            );
+            assert!(steward_report(&a, repo)["prs"][0]["branch_update"].is_null());
+        }
+        a.db.ks(&blocked_key, &blocked);
+        assert_eq!(steward_report(&a, repo)["prs"][0]["branch_update"], blocked);
+        let observed = json!({"status":"observed","head":old,"base":base,"observed_head":head,"at":now()});
+        a.db.ks(&key, &observed);
+        assert_eq!(steward_report(&a, repo)["prs"][0]["branch_update"], observed);
+        a.db.ks(
+            &key,
+            &json!({"status":"observed","head":old,"base":base,"observed_head":old}),
+        );
+        a.db.ks(
+            &blocked_key,
+            &json!({"status":"blocked","head":old,"base":base}),
+        );
+        assert!(steward_report(&a, repo)["prs"][0]["branch_update"].is_null());
+        assert!(!branch_update_matches_pr(
+            &json!({"status":"updated"}),
+            &Value::Null,
+            &Value::Null
+        ));
     }
 
     #[test]
