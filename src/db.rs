@@ -343,7 +343,8 @@ fn init(c: &mut Connection) -> anyhow::Result<()> {
     ")?;
     // Invalidate active analysis ownership on repository lifecycle changes,
     // without resetting the retry deadline or discarding receipt history.
-    tx.execute_batch("
+    tx.execute_batch(
+        "
         create trigger if not exists watcher_attempt_repo_changed
         after update of on_,full on rp
         when old.on_ is not new.on_ or old.full is not new.full
@@ -372,7 +373,8 @@ fn init(c: &mut Connection) -> anyhow::Result<()> {
             where repo=new.full and analysis_ticket is not null)
             then raise(abort,'watcher attempt revocation failed') end;
         end;
-    ")?;
+    ",
+    )?;
     // Cancel unsent replies when repository authorization is revoked. Never
     // discard uncertain deliveries: they may already have reached GitHub.
     tx.execute_batch("
@@ -4172,7 +4174,9 @@ mod watcher_storage_failure_tests {
              when new.analysis_ticket is null begin select raise(ignore); end;",
         )
         .unwrap();
-        assert!(c.execute("update rp set on_=0 where full='o/r'", []).is_err());
+        assert!(c
+            .execute("update rp set on_=0 where full='o/r'", [])
+            .is_err());
         let on: i64 = c
             .query_row("select on_ from rp where full='o/r'", [], |r| r.get(0))
             .unwrap();
