@@ -4858,6 +4858,7 @@ fn clear_superseded_ci_markers(
     suffix: &str,
     base: &str,
     expected: &CiMarkerRows,
+    generation: Option<u64>,
 ) -> rusqlite::Result<bool> {
     let mut connection = a.db.0.lock().unwrap();
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -4871,16 +4872,26 @@ fn clear_superseded_ci_markers(
             return Ok(false);
         }
     }
-    for (key, raw, _) in &markers {
-        if tx.execute("delete from kv where k=?1 and v=?2", rusqlite::params![key, raw])? != 1 {
-            return Err(rusqlite::Error::InvalidQuery);
+    let persist = || -> rusqlite::Result<bool> {
+        for (key, raw, _) in &markers {
+            if tx.execute("delete from kv where k=?1 and v=?2", rusqlite::params![key, raw])? != 1 {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
         }
+        tx.commit()?;
+        if !markers.is_empty() {
+            crate::app::chg();
+        }
+        Ok(true)
+    };
+    if markers.is_empty() {
+        return persist();
     }
-    tx.commit()?;
-    if !markers.is_empty() {
-        crate::app::chg();
-    }
-    Ok(true)
+    let Some(generation) = generation else {
+        return Ok(false);
+    };
+    crate::gh::with_current_head_observation(a, repo, generation, persist)
+        .unwrap_or(Ok(false))
 }
 
 // A prepared or resumed checkout alone is not evidence of the current
@@ -4911,7 +4922,10 @@ where
 {
     let suffix = hk(a, host);
     let expected = ci_marker_rows(&a.db.0.lock().unwrap(), repo, &suffix)?;
-    if !expected.is_empty() {
+    let generation = if expected.is_empty() {
+        None
+    } else {
+        let generation = crate::gh::begin_head_observation(a, repo);
         let head = remote().await;
         if !crate::db::valid_git_sha(base)
             || !head["s"].as_str().is_some_and(|sha| {
@@ -4920,11 +4934,12 @@ where
         {
             return Ok(false);
         }
-    }
+        Some(generation)
+    };
     if hk(a, host) != suffix {
         return Ok(false);
     }
-    clear_superseded_ci_markers(a, repo, &suffix, base, &expected)
+    clear_superseded_ci_markers(a, repo, &suffix, base, &expected, generation)
 }
 
 async fn red(a: &Ax, r: &str, h: &str) -> bool {
