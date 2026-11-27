@@ -1539,11 +1539,9 @@ impl Db {
         let rows = self.try_all("select v from kv where k=?", crate::pa![key])?;
         match rows.as_slice() {
             [] => Ok(None),
-            [row] => serde_json::from_str(
-                row["v"].as_str().ok_or(rusqlite::Error::InvalidQuery)?,
-            )
-            .map(Some)
-            .map_err(|_| rusqlite::Error::InvalidQuery),
+            [row] => serde_json::from_str(row["v"].as_str().ok_or(rusqlite::Error::InvalidQuery)?)
+                .map(Some)
+                .map_err(|_| rusqlite::Error::InvalidQuery),
             _ => Err(rusqlite::Error::InvalidQuery),
         }
     }
@@ -3235,16 +3233,35 @@ mod watcher_outbox_tests {
     #[test]
     fn delivery_cursor_write_failures_preserve_previous_checkpoint() {
         let db = Db::mem();
-        assert!(db.load_watcher_delivery_cursor("owner", "pending").unwrap().is_none());
-        db.save_watcher_delivery_cursor("owner", "pending", 1, "a").unwrap();
+        assert!(db
+            .load_watcher_delivery_cursor("owner", "pending")
+            .unwrap()
+            .is_none());
+        db.save_watcher_delivery_cursor("owner", "pending", 1, "a")
+            .unwrap();
         db.run("create trigger ignore_cursor before update on kv when new.k='watcher:delivery-cursor:pending:owner' begin select raise(ignore); end", vec![]);
-        assert!(db.save_watcher_delivery_cursor("owner", "pending", 2, "b").is_err());
-        assert_eq!(db.load_watcher_delivery_cursor("owner", "pending").unwrap(), Some((1, "a".into())));
+        assert!(db
+            .save_watcher_delivery_cursor("owner", "pending", 2, "b")
+            .is_err());
+        assert_eq!(
+            db.load_watcher_delivery_cursor("owner", "pending").unwrap(),
+            Some((1, "a".into()))
+        );
         db.run("drop trigger ignore_cursor", vec![]);
-        db.save_watcher_delivery_cursor("owner", "pending", 0, "c").unwrap();
-        assert_eq!(db.load_watcher_delivery_cursor("owner", "pending").unwrap(), Some((0, "c".into())));
-        assert!(db.load_watcher_delivery_cursor("other", "pending").unwrap().is_none());
-        assert!(db.load_watcher_delivery_cursor("owner", "uncertain").unwrap().is_none());
+        db.save_watcher_delivery_cursor("owner", "pending", 0, "c")
+            .unwrap();
+        assert_eq!(
+            db.load_watcher_delivery_cursor("owner", "pending").unwrap(),
+            Some((0, "c".into()))
+        );
+        assert!(db
+            .load_watcher_delivery_cursor("other", "pending")
+            .unwrap()
+            .is_none());
+        assert!(db
+            .load_watcher_delivery_cursor("owner", "uncertain")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
