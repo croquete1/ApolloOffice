@@ -64,36 +64,81 @@ mod t {
             1,
             "x".into(),
         ));
+        let clear = |base: &str| {
+            let expected = ci_marker_rows(&a.db.0.lock().unwrap(), "o/r", "@host")?;
+            clear_superseded_ci_markers(&a, "o/r", "@host", base, &expected)
+        };
         let base = "b".repeat(40);
         let old = json!({"sha":"a".repeat(40)});
         let current = json!({"sha":base});
         a.db.ks("cired:o/r", &old);
         a.db.ks("cired:o/r@host", &current);
         a.db.ks("cired:o/r@other", &old);
-        assert!(!clear_superseded_ci_markers(&a, "o/r", "@host", &base).unwrap());
+        assert!(!clear(&base).unwrap());
         assert_eq!(a.db.kg("cired:o/r"), old);
         assert_eq!(a.db.kg("cired:o/r@host"), current);
         a.db.ks("cired:o/r@host", &json!({"sha":"invalid"}));
-        assert!(!clear_superseded_ci_markers(&a, "o/r", "@host", &base).unwrap());
+        assert!(!clear(&base).unwrap());
         assert_eq!(a.db.kg("cired:o/r"), old);
         a.db.run("update kv set v='{' where k='cired:o/r@host'", pa![]);
-        assert!(clear_superseded_ci_markers(&a, "o/r", "@host", &base).is_err());
+        assert!(clear(&base).is_err());
         assert_eq!(a.db.kg("cired:o/r"), old);
         a.db.ks("cired:o/r@host", &old);
-        assert!(!clear_superseded_ci_markers(&a, "o/r", "@host", "invalid").unwrap());
+        assert!(!clear("invalid").unwrap());
         a.db.0.lock().unwrap().execute_batch(
             "create trigger fail_hold_delete before delete on kv
              when old.k='cired:o/r@host' begin select raise(abort,'injected'); end;",
         ).unwrap();
-        assert!(clear_superseded_ci_markers(&a, "o/r", "@host", &base).is_err());
+        assert!(clear(&base).is_err());
         assert_eq!(a.db.kg("cired:o/r"), old);
         assert_eq!(a.db.kg("cired:o/r@host"), old);
         a.db.run("drop trigger fail_hold_delete", pa![]);
-        assert!(clear_superseded_ci_markers(&a, "o/r", "@host", &base).unwrap());
+        assert!(clear(&base).unwrap());
         assert!(a.db.kg("cired:o/r").is_null());
         assert!(a.db.kg("cired:o/r@host").is_null());
         assert_eq!(a.db.kg("cired:o/r@other"), old);
-        assert!(clear_superseded_ci_markers(&a, "o/r", "@host", &base).unwrap());
+        assert!(clear(&base).unwrap());
+    }
+
+    #[tokio::test]
+    async fn prepared_ci_cleanup_requires_fresh_default_head_and_unchanged_holds() {
+        for mutation in ["none", "stale_base", "invalid_head", "new_hold", "removed_hold"] {
+            let a = std::sync::Arc::new(crate::app::App::new(
+                crate::db::Db::mem(),
+                std::env::temp_dir(),
+                1,
+                "x".into(),
+            ));
+            let base = "b".repeat(40);
+            let old = json!({"sha":"a".repeat(40)});
+            let newer = json!({"sha":"c".repeat(40)});
+            a.db.ks("cired:o/r", &old);
+            let cleared = clear_prepared_ci_markers_with(&a, "o/r", "local", &base, || {
+                let head = match mutation {
+                    "stale_base" => json!({"s":"c".repeat(40)}),
+                    "invalid_head" => json!({"s":"invalid"}),
+                    "new_hold" => {
+                        a.db.ks("cired:o/r", &newer);
+                        json!({"s":base})
+                    }
+                    "removed_hold" => {
+                        a.db.kd("cired:o/r");
+                        json!({"s":base})
+                    }
+                    _ => json!({"s":base}),
+                };
+                std::future::ready(head)
+            })
+            .await
+            .unwrap();
+            assert_eq!(cleared, mutation == "none", "{mutation}");
+            let expected = match mutation {
+                "none" | "removed_hold" => Value::Null,
+                "new_hold" => newer,
+                _ => old,
+            };
+            assert_eq!(a.db.kg("cired:o/r"), expected);
+        }
     }
 
     #[test]
