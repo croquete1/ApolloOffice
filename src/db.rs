@@ -2216,30 +2216,58 @@ mod strict_db_tests {
         .unwrap();
         init(&mut c).unwrap();
         fn token(c: &Connection) -> String {
-            c.query_row("select token from ci_hold_epochs where k='cired:o/r'", [], |r| r.get(0))
-                .unwrap()
+            c.query_row(
+                "select token from ci_hold_epochs where k='cired:o/r'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
         }
         let first = token(&c);
         assert_eq!(first.len(), 32);
         init(&mut c).unwrap();
         assert_eq!(token(&c), first);
-        c.execute("update kv set v=v where k='unrelated'", []).unwrap();
+        c.execute("update kv set v=v where k='unrelated'", [])
+            .unwrap();
         assert_eq!(token(&c), first);
         let tx = c.transaction().unwrap();
-        tx.execute("update kv set v=v where k='cired:o/r'", []).unwrap();
+        tx.execute("update kv set v=v where k='cired:o/r'", [])
+            .unwrap();
         assert_ne!(token(&tx), first);
         tx.rollback().unwrap();
         assert_eq!(token(&c), first);
-        c.execute("update kv set v=v where k='cired:o/r'", []).unwrap();
+        c.execute("update kv set v=v where k='cired:o/r'", [])
+            .unwrap();
         let second = token(&c);
         assert_ne!(second, first);
         c.execute("delete from kv where k='cired:o/r'", []).unwrap();
-        assert_eq!(c.query_row("select count(*) from ci_hold_epochs", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
-        c.execute("insert into kv(k,v) values('cired:o/r','{}')", []).unwrap();
+        assert_eq!(
+            c.query_row("select count(*) from ci_hold_epochs", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        c.execute("insert into kv(k,v) values('cired:o/r','{}')", [])
+            .unwrap();
         assert_ne!(token(&c), second);
-        c.execute("update kv set k='cired:o/renamed' where k='cired:o/r'", []).unwrap();
-        assert!(c.query_row("select token from ci_hold_epochs where k='cired:o/r'", [], |r| r.get::<_, String>(0)).is_err());
-        assert_eq!(c.query_row("select length(token) from ci_hold_epochs where k='cired:o/renamed'", [], |r| r.get::<_, i64>(0)).unwrap(), 32);
+        c.execute("update kv set k='cired:o/renamed' where k='cired:o/r'", [])
+            .unwrap();
+        assert!(c
+            .query_row(
+                "select token from ci_hold_epochs where k='cired:o/r'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .is_err());
+        assert_eq!(
+            c.query_row(
+                "select length(token) from ci_hold_epochs where k='cired:o/renamed'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            32
+        );
     }
 
     #[test]

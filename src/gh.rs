@@ -80,11 +80,7 @@ fn publish_head(
 
 /// Only reuse a scheduler observation made for these exact CI marker rows.
 /// Manual recovery observations are not proof of a particular marker snapshot.
-pub(crate) fn cached_ci_head(
-    a: &App,
-    repo: &str,
-    markers: &[CiMarkerRow],
-) -> Option<(u64, Value)> {
+pub(crate) fn cached_ci_head(a: &App, repo: &str, markers: &[CiMarkerRow]) -> Option<(u64, Value)> {
     with_cached_ci_head(a, repo, markers, |generation, head| {
         (generation, head.clone())
     })
