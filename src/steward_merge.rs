@@ -1981,13 +1981,16 @@ mod tests {
         ] {
             db.ks(key, &invalid);
             assert!(load_branch_update(&db, "o/r", 1).is_err());
-            assert!(reserve_branch_update(&db, "o/r", 1, activation, true, target, 400_000).is_err());
-            let raw = db
-                .0
-                .lock()
-                .unwrap()
-                .query_row("select v from kv where k=?", [key], |row| row.get::<_, String>(0))
-                .unwrap();
+            assert!(
+                reserve_branch_update(&db, "o/r", 1, activation, true, target, 400_000).is_err()
+            );
+            let raw =
+                db.0.lock()
+                    .unwrap()
+                    .query_row("select v from kv where k=?", [key], |row| {
+                        row.get::<_, String>(0)
+                    })
+                    .unwrap();
             assert_eq!(raw, invalid.to_string());
         }
         for status in ["attempted", "updated", "error", "blocked"] {
@@ -1995,7 +1998,9 @@ mod tests {
             db.ks(key, &legacy);
             assert_eq!(load_branch_update(&db, "o/r", 1).unwrap(), Some(legacy));
             assert!(!reserve_branch_update(&db, "o/r", 1, activation, true, target, 101).unwrap());
-            assert!(reserve_branch_update(&db, "o/r", 1, activation, true, target, 400_000).unwrap());
+            assert!(
+                reserve_branch_update(&db, "o/r", 1, activation, true, target, 400_000).unwrap()
+            );
         }
     }
 
