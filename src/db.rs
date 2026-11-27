@@ -341,6 +341,38 @@ fn init(c: &mut Connection) -> anyhow::Result<()> {
           delete from kv where substr(k,1,length('coderabbit:observation:' || old.full || '#')) = 'coderabbit:observation:' || old.full || '#';
         end;
     ")?;
+    // Invalidate active analysis ownership on repository lifecycle changes,
+    // without resetting the retry deadline or discarding receipt history.
+    tx.execute_batch("
+        create trigger if not exists watcher_attempt_repo_changed
+        after update of on_,full on rp
+        when old.on_ is not new.on_ or old.full is not new.full
+        begin
+          update watcher_retry set analysis_ticket=null
+            where repo in (old.full,new.full) and analysis_ticket is not null;
+          select case when exists(select 1 from watcher_retry
+            where repo in (old.full,new.full) and analysis_ticket is not null)
+            then raise(abort,'watcher attempt revocation failed') end;
+        end;
+        create trigger if not exists watcher_attempt_repo_removed
+        after delete on rp
+        begin
+          update watcher_retry set analysis_ticket=null
+            where repo=old.full and analysis_ticket is not null;
+          select case when exists(select 1 from watcher_retry
+            where repo=old.full and analysis_ticket is not null)
+            then raise(abort,'watcher attempt revocation failed') end;
+        end;
+        create trigger if not exists watcher_attempt_repo_inserted
+        after insert on rp
+        begin
+          update watcher_retry set analysis_ticket=null
+            where repo=new.full and analysis_ticket is not null;
+          select case when exists(select 1 from watcher_retry
+            where repo=new.full and analysis_ticket is not null)
+            then raise(abort,'watcher attempt revocation failed') end;
+        end;
+    ")?;
     // Cancel unsent replies when repository authorization is revoked. Never
     // discard uncertain deliveries: they may already have reached GitHub.
     tx.execute_batch("
@@ -4085,6 +4117,69 @@ mod watcher_storage_failure_tests {
         db.receive_review_batch("o/r", 1, "t", HEAD, &ids).unwrap();
         db.receive_review_batch("o/r", 1, "t", HEAD, &ids).unwrap();
         assert_eq!(db.n("select count(*) from watcher_inbox", vec![]), 3);
+    }
+
+    #[test]
+    fn repository_lifecycle_revokes_attempt_without_resetting_retry() {
+        for change in [
+            "update rp set on_=0 where full='o/r'; update rp set on_=1 where full='o/r';",
+            "delete from rp where full='o/r'; insert into rp(full) values('o/r');",
+            "update rp set full='o/other' where full='o/r'; update rp set full='o/r' where full='o/other';",
+        ] {
+            let db = Db::mem();
+            seed(&db);
+            let ids = vec!["r1".into()];
+            let old = db
+                .claim_review_attempt("o/r", 1, "t", HEAD, 0)
+                .unwrap()
+                .unwrap();
+            db.0.lock().unwrap().execute_batch(change).unwrap();
+            let rows = db.try_all("select * from watcher_retry", vec![]).unwrap();
+            assert!(rows[0]["analysis_ticket"].is_null());
+            assert_eq!(rows[0]["next_attempt_at"], 600000);
+            assert!(db
+                .queue_review_with_attempt("o/r", 1, "t", &ids, &request(), &old)
+                .is_err());
+            assert_pending(&db);
+            assert!(db
+                .claim_review_attempt("o/r", 1, "t", HEAD, 599999)
+                .unwrap()
+                .is_none());
+            let current = db
+                .claim_review_attempt("o/r", 1, "t", HEAD, 600000)
+                .unwrap()
+                .unwrap();
+            old.release().unwrap();
+            db.run("update rp set on_=on_ where full='o/r'", vec![]);
+            assert!(db
+                .queue_review_with_attempt("o/r", 1, "t", &ids, &request(), &current)
+                .unwrap());
+            current.release().unwrap();
+        }
+    }
+
+    #[test]
+    fn ignored_repository_revocation_aborts_state_change() {
+        let db = Db::mem();
+        seed(&db);
+        let attempt = db
+            .claim_review_attempt("o/r", 1, "t", HEAD, 0)
+            .unwrap()
+            .unwrap();
+        let c = db.0.lock().unwrap();
+        c.execute_batch(
+            "create trigger ignore_revoke before update on watcher_retry
+             when new.analysis_ticket is null begin select raise(ignore); end;",
+        )
+        .unwrap();
+        assert!(c.execute("update rp set on_=0 where full='o/r'", []).is_err());
+        let on: i64 = c
+            .query_row("select on_ from rp where full='o/r'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(on, 1);
+        c.execute_batch("drop trigger ignore_revoke").unwrap();
+        drop(c);
+        attempt.release().unwrap();
     }
 
     #[test]
