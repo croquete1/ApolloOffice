@@ -4109,14 +4109,7 @@ mod watcher_storage_failure_tests {
                 .queue_review_with_attempt("o/r", 1, "t", &ids, &req, &old)
                 .is_err());
             assert!(db
-                .ack_review_with_attempt(
-                    "o/r",
-                    1,
-                    "t",
-                    HEAD,
-                    (&ids, Some(&old)),
-                    &req["reply"],
-                )
+                .ack_review_with_attempt("o/r", 1, "t", HEAD, (&ids, Some(&old)), &req["reply"],)
                 .is_err());
             assert_pending(&db);
             assert!(db
