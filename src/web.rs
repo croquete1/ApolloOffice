@@ -1880,12 +1880,18 @@ fn steward_report(a: &Ax, repo: &str) -> Value {
                 })
             }).unwrap_or(Value::Null);
             let update = a.db.kg(&format!("steward:update:{repo}#{number}"));
-            pr["branch_update"] =
-                if update["head"] == pr["head_sha"] || update["base"] == pr["base_sha"] {
-                    update
-                } else {
-                    Value::Null
-                };
+            let blocked = a.db.kg(&format!("steward:update_blocked:{repo}#{number}"));
+            let matches = |record: &Value| {
+                record.is_object()
+                    && (record["head"] == pr["head_sha"] || record["base"] == pr["base_sha"])
+            };
+            pr["branch_update"] = if matches(&update) {
+                update
+            } else if matches(&blocked) {
+                blocked
+            } else {
+                Value::Null
+            };
         }
     }
     report["queue"] = json!({

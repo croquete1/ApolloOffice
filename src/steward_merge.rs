@@ -1157,8 +1157,9 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
             submit_reserved_branch_update(a, repo, number, &reservation).await?;
         } else {
             let reason = "a PR não é uma branch própria do repositório ou faltam permissões";
+            // A diagnostic must not erase a durable, possibly in-flight attempt.
             a.db.ks(
-                &update_key,
+                &format!("steward:update_blocked:{repo}#{number}"),
                 &json!({
                     "status":"blocked",
                     "head":head,
@@ -1829,6 +1830,91 @@ mod tests {
         assert!(
             observed_branch_update(&observed, &head, &old_compare, &base_compare, 300).is_none()
         );
+    }
+
+    // Run the actual reservation/outcome writers in a separate process, then
+    // terminate without dropping the database connection. The parent opens
+    // the same WAL-backed file and uses the production observation/CAS path.
+    #[test]
+    #[ignore = "subprocess fixture invoked by branch_update_survives_process_exit"]
+    fn branch_update_crash_child() {
+        let path = std::env::var_os("APOLLO_TEST_BRANCH_UPDATE_DB").unwrap();
+        let phase = std::env::var("APOLLO_TEST_BRANCH_UPDATE_PHASE").unwrap();
+        let db = crate::db::Db::open(std::path::Path::new(&path)).unwrap();
+        db.run(
+            "insert into rp(full,on_,auto_merge,local_merge) values('o/r',1,1,1)",
+            pa![],
+        );
+        let policy = db.one("select merge_activation from rp", pa![]).unwrap();
+        let activation = policy["merge_activation"].as_str().unwrap();
+        let head = "a".repeat(40);
+        let base = "b".repeat(40);
+        let target = (head.as_str(), base.as_str());
+        assert!(reserve_branch_update(&db, "o/r", 1, activation, true, target, 100).unwrap());
+        let reservation = branch_update_reservation(activation, target, 100);
+        match phase.as_str() {
+            "attempted" => {}
+            "accepted" => {
+                assert!(record_branch_update_outcome(&db, "o/r", 1, &reservation, None).unwrap());
+            }
+            "uncertain" => {
+                assert!(
+                    record_branch_update_outcome(&db, "o/r", 1, &reservation, Some("timeout"))
+                        .unwrap()
+                );
+            }
+            _ => panic!("unexpected fixture phase"),
+        }
+        // No Rust destructors run; SQLite must recover the committed record.
+        std::process::exit(73);
+    }
+
+    #[test]
+    fn branch_update_survives_process_exit() {
+        let root = std::env::temp_dir().join(format!(
+            "apollo-branch-update-crash-{}",
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let exe = std::env::current_exe().unwrap();
+        let old = "a".repeat(40);
+        let base = "b".repeat(40);
+        let head = "c".repeat(40);
+        let target = (old.as_str(), base.as_str());
+        let old_comparison = json!({"status":"ahead","merge_base_commit":{"sha":old}});
+        let base_comparison = json!({"status":"ahead","merge_base_commit":{"sha":base}});
+        for phase in ["attempted", "accepted", "uncertain"] {
+            let path = root.join(format!("{phase}.db"));
+            let status = std::process::Command::new(&exe)
+                .args([
+                    "--exact",
+                    "steward_merge::tests::branch_update_crash_child",
+                    "--ignored",
+                ])
+                .env("APOLLO_TEST_BRANCH_UPDATE_DB", &path)
+                .env("APOLLO_TEST_BRANCH_UPDATE_PHASE", phase)
+                .status()
+                .unwrap();
+            assert_eq!(status.code(), Some(73));
+            let db = crate::db::Db::open(&path).unwrap();
+            let previous = load_branch_update(&db, "o/r", 1).unwrap().unwrap();
+            assert_eq!(previous["status"], phase);
+            assert_eq!(previous["at"], 100);
+            let activation = previous["merge_activation"].as_str().unwrap();
+            assert!(!reserve_branch_update(&db, "o/r", 1, activation, true, target, 101).unwrap());
+            let observed =
+                observed_branch_update(&previous, &head, &old_comparison, &base_comparison, 200)
+                    .unwrap();
+            assert!(replace_branch_update_record(&db, "o/r", 1, &previous, &observed).unwrap());
+            drop(db);
+            let db = crate::db::Db::open(&path).unwrap();
+            assert_eq!(
+                load_branch_update(&db, "o/r", 1).unwrap(),
+                Some(observed.clone())
+            );
+            assert!(!replace_branch_update_record(&db, "o/r", 1, &previous, &observed).unwrap());
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
