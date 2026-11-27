@@ -2419,11 +2419,13 @@ impl WatcherDeliveryCursor {
         if self.author == author {
             return Ok(());
         }
-        let pending = db.load_watcher_delivery_cursor(author, "pending")?;
-        let uncertain = db.load_watcher_delivery_cursor(author, "uncertain")?;
+        let pending = db.load_watcher_delivery_cursor(author, "pending");
+        let uncertain = db.load_watcher_delivery_cursor(author, "uncertain");
         self.for_author(author);
-        self.pending = pending;
-        self.uncertain = uncertain;
+        self.pending = pending.as_ref().ok().cloned().flatten();
+        self.uncertain = uncertain.as_ref().ok().cloned().flatten();
+        pending?;
+        uncertain?;
         Ok(())
     }
 
@@ -2485,7 +2487,13 @@ fn watcher_outbox_step(a: &Ax, tag: &str, operation: &str, result: rusqlite::Res
 }
 
 async fn deliver_watcher_outbox(a: &Ax, me: &str, cursor: &mut WatcherDeliveryCursor) -> R<()> {
-    cursor.restore(&a.db, me).map_err(|e| X::E(e.to_string()))?;
+    if let Err(error) = cursor.restore(&a.db, me) {
+        a.say(
+            "watcher",
+            &format!("outbox cursor restore failed: {error}; using available checkpoints"),
+            None,
+        );
+    }
     let rows = watcher_delivery_batch(&a.db, me, now(), cursor).map_err(|e| X::E(e.to_string()))?;
     for row in rows {
         if a.hold("watcher") {
@@ -2774,6 +2782,11 @@ mod t {
             assert!(cursor.pending.is_none() && cursor.uncertain.is_none());
             cursor.restore(&db, "owner").unwrap();
             assert_eq!(cursor.pending, Some((1, "pending-09".into())));
+            db.run("update kv set v='invalid' where k='watcher:delivery-cursor:pending:owner'", pa![]);
+            let mut cursor = WatcherDeliveryCursor::default();
+            assert!(cursor.restore(&db, "owner").is_err());
+            assert!(cursor.pending.is_none());
+            assert_eq!(cursor.uncertain, Some((1, "uncertain-09".into())));
         }
         std::fs::remove_dir_all(path).unwrap();
     }
