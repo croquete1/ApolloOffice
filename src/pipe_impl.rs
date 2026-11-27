@@ -4931,10 +4931,7 @@ fn remove_ci_hold_journal(a: &Ax, repo: &str) -> rusqlite::Result<()> {
 pub(crate) fn ci_storage_pending(a: &Ax, repo: &str) -> bool {
     // Release the memory lock before any database access by callers.
     let pending = a.pending_ci_holds.lock().unwrap().keys().any(|(r, _)| r == repo);
-    pending || match std::fs::symlink_metadata(ci_hold_journal(a, repo)) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        _ => true,
-    }
+    pending || !matches!(std::fs::symlink_metadata(ci_hold_journal(a, repo)), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
 }
 
 fn record_ci_failure(a: &Ax, repo: &str, suffix: &str, marker: &Value) -> rusqlite::Result<()> {
