@@ -4466,7 +4466,8 @@ async fn go(a: &Ax, id: i64, h: &str) {
                 clean(a, &jj).await;
                 return Err(X::Back(String::new()));
             }
-            if !clear_superseded_ci_markers(a, &j.repo, &hk(a, &j.h()), &j.s("base"))
+            if !clear_prepared_ci_markers(a, &j.repo, &j.h(), &j.s("base"))
+                .await
                 .map_err(|error| X::Defer(format!("CI hold cleanup unavailable: {error}")))?
             {
                 return Err(X::Back(format!(
@@ -4815,16 +4816,26 @@ fn ci_marker_requires_two_valid_distinct_object_ids() {
 
 // Read both applicable holds together. Missing rows are distinct from
 // malformed JSON and database errors, which must not authorize dispatch.
+type CiMarkerRows = Vec<(String, String)>;
+
+fn ci_marker_rows(
+    connection: &rusqlite::Connection,
+    repo: &str,
+    suffix: &str,
+) -> rusqlite::Result<CiMarkerRows> {
+    let global = format!("cired:{repo}");
+    let scoped = format!("cired:{repo}{suffix}");
+    let mut statement = connection.prepare("select k,v from kv where k in (?1,?2) order by k")?;
+    let rows = statement.query_map(rusqlite::params![global, scoped], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    rows.collect()
+}
+
 fn ci_markers(a: &Ax, repo: &str, suffix: &str) -> rusqlite::Result<Vec<Value>> {
-    let rows = a.db.try_all(
-        "select v from kv where k in (?,?) order by k",
-        pa![format!("cired:{repo}"), format!("cired:{repo}{suffix}")],
-    )?;
+    let rows = ci_marker_rows(&a.db.0.lock().unwrap(), repo, suffix)?;
     rows.into_iter()
-        .map(|row| {
-            let raw = row["v"].as_str().ok_or(rusqlite::Error::InvalidQuery)?;
-            serde_json::from_str(raw).map_err(|_| rusqlite::Error::InvalidQuery)
-        })
+        .map(|(_, raw)| serde_json::from_str(&raw).map_err(|_| rusqlite::Error::InvalidQuery))
         .collect()
 }
 
@@ -4835,18 +4846,14 @@ fn clear_superseded_ci_markers(
     repo: &str,
     suffix: &str,
     base: &str,
+    expected: &CiMarkerRows,
 ) -> rusqlite::Result<bool> {
-    let global = format!("cired:{repo}");
-    let scoped = format!("cired:{repo}{suffix}");
     let mut connection = a.db.0.lock().unwrap();
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let markers = {
-        let mut statement = tx.prepare("select k,v from kv where k in (?1,?2) order by k")?;
-        let rows = statement.query_map(rusqlite::params![global, scoped], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()?
-    };
+    let markers = ci_marker_rows(&tx, repo, suffix)?;
+    if &markers != expected {
+        return Ok(false);
+    }
     for (_, raw) in &markers {
         let marker: Value = serde_json::from_str(raw).map_err(|_| rusqlite::Error::InvalidQuery)?;
         if !ci_marker_superseded(&json!({"s":base}), &marker) {
@@ -4863,6 +4870,50 @@ fn clear_superseded_ci_markers(
         crate::app::chg();
     }
     Ok(true)
+}
+
+// A prepared or resumed checkout alone is not evidence of the current
+// default branch. Observe it after reading the holds; then compare the exact
+// marker keys and values inside the cleanup transaction.
+async fn clear_prepared_ci_markers(a: &Ax, repo: &str, host: &str, base: &str) -> rusqlite::Result<bool> {
+    clear_prepared_ci_markers_with(a, repo, host, base, || async {
+        ghj(
+            &["api", &format!("repos/{repo}/commits/HEAD"), "--jq", "{s: .sha}"],
+            60,
+        )
+        .await
+        .unwrap_or(Value::Null)
+    })
+    .await
+}
+
+async fn clear_prepared_ci_markers_with<F, Fut>(
+    a: &Ax,
+    repo: &str,
+    host: &str,
+    base: &str,
+    remote: F,
+) -> rusqlite::Result<bool>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Value>,
+{
+    let suffix = hk(a, host);
+    let expected = ci_marker_rows(&a.db.0.lock().unwrap(), repo, &suffix)?;
+    if !expected.is_empty() {
+        let head = remote().await;
+        if !crate::db::valid_git_sha(base)
+            || !head["s"].as_str().is_some_and(|sha| {
+                crate::db::valid_git_sha(sha) && sha.eq_ignore_ascii_case(base)
+            })
+        {
+            return Ok(false);
+        }
+    }
+    if hk(a, host) != suffix {
+        return Ok(false);
+    }
+    clear_superseded_ci_markers(a, repo, &suffix, base, &expected)
 }
 
 async fn red(a: &Ax, r: &str, h: &str) -> bool {
