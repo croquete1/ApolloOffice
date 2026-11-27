@@ -526,9 +526,7 @@ fn reserve_branch_update(
             return Ok(false);
         }
     }
-    let data =
-        json!({"head":head,"base":base,"at":at,"status":"attempted","merge_activation":activation})
-            .to_string();
+    let data = branch_update_reservation(activation, target, at).to_string();
     let changed = tx.execute(
         "insert into kv(k,v) values(?,?) on conflict(k) do update set v=excluded.v",
         rusqlite::params![key, data],
@@ -548,6 +546,91 @@ fn reserve_branch_update(
     }
     tx.commit()?;
     Ok(true)
+}
+
+fn branch_update_reservation(activation: &str, target: (&str, &str), at: i64) -> Value {
+    json!({"head":target.0,"base":target.1,"at":at,"status":"attempted","merge_activation":activation})
+}
+
+// The update endpoint accepts a request asynchronously. A successful HTTP
+// response is not proof of a new HEAD; an error can be an ambiguous outcome.
+fn record_branch_update_outcome(
+    db: &crate::db::Db,
+    repo: &str,
+    number: i64,
+    reservation: &Value,
+    error: Option<&str>,
+) -> rusqlite::Result<bool> {
+    let mut c = db.0.lock().unwrap();
+    let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let key = format!("steward:update:{repo}#{number}");
+    let previous = reservation.to_string();
+    let eligible: bool = tx.query_row(
+        "select exists(select 1 from kv where k=? and v=?)",
+        rusqlite::params![key, previous],
+        |row| row.get(0),
+    )?;
+    if !eligible {
+        return Ok(false);
+    }
+    let mut outcome = reservation.clone();
+    outcome["status"] = json!(if error.is_some() { "uncertain" } else { "accepted" });
+    if let Some(error) = error {
+        outcome["error"] = json!(crate::sh::head(error, 500));
+    }
+    let data = outcome.to_string();
+    let changed = tx.execute(
+        "update kv set v=? where k=? and v=?",
+        rusqlite::params![data, key, previous],
+    )?;
+    let persisted: bool = tx.query_row(
+        "select exists(select 1 from kv where k=? and v=?)",
+        rusqlite::params![key, data],
+        |row| row.get(0),
+    )?;
+    if changed != 1 || !persisted {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    tx.commit()?;
+    Ok(true)
+}
+
+async fn submit_reserved_branch_update(
+    a: &Ax,
+    repo: &str,
+    number: i64,
+    reservation: &Value,
+) -> Result<(), String> {
+    let head = reservation["head"].as_str().ok_or("missing reserved HEAD")?;
+    let response = ghj(
+        &[
+            "api",
+            "-X",
+            "PUT",
+            &format!("repos/{repo}/pulls/{number}/update-branch"),
+            "-f",
+            &format!("expected_head_sha={head}"),
+        ],
+        90,
+    )
+    .await;
+    let error = response.as_ref().err().map(String::as_str);
+    if !record_branch_update_outcome(&a.db, repo, number, reservation, error)
+        .map_err(|error| format!("branch update outcome unavailable: {error}"))?
+    {
+        return Err("branch update reservation replaced before outcome recording".into());
+    }
+    a.say(
+        "watcher",
+        &format!("{repo}#{number}: {}", if error.is_some() {
+            "resultado da atualização incerto; aguarda nova observação do GitHub"
+        } else {
+            "pedido de atualização aceite; aguarda novo HEAD e validação"
+        }),
+        None,
+    );
+    a.steward_wake.notify_one();
+    Ok(())
 }
 
 // Both update paths require a fresh owned PR and the exact observed target.
@@ -922,6 +1005,7 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
             {
                 return Ok(false);
             }
+            let at = crate::db::now();
             if !reserve_branch_update(
                 &a.db,
                 repo,
@@ -929,62 +1013,15 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
                 activation,
                 false,
                 (&head, current_base),
-                crate::db::now(),
+                at,
             )
             .map_err(|error| format!("branch update reservation unavailable: {error}"))?
                 || !update_policy_allows(a, repo, number, false, activation)?
             {
                 return Ok(false);
             }
-            match ghj(
-                &[
-                    "api",
-                    "-X",
-                    "PUT",
-                    &format!("repos/{repo}/pulls/{number}/update-branch"),
-                    "-f",
-                    &format!("expected_head_sha={head}"),
-                ],
-                90,
-            )
-            .await
-            {
-                Ok(_) => {
-                    a.db.ks(
-                        &update_key,
-                        &json!({
-                            "status":"updated",
-                            "head":head,
-                            "base":current_base,
-                            "at":crate::db::now(),
-                            "message":"Branch atualizada no GitHub; CI e revisão têm de validar o novo HEAD"
-                        }),
-                    );
-                    a.say(
-                        "watcher",
-                        &format!("{repo}#{number}: base avançou; branch atualizada e provas anteriores invalidadas"),
-                        None,
-                    );
-                    a.steward_wake.notify_one();
-                }
-                Err(error) => {
-                    a.db.ks(
-                        &update_key,
-                        &json!({
-                            "status":"error",
-                            "head":head,
-                            "base":current_base,
-                            "at":crate::db::now(),
-                            "error":crate::sh::head(&error,500)
-                        }),
-                    );
-                    a.say(
-                        "watcher",
-                        &format!("{repo}#{number}: não foi possível atualizar a branch para a base atual"),
-                        None,
-                    );
-                }
-            }
+            let reservation = branch_update_reservation(activation, (&head, current_base), at);
+            submit_reserved_branch_update(a, repo, number, &reservation).await?;
         } else {
             let reason = "a PR não é uma branch própria do repositório ou faltam permissões";
             a.db.ks(
@@ -1091,6 +1128,7 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
                 }
                 // Reserve the backoff before an external attempt, including an
                 // ambiguous response, rather than retrying on every scan.
+                let at = crate::db::now();
                 if !reserve_branch_update(
                     &a.db,
                     repo,
@@ -1098,38 +1136,15 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
                     activation,
                     true,
                     (&head, base_sha),
-                    crate::db::now(),
+                    at,
                 )
                 .map_err(|error| format!("branch update reservation unavailable: {error}"))?
                     || !update_policy_allows(a, repo, number, true, activation)?
                 {
                     return Ok(false);
                 }
-                match ghj(
-                    &[
-                        "api",
-                        "-X",
-                        "PUT",
-                        &format!("repos/{repo}/pulls/{number}/update-branch"),
-                        "-f",
-                        &format!("expected_head_sha={head}"),
-                    ],
-                    90,
-                )
-                .await
-                {
-                    Ok(_) => a.say(
-                        "watcher",
-                        &format!("{repo}#{number}: branch atualizada; CI terá de correr novamente"),
-                        None,
-                    ),
-                    Err(error) => {
-                        a.db.ks(
-                            &format!("steward:update_error:{repo}#{number}"),
-                            &json!({"head":head,"error":crate::sh::head(&error,500)}),
-                        );
-                    }
-                }
+                let reservation = branch_update_reservation(activation, (&head, base_sha), at);
+                submit_reserved_branch_update(a, repo, number, &reservation).await?;
             }
             return Ok(false);
         }
@@ -1585,6 +1600,41 @@ mod tests {
         db.run("update rp set auto_merge=0", pa![]);
         db.run("update rp set auto_merge=1", pa![]);
         assert!(!reserve(600_100).unwrap());
+    }
+
+    #[test]
+    fn branch_update_outcome_preserves_reservation_and_rejects_stale_writes() {
+        let db = crate::db::Db::mem();
+        db.run(
+            "insert into rp(full,on_,auto_merge,local_merge) values('o/r',1,1,1)",
+            pa![],
+        );
+        let policy = db.one("select merge_activation from rp", pa![]).unwrap();
+        let activation = policy["merge_activation"].as_str().unwrap();
+        let head = "a".repeat(40);
+        let base = "b".repeat(40);
+        let target = (head.as_str(), base.as_str());
+        let key = "steward:update:o/r#1";
+        assert!(reserve_branch_update(&db, "o/r", 1, activation, true, target, 100).unwrap());
+        let first = branch_update_reservation(activation, target, 100);
+        db.run("create trigger ignore_outcome before update on kv when new.k glob 'steward:update:*' begin select raise(ignore); end;", pa![]);
+        assert!(record_branch_update_outcome(&db, "o/r", 1, &first, None).is_err());
+        assert_eq!(db.kg(key), first);
+        db.run("drop trigger ignore_outcome", pa![]);
+        assert!(record_branch_update_outcome(&db, "o/r", 1, &first, Some("timeout")).unwrap());
+        let uncertain = db.kg(key);
+        assert_eq!(uncertain["status"], "uncertain");
+        assert_eq!(uncertain["at"], 100);
+        assert!(!reserve_branch_update(&db, "o/r", 1, activation, true, target, 101).unwrap());
+        assert!(reserve_branch_update(&db, "o/r", 1, activation, true, target, 300_100).unwrap());
+        let second = branch_update_reservation(activation, target, 300_100);
+        assert!(!record_branch_update_outcome(&db, "o/r", 1, &first, None).unwrap());
+        assert_eq!(db.kg(key), second);
+        assert!(record_branch_update_outcome(&db, "o/r", 1, &second, None).unwrap());
+        let accepted = db.kg(key);
+        assert_eq!(accepted["status"], "accepted");
+        assert_eq!(accepted["at"], 300_100);
+        assert_eq!(accepted["merge_activation"], activation);
     }
 
     #[test]
