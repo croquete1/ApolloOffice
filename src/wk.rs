@@ -2412,12 +2412,7 @@ fn watcher_delivery_batch(
 
 // A local storage error belongs to the current reply. Global authentication
 // errors still abort the batch before any further external POST.
-fn watcher_outbox_step(
-    a: &Ax,
-    tag: &str,
-    operation: &str,
-    result: rusqlite::Result<bool>,
-) -> bool {
+fn watcher_outbox_step(a: &Ax, tag: &str, operation: &str, result: rusqlite::Result<bool>) -> bool {
     match result {
         Ok(changed) => changed,
         Err(error) => {
@@ -2582,12 +2577,8 @@ async fn deliver_watcher_outbox(a: &Ax, me: &str) -> R<()> {
         .await
         {
             Ok(_) => {
-                if watcher_outbox_step(
-                    a,
-                    &tag,
-                    "completion",
-                    a.db.finish_watcher_reply(id, "sent"),
-                ) {
+                if watcher_outbox_step(a, &tag, "completion", a.db.finish_watcher_reply(id, "sent"))
+                {
                     a.db.ks(&format!("wr:{tag}"), &json!(now()));
                     a.say("watcher", &format!("{tag}: queued reply delivered"), None);
                 }
