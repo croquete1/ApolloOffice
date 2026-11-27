@@ -2005,23 +2005,10 @@ async fn watch_pr(
         v["headRepository"]["name"].as_str().unwrap_or("")
     );
     let hrn = v["headRefName"].as_str().unwrap_or("").to_string();
+    // The Watcher records the observed HEAD and wakes the Steward. Only
+    // the Steward may decide whether to enqueue an automatic conflict repair.
     if v["mergeable"] == "CONFLICTING" && v["headRepositoryOwner"]["login"].as_str() == Some(me) {
-        let request = json!({
-            "title":v["title"],"url":v["url"],
-            "why":format!("merge conflict with {}",v["baseRefName"].as_str().unwrap_or("")),
-            "data":{"branch":hrn,"head":hd,"test_cmd":p["d"]["test_cmd"]}
-        });
-        if a.db
-            .queue_watcher_rebase(&r, n, &up, &source_head, &request)
-            .map_err(|e| X::E(e.to_string()))?
-        {
-            a.flow("watcher", "fixer", "rebase");
-            a.say(
-                "watcher",
-                &format!("{tag} has a merge conflict, sent to rebase"),
-                None,
-            );
-        }
+        a.steward_wake.notify_one();
     }
     observe_auto_merge(a, &r, n, &v, &p["d"], me)?;
     if !has_pending
