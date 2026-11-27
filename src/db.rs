@@ -1167,7 +1167,7 @@ impl Db {
         if stale {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        tx.execute("delete from watcher_retry where repo=? and num=? and head=? and not exists(select 1 from watcher_inbox where repo=? and num=? and head=? and state='received')",rusqlite::params![repo,number,head,repo,number,head])?;
+        Self::clear_review_retry_if_complete(&tx, repo, number, head)?;
         tx.commit()?;
         Ok(changed)
     }
@@ -1221,6 +1221,37 @@ impl Db {
         }))
     }
 
+    // Cleanup may legitimately be a no-op while receipts are pending.
+    // If none remain, the matching retry row must actually be removed.
+    fn clear_review_retry_if_complete(
+        tx: &rusqlite::Transaction<'_>,
+        repo: &str,
+        number: i64,
+        head: &str,
+    ) -> rusqlite::Result<()> {
+        let pending: bool = tx.query_row(
+            "select exists(select 1 from watcher_inbox where repo=? and num=? and head=? and state='received')",
+            rusqlite::params![repo, number, head],
+            |row| row.get(0),
+        )?;
+        if pending {
+            return Ok(());
+        }
+        tx.execute(
+            "delete from watcher_retry where repo=? and num=? and head=?",
+            rusqlite::params![repo, number, head],
+        )?;
+        let retained: bool = tx.query_row(
+            "select exists(select 1 from watcher_retry where repo=? and num=? and head=?)",
+            rusqlite::params![repo, number, head],
+            |row| row.get(0),
+        )?;
+        if retained {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        Ok(())
+    }
+
     fn finish_review_inbox(
         tx: &rusqlite::Transaction<'_>,
         repo: &str,
@@ -1241,7 +1272,7 @@ impl Db {
                 return Err(rusqlite::Error::InvalidQuery);
             }
         }
-        tx.execute("delete from watcher_retry where repo=? and num=? and head=? and not exists(select 1 from watcher_inbox where repo=? and num=? and head=? and state='received')",rusqlite::params![repo,number,head,repo,number,head])?;
+        Self::clear_review_retry_if_complete(tx, repo, number, head)?;
         Ok(())
     }
 
@@ -3744,6 +3775,52 @@ mod watcher_storage_failure_tests {
             assert_eq!(db.n("select count(*) from watcher_outbox", vec![]), 1);
             assert!(db.comment_acknowledged("o/r", "r1").unwrap());
             assert!(!db.has_pending_review("o/r", 1).unwrap());
+        }
+    }
+
+    #[test]
+    fn ignored_retry_cleanup_rolls_back_receipt_transitions() {
+        for reconcile in [false, true] {
+            let db = Db::mem();
+            seed(&db);
+            assert!(db
+                .claim_review_attempt("o/r", 1, "t", HEAD, 0)
+                .unwrap()
+                .is_some());
+            db.0.lock()
+                .unwrap()
+                .execute_batch(
+                    "create trigger ignore_retry before delete on watcher_retry
+                     begin select raise(ignore); end;",
+                )
+                .unwrap();
+            if reconcile {
+                assert!(db
+                    .reconcile_review_receipts("o/r", 1, "t", HEAD, &[])
+                    .is_err());
+            } else {
+                assert!(db
+                    .queue_review_and_ack("o/r", 1, "t", &["r1".into()], &request())
+                    .is_err());
+            }
+            assert_pending(&db);
+            assert_eq!(db.n("select count(*) from watcher_retry", vec![]), 1);
+            db.run("drop trigger ignore_retry", vec![]);
+            if reconcile {
+                assert_eq!(
+                    db.reconcile_review_receipts("o/r", 1, "t", HEAD, &[])
+                        .unwrap(),
+                    1
+                );
+                assert!(!db.comment_acknowledged("o/r", "r1").unwrap());
+            } else {
+                assert!(db
+                    .queue_review_and_ack("o/r", 1, "t", &["r1".into()], &request())
+                    .unwrap());
+                assert!(db.comment_acknowledged("o/r", "r1").unwrap());
+            }
+            assert!(!db.has_pending_review("o/r", 1).unwrap());
+            assert_eq!(db.n("select count(*) from watcher_retry", vec![]), 0);
         }
     }
 

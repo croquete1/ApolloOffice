@@ -63,7 +63,11 @@ def enqueue(db, crash_at=None):
     db.execute(extract("update prs set d=json_set(d, '$.seen', json('true'), '$.comment_seen_at', ?)"), ("t", "o/r", 1))
     checkpoint("after-ack")
     db.execute(extract("update watcher_inbox set state='done',updated_at=? where repo=? and num=? and head=? and comment_id=?"), (2, "o/r", 1, HEAD, "r1"))
-    db.execute(extract("delete from watcher_retry where repo=? and num=? and head=? and not exists(select 1 from watcher_inbox"), ("o/r", 1, HEAD, "o/r", 1, HEAD))
+    if not db.execute(extract("select exists(select 1 from watcher_inbox where repo=? and num=? and head=? and state='received')"), ("o/r", 1, HEAD)).fetchone()[0]:
+        db.execute(extract("delete from watcher_retry where repo=? and num=? and head=?"), ("o/r", 1, HEAD))
+        if db.execute(extract("select exists(select 1 from watcher_retry where repo=? and num=? and head=?)"), ("o/r", 1, HEAD)).fetchone()[0]:
+            db.rollback()
+            raise sqlite3.IntegrityError("Retry cleanup did not persist")
     checkpoint("before-commit")
     db.commit()
     checkpoint("after-commit")
@@ -118,6 +122,19 @@ class WatcherSqlCrashTests(unittest.TestCase):
                     self.assertTrue(enqueue(db))
                     self.assertEqual(self.state(db), (1, 1, 1, "done", 0, "t"))
                     self.assertFalse(enqueue(db))
+
+    def test_ignored_retry_cleanup_rolls_back_entire_transaction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.make_db(directory)
+            with closing(connect(path)) as db:
+                db.execute("create trigger ignore_retry before delete on watcher_retry begin select raise(ignore); end")
+                with self.assertRaises(sqlite3.IntegrityError):
+                    enqueue(db)
+                self.assertEqual(self.state(db), (0, 0, 0, "received", 1, None))
+                db.execute("drop trigger ignore_retry")
+                self.assertTrue(enqueue(db))
+                self.assertEqual(self.state(db), (1, 1, 1, "done", 0, "t"))
+                self.assertFalse(enqueue(db))
 
     def test_commit_survives_exit_and_replay_does_not_enqueue(self):
         with tempfile.TemporaryDirectory() as directory:
