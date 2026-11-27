@@ -1829,13 +1829,23 @@ impl Db {
         data.insert("source_comments".into(), json!(ids));
         data.insert("source_updated_at".into(), json!(updated));
         let t = now();
+        let encoded = json!(data).to_string();
         if tx.execute("insert into jobs(repo,num,kind,title,url,st,why,d,pr,prio,t0,t1) values(?,?,'review',?,?,'ready',?,?,?,-1.0,?,?)",
-            rusqlite::params![repo, number, title, url, change, json!(data).to_string(), number, t, t])? != 1 {
+            rusqlite::params![repo, number, title, url, change, encoded, number, t, t])? != 1 {
             return Err(rusqlite::Error::InvalidQuery);
         }
+        let job = tx.last_insert_rowid();
         Self::queue_watcher_reply(&tx, repo, number, head, ids, &request["reply"])?;
         Self::ack_comments_in_tx(&tx, repo, number, updated, ids)?;
         Self::finish_review_inbox(&tx, repo, number, head, ids)?;
+        let persisted: bool = tx.query_row(
+            "select exists(select 1 from jobs where id=?1 and repo=?2 and num=?3 and pr=?3 and kind='review' and st='ready' and title=?4 and url=?5 and why=?6 and d=?7 and prio=-1.0 and t0=?8 and t1=?8)",
+            rusqlite::params![job, repo, number, title, url, change, encoded, t],
+            |row| row.get(0),
+        )?;
+        if !persisted {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
         tx.commit()?;
         crate::app::chg();
         Ok(true)
@@ -1956,12 +1966,21 @@ impl Db {
             .filter(|v| !v.trim().is_empty())
             .ok_or(rusqlite::Error::InvalidQuery)?;
         let t = now();
-        let data = json!({"title":title,"body":body,"after":number,"source_comments":ids});
+        let encoded = json!({"title":title,"body":body,"after":number,"source_comments":ids}).to_string();
         if tx.execute("insert into jobs(repo,num,kind,title,url,st,why,d,prio,t0,t1) values(?,0,'fix',?,?,'vet',?,?,-1.0,?,?)",
-            rusqlite::params![repo,title,url,why,data.to_string(),t,t])? != 1 {
+            rusqlite::params![repo,title,url,why,encoded,t,t])? != 1 {
             return Err(rusqlite::Error::InvalidQuery);
         }
+        let job = tx.last_insert_rowid();
         Self::ack_merged_in_tx(&tx, repo, number, updated, ids, complete)?;
+        let persisted: bool = tx.query_row(
+            "select exists(select 1 from jobs where id=?1 and repo=?2 and num=0 and pr is null and kind='fix' and st='vet' and title=?3 and url=?4 and why=?5 and d=?6 and prio=-1.0 and t0=?7 and t1=?7)",
+            rusqlite::params![job, repo, title, url, why, encoded, t],
+            |row| row.get(0),
+        )?;
+        if !persisted {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
         tx.commit()?;
         crate::app::chg();
         Ok(true)
@@ -2891,6 +2910,40 @@ mod late_followup_tests {
                 .unwrap());
             assert_eq!(db.n("select count(*) from jobs", vec![]), 1);
             assert_eq!(db.n("select count(*) from cm", vec![]), 2);
+        }
+    }
+
+    #[test]
+    fn followup_job_must_survive_acknowledgement_with_exact_payload() {
+        for fault in [
+            "create trigger mutate_job after insert on jobs when new.kind='fix' begin update jobs set d='{}' where id=new.id; end;",
+            "create trigger mutate_job after insert on cm begin delete from jobs where kind='fix'; end;",
+        ] {
+            let db = Db::mem();
+            db.run("insert into rp(full) values('o/r')", vec![]);
+            db.run(
+                "insert into prs(repo,num,st,upd,d) values('o/r',1,'merged','new',?)",
+                crate::pa![json!({"comment_seen_at":"old"}).to_string()],
+            );
+            let request = json!({"title":"follow-up","body":"verified request","url":"https://example.test","why":"maintainer"});
+            let ids = vec!["i1".into()];
+            db.0.lock().unwrap().execute_batch(fault).unwrap();
+            assert!(db
+                .queue_followup_and_ack("o/r", 1, "new", &ids, &request, true)
+                .is_err());
+            assert!(!db.comment_acknowledged("o/r", "i1").unwrap());
+            assert_eq!(db.n("select count(*) from jobs", vec![]), 0);
+            assert_eq!(
+                db.one("select d from prs where repo='o/r' and num=1", vec![])
+                    .unwrap()["d"]["comment_seen_at"],
+                "old"
+            );
+            db.run("drop trigger mutate_job", vec![]);
+            assert!(db
+                .queue_followup_and_ack("o/r", 1, "new", &ids, &request, true)
+                .unwrap());
+            assert!(db.comment_acknowledged("o/r", "i1").unwrap());
+            assert_eq!(db.n("select count(*) from jobs", vec![]), 1);
         }
     }
 
@@ -4243,6 +4296,29 @@ mod watcher_storage_failure_tests {
         json!({"title":"PR","url":"https://github.com/o/r/pull/1","why":"conflict",
             "data":{"branch":"fix","head":"o/r","steward_rebase_base_ref":"main",
             "steward_rebase_base_sha":"b".repeat(40),"steward_rebase_activation":token}})
+    }
+
+    #[test]
+    fn review_job_must_survive_acknowledgement_with_exact_payload() {
+        for fault in [
+            "create trigger mutate_job after insert on jobs when new.kind='review' begin update jobs set d='{}' where id=new.id; end;",
+            "create trigger mutate_job after insert on cm begin delete from jobs where kind='review'; end;",
+        ] {
+            let db = Db::mem();
+            seed(&db);
+            let ids = vec!["r1".into()];
+            db.0.lock().unwrap().execute_batch(fault).unwrap();
+            assert!(db
+                .queue_review_and_ack("o/r", 1, "t", &ids, &request())
+                .is_err());
+            assert_pending(&db);
+            db.run("drop trigger mutate_job", vec![]);
+            assert!(db
+                .queue_review_and_ack("o/r", 1, "t", &ids, &request())
+                .unwrap());
+            assert!(db.comment_acknowledged("o/r", "r1").unwrap());
+            assert_eq!(db.n("select count(*) from jobs", vec![]), 1);
+        }
     }
 
     #[test]
