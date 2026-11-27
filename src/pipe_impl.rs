@@ -5030,8 +5030,16 @@ fn record_ci_admission(
     let mut connection = a.db.0.lock().unwrap();
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let at = now();
-    let (state, raw): (String, String) = tx.query_row(
-        "select j.st,j.d from jobs j join rp on rp.full=j.repo
+    let (state, raw, kind, enabled, hunt, ci): (
+        String,
+        String,
+        String,
+        bool,
+        bool,
+        Option<String>,
+    ) = tx.query_row(
+        "select j.st,j.d,j.kind,coalesce(rp.on_=1,0),coalesce(rp.hunt=1,0),rp.ci
+         from jobs j join rp on rp.full=j.repo
          left join job_schedule s on s.job=j.id
          where j.id=?1 and j.repo=?2 and j.st in ('ready','submit')
          and coalesce(s.retry_after,0)<=?3
@@ -5040,13 +5048,30 @@ fn record_ci_admission(
              on p.repo=prior.repo and p.num=prior.pr
              where prior.id=dep.prerequisite and prior.st='done' and p.st='merged'))",
         rusqlite::params![id, repo, at],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        },
     )?;
     let data: Value = serde_json::from_str(&raw).map_err(|_| rusqlite::Error::InvalidQuery)?;
     if !data.is_object() {
         return Err(rusqlite::Error::InvalidQuery);
     }
     let pinned = state == "submit" || data["rs"] == true || data["rp"] == true;
+    let configured = ci.as_deref().is_some_and(|command| !command.trim().is_empty());
+    // Preserve the existing exemption for pinned reconciliation/resume,
+    // but never admit a Hunter after its explicit opt-in was revoked.
+    if (!pinned && (!enabled || !configured))
+        || (kind == "hunt" && (!enabled || !hunt || !configured))
+    {
+        return Ok(false);
+    }
     let rows = if pinned {
         Vec::new()
     } else {
