@@ -392,18 +392,24 @@ fn init(c: &mut Connection) -> anyhow::Result<()> {
     // Cancel unsent replies when repository authorization is revoked. Never
     // discard uncertain deliveries: they may already have reached GitHub.
     tx.execute_batch("
-        create trigger if not exists watcher_outbox_repo_removed
+        drop trigger if exists watcher_outbox_repo_removed;
+        create trigger if not exists watcher_outbox_repo_removed_v2
         after delete on rp
         begin
           update watcher_outbox set state='cancelled',updated=cast(strftime('%s','now') as integer)*1000
             where repo=old.full and state='pending';
+          select case when exists(select 1 from watcher_outbox where repo=old.full and state='pending')
+            then raise(abort,'watcher reply revocation failed') end;
         end;
-        create trigger if not exists watcher_outbox_repo_disabled
+        drop trigger if exists watcher_outbox_repo_disabled;
+        create trigger if not exists watcher_outbox_repo_disabled_v2
         after update of on_,full on rp
         when new.on_ is not 1 or old.full is not new.full
         begin
           update watcher_outbox set state='cancelled',updated=cast(strftime('%s','now') as integer)*1000
             where repo=old.full and state='pending';
+          select case when exists(select 1 from watcher_outbox where repo=old.full and state='pending')
+            then raise(abort,'watcher reply revocation failed') end;
         end;
         update watcher_outbox set state='cancelled',updated=cast(strftime('%s','now') as integer)*1000
           where state='pending' and not exists(select 1 from rp where full=watcher_outbox.repo and on_=1);
@@ -411,32 +417,48 @@ fn init(c: &mut Connection) -> anyhow::Result<()> {
     // Terminal or deleted PRs cannot send previously queued replies. Keep
     // uncertain/sent deliveries for reconciliation; a reopen needs new work.
     tx.execute_batch("
-        create trigger if not exists watcher_outbox_pr_terminal
+        drop trigger if exists watcher_outbox_pr_terminal;
+        create trigger if not exists watcher_outbox_pr_terminal_v2
         after update of st on prs when new.st is not 'open' and old.st is not new.st
         begin
           update watcher_outbox set state='cancelled',updated=cast(strftime('%s','now') as integer)*1000
             where repo=new.repo and num=new.num and state='pending';
+          select case when exists(select 1 from watcher_outbox where repo=new.repo and num=new.num and state='pending')
+            then raise(abort,'watcher reply revocation failed') end;
         end;
-        create trigger if not exists watcher_outbox_pr_deleted
+        drop trigger if exists watcher_outbox_pr_deleted;
+        create trigger if not exists watcher_outbox_pr_deleted_v2
         after delete on prs
         begin
           update watcher_outbox set state='cancelled',updated=cast(strftime('%s','now') as integer)*1000
             where repo=old.repo and num=old.num and state='pending';
+          select case when exists(select 1 from watcher_outbox where repo=old.repo and num=old.num and state='pending')
+            then raise(abort,'watcher reply revocation failed') end;
         end;
         update watcher_outbox set state='cancelled',updated=cast(strftime('%s','now') as integer)*1000
           where state='pending' and not exists(select 1 from prs where repo=watcher_outbox.repo and num=watcher_outbox.num and st='open');
-        create trigger if not exists watcher_outbox_pr_head_changed
+        drop trigger if exists watcher_outbox_pr_head_changed;
+        create trigger if not exists watcher_outbox_pr_head_changed_v2
         after update of d on prs
         begin
           update watcher_outbox set state='cancelled',updated=cast(strftime('%s','now') as integer)*1000
             where repo=new.repo and num=new.num and state='pending' and
               (source_head='' or source_head is not case when json_valid(new.d) then json_extract(new.d,'$.watcher_head') end);
+          select case when exists(select 1 from watcher_outbox where repo=new.repo and num=new.num and state='pending'
+            and (source_head='' or source_head is not case when json_valid(new.d) then json_extract(new.d,'$.watcher_head') end))
+            then raise(abort,'watcher reply revocation failed') end;
         end;
         update watcher_outbox set state='cancelled',updated=cast(strftime('%s','now') as integer)*1000
           where state='pending' and (source_head='' or not exists(
             select 1 from prs where repo=watcher_outbox.repo and num=watcher_outbox.num and st='open'
               and case when json_valid(d) then json_extract(d,'$.watcher_head') end=watcher_outbox.source_head));
     ")?;
+    let stale_watcher_replies: bool = tx.query_row(
+        "select exists(select 1 from watcher_outbox where state='pending' and (not exists(select 1 from rp where full=watcher_outbox.repo and on_=1) or source_head='' or not exists(select 1 from prs where repo=watcher_outbox.repo and num=watcher_outbox.num and st='open' and case when json_valid(d) then json_extract(d,'$.watcher_head') end=watcher_outbox.source_head)))",
+        [],
+        |row| row.get(0),
+    )?;
+    anyhow::ensure!(!stale_watcher_replies, "watcher reply revocation failed");
     // A fresh opaque token also fences deletion/recreation of a repository.
     // Existing permissions are preserved, but old jobs have no valid token.
     tx.execute_batch("
@@ -3082,6 +3104,52 @@ mod watcher_outbox_tests {
             .queue_review_and_ack("o/r", 1, "next", &["r2".into()], &req)
             .unwrap());
         assert_eq!(db.n("select count(*) from watcher_outbox", vec![]), 1);
+    }
+
+    #[test]
+    fn ignored_outbox_revocation_rolls_back_lifecycle_mutation() {
+        let head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        for mutation in [
+            "update rp set on_=0 where full='o/r'",
+            "update rp set full='o/other' where full='o/r'",
+            "delete from rp where full='o/r'",
+            "update prs set st='closed' where repo='o/r' and num=1",
+            "delete from prs where repo='o/r' and num=1",
+            "update prs set d='{}' where repo='o/r' and num=1",
+        ] {
+            let db = Db::mem();
+            db.run("insert into rp(full) values('o/r')", vec![]);
+            db.run(
+                "insert into prs(repo,num,st,upd,d) values('o/r',1,'open','t',?)",
+                crate::pa![json!({"watcher_head":head}).to_string()],
+            );
+            {
+                let c = db.0.lock().unwrap();
+                for (id, state) in [("a", "pending"), ("b", "uncertain"), ("c", "sent")] {
+                    c.execute(
+                        "insert into watcher_outbox(id,repo,num,author,body,state,created,updated,source_head) values(?,'o/r',1,'owner','reply',?,1,1,?)",
+                        rusqlite::params![id, state, head],
+                    )
+                    .unwrap();
+                }
+                c.execute_batch(
+                    "create trigger ignore_outbox_revoke before update on watcher_outbox
+                     when new.state='cancelled' begin select raise(ignore); end;",
+                )
+                .unwrap();
+                assert!(c.execute(mutation, []).is_err());
+                c.execute_batch("drop trigger ignore_outbox_revoke").unwrap();
+            }
+            assert_eq!(db.n("select count(*) from rp where full='o/r' and on_=1", vec![]), 1);
+            assert_eq!(db.n("select count(*) from prs where st='open' and json_extract(d,'$.watcher_head') is not null", vec![]), 1);
+            assert_eq!(db.watcher_outbox_counts().unwrap()["pending"], 1);
+            db.0.lock().unwrap().execute(mutation, []).unwrap();
+            let counts = db.watcher_outbox_counts().unwrap();
+            assert_eq!(counts["cancelled"], 1);
+            assert_eq!(counts["uncertain"], 1);
+            assert_eq!(counts["sent"], 1);
+            assert!(!db.claim_watcher_reply("a", "owner").unwrap());
+        }
     }
 
     #[test]
