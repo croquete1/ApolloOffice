@@ -81,7 +81,7 @@ pub struct App {
     pub sem: Mutex<HashMap<String, usize>>,
     pub runs: Mutex<HashMap<String, Rn>>,
     pub cache: Mutex<HashMap<String, (i64, Value)>>,
-    pub head_observations: Mutex<HashMap<String, u64>>,
+    pub(crate) head_observations: Mutex<HashMap<String, crate::gh::HeadObservation>>,
     pub codex_usage: Mutex<Value>,
     codex_background: tokio::sync::Semaphore,
     pub vtk: Mutex<HashSet<i64>>,

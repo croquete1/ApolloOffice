@@ -4832,11 +4832,15 @@ fn ci_marker_rows(
     rows.collect()
 }
 
-fn ci_markers(a: &Ax, repo: &str, suffix: &str) -> rusqlite::Result<Vec<Value>> {
-    let rows = ci_marker_rows(&a.db.0.lock().unwrap(), repo, suffix)?;
-    rows.into_iter()
-        .map(|(_, raw)| serde_json::from_str(&raw).map_err(|_| rusqlite::Error::InvalidQuery))
+fn parse_ci_markers(rows: &CiMarkerRows) -> rusqlite::Result<Vec<Value>> {
+    rows.iter()
+        .map(|(_, raw)| serde_json::from_str(raw).map_err(|_| rusqlite::Error::InvalidQuery))
         .collect()
+}
+
+#[cfg(test)]
+fn ci_markers(a: &Ax, repo: &str, suffix: &str) -> rusqlite::Result<Vec<Value>> {
+    parse_ci_markers(&ci_marker_rows(&a.db.0.lock().unwrap(), repo, suffix)?)
 }
 
 // A single write transaction prevents partial cleanup and deletion of a
@@ -4939,28 +4943,36 @@ where
     Fut: std::future::Future<Output = Value>,
 {
     let suffix = hk(a, h);
-    let Ok(markers) = ci_markers(a, r, &suffix) else {
+    let rows = {
+        let connection = a.db.0.lock().unwrap();
+        ci_marker_rows(&connection, r, &suffix)
+    };
+    let Ok(rows) = rows else {
         return true;
     };
-    if markers.is_empty() {
+    if rows.is_empty() {
         return false;
     }
-    let k = format!("head:{r}");
-    let head = match crate::gh::cg(a, &k, 600_000).filter(|v| {
-        v["s"].as_str().is_some_and(crate::db::valid_git_sha)
-    }) {
-        Some(v) => v,
+    let Ok(markers) = parse_ci_markers(&rows) else {
+        return true;
+    };
+    let (generation, head) = match crate::gh::cached_ci_head(a, r, &rows) {
+        Some(proof) => proof,
         None => {
             let generation = crate::gh::begin_head_observation(a, r);
             let v = remote().await;
-            if !crate::gh::publish_head_observation(a, r, generation, &v) {
+            if !crate::gh::publish_ci_head_observation(a, r, generation, &v, &rows) {
                 return true;
             }
-            v
+            (generation, v)
         }
     };
-    // A newer hold or changed host scope during I/O requires a fresh decision.
-    if hk(a, h) != suffix || ci_markers(a, r, &suffix).ok().as_ref() != Some(&markers) {
+    // A newer hold, host scope or HEAD request requires a fresh decision.
+    let latest = ci_marker_rows(&a.db.0.lock().unwrap(), r, &suffix);
+    if hk(a, h) != suffix
+        || latest.ok().as_ref() != Some(&rows)
+        || !crate::gh::head_observation_is_current(a, r, generation)
+    {
         return true;
     }
     !markers.iter().all(|marker| ci_marker_superseded(&head, marker))
