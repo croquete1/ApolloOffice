@@ -57,6 +57,46 @@ mod t {
     }
 
     #[test]
+    fn ci_hold_cleanup_is_atomic_and_fail_closed() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            1,
+            "x".into(),
+        ));
+        let base = "b".repeat(40);
+        let old = json!({"sha":"a".repeat(40)});
+        let current = json!({"sha":base});
+        a.db.ks("cired:o/r", &old);
+        a.db.ks("cired:o/r@host", &current);
+        a.db.ks("cired:o/r@other", &old);
+        assert!(!clear_superseded_ci_markers(&a, "o/r", "@host", &base).unwrap());
+        assert_eq!(a.db.kg("cired:o/r"), old);
+        assert_eq!(a.db.kg("cired:o/r@host"), current);
+        a.db.ks("cired:o/r@host", &json!({"sha":"invalid"}));
+        assert!(!clear_superseded_ci_markers(&a, "o/r", "@host", &base).unwrap());
+        assert_eq!(a.db.kg("cired:o/r"), old);
+        a.db.run("update kv set v='{' where k='cired:o/r@host'", pa![]);
+        assert!(clear_superseded_ci_markers(&a, "o/r", "@host", &base).is_err());
+        assert_eq!(a.db.kg("cired:o/r"), old);
+        a.db.ks("cired:o/r@host", &old);
+        assert!(!clear_superseded_ci_markers(&a, "o/r", "@host", "invalid").unwrap());
+        a.db.0.lock().unwrap().execute_batch(
+            "create trigger fail_hold_delete before delete on kv
+             when old.k='cired:o/r@host' begin select raise(abort,'injected'); end;",
+        ).unwrap();
+        assert!(clear_superseded_ci_markers(&a, "o/r", "@host", &base).is_err());
+        assert_eq!(a.db.kg("cired:o/r"), old);
+        assert_eq!(a.db.kg("cired:o/r@host"), old);
+        a.db.run("drop trigger fail_hold_delete", pa![]);
+        assert!(clear_superseded_ci_markers(&a, "o/r", "@host", &base).unwrap());
+        assert!(a.db.kg("cired:o/r").is_null());
+        assert!(a.db.kg("cired:o/r@host").is_null());
+        assert_eq!(a.db.kg("cired:o/r@other"), old);
+        assert!(clear_superseded_ci_markers(&a, "o/r", "@host", &base).unwrap());
+    }
+
+    #[test]
     fn removed_repository_cannot_admit_stale_submission() {
         let db = crate::db::Db::mem();
         db.run(
