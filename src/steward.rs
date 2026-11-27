@@ -384,11 +384,17 @@ pub fn assess(prs: &[Value]) -> Vec<Value> {
 // newer auto-merge or repair opt-in for this existing conflict workflow.
 fn conflict_request(listed: &Value, fresh: &Value, saved: &Value, login: &str) -> Option<Value> {
     let number = listed["number"].as_i64().filter(|n| *n > 0)?;
-    let head = listed["headRefOid"].as_str().filter(|s| crate::db::valid_git_sha(s))?;
-    let base_sha = listed["baseRefOid"].as_str().filter(|s| crate::db::valid_git_sha(s))?;
+    let head = listed["headRefOid"]
+        .as_str()
+        .filter(|s| crate::db::valid_git_sha(s))?;
+    let base_sha = listed["baseRefOid"]
+        .as_str()
+        .filter(|s| crate::db::valid_git_sha(s))?;
     let updated = listed["updatedAt"].as_str()?;
     chrono::DateTime::parse_from_rfc3339(updated).ok()?;
-    let base = listed["baseRefName"].as_str().filter(|s| !s.trim().is_empty())?;
+    let base = listed["baseRefName"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())?;
     if login.trim().is_empty()
         || listed["mergeStateStatus"] != "DIRTY"
         || fresh["state"] != "OPEN"
@@ -407,8 +413,12 @@ fn conflict_request(listed: &Value, fresh: &Value, saved: &Value, login: &str) -
     {
         return None;
     }
-    let branch = fresh["headRefName"].as_str().filter(|s| !s.trim().is_empty())?;
-    let source = fresh["headRepository"]["name"].as_str().filter(|s| !s.trim().is_empty())?;
+    let branch = fresh["headRefName"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())?;
+    let source = fresh["headRepository"]["name"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())?;
     let title = fresh["title"].as_str()?;
     let url = fresh["url"].as_str().filter(|s| !s.trim().is_empty())?;
     Some(json!({
@@ -422,7 +432,10 @@ async fn route_tracked_rebases(a: &Ax, repo: &str, listed: &[Value]) -> Result<(
         return Ok(());
     }
     let login = crate::gh::me(a).await?;
-    let login = login["login"].as_str().filter(|s| !s.trim().is_empty()).ok_or("GitHub identity unavailable")?;
+    let login = login["login"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or("GitHub identity unavailable")?;
     for pr in listed.iter().filter(|pr| pr["mergeStateStatus"] == "DIRTY") {
         if a.hold("watcher") || a.drain.load(std::sync::atomic::Ordering::Relaxed) {
             return Ok(());
@@ -430,26 +443,40 @@ async fn route_tracked_rebases(a: &Ax, repo: &str, listed: &[Value]) -> Result<(
         let Some(number) = pr["number"].as_i64().filter(|n| *n > 0) else {
             continue;
         };
-        let rows = a.db.try_all(
-            "select st,upd,d from prs where repo=? and num=? and st='open'",
-            pa![repo.to_string(), number],
-        ).map_err(|error| error.to_string())?;
-        let Some(saved) = rows.first() else { continue; };
+        let rows =
+            a.db.try_all(
+                "select st,upd,d from prs where repo=? and num=? and st='open'",
+                pa![repo.to_string(), number],
+            )
+            .map_err(|error| error.to_string())?;
+        let Some(saved) = rows.first() else {
+            continue;
+        };
         let fresh = ghj(
             &["pr", "view", &number.to_string(), "-R", repo, "--json",
               "number,state,mergeable,title,url,isDraft,headRefOid,baseRefOid,baseRefName,updatedAt,headRepositoryOwner,headRepository,headRefName"],
             60,
         ).await?;
-        let Some(request) = conflict_request(pr, &fresh, saved, login) else { continue; };
+        let Some(request) = conflict_request(pr, &fresh, saved, login) else {
+            continue;
+        };
         if a.hold("watcher") || a.drain.load(std::sync::atomic::Ordering::Relaxed) {
             return Ok(());
         }
-        let updated = fresh["updatedAt"].as_str().ok_or("PR timestamp unavailable")?;
+        let updated = fresh["updatedAt"]
+            .as_str()
+            .ok_or("PR timestamp unavailable")?;
         let head = fresh["headRefOid"].as_str().ok_or("PR HEAD unavailable")?;
-        if a.db.queue_watcher_rebase(repo, number, updated, head, &request)
-            .map_err(|error| error.to_string())? {
+        if a.db
+            .queue_watcher_rebase(repo, number, updated, head, &request)
+            .map_err(|error| error.to_string())?
+        {
             a.flow("watcher", "fixer", "rebase");
-            a.say("watcher", &format!("{repo}#{number}: Steward confirmed merge conflict, sent to rebase"), None);
+            a.say(
+                "watcher",
+                &format!("{repo}#{number}: Steward confirmed merge conflict, sent to rebase"),
+                None,
+            );
         }
     }
     Ok(())
@@ -621,21 +648,30 @@ mod tests {
             "headRepositoryOwner":{"login":"owner"},"headRepository":{"name":"fork"},
             "headRefName":"fix","title":"PR","url":"https://github.com/o/r/pull/1"
         });
-        let saved = json!({"st":"open","upd":updated,"d":{"watcher_head":head,"test_cmd":"cargo test"}});
+        let saved =
+            json!({"st":"open","upd":updated,"d":{"watcher_head":head,"test_cmd":"cargo test"}});
         let request = conflict_request(&listed, &fresh, &saved, "owner").unwrap();
         assert_eq!(request["data"]["head"], "owner/fork");
         assert_eq!(request["data"]["test_cmd"], "cargo test");
         for (key, value) in [
-            ("state",json!("CLOSED")), ("mergeable",json!("MERGEABLE")),
-            ("number",json!(2)), ("headRefOid",json!("c".repeat(40))),
-            ("baseRefOid",json!("c".repeat(40))), ("baseRefName",json!("other")),
-            ("updatedAt",json!("2026-01-02T00:00:00Z")), ("isDraft",json!(true)),
-            ("headRepositoryOwner",json!({"login":"other"})), ("headRefName",json!("")),
-            ("headRepository",Value::Null),
+            ("state", json!("CLOSED")),
+            ("mergeable", json!("MERGEABLE")),
+            ("number", json!(2)),
+            ("headRefOid", json!("c".repeat(40))),
+            ("baseRefOid", json!("c".repeat(40))),
+            ("baseRefName", json!("other")),
+            ("updatedAt", json!("2026-01-02T00:00:00Z")),
+            ("isDraft", json!(true)),
+            ("headRepositoryOwner", json!({"login":"other"})),
+            ("headRefName", json!("")),
+            ("headRepository", Value::Null),
         ] {
             let mut changed = fresh.clone();
             changed[key] = value;
-            assert!(conflict_request(&listed, &changed, &saved, "owner").is_none(), "{key}");
+            assert!(
+                conflict_request(&listed, &changed, &saved, "owner").is_none(),
+                "{key}"
+            );
         }
         assert!(conflict_request(&listed, &fresh, &Value::Null, "owner").is_none());
         assert!(conflict_request(&listed, &fresh, &saved, "").is_none());
@@ -645,12 +681,24 @@ mod tests {
         // Do not create a new permission or require auto-merge: the legacy
         // owned tracked conflict route works independently of those options.
         let db = crate::db::Db::mem();
-        db.run("insert into rp(full,on_,auto_merge,steward_repair) values('o/r',1,0,0)", pa![]);
-        db.run("insert into prs(repo,num,st,upd,d) values('o/r',1,'open',?,?)", pa![updated.to_string(), saved["d"].to_string()]);
-        assert!(db.queue_watcher_rebase("o/r", 1, updated, &head, &request).unwrap());
-        assert!(!db.queue_watcher_rebase("o/r", 1, updated, &head, &request).unwrap());
+        db.run(
+            "insert into rp(full,on_,auto_merge,steward_repair) values('o/r',1,0,0)",
+            pa![],
+        );
+        db.run(
+            "insert into prs(repo,num,st,upd,d) values('o/r',1,'open',?,?)",
+            pa![updated.to_string(), saved["d"].to_string()],
+        );
+        assert!(db
+            .queue_watcher_rebase("o/r", 1, updated, &head, &request)
+            .unwrap());
+        assert!(!db
+            .queue_watcher_rebase("o/r", 1, updated, &head, &request)
+            .unwrap());
         db.run("update rp set on_=0 where full='o/r'", pa![]);
-        assert!(db.queue_watcher_rebase("o/r", 1, updated, &head, &request).is_err());
+        assert!(db
+            .queue_watcher_rebase("o/r", 1, updated, &head, &request)
+            .is_err());
     }
 
     #[test]
