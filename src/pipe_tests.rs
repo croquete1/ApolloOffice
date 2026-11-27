@@ -718,6 +718,24 @@ mod t {
     }
 
     #[test]
+    fn steward_rebase_requires_exact_base_at_execution_and_publication() {
+        let sha = "a".repeat(40);
+        let mut job = Job::of(json!({"kind":"rebase","d":{
+            "steward_rebase_base_ref":"main","steward_rebase_base_sha":sha
+        }}));
+        assert!(rebase_base_matches(&job, "main", &sha).is_ok());
+        assert!(rebase_base_matches(&job, "release", &sha).is_err());
+        assert!(rebase_base_matches(&job, "main", &"b".repeat(40)).is_err());
+        assert!(rebase_base_matches(&job, "main", "invalid").is_err());
+        job.d["steward_rebase_base_sha"] = Value::Null;
+        assert!(rebase_base_matches(&job, "main", &sha).is_err());
+        job.d.as_object_mut().unwrap().remove("steward_rebase_base_sha");
+        assert!(rebase_base_matches(&job, "main", &sha).is_err());
+        job.d = json!({});
+        assert!(rebase_base_matches(&job, "main", &sha).is_ok());
+    }
+
+    #[test]
     fn review_publication_requires_original_open_pr_and_exact_head(){
         let source="a".repeat(40);
         let candidate="b".repeat(40);
