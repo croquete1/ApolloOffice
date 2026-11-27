@@ -2526,6 +2526,54 @@ mod strict_db_tests {
     }
 
     #[test]
+    fn startup_retirement_rolls_back_legacy_migration_on_partial_cleanup() {
+        for fault in [
+            "create trigger ignore_cleanup before update on watcher_inbox when new.state='superseded' begin select raise(ignore); end;",
+            "create trigger ignore_cleanup before delete on watcher_retry begin select raise(ignore); end;",
+            "create trigger ignore_cleanup before update on watcher_outbox when new.state='cancelled' begin select raise(ignore); end;",
+        ] {
+            let mut c = Connection::open_in_memory().unwrap();
+            init(&mut c).unwrap();
+            c.execute_batch(
+                "drop trigger watcher_inbox_pr_terminal_v2;
+                 drop trigger watcher_outbox_pr_terminal_v2;
+                 create trigger watcher_inbox_pr_terminal after update of st on prs begin select 1; end;
+                 create trigger watcher_outbox_pr_terminal after update of st on prs begin select 1; end;
+                 insert into rp(full) values('o/r');
+                 insert into prs(repo,num,st) values('o/r',1,'closed');
+                 insert into watcher_inbox(repo,num,head,comment_id,snapshot,state,received_at,updated_at)
+                    values('o/r',1,'head','r1','t','received',1,1);
+                 insert into watcher_retry(repo,num,head,snapshot,attempts,next_attempt_at,analysis_ticket)
+                    values('o/r',1,'head','t',2,100,'live');
+                 insert into watcher_outbox(id,repo,num,author,body,state,created,updated)
+                    values('a','o/r',1,'owner','reply','pending',1,1),
+                          ('b','o/r',1,'owner','reply','uncertain',1,1);",
+            )
+            .unwrap();
+            c.execute_batch(fault).unwrap();
+            assert!(init(&mut c).is_err());
+            fn count(c: &Connection, sql: &str) -> i64 {
+                c.query_row(sql, [], |r| r.get(0)).unwrap()
+            }
+            assert_eq!(count(&c, "select count(*) from watcher_inbox where state='received' and updated_at=1"), 1);
+            assert_eq!(count(&c, "select count(*) from watcher_retry where analysis_ticket='live' and next_attempt_at=100"), 1);
+            assert_eq!(count(&c, "select count(*) from watcher_outbox where state='pending' and updated=1"), 1);
+            assert_eq!(count(&c, "select count(*) from sqlite_master where type='trigger' and name in ('watcher_inbox_pr_terminal','watcher_outbox_pr_terminal')"), 2);
+            assert_eq!(count(&c, "select count(*) from sqlite_master where type='trigger' and name in ('watcher_inbox_pr_terminal_v2','watcher_outbox_pr_terminal_v2')"), 0);
+            c.execute_batch("drop trigger ignore_cleanup").unwrap();
+            init(&mut c).unwrap();
+            init(&mut c).unwrap();
+            assert_eq!(count(&c, "select count(*) from watcher_inbox where state='superseded'"), 1);
+            assert_eq!(count(&c, "select count(*) from watcher_retry"), 0);
+            assert_eq!(count(&c, "select count(*) from watcher_outbox where state='cancelled'"), 1);
+            assert_eq!(count(&c, "select count(*) from watcher_outbox where state='uncertain' and updated=1"), 1);
+            assert_eq!(count(&c, "select count(*) from cm"), 0);
+            assert_eq!(count(&c, "select count(*) from sqlite_master where type='trigger' and name in ('watcher_inbox_pr_terminal','watcher_outbox_pr_terminal')"), 0);
+            assert_eq!(count(&c, "select count(*) from sqlite_master where type='trigger' and name in ('watcher_inbox_pr_terminal_v2','watcher_outbox_pr_terminal_v2')"), 2);
+        }
+    }
+
+    #[test]
     fn migration_rolls_back_on_non_duplicate_failure_and_refuses_future_schema() {
         let mut c = Connection::open_in_memory().unwrap();
         c.execute_batch(
