@@ -2435,16 +2435,27 @@ async fn deliver_watcher_outbox(a: &Ax, me: &str) -> R<()> {
             continue;
         }
         let (Some(state), Some(previous)) = (row["state"].as_str(), row["updated"].as_i64()) else {
-            a.say("watcher", &format!("{tag}: invalid outbox rotation snapshot"), None);
+            a.say(
+                "watcher",
+                &format!("{tag}: invalid outbox rotation snapshot"),
+                None,
+            );
             continue;
         };
         // Persist rotation before remote I/O, including reconciliation and
         // expiry. A failed row cannot authorize a POST or stop the batch.
-        match a.db.rotate_watcher_reply(id, author, state, previous, now()) {
+        match a
+            .db
+            .rotate_watcher_reply(id, author, state, previous, now())
+        {
             Ok(true) => {}
             Ok(false) => continue,
             Err(error) => {
-                a.say("watcher", &format!("{tag}: outbox rotation failed: {error}"), None);
+                a.say(
+                    "watcher",
+                    &format!("{tag}: outbox rotation failed: {error}"),
+                    None,
+                );
                 continue;
             }
         }
