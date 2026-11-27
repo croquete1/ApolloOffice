@@ -480,17 +480,58 @@ fn queue_recheck(a: &Ax, repo: &str, number: i64, head: &str, base: &str, detail
     if a.hold("watcher") || !crate::db::valid_git_sha(head) || !crate::db::valid_git_sha(base) {
         return false;
     }
-    let original = a.db.one(
-        "select d from jobs where repo=? and pr=? and kind='fix' and st='done' order by id desc limit 1",
-        pa![repo.to_string(), number],
-    );
-    let author = original
-        .as_ref()
-        .and_then(|x| x["d"]["author"].as_str())
-        .unwrap_or("");
+    let inserted = match admit_recheck(&a.db, repo, number, head, base, detail) {
+        Ok(inserted) => inserted,
+        Err(error) => {
+            a.say(
+                "watcher",
+                &format!("{repo}#{number}: recheck admission failed: {error}"),
+                None,
+            );
+            false
+        }
+    };
+    if inserted {
+        a.say(
+            "watcher",
+            &format!("{repo}#{number}: agendada revalidação gratuita com CI e Reviewer"),
+            None,
+        );
+        a.sw.notify_one();
+    }
+    inserted
+}
+
+// Keep the original fix evidence and admission predicates in the same write
+// transaction. A trigger must not silently remove or rewrite the new job.
+fn admit_recheck(
+    db: &crate::db::Db,
+    repo: &str,
+    number: i64,
+    head: &str,
+    base: &str,
+    detail: &Value,
+) -> rusqlite::Result<bool> {
+    use rusqlite::OptionalExtension;
+    let mut c = db.0.lock().unwrap();
+    let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let author: Option<String> = tx
+        .query_row(
+            "select json_extract(d,'$.author') from jobs where repo=? and pr=? and kind='fix' and st='done' order by id desc limit 1",
+            rusqlite::params![repo, number],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
     let branch = detail["head"]["ref"].as_str().unwrap_or("");
-    if author.is_empty() || branch.is_empty() {
-        return false;
+    let Some(author) = author.filter(|s| !s.trim().is_empty()) else {
+        return Ok(false);
+    };
+    if branch.trim().is_empty()
+        || !crate::db::valid_git_sha(head)
+        || !crate::db::valid_git_sha(base)
+    {
+        return Ok(false);
     }
     let data = json!({
         "head":repo,
@@ -499,9 +540,34 @@ fn queue_recheck(a: &Ax, repo: &str, number: i64, head: &str, base: &str, detail
         "expected_base":base,
         "author":author,
         "body":detail["body"]
-    });
+    })
+    .to_string();
+    let title = detail["title"].as_str().unwrap_or("Revalidar PR");
+    let url = detail["html_url"].as_str().unwrap_or("");
     let t = crate::db::now();
-    let inserted = a.db.ch(
+    let eligible: bool = tx.query_row(
+        "select exists (
+             select 1 from rp where full=?1 and on_=1 and auto_merge=1 and local_merge=1
+         )
+         and not exists (
+             select 1 from jobs where repo=?1 and pr=?2 and kind in ('review','rebase','mergecheck')
+               and st not in ('done','drop')
+         )
+         and not exists (
+             select 1 from jobs where repo=?1 and kind='mergecheck' and st not in ('done','drop')
+         )
+         and not exists (
+             select 1 from jobs where repo=?1 and pr=?2 and kind='mergecheck'
+               and json_extract(d,'$.expected_head')=?3
+               and json_extract(d,'$.expected_base')=?4
+         )",
+        rusqlite::params![repo, number, head, base],
+        |row| row.get(0),
+    )?;
+    if !eligible {
+        return Ok(false);
+    }
+    let changed = tx.execute(
         "insert into jobs(repo,num,kind,title,url,st,why,d,pr,prio,t0,t1)
          select ?,?,'mergecheck',?,?,'ready','Revalidar CI e Reviewer antes de merge',?,?,-5.0,?,?
          where exists (
@@ -519,37 +585,24 @@ fn queue_recheck(a: &Ax, repo: &str, number: i64, head: &str, base: &str, detail
                and json_extract(d,'$.expected_head')=?
                and json_extract(d,'$.expected_base')=?
          )",
-        pa![
-            repo.to_string(),
-            number,
-            detail["title"]
-                .as_str()
-                .unwrap_or("Revalidar PR")
-                .to_string(),
-            detail["html_url"].as_str().unwrap_or("").to_string(),
-            data.to_string(),
-            number,
-            t,
-            t,
-            repo.to_string(),
-            repo.to_string(),
-            number,
-            repo.to_string(),
-            repo.to_string(),
-            number,
-            head.to_string(),
-            base.to_string()
+        rusqlite::params![
+            repo, number, title, url, data, number, t, t, repo, repo, number, repo, repo, number,
+            head, base
         ],
-    ) == 1;
-    if inserted {
-        a.say(
-            "watcher",
-            &format!("{repo}#{number}: agendada revalidação gratuita com CI e Reviewer"),
-            None,
-        );
-        a.sw.notify_one();
+    )?;
+    let job = tx.last_insert_rowid();
+    let persisted: bool = tx.query_row(
+        "select exists(select 1 from jobs where id=?1 and repo=?2 and num=?3 and pr=?3 and kind='mergecheck' and st='ready' and title=?4 and url=?5 and d=?6 and why='Revalidar CI e Reviewer antes de merge' and prio=-5.0 and t0=?7 and t1=?7)
+         and exists(select 1 from rp where full=?2 and on_=1 and auto_merge=1 and local_merge=1)",
+        rusqlite::params![job, repo, number, title, url, data, t],
+        |row| row.get(0),
+    )?;
+    if changed != 1 || !persisted {
+        return Err(rusqlite::Error::InvalidQuery);
     }
-    inserted
+    tx.commit()?;
+    crate::app::chg();
+    Ok(true)
 }
 
 // A reconciliação normal é sequencial. O guard protege também chamadas
@@ -1463,6 +1516,21 @@ mod tests {
         a.db.run("update rp set auto_merge=1,on_=0", pa![]);
         assert!(!queue_recheck(&a, repo, 42, head, base, &detail));
         a.db.run("update rp set on_=1", pa![]);
+        for fault in [
+            "create trigger fail_recheck before insert on jobs when new.kind='mergecheck' begin select raise(ignore); end;",
+            "create trigger fail_recheck after insert on jobs when new.kind='mergecheck' begin update jobs set d='{}' where id=new.id; end;",
+            "create trigger fail_recheck after insert on jobs when new.kind='mergecheck' begin delete from jobs where id=new.id; end;",
+            "create trigger fail_recheck after insert on jobs when new.kind='mergecheck' begin update rp set local_merge=0; end;",
+        ] {
+            a.db.0.lock().unwrap().execute_batch(fault).unwrap();
+            assert!(admit_recheck(&a.db, repo, 42, head, base, &detail).is_err());
+            assert_eq!(
+                a.db.n("select count(*) from jobs where kind='mergecheck'", pa![]),
+                0
+            );
+            assert_eq!(a.db.n("select local_merge from rp", pa![]), 1);
+            a.db.run("drop trigger fail_recheck", pa![]);
+        }
         assert!(queue_recheck(&a, repo, 42, head, base, &detail));
         assert!(!queue_recheck(&a, repo, 42, head, base, &detail));
         assert_eq!(
