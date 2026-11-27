@@ -2415,6 +2415,18 @@ impl WatcherDeliveryCursor {
         }
     }
 
+    fn restore(&mut self, db: &crate::db::Db, author: &str) -> rusqlite::Result<()> {
+        if self.author == author {
+            return Ok(());
+        }
+        let pending = db.load_watcher_delivery_cursor(author, "pending")?;
+        let uncertain = db.load_watcher_delivery_cursor(author, "uncertain")?;
+        self.for_author(author);
+        self.pending = pending;
+        self.uncertain = uncertain;
+        Ok(())
+    }
+
     fn advance(&mut self, state: &str, updated: i64, id: &str) {
         let key = Some((updated, id.to_string()));
         match state {
@@ -2473,7 +2485,7 @@ fn watcher_outbox_step(a: &Ax, tag: &str, operation: &str, result: rusqlite::Res
 }
 
 async fn deliver_watcher_outbox(a: &Ax, me: &str, cursor: &mut WatcherDeliveryCursor) -> R<()> {
-    cursor.for_author(me);
+    cursor.restore(&a.db, me).map_err(|e| X::E(e.to_string()))?;
     let rows = watcher_delivery_batch(&a.db, me, now(), cursor).map_err(|e| X::E(e.to_string()))?;
     for row in rows {
         if a.hold("watcher") {
@@ -2506,6 +2518,16 @@ async fn deliver_watcher_outbox(a: &Ax, me: &str, cursor: &mut WatcherDeliveryCu
             continue;
         };
         cursor.advance(state, previous, id);
+        // Persist the attempted position before I/O. A checkpoint failure is
+        // diagnostic only; the in-memory cursor still advances, and every
+        // external send must independently pass the durable claim gate.
+        if let Err(error) = a.db.save_watcher_delivery_cursor(author, state, previous, id) {
+            a.say(
+                "watcher",
+                &format!("{tag}: outbox cursor checkpoint failed: {error}"),
+                None,
+            );
+        }
         if state == "uncertain" {
             // Positive confirmation only: absence is not evidence that a POST failed.
             if let Ok(comments) = apip_unique(&format!(
@@ -2718,6 +2740,42 @@ mod t {
         assert!(rows
             .iter()
             .all(|r| r["id"] != "recent" && r["id"] != "sent" && r["author"] == "owner"));
+    }
+
+    #[test]
+    fn watcher_delivery_cursor_resumes_after_database_reopen() {
+        let path = std::env::temp_dir().join(format!("apollo-cursor-{}", rand::random::<u64>()));
+        std::fs::create_dir(&path).unwrap();
+        let file = path.join("state.db");
+        {
+            let db = crate::db::Db::open(&file).unwrap();
+            db.run("insert into rp(full) values('o/r')", pa![]);
+            db.run(
+                "insert into prs(repo,num,st,upd,d) values('o/r',1,'open','t',?)",
+                pa![json!({"watcher_head":"a".repeat(40)}).to_string()],
+            );
+            for state in ["pending", "uncertain"] {
+                for i in 0..25 {
+                    db.run("insert into watcher_outbox(id,repo,num,author,body,state,created,updated,source_head) values(?,'o/r',1,'owner','reply',?,1,1,?)",pa![format!("{state}-{i:02}"),state.to_string(),"a".repeat(40)]);
+                }
+            }
+            db.save_watcher_delivery_cursor("owner", "pending", 1, "pending-09").unwrap();
+            db.save_watcher_delivery_cursor("owner", "uncertain", 1, "uncertain-09").unwrap();
+        }
+        {
+            let db = crate::db::Db::open(&file).unwrap();
+            let mut cursor = WatcherDeliveryCursor::default();
+            cursor.restore(&db, "owner").unwrap();
+            let rows = watcher_delivery_batch(&db, "owner", 2_000_000, &cursor).unwrap();
+            assert_eq!(rows[0]["id"], "pending-10");
+            assert_eq!(rows[1]["id"], "uncertain-10");
+            assert_eq!(rows.len(), 20);
+            cursor.restore(&db, "other").unwrap();
+            assert!(cursor.pending.is_none() && cursor.uncertain.is_none());
+            cursor.restore(&db, "owner").unwrap();
+            assert_eq!(cursor.pending, Some((1, "pending-09".into())));
+        }
+        std::fs::remove_dir_all(path).unwrap();
     }
 
     #[test]
