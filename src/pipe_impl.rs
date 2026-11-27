@@ -4774,6 +4774,14 @@ pub fn recover(a: &Ax) -> rusqlite::Result<()> {
         "update watcher_retry set analysis_ticket=null where analysis_ticket is not null",
         [],
     )?;
+    let retained: bool = tx.query_row(
+        "select exists(select 1 from watcher_retry where analysis_ticket is not null)",
+        [],
+        |row| row.get(0),
+    )?;
+    if retained {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
     let jobs = {
         let mut stmt = tx.prepare(
             "select id,st,kind,d from jobs where st in ('repro','fix','ci','review','gate','hunt','submit') order by id",
