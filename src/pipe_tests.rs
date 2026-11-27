@@ -754,6 +754,58 @@ mod t {
     }
 
     #[test]
+    fn mergecheck_completion_is_atomic_and_rejects_revoked_policy() {
+        let db = crate::db::Db::mem();
+        db.run("insert into rp(full,on_,auto_merge,local_merge,ci) values('o/r',1,1,1,'cargo test')", pa![]);
+        let activation = db.one("select merge_activation from rp", pa![]).unwrap()["merge_activation"].clone();
+        let head = "a".repeat(40);
+        let base = "b".repeat(40);
+        let tree = "c".repeat(40);
+        let data = json!({"merge_activation":activation,"expected_head":head,"expected_base":base,"author":"author"});
+        let id = db.jnew("o/r",1,"mergecheck","PR","url","review","pending",data.clone(),Some(1),-5.0);
+        let mut job = db.jg(id).unwrap();
+        job.d["published_sha"] = json!(head);
+        job.d["base"] = json!(base);
+        job.d["ci_tree"] = json!(tree);
+        job.d["publish_tree"] = json!(tree);
+        job.d["ci_verified_at"] = json!(100);
+        job.d["ci_evidence"] = json!({"command":"cargo test","exit":0,"candidate":head});
+        job.d["last_review"] = json!({"model":"reviewer","t":101,"verdict":{"ok":true}});
+        for fault in [
+            "create trigger fail_finish before update on jobs when new.st='done' begin select raise(ignore); end;",
+            "create trigger fail_finish after update on jobs when new.st='done' begin update jobs set d='{}' where id=new.id; end;",
+            "create trigger fail_finish after update on jobs when new.st='done' begin update rp set local_merge=0; end;",
+            "create trigger fail_finish after update on jobs when new.st='done' begin insert into kv(k,v) values('kill:' || new.id,'true'); end;",
+        ] {
+            db.0.lock().unwrap().execute_batch(fault).unwrap();
+            assert!(finish_mergecheck(&db,&job).is_err());
+            let saved = db.jg(id).unwrap();
+            assert_eq!(saved.st,"review");
+            assert_eq!(saved.d,data);
+            assert_eq!(db.n("select local_merge from rp",pa![]),1);
+            assert!(!cancellation_requested(&db,id).unwrap());
+            db.run("drop trigger fail_finish",pa![]);
+        }
+        db.ks(&format!("kill:{id}"),&json!(true));
+        assert!(!finish_mergecheck(&db,&job).unwrap());
+        db.ks(&format!("kill:{id}"),&json!(false));
+        db.run("update rp set local_merge=0",pa![]);
+        db.run("update rp set local_merge=1",pa![]);
+        assert!(!finish_mergecheck(&db,&job).unwrap());
+        assert_eq!(db.jg(id).unwrap().d,data);
+        let activation = db.one("select merge_activation from rp",pa![]).unwrap()["merge_activation"].clone();
+        job.d["merge_activation"] = activation.clone();
+        let mut saved = db.jg(id).unwrap();
+        saved.d["merge_activation"] = activation;
+        db.jd(&saved);
+        assert!(finish_mergecheck(&db,&job).unwrap());
+        let saved = db.jg(id).unwrap();
+        assert_eq!(saved.st,"done");
+        assert_eq!(saved.d,job.d);
+        assert!(!finish_mergecheck(&db,&job).unwrap());
+    }
+
+    #[test]
     fn mergecheck_activation_rejects_legacy_and_revoked_jobs() {
         let db = crate::db::Db::mem();
         db.run("insert into rp(full,on_,auto_merge,local_merge,ci) values('o/r',1,1,1,'cargo test')", pa![]);

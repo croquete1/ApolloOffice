@@ -593,6 +593,9 @@ fn kill(a: &Ax, j: &Job) -> R<()> {
     {
         return drop("dropped by the owner");
     }
+    if j.kind == "mergecheck" {
+        mergecheck_authorized(&a.db, j)?;
+    }
     steward_rebase_authorized(&a.db, j)?;
     automated_review_authorized(&a.db, j)
 }
@@ -4392,6 +4395,74 @@ fn mergecheck_authorized(db: &crate::db::Db, j: &Job) -> R<()> {
     Ok(())
 }
 
+// A successful recheck is one durable transition, not a pair of best-effort writes.
+fn finish_mergecheck(db: &crate::db::Db, j: &Job) -> rusqlite::Result<bool> {
+    let activation = j.s("merge_activation");
+    let head = j.s("expected_head");
+    let base = j.s("expected_base");
+    let tree = j.s("publish_tree");
+    let Some(number) = j.pr.filter(|n| *n > 0) else {
+        return Err(rusqlite::Error::InvalidQuery);
+    };
+    if j.kind != "mergecheck" || !crate::db::valid_git_sha(&head)
+        || !crate::db::valid_git_sha(&base) || !crate::db::valid_git_sha(&tree)
+        || j.d["published_sha"] != head || j.d["base"] != base || j.d["ci_tree"] != tree
+        || j.d["ci_evidence"]["exit"] != 0 || j.d["ci_evidence"]["candidate"] != head
+        || j.d["last_review"]["verdict"]["ok"] != true
+        || j.s("author").is_empty()
+        || j.d["last_review"]["model"].as_str().is_none_or(|m| m.is_empty() || m == j.s("author"))
+        || !j.d["ci_verified_at"].as_i64().is_some_and(|at| at > 0
+            && j.d["last_review"]["t"].as_i64().is_some_and(|reviewed| reviewed >= at))
+    {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let mut c = db.0.lock().unwrap();
+    let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let key = format!("kill:{}", j.id);
+    let cancel: String = tx.query_row(
+        "select coalesce((select v from kv where k=?),'false')",
+        [&key],
+        |row| row.get(0),
+    )?;
+    if serde_json::from_str::<bool>(&cancel).map_err(|_| rusqlite::Error::InvalidQuery)? {
+        return Ok(false);
+    }
+    let eligible: bool = tx.query_row(
+        "select exists(select 1 from jobs where id=?1 and repo=?2 and pr=?3 and kind='mergecheck' and st='review'
+         and json_extract(d,'$.merge_activation')=?4 and json_extract(d,'$.expected_head')=?5 and json_extract(d,'$.expected_base')=?6)
+         and exists(select 1 from rp where full=?2 and on_=1 and auto_merge=1 and local_merge=1 and merge_activation=?4 and trim(ci)=?7)",
+        rusqlite::params![j.id, j.repo, number, activation, head, base, j.d["ci_evidence"]["command"].as_str().unwrap_or("")],
+        |row| row.get(0),
+    )?;
+    if !eligible {
+        return Ok(false);
+    }
+    let data = j.d.to_string();
+    let why = "revalidação local concluída; aguarda gate de merge";
+    let at = now();
+    let changed = tx.execute(
+        "update jobs set d=?,st='done',why=?,t1=? where id=? and st='review'",
+        rusqlite::params![data, why, at, j.id],
+    )?;
+    let persisted: bool = tx.query_row(
+        "select exists(select 1 from jobs where id=?1 and repo=?2 and pr=?3 and kind='mergecheck' and st='done' and d=?4 and why=?5 and t1=?6)
+         and exists(select 1 from rp where full=?2 and on_=1 and auto_merge=1 and local_merge=1 and merge_activation=?7 and trim(ci)=?8)",
+        rusqlite::params![j.id, j.repo, number, data, why, at, activation, j.d["ci_evidence"]["command"].as_str().unwrap_or("")],
+        |row| row.get(0),
+    )?;
+    let cancel: String = tx.query_row(
+        "select coalesce((select v from kv where k=?),'false')",
+        [&key],
+        |row| row.get(0),
+    )?;
+    if changed != 1 || !persisted || serde_json::from_str::<bool>(&cancel).map_err(|_| rusqlite::Error::InvalidQuery)? {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    tx.commit()?;
+    crate::app::chg();
+    Ok(true)
+}
+
 async fn mergecheck(a: &Ax, j: &mut Job) -> R<()> {
     mergecheck_authorized(&a.db, j)?;
     let head = j.s("expected_head");
@@ -4436,8 +4507,9 @@ async fn mergecheck(a: &Ax, j: &mut Job) -> R<()> {
     mergecheck_authorized(&a.db, j)?;
     j.d["published_sha"] = json!(head);
     j.d["publish_tree"] = json!(tree);
-    a.db.jd(j);
-    a.db.jset(j.id, &[("st", json!("done")), ("why", json!("revalidação local concluída; aguarda gate de merge"))]);
+    if !finish_mergecheck(&a.db, j).map_err(|error| X::Defer(format!("Mergecheck completion unavailable: {error}")))? {
+        return drop("Mergecheck completion authorization or job state changed");
+    }
     a.say("reviewer", &format!("{}#{number}: CI e revisão independente aprovadas no HEAD atual", j.repo), Some(j.id));
     clean(a, j).await;
     a.steward_wake.notify_one();
