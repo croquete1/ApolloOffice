@@ -1325,7 +1325,11 @@ impl Db {
                 .and_then(Value::as_str)
                 .filter(|s| !s.trim().is_empty())
                 .ok_or(rusqlite::Error::InvalidQuery)?;
-            if !data.get("steward_rebase_base_sha").and_then(Value::as_str).is_some_and(valid_git_sha) {
+            if !data
+                .get("steward_rebase_base_sha")
+                .and_then(Value::as_str)
+                .is_some_and(valid_git_sha)
+            {
                 return Err(rusqlite::Error::InvalidQuery);
             }
             let current: bool = tx.query_row(
