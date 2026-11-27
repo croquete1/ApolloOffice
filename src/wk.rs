@@ -2441,9 +2441,11 @@ async fn deliver_watcher_outbox(a: &Ax, me: &str) -> R<()> {
             ))
             .await
             {
-                if reply_confirmed(&comments, author, body) {
-                    a.db.finish_watcher_reply(id, "sent")
-                        .map_err(|e| X::E(e.to_string()))?;
+                if reply_confirmed(&comments, author, body)
+                    && a.db
+                        .finish_watcher_reply(id, "sent")
+                        .map_err(|e| X::E(e.to_string()))?
+                {
                     a.say(
                         "watcher",
                         &format!("{tag}: previously uncertain reply confirmed"),
@@ -2459,13 +2461,16 @@ async fn deliver_watcher_outbox(a: &Ax, me: &str) -> R<()> {
             continue;
         }
         if now().saturating_sub(row["created"].as_i64().unwrap_or(0)) >= 86_400_000 {
-            a.db.finish_watcher_reply(id, "cancelled")
-                .map_err(|e| X::E(e.to_string()))?;
-            a.say(
-                "watcher",
-                &format!("{tag}: unsent reply expired; manual review required"),
-                None,
-            );
+            if a.db
+                .finish_watcher_reply(id, "cancelled")
+                .map_err(|e| X::E(e.to_string()))?
+            {
+                a.say(
+                    "watcher",
+                    &format!("{tag}: unsent reply expired; manual review required"),
+                    None,
+                );
+            }
             continue;
         }
         // Recheck the remote state before publishing previously queued content.
@@ -2536,10 +2541,13 @@ async fn deliver_watcher_outbox(a: &Ax, me: &str) -> R<()> {
         .await
         {
             Ok(_) => {
-                a.db.finish_watcher_reply(id, "sent")
-                    .map_err(|e| X::E(e.to_string()))?;
-                a.db.ks(&format!("wr:{tag}"), &json!(now()));
-                a.say("watcher", &format!("{tag}: queued reply delivered"), None);
+                if a.db
+                    .finish_watcher_reply(id, "sent")
+                    .map_err(|e| X::E(e.to_string()))?
+                {
+                    a.db.ks(&format!("wr:{tag}"), &json!(now()));
+                    a.say("watcher", &format!("{tag}: queued reply delivered"), None);
+                }
             }
             Err(_) => a.say(
                 "watcher",
