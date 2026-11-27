@@ -111,12 +111,11 @@ fn manual_pr_inventory(prs: &Value) -> Result<&[Value], &'static str> {
 }
 
 /// Atualiza a cache do HEAD remoto sem apagar marcadores CI válidos.
-fn cache_default_head(a: &Ax, repo: &str, head: &Value) -> Result<(), String> {
+fn validate_default_head(head: &Value) -> Result<(), String> {
     let sha = head["s"].as_str().ok_or("HEAD remoto sem SHA")?;
     if sha.len() != 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("HEAD remoto com SHA inválido".into());
     }
-    crate::gh::cs(a, &format!("head:{repo}"), head);
     Ok(())
 }
 
@@ -173,13 +172,15 @@ where
     // Evita que uma cache anterior bloqueie uma nova tentativa depois de a
     // branch principal mudar. Mantém as provas cired que ainda correspondem.
     let path = format!("repos/{}/commits/HEAD", job.repo);
+    let generation = crate::gh::begin_head_observation(a, &job.repo);
     let head = remote(
         vec!["api".into(), path, "--jq".into(), "{s: .sha}".into()],
         60,
     )
     .await?;
-    cache_default_head(a, &job.repo, &head)?;
-    retry_snapshot(a, &job, &snapshot, false).map_err(|error| error.to_string())
+    validate_default_head(&head)?;
+    retry_snapshot_with_head(a, &job, &snapshot, false, Some((generation, &head)))
+        .map_err(|error| error.to_string())
 }
 
 /// Nova tentativa desde o início, com limpeza de provas e autorizações antigas.
@@ -196,6 +197,16 @@ fn retry_snapshot(
     j: &Job,
     snapshot: &RecoverySnapshot,
     automatic: bool,
+) -> Result<bool, &'static str> {
+    retry_snapshot_with_head(a, j, snapshot, automatic, None)
+}
+
+fn retry_snapshot_with_head(
+    a: &Ax,
+    j: &Job,
+    snapshot: &RecoverySnapshot,
+    automatic: bool,
+    head_update: Option<(u64, &Value)>,
 ) -> Result<bool, &'static str> {
     let id = j.id;
     if !eligible(j, automatic) {
@@ -298,6 +309,9 @@ fn retry_snapshot(
         .map_err(|_| "Falha ao guardar recuperação na base de dados")?;
     if !changed {
         return Ok(false);
+    }
+    if let Some((generation, head)) = head_update {
+        crate::gh::publish_head_observation(a, &j.repo, generation, head);
     }
     a.say("watcher", &format!("{}: {message}", j.tag()), Some(id));
     a.sw.notify_one();
@@ -646,13 +660,30 @@ mod tests {
         let a = setup();
         a.db.ks("cired:org/repo", &json!({"sha":"a".repeat(40)}));
         let good = json!({"s":"a".repeat(40)});
-        assert!(cache_default_head(&a, "org/repo", &good).is_ok());
+        assert!(validate_default_head(&good).is_ok());
+        let generation = crate::gh::begin_head_observation(&a, "org/repo");
+        assert!(crate::gh::publish_head_observation(
+            &a, "org/repo", generation, &good
+        ));
         assert_eq!(
             crate::gh::cg(&a, "head:org/repo", 60_000),
             Some(good.clone())
         );
         assert_eq!(a.db.kg("cired:org/repo")["sha"], "a".repeat(40));
-        assert!(cache_default_head(&a, "org/repo", &json!({"s":"invalid"})).is_err());
+        assert!(validate_default_head(&json!({"s":"invalid"})).is_err());
+        let newer = crate::gh::begin_head_observation(&a, "org/repo");
+        assert!(!crate::gh::publish_head_observation(
+            &a,
+            "org/repo",
+            newer,
+            &json!({"s":"invalid"})
+        ));
+        assert!(!crate::gh::publish_head_observation(
+            &a,
+            "org/repo",
+            generation,
+            &json!({"s":"b".repeat(40)})
+        ));
         assert_eq!(crate::gh::cg(&a, "head:org/repo", 60_000), Some(good));
     }
 
@@ -804,12 +835,22 @@ mod tests {
                 "ci",
                 "none",
                 "cancel",
+                "newer_head",
             ] {
-                if mutation == "cancel" && !automatic {
+                if (mutation == "cancel" && !automatic) || (mutation == "newer_head" && automatic) {
                     continue;
                 }
                 let a = setup();
                 let id = dropped(&a, "machine kept failing: timed out", json!({}));
+                let generation = crate::gh::begin_head_observation(&a, "org/repo");
+                let original_head = json!({"s":"b".repeat(40)});
+                assert!(crate::gh::publish_head_observation(
+                    &a,
+                    "org/repo",
+                    generation,
+                    &original_head
+                ));
+                a.db.ks("cired:org/repo", &json!({"sha":"b".repeat(40)}));
                 let kill = format!("kill:{id}");
                 if !automatic {
                     a.db.ks(&kill, &json!(true));
@@ -855,24 +896,41 @@ mod tests {
                         }
                         "pr" => json!([]),
                         "api" if args[1] == "repos/org/repo/commits/HEAD" => {
+                            if mutation == "newer_head" {
+                                let newer = crate::gh::begin_head_observation(&a, "org/repo");
+                                assert!(crate::gh::publish_head_observation(
+                                    &a,
+                                    "org/repo",
+                                    newer,
+                                    &json!({"s":"c".repeat(40)})
+                                ));
+                            }
                             json!({"s":"a".repeat(40)})
                         }
                         _ => panic!("unexpected fixture request: {args:?}"),
                     };
                     std::future::ready(Ok(response))
                 };
+                let accepted = matches!(mutation, "none" | "newer_head");
                 if automatic {
                     scan_with(&a, "org/repo", &[], remote).await;
                     assert_eq!(calls, 1);
                 } else {
-                    assert_eq!(
-                        retry_manual_with(&a, id, remote).await.unwrap(),
-                        mutation == "none"
-                    );
+                    assert_eq!(retry_manual_with(&a, id, remote).await.unwrap(), accepted);
                     assert_eq!(calls, 3);
                 }
                 let job = a.db.jg(id).unwrap();
-                if mutation == "none" {
+                let expected_head = match (automatic, mutation) {
+                    (false, "none") => json!({"s":"a".repeat(40)}),
+                    (false, "newer_head") => json!({"s":"c".repeat(40)}),
+                    _ => original_head,
+                };
+                assert_eq!(
+                    crate::gh::cg(&a, "head:org/repo", 60_000),
+                    Some(expected_head)
+                );
+                assert_eq!(a.db.kg("cired:org/repo")["sha"], "b".repeat(40));
+                if accepted {
                     assert_eq!(job.st, "ready");
                     assert_eq!(attempts(&job), Some(u64::from(automatic)));
                     assert!(a.db.kg(&kill).is_null());

@@ -4836,6 +4836,7 @@ async fn red(a: &Ax, r: &str, h: &str) -> bool {
     }) {
         Some(v) => v,
         None => {
+            let generation = crate::gh::begin_head_observation(a, r);
             let v = ghj(
                 &[
                     "api",
@@ -4847,8 +4848,8 @@ async fn red(a: &Ax, r: &str, h: &str) -> bool {
             )
             .await
             .unwrap_or(Value::Null);
-            if v["s"].as_str().is_some_and(crate::db::valid_git_sha) {
-                crate::gh::cs(a, &k, &v);
+            if !crate::gh::publish_head_observation(a, r, generation, &v) {
+                return true;
             }
             v
         }

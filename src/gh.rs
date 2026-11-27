@@ -15,6 +15,31 @@ pub fn cs(a: &App, k: &str, v: &Value) {
     a.cache.lock().unwrap().insert(k.into(), (now(), v.clone()));
 }
 
+/// Order requests per repository without holding a mutex across remote I/O.
+pub(crate) fn begin_head_observation(a: &App, repo: &str) -> u64 {
+    let mut observations = a.head_observations.lock().unwrap();
+    let generation = observations.entry(repo.to_owned()).or_default();
+    *generation = generation
+        .checked_add(1)
+        .expect("HEAD observation generation exhausted");
+    *generation
+}
+
+/// Reject malformed responses and results superseded by a later request.
+/// Keep the generation lock through the cache write so another request
+/// cannot begin between the check and publication.
+pub(crate) fn publish_head_observation(a: &App, repo: &str, generation: u64, head: &Value) -> bool {
+    if !head["s"].as_str().is_some_and(crate::db::valid_git_sha) {
+        return false;
+    }
+    let observations = a.head_observations.lock().unwrap();
+    if observations.get(repo) != Some(&generation) {
+        return false;
+    }
+    cs(a, &format!("head:{repo}"), head);
+    true
+}
+
 pub async fn me(a: &App) -> Result<Value, String> {
     if let Some(v) = cg(a, "me", 3_600_000) {
         return Ok(v);
