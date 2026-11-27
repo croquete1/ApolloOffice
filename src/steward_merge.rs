@@ -574,7 +574,11 @@ fn record_branch_update_outcome(
         return Ok(false);
     }
     let mut outcome = reservation.clone();
-    outcome["status"] = json!(if error.is_some() { "uncertain" } else { "accepted" });
+    outcome["status"] = json!(if error.is_some() {
+        "uncertain"
+    } else {
+        "accepted"
+    });
     if let Some(error) = error {
         outcome["error"] = json!(crate::sh::head(error, 500));
     }
@@ -601,7 +605,9 @@ async fn submit_reserved_branch_update(
     number: i64,
     reservation: &Value,
 ) -> Result<(), String> {
-    let head = reservation["head"].as_str().ok_or("missing reserved HEAD")?;
+    let head = reservation["head"]
+        .as_str()
+        .ok_or("missing reserved HEAD")?;
     let response = ghj(
         &[
             "api",
@@ -622,11 +628,14 @@ async fn submit_reserved_branch_update(
     }
     a.say(
         "watcher",
-        &format!("{repo}#{number}: {}", if error.is_some() {
-            "resultado da atualização incerto; aguarda nova observação do GitHub"
-        } else {
-            "pedido de atualização aceite; aguarda novo HEAD e validação"
-        }),
+        &format!(
+            "{repo}#{number}: {}",
+            if error.is_some() {
+                "resultado da atualização incerto; aguarda nova observação do GitHub"
+            } else {
+                "pedido de atualização aceite; aguarda novo HEAD e validação"
+            }
+        ),
         None,
     );
     a.steward_wake.notify_one();
