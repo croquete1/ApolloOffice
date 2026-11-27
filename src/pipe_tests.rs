@@ -174,6 +174,60 @@ mod t {
     }
 
     #[test]
+    fn final_admission_requires_current_ci_proof_and_committed_history() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            1,
+            "x".into(),
+        ));
+        a.db.run("insert into rp(full,on_) values('o/r',1)", pa![]);
+        a.db.run(
+            "insert into jobs(id,repo,kind,st) values(1,'o/r','fix','ready')",
+            pa![],
+        );
+        let reserved = std::cell::Cell::new(0);
+        let admit = || {
+            record_ci_admission(&a, "o/r", "@host", 1, || {
+                reserved.set(reserved.get() + 1);
+            })
+        };
+        let head = json!({"s":"b".repeat(40)});
+        a.db.ks("cired:o/r", &json!({"sha":"a".repeat(40),"t":1}));
+        let rows = ci_marker_rows(&a.db.0.lock().unwrap(), "o/r", "@host").unwrap();
+        let generation = crate::gh::begin_head_observation(&a, "o/r");
+        assert!(crate::gh::publish_ci_head_observation(&a, "o/r", generation, &head, &rows));
+        // A hold written after pick must block final admission.
+        a.db.ks("cired:o/r@host", &json!({"sha":"b".repeat(40),"t":2}));
+        assert!(!admit().unwrap());
+        assert_eq!(reserved.get(), 0);
+        assert_eq!(a.db.n("select count(*) from job_schedule", pa![]), 0);
+        a.db.kd("cired:o/r@host");
+        crate::gh::begin_head_observation(&a, "o/r");
+        assert!(!admit().unwrap());
+        let generation = crate::gh::begin_head_observation(&a, "o/r");
+        assert!(crate::gh::publish_ci_head_observation(&a, "o/r", generation, &head, &rows));
+        a.db.0.lock().unwrap().execute_batch(
+            "create trigger fail_admit before insert on job_schedule
+             begin select raise(abort,'injected'); end;",
+        ).unwrap();
+        assert!(admit().is_err());
+        assert_eq!(reserved.get(), 0);
+        a.db.run("drop trigger fail_admit", pa![]);
+        assert!(admit().unwrap());
+        assert_eq!(reserved.get(), 1);
+        assert_eq!(a.db.n("select count(*) from job_schedule", pa![]), 1);
+        // Verified/pinned work preserves its existing exemption.
+        a.db.ks("cired:o/r", &json!({"sha":"b".repeat(40)}));
+        a.db.run("update jobs set st='submit' where id=1", pa![]);
+        assert!(admit().unwrap());
+        assert_eq!(reserved.get(), 2);
+        a.db.run("update jobs set st='drop' where id=1", pa![]);
+        assert!(admit().is_err());
+        assert_eq!(reserved.get(), 2);
+    }
+
+    #[test]
     fn removed_repository_cannot_admit_stale_submission() {
         let db = crate::db::Db::mem();
         db.run(

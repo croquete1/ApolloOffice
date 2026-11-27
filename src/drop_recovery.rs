@@ -788,6 +788,21 @@ mod tests {
         a.db.run("update rp set auto_recover_drops=0", vec![]);
         assert!(!commit().unwrap());
         a.db.run("update rp set auto_recover_drops=1", vec![]);
+        // Restoring the value must not revive the original authorization.
+        assert!(!commit().unwrap());
+        assert_eq!(a.db.jg(id).unwrap().st, "drop");
+        let (fresh_job, fresh_snapshot) = recovery_job(&a, id).unwrap();
+        let commit = || {
+            commit_retry(
+                &a,
+                &fresh_job,
+                &fresh_snapshot,
+                true,
+                "ready",
+                "retry",
+                &json!({}),
+            )
+        };
         a.db.ks(&format!("kill:{id}"), &json!(true));
         assert!(!commit().unwrap());
         assert_eq!(a.db.kg(&format!("kill:{id}")), true);

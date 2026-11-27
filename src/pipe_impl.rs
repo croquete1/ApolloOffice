@@ -5017,6 +5017,65 @@ fn host_retry_delay(attempt: i64) -> i64 {
     30_000 * (1_i64 << (attempt.clamp(1,5)-1))
 }
 
+// The final SQLite admission boundary rechecks the actual job state, retry
+// dependencies and all applicable CI holds. The reservation callback runs
+// only after commit while the database (and any HEAD proof) remains locked.
+fn record_ci_admission(
+    a: &Ax,
+    repo: &str,
+    suffix: &str,
+    id: i64,
+    reserve: impl FnOnce(),
+) -> rusqlite::Result<bool> {
+    let mut connection = a.db.0.lock().unwrap();
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let at = now();
+    let (state, raw): (String, String) = tx.query_row(
+        "select j.st,j.d from jobs j join rp on rp.full=j.repo
+         left join job_schedule s on s.job=j.id
+         where j.id=?1 and j.repo=?2 and j.st in ('ready','submit')
+         and coalesce(s.retry_after,0)<=?3
+         and not exists(select 1 from job_dependencies dep
+           where dep.job=j.id and not exists(select 1 from jobs prior join prs p
+             on p.repo=prior.repo and p.num=prior.pr
+             where prior.id=dep.prerequisite and prior.st='done' and p.st='merged'))",
+        rusqlite::params![id, repo, at],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let data: Value = serde_json::from_str(&raw).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    if !data.is_object() {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let pinned = state == "submit" || data["rs"] == true || data["rp"] == true;
+    let rows = if pinned {
+        Vec::new()
+    } else {
+        ci_marker_rows(&tx, repo, suffix)?
+    };
+    let markers = parse_ci_markers(&rows)?;
+    let persist = || -> rusqlite::Result<bool> {
+        tx.execute(
+            "insert into job_schedule(job,admitted_at,retry_after,retry_reason) values(?1,?2,0,'')
+             on conflict(job) do update set admitted_at=excluded.admitted_at,retry_after=0,retry_reason=''",
+            rusqlite::params![id, at],
+        )?;
+        tx.commit()?;
+        reserve();
+        crate::app::chg();
+        Ok(true)
+    };
+    if markers.is_empty() {
+        return persist();
+    }
+    crate::gh::with_cached_ci_head(a, repo, &rows, |_, head| {
+        if !markers.iter().all(|marker| ci_marker_superseded(head, marker)) {
+            return Ok(false);
+        }
+        persist()
+    })
+    .unwrap_or(Ok(false))
+}
+
 // Atomically reserve work against updates, cache maintenance and other lanes.
 pub(crate) fn admit(a: &Ax, repo: &str, host: &str, id: i64) -> bool {
     let _transition = a.update_transition.lock().unwrap();
@@ -5094,15 +5153,19 @@ pub(crate) fn admit(a: &Ax, repo: &str, host: &str, id: i64) -> bool {
     {
         return false;
     }
-    // Persist admission history for equal-priority fairness; a failed write
-    // cannot silently admit a task against an unavailable scheduling database.
-    if a.db.run("insert into job_schedule(job,admitted_at,retry_after,retry_reason) values(?,?,0,'') on conflict(job) do update set admitted_at=excluded.admitted_at,retry_after=0,retry_reason=''",
-        pa![id,now()]) < 0 {
-        return false;
+    // Do not trust the earlier async pick decision. Persist admission and
+    // reserve the in-memory lane while the final CI snapshot is stable.
+    let suffix = hk(a, host);
+    match record_ci_admission(a, repo, &suffix, id, || {
+        active.insert(claim);
+        locked.insert(id);
+    }) {
+        Ok(admitted) => admitted,
+        Err(error) => {
+            eprintln!("scheduler admission unavailable: {error}");
+            false
+        }
     }
-    active.insert(claim);
-    locked.insert(id);
-    true
 }
 
 fn pick_rank(j: &Value, at: i64) -> (i32, i32, i32, f64, i64, i64) {

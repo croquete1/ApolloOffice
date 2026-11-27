@@ -361,7 +361,8 @@ fn init(c: &mut Connection) -> anyhow::Result<()> {
     ")?;
     // Recovery authorization is a separate epoch: changing CI or automatic
     // recovery and then restoring it must not revive a pre-I/O snapshot.
-    tx.execute_batch("
+    tx.execute_batch(
+        "
         update rp set recovery_activation=lower(hex(randomblob(16))) where recovery_activation='';
         create trigger if not exists recovery_activation_insert
         after insert on rp
@@ -376,7 +377,8 @@ fn init(c: &mut Connection) -> anyhow::Result<()> {
         begin
           update rp set recovery_activation=lower(hex(randomblob(16))) where id=new.id;
         end;
-    ")?;
+    ",
+    )?;
     // Backfill recoverable history once; a cleared legacy job may only be
     // visible through its queued findings. Keep the larger observed count.
     if version < 4 {
@@ -2120,17 +2122,22 @@ mod strict_db_tests {
              pragma user_version=7;
              insert into rp(full,on_,ci,auto_recover_drops,steward_repair)
              values('o/r',1,'cargo test',1,1);",
-        ).unwrap();
-        let steward: String = c.query_row("select steward_activation from rp", [], |r| r.get(0)).unwrap();
+        )
+        .unwrap();
+        let steward: String = c
+            .query_row("select steward_activation from rp", [], |r| r.get(0))
+            .unwrap();
         init(&mut c).unwrap();
         fn recovery(c: &Connection) -> String {
-            c.query_row("select recovery_activation from rp", [], |r| r.get(0)).unwrap()
+            c.query_row("select recovery_activation from rp", [], |r| r.get(0))
+                .unwrap()
         }
         let first = recovery(&c);
         assert_eq!(first.len(), 32);
         init(&mut c).unwrap();
         assert_eq!(recovery(&c), first);
-        c.execute("update rp set ci='cargo test',auto_recover_drops=1", []).unwrap();
+        c.execute("update rp set ci='cargo test',auto_recover_drops=1", [])
+            .unwrap();
         assert_eq!(recovery(&c), first);
         let mut last = first.clone();
         for change in [
@@ -2145,7 +2152,9 @@ mod strict_db_tests {
             assert_ne!(token, first);
             last = token;
         }
-        let actual_steward: String = c.query_row("select steward_activation from rp", [], |r| r.get(0)).unwrap();
+        let actual_steward: String = c
+            .query_row("select steward_activation from rp", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(actual_steward, steward);
         c.execute("update rp set on_=0", []).unwrap();
         assert_ne!(recovery(&c), last);
@@ -2153,7 +2162,11 @@ mod strict_db_tests {
         c.execute("update rp set on_=1", []).unwrap();
         assert_ne!(recovery(&c), disabled);
         c.execute("delete from rp", []).unwrap();
-        c.execute("insert into rp(full,on_,ci,auto_recover_drops) values('o/r',1,'cargo test',1)", []).unwrap();
+        c.execute(
+            "insert into rp(full,on_,ci,auto_recover_drops) values('o/r',1,'cargo test',1)",
+            [],
+        )
+        .unwrap();
         assert_ne!(recovery(&c), first);
     }
 
