@@ -85,13 +85,28 @@ pub(crate) fn cached_ci_head(
     repo: &str,
     markers: &[(String, String)],
 ) -> Option<(u64, Value)> {
+    with_cached_ci_head(a, repo, markers, |generation, head| {
+        (generation, head.clone())
+    })
+}
+
+// Keep the observation stable while a synchronous admission commits its
+// decision. Callers must never await or acquire the database from this closure.
+pub(crate) fn with_cached_ci_head<T>(
+    a: &App,
+    repo: &str,
+    markers: &[(String, String)],
+    use_proof: impl FnOnce(u64, &Value) -> T,
+) -> Option<T> {
     let observations = a.head_observations.lock().unwrap();
     let observation = observations.get(repo)?;
     let (observed, head) = observation.ci_proof.as_ref()?;
     if observation.started.elapsed() >= Duration::from_secs(600) || observed.as_slice() != markers {
         return None;
     }
-    Some((observation.generation, head.clone()))
+    let result = use_proof(observation.generation, head);
+    drop(observations);
+    Some(result)
 }
 
 pub(crate) fn head_observation_is_current(a: &App, repo: &str, generation: u64) -> bool {
