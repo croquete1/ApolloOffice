@@ -101,7 +101,7 @@ def running(binary, root, env):
             process.wait(timeout=10)
 
 
-def scenario(source_binary, accepted):
+def scenario(source_binary, accepted, cursor_restart=False):
     with tempfile.TemporaryDirectory(prefix="apollo-watcher-") as directory:
         root = Path(directory)
         binary = root / "apollo-office"
@@ -127,12 +127,35 @@ def scenario(source_binary, accepted):
             db.execute("update hs set on_=0")
             db.execute("insert into rp(full,on_,hunt,auto_merge) values('o/r',1,0,0)")
             db.execute("insert into prs(repo,num,st,upd,d) values('o/r',1,'open',?,?)", (timestamp, json.dumps({"seen": True, "comment_seen_at": timestamp, "watcher_head": HEAD})))
-            db.execute("insert into watcher_outbox(id,repo,num,author,body,state,created,updated,source_head) values('fixture','o/r',1,'tester',?,'pending',?,?,?)", (BODY, now, now, HEAD))
             db.execute("insert into watcher_outbox(id,repo,num,author,body,state,created,updated,source_head) values('blocked','o/r',1,'tester','must not post','pending',?,?,?)", (now, now - 1, HEAD))
             db.execute("create trigger blocked_claim before update on watcher_outbox when old.id='blocked' and new.state='uncertain' begin select raise(ignore); end")
+            if cursor_restart:
+                db.executemany("insert into watcher_outbox(id,repo,num,author,body,state,created,updated,source_head) values(?,'o/r',1,'tester','must not post','pending',?,?,?)",
+                               [(f"blocked-{i:02}", now, now - 1, HEAD) for i in range(1, 20)])
+                db.execute("create trigger blocked_rotation before update on watcher_outbox when old.id like 'blocked%' begin select raise(ignore); end")
+        if cursor_restart:
+            key = "watcher:delivery-cursor:pending:tester"
+            def checkpoint_ready(_):
+                with closing(db_connection(root)) as db:
+                    row = db.execute("select v from kv where k=?", (key,)).fetchone()
+                return row is not None and json.loads(row[0]) == [now - 1, "blocked-19"]
+            with running(binary, root, env) as process:
+                wait_for(root, process, checkpoint_ready, "first batch checkpoint")
+            assert not list(root.glob("post-*"))
+            with closing(db_connection(root)) as db, db:
+                assert db.execute("select count(*) from watcher_outbox where state='pending' and updated=?", (now - 1,)).fetchone() == (20,)
+                db.execute("create table cursor_acceptance_audit (v text not null)")
+                db.execute("create trigger audit_cursor after update on kv when new.k='watcher:delivery-cursor:pending:tester' begin insert into cursor_acceptance_audit(v) values(new.v); end")
+        with closing(db_connection(root)) as db, db:
+            db.execute("insert into watcher_outbox(id,repo,num,author,body,state,created,updated,source_head) values('fixture','o/r',1,'tester',?,'pending',?,?,?)", (BODY, now, now, HEAD))
         with running(binary, root, env) as process:
             wait_for(root, process, lambda row: row[0] == "uncertain" and any(root.glob("post-*")) and (not accepted or json.loads((root / "remote.json").read_text())), "ambiguous POST")
         assert len(list(root.glob("post-*"))) == 1
+        if cursor_restart:
+            with closing(db_connection(root)) as db:
+                first = db.execute("select v from cursor_acceptance_audit order by rowid limit 1").fetchone()
+                assert first is not None and json.loads(first[0]) == [now, "fixture"], first
+                assert db.execute("select count(*) from watcher_outbox where id like 'blocked%' and state='pending'").fetchone() == (20,)
         # Make the existing 10-minute reconciliation window due; do not alter state.
         with closing(db_connection(root)) as db, db:
             assert db.execute("update watcher_outbox set updated=0 where id='fixture' and state='uncertain'").rowcount == 1
@@ -143,7 +166,7 @@ def scenario(source_binary, accepted):
         with closing(db_connection(root)) as db:
             assert db.execute("select state from watcher_outbox where id='blocked'").fetchone() == ("pending",)
         assert len(list(root.glob("post-*"))) == 1
-        print(f"F02 Watcher restart: accepted={accepted}, final={wanted}, POST attempts=1", flush=True)
+        print(f"Watcher restart: accepted={accepted}, cursor_restart={cursor_restart}, final={wanted}, POST attempts=1", flush=True)
 
 
 if __name__ == "__main__":
@@ -154,3 +177,4 @@ if __name__ == "__main__":
         raise SystemExit("usage: watcher_process_acceptance.py /path/to/apollo-office")
     for accepted in (True, False):
         scenario(Path(sys.argv[1]).resolve(strict=True), accepted)
+    scenario(Path(sys.argv[1]).resolve(strict=True), True, cursor_restart=True)
