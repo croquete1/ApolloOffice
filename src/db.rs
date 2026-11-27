@@ -1966,7 +1966,8 @@ impl Db {
             .filter(|v| !v.trim().is_empty())
             .ok_or(rusqlite::Error::InvalidQuery)?;
         let t = now();
-        let encoded = json!({"title":title,"body":body,"after":number,"source_comments":ids}).to_string();
+        let encoded =
+            json!({"title":title,"body":body,"after":number,"source_comments":ids}).to_string();
         if tx.execute("insert into jobs(repo,num,kind,title,url,st,why,d,prio,t0,t1) values(?,0,'fix',?,?,'vet',?,?,-1.0,?,?)",
             rusqlite::params![repo,title,url,why,encoded,t,t])? != 1 {
             return Err(rusqlite::Error::InvalidQuery);
