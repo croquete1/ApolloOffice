@@ -651,8 +651,7 @@ mod tests {
             "headRepositoryOwner":{"login":"owner"},"headRepository":{"name":"fork"},
             "headRefName":"fix","title":"PR","url":"https://github.com/o/r/pull/1"
         });
-        let saved =
-            json!({"st":"open","upd":updated,"d":{"watcher_head":head,"test_cmd":"cargo test","default_branch":"main"}});
+        let saved = json!({"st":"open","upd":updated,"d":{"watcher_head":head,"test_cmd":"cargo test","default_branch":"main"}});
         let request = conflict_request(&listed, &fresh, &saved, "owner").unwrap();
         assert_eq!(request["data"]["head"], "owner/fork");
         assert_eq!(request["data"]["test_cmd"], "cargo test");
