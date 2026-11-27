@@ -528,7 +528,10 @@ fn init(c: &mut Connection) -> anyhow::Result<()> {
         [],
         |row| row.get(0),
     )?;
-    anyhow::ensure!(!invalid_merge_activation, "merge activation initialization failed");
+    anyhow::ensure!(
+        !invalid_merge_activation,
+        "merge activation initialization failed"
+    );
     // CI hold receipts are distinct even when a writer repeats the same
     // SHA, timestamp and raw JSON. Keep identity changes in the same transaction.
     tx.execute_batch(
@@ -2741,8 +2744,15 @@ mod strict_db_tests {
         let before = token(&c);
         assert!(c.execute("update rp set local_merge=0", []).is_err());
         assert_eq!(token(&c), before);
-        assert_eq!(c.query_row("select local_merge from rp", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
-        c.execute_batch("drop trigger ignore_merge_epoch; delete from rp; insert into rp(full) values('o/r');").unwrap();
+        assert_eq!(
+            c.query_row("select local_merge from rp", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        c.execute_batch(
+            "drop trigger ignore_merge_epoch; delete from rp; insert into rp(full) values('o/r');",
+        )
+        .unwrap();
         assert_ne!(token(&c), before);
         assert_ne!(token(&c), first);
     }
