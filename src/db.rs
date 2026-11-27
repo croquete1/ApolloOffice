@@ -1110,6 +1110,14 @@ impl Db {
         // Retain the evidence that a prior HEAD was observed without reusing it
         // as permission to act on the current HEAD.
         tx.execute("update watcher_inbox set state='superseded',updated_at=? where repo=? and num=? and head<>? and state='received'",rusqlite::params![at,repo,number,head])?;
+        let stale: bool = tx.query_row(
+            "select exists(select 1 from watcher_inbox where repo=? and num=? and head<>? and state='received')",
+            rusqlite::params![repo, number, head],
+            |row| row.get(0),
+        )?;
+        if stale {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
         for id in ids {
             tx.execute("insert into watcher_inbox(repo,num,head,comment_id,snapshot,state,received_at,updated_at) values(?,?,?,?,?,'received',?,?) on conflict(repo,num,head,comment_id) do update set snapshot=excluded.snapshot,state='received',updated_at=excluded.updated_at where watcher_inbox.state in ('received','superseded')",rusqlite::params![repo,number,head,id,updated,at,at])?;
             // Preserve completed receipts on replay; otherwise require the
@@ -1149,7 +1157,16 @@ impl Db {
         {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        let changed=tx.execute("update watcher_inbox set state='superseded',updated_at=? where repo=? and num=? and head=? and state='received' and not exists(select 1 from json_each(?) where value=watcher_inbox.comment_id)",rusqlite::params![now(),repo,number,head,json!(observed).to_string()])?;
+        let inventory = json!(observed).to_string();
+        let changed=tx.execute("update watcher_inbox set state='superseded',updated_at=? where repo=? and num=? and head=? and state='received' and not exists(select 1 from json_each(?) where value=watcher_inbox.comment_id)",rusqlite::params![now(),repo,number,head,inventory])?;
+        let stale: bool = tx.query_row(
+            "select exists(select 1 from watcher_inbox where repo=? and num=? and head=? and state='received' and not exists(select 1 from json_each(?) where value=watcher_inbox.comment_id))",
+            rusqlite::params![repo, number, head, inventory],
+            |row| row.get(0),
+        )?;
+        if stale {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
         tx.execute("delete from watcher_retry where repo=? and num=? and head=? and not exists(select 1 from watcher_inbox where repo=? and num=? and head=? and state='received')",rusqlite::params![repo,number,head,repo,number,head])?;
         tx.commit()?;
         Ok(changed)
@@ -3728,6 +3745,78 @@ mod watcher_storage_failure_tests {
             assert!(db.comment_acknowledged("o/r", "r1").unwrap());
             assert!(!db.has_pending_review("o/r", 1).unwrap());
         }
+    }
+
+    #[test]
+    fn ignored_retirement_blocks_new_head_receipt() {
+        let db = Db::mem();
+        seed(&db);
+        let next = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        db.run(
+            "update prs set upd='t2',d=? where repo='o/r' and num=1",
+            crate::pa![json!({"watcher_head":next}).to_string()],
+        );
+        db.0.lock()
+            .unwrap()
+            .execute_batch(
+                "create trigger ignore_retire before update on watcher_inbox
+                 when new.state='superseded' begin select raise(ignore); end;",
+            )
+            .unwrap();
+        let ids = vec!["r2".into()];
+        assert!(db.receive_review_batch("o/r", 1, "t2", next, &ids).is_err());
+        assert_pending(&db);
+        assert_eq!(db.n("select count(*) from watcher_inbox", vec![]), 1);
+        db.run("drop trigger ignore_retire", vec![]);
+        db.receive_review_batch("o/r", 1, "t2", next, &ids).unwrap();
+        assert_eq!(
+            db.n(
+                "select count(*) from watcher_inbox where state='superseded'",
+                vec![]
+            ),
+            1
+        );
+        assert_pending(&db);
+        assert!(!db.comment_acknowledged("o/r", "r1").unwrap());
+    }
+
+    #[test]
+    fn ignored_absence_retirement_rolls_back_other_retirements() {
+        let db = Db::mem();
+        seed(&db);
+        db.receive_review_batch("o/r", 1, "t", HEAD, &["r2".into()])
+            .unwrap();
+        db.0.lock()
+            .unwrap()
+            .execute_batch(
+                "create trigger ignore_retire before update on watcher_inbox
+                 when new.state='superseded' and old.comment_id='r2'
+                 begin select raise(ignore); end;",
+            )
+            .unwrap();
+        assert!(db
+            .reconcile_review_receipts("o/r", 1, "t", HEAD, &[])
+            .is_err());
+        assert_eq!(
+            db.n(
+                "select count(*) from watcher_inbox where state='received'",
+                vec![]
+            ),
+            2
+        );
+        db.run("drop trigger ignore_retire", vec![]);
+        assert_eq!(
+            db.reconcile_review_receipts("o/r", 1, "t", HEAD, &[])
+                .unwrap(),
+            2
+        );
+        assert!(!db.has_pending_review("o/r", 1).unwrap());
+        assert_eq!(db.n("select count(*) from cm", vec![]), 0);
+        assert_eq!(
+            db.reconcile_review_receipts("o/r", 1, "t", HEAD, &[])
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
