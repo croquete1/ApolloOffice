@@ -1059,6 +1059,16 @@ impl Db {
             return Ok(());
         }
         tx.execute("insert or ignore into watcher_outbox(id,repo,num,author,body,state,created,updated,source_head) select ?,?,?,?,?,'pending',?,?,? where exists(select 1 from rp where full=? and on_=1)",rusqlite::params![key,repo,number,author,body,at,at,head,repo])?;
+        // A previous action with this key is a legitimate no-op, even if
+        // cancelled. Never consume the batch if no durable action exists.
+        let exists: bool = tx.query_row(
+            "select exists(select 1 from watcher_outbox where id=? and repo=? and num=?)",
+            rusqlite::params![key, repo, number],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
         Ok(())
     }
 
@@ -1102,6 +1112,16 @@ impl Db {
         tx.execute("update watcher_inbox set state='superseded',updated_at=? where repo=? and num=? and head<>? and state='received'",rusqlite::params![at,repo,number,head])?;
         for id in ids {
             tx.execute("insert into watcher_inbox(repo,num,head,comment_id,snapshot,state,received_at,updated_at) values(?,?,?,?,?,'received',?,?) on conflict(repo,num,head,comment_id) do update set snapshot=excluded.snapshot,state='received',updated_at=excluded.updated_at where watcher_inbox.state in ('received','superseded')",rusqlite::params![repo,number,head,id,updated,at,at])?;
+            // Preserve completed receipts on replay; otherwise require the
+            // current snapshot to have been persisted before analysis.
+            let exists: bool = tx.query_row(
+                "select exists(select 1 from watcher_inbox where repo=? and num=? and head=? and comment_id=? and (state='done' or (state='received' and snapshot=?)))",
+                rusqlite::params![repo, number, head, id, updated],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
         }
         tx.commit()?;
         Ok(())
@@ -1193,6 +1213,16 @@ impl Db {
     ) -> rusqlite::Result<()> {
         for id in ids {
             tx.execute("update watcher_inbox set state='done',updated_at=? where repo=? and num=? and head=? and comment_id=? and state='received'",rusqlite::params![now(),repo,number,head,id])?;
+            // Legacy callers may have no receipt. An existing pending
+            // receipt, however, must not survive a successful acknowledgement.
+            let pending: bool = tx.query_row(
+                "select exists(select 1 from watcher_inbox where repo=? and num=? and head=? and comment_id=? and state='received')",
+                rusqlite::params![repo, number, head, id],
+                |row| row.get(0),
+            )?;
+            if pending {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
         }
         tx.execute("delete from watcher_retry where repo=? and num=? and head=? and not exists(select 1 from watcher_inbox where repo=? and num=? and head=? and state='received')",rusqlite::params![repo,number,head,repo,number,head])?;
         Ok(())
@@ -3674,6 +3704,55 @@ mod watcher_storage_failure_tests {
             Some(rusqlite::ErrorCode::DiskFull)
         );
         assert_pending(&db);
+    }
+
+    #[test]
+    fn ignored_watcher_effects_roll_back_job_and_ack() {
+        for sql in [
+            "create trigger ignore_effect before insert on watcher_outbox begin select raise(ignore); end;",
+            "create trigger ignore_effect before update on watcher_inbox begin select raise(ignore); end;",
+        ] {
+            let db = Db::mem();
+            seed(&db);
+            db.0.lock().unwrap().execute_batch(sql).unwrap();
+            assert!(db
+                .queue_review_and_ack("o/r", 1, "t", &["r1".into()], &request())
+                .is_err());
+            assert_pending(&db);
+            db.run("drop trigger ignore_effect", vec![]);
+            assert!(db
+                .queue_review_and_ack("o/r", 1, "t", &["r1".into()], &request())
+                .unwrap());
+            assert_eq!(db.n("select count(*) from jobs", vec![]), 1);
+            assert_eq!(db.n("select count(*) from watcher_outbox", vec![]), 1);
+            assert!(db.comment_acknowledged("o/r", "r1").unwrap());
+            assert!(!db.has_pending_review("o/r", 1).unwrap());
+        }
+    }
+
+    #[test]
+    fn ignored_receipt_insert_rolls_back_entire_batch() {
+        let db = Db::mem();
+        seed(&db);
+        db.0.lock()
+            .unwrap()
+            .execute_batch(
+                "create trigger ignore_receipt before insert on watcher_inbox
+                 when new.comment_id='r3' begin select raise(ignore); end;",
+            )
+            .unwrap();
+        let ids = vec!["r2".into(), "r3".into()];
+        assert!(db
+            .receive_review_batch("o/r", 1, "t", HEAD, &ids)
+            .is_err());
+        assert_pending(&db);
+        assert_eq!(db.n("select count(*) from watcher_inbox", vec![]), 1);
+        db.run("drop trigger ignore_receipt", vec![]);
+        db.receive_review_batch("o/r", 1, "t", HEAD, &ids)
+            .unwrap();
+        db.receive_review_batch("o/r", 1, "t", HEAD, &ids)
+            .unwrap();
+        assert_eq!(db.n("select count(*) from watcher_inbox", vec![]), 3);
     }
 
     #[test]
