@@ -64,6 +64,40 @@ mod t {
     }
 
     #[tokio::test]
+    async fn failed_ci_receipt_write_blocks_admission_until_persisted() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(), std::env::temp_dir(), 1, "x".into(),
+        ));
+        a.db.run("insert into rp(full,ci) values('o/r','true'),('o/other','true')", pa![]);
+        a.db.run("insert into jobs(id,repo,kind,st) values(1,'o/r','fix','ready'),(2,'o/other','fix','ready')", pa![]);
+        let marker = json!({"sha":"a".repeat(40),"t":1});
+        a.db.0.lock().unwrap().execute_batch(
+            "create trigger fail_ci_receipt before insert on kv
+             when new.k='cired:o/r' begin select raise(abort,'injected'); end;",
+        ).unwrap();
+        assert!(record_ci_failure(&a, "o/r", "", &marker).is_err());
+        assert!(a.db.kg("cired:o/r").is_null());
+        assert!(red_with(&a, "o/r", "local", || std::future::ready(Value::Null)).await);
+        assert!(!admit(&a, "o/r", "local", 1));
+        assert_eq!(a.db.n("select count(*) from job_schedule", pa![]), 0);
+        assert!(a.lk.lock().unwrap().is_empty());
+        assert!(clear_prepared_ci_markers_with(&a, "o/r", "local", &"b".repeat(40), || {
+            std::future::ready(json!({"s":"b".repeat(40)}))
+        }).await.is_err());
+        assert!(admit(&a, "o/other", "local", 2));
+        a.db.run("drop trigger fail_ci_receipt", pa![]);
+        assert!(red_with(&a, "o/r", "local", || std::future::ready(json!({"s":"a".repeat(40)}))).await);
+        assert_eq!(a.db.kg("cired:o/r"), marker);
+        assert!(a.pending_ci_holds.lock().unwrap().is_empty());
+        assert!(!admit(&a, "o/r", "local", 1));
+        // A fresh observation is required after the cache's current HEAD
+        // matches the failed SHA; invalidate it explicitly for this control.
+        crate::gh::begin_head_observation(&a, "o/r");
+        assert!(!red_with(&a, "o/r", "local", || std::future::ready(json!({"s":"b".repeat(40)}))).await);
+        assert!(record_ci_admission(&a, "o/r", "", 1, || {}).unwrap());
+    }
+
+    #[tokio::test]
     async fn identical_ci_hold_recreation_invalidates_cached_and_inflight_evidence() {
         let a = std::sync::Arc::new(crate::app::App::new(
             crate::db::Db::mem(),
