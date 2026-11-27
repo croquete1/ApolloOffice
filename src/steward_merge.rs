@@ -369,13 +369,7 @@ fn valid_sha(value: &str) -> bool {
 /// An advanced base makes the previous CI proof stale. Updating is allowed
 /// only for the owner's same-repository PR branch; GitHub reruns its gates on
 /// the new head before the ordinary merge path can proceed.
-fn can_update_branch(
-    detail: &Value,
-    repo: &str,
-    base: &str,
-    current_base: &str,
-    login: &str,
-) -> bool {
+fn owned_update_target(detail: &Value, repo: &str, base: &str, login: &str) -> bool {
     let pr_base = detail["base"]["sha"].as_str().unwrap_or("");
     let head = detail["head"]["sha"].as_str().unwrap_or("");
     !login.is_empty()
@@ -385,11 +379,48 @@ fn can_update_branch(
         && detail["head"]["repo"]["full_name"] == repo
         && detail["base"]["repo"]["full_name"] == repo
         && detail["base"]["ref"] == base
-        && detail["head"]["ref"] != base
+        && detail["head"]["ref"]
+            .as_str()
+            .is_some_and(|branch| !branch.is_empty() && branch != base)
         && valid_sha(pr_base)
-        && valid_sha(current_base)
         && valid_sha(head)
-        && pr_base != current_base
+}
+
+fn can_update_branch(
+    detail: &Value,
+    repo: &str,
+    base: &str,
+    current_base: &str,
+    login: &str,
+) -> bool {
+    owned_update_target(detail, repo, base, login)
+        && valid_sha(current_base)
+        && detail["base"]["sha"] != current_base
+}
+
+fn update_policy_allows(a: &Ax, repo: &str, number: i64, local: bool) -> Result<bool, String> {
+    if a.hold("watcher") || a.drain.load(std::sync::atomic::Ordering::SeqCst) {
+        return Ok(false);
+    }
+    a.db.try_n(
+        "select count(*) from rp where full=? and on_=1 and auto_merge=1
+         and (?=0 or local_merge=1)
+         and not exists(select 1 from jobs where repo=rp.full and pr=?
+           and kind in ('review','rebase','mergecheck') and st not in ('done','drop'))",
+        pa![repo.to_string(), local as i64, number],
+    )
+    .map(|count| count == 1)
+    .map_err(|error| format!("branch update policy unavailable: {error}"))
+}
+
+// Both update paths require a fresh owned PR and the exact observed target.
+// The GitHub PUT still carries expected_head_sha; it cannot fence a base race.
+fn same_update_target(before: &Value, after: &Value, repo: &str, base: &str, login: &str) -> bool {
+    owned_update_target(before, repo, base, login)
+        && owned_update_target(after, repo, base, login)
+        && before["head"]["sha"] == after["head"]["sha"]
+        && before["head"]["ref"] == after["head"]["ref"]
+        && before["base"]["sha"] == after["base"]["sha"]
 }
 
 fn update_retry_deferred(previous: &Value, head: &str, base: &str, now: i64) -> bool {
@@ -667,20 +698,12 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
         }
         let login = crate::gh::login(a).await;
         if can_update_branch(&detail, repo, base, current_base, &login) {
-            if a.hold("watcher")
-                || a.db.n(
-                    "select auto_merge from rp where full=? and on_=1",
-                    pa![repo.to_string()],
-                ) != 1
-            {
-                return Ok(false);
-            }
             let latest = ghj(&["api", &format!("repos/{repo}/pulls/{number}")], 40).await?;
-            if latest["head"]["sha"] != head
-                || latest["base"]["sha"] == current_base
-                || latest["base"]["sha"] != base_sha
-                || latest["base"]["ref"] != base
+            let fresh_base = ghj(&["api", &format!("repos/{repo}/branches/{base}")], 40).await?;
+            if !same_update_target(&detail, &latest, repo, base, &login)
                 || !can_update_branch(&latest, repo, base, current_base, &login)
+                || fresh_base["commit"]["sha"] != current_base
+                || !update_policy_allows(a, repo, number, false)?
             {
                 return Ok(false);
             }
@@ -822,6 +845,28 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
         .await?;
         if ancestry["status"] != "ahead" && ancestry["status"] != "identical" {
             if ancestry["status"] == "diverged" {
+                let update_key = format!("steward:update:{repo}#{number}");
+                if update_retry_deferred(&a.db.kg(&update_key), &head, base_sha, crate::db::now()) {
+                    return Ok(false);
+                }
+                let login = crate::gh::login(a).await;
+                let latest = ghj(&["api", &format!("repos/{repo}/pulls/{number}")], 40).await?;
+                let fresh_base =
+                    ghj(&["api", &format!("repos/{repo}/branches/{base}")], 40).await?;
+                if !same_update_target(&detail, &latest, repo, base, &login)
+                    || fresh_base["commit"]["sha"] != base_sha
+                    || !update_policy_allows(a, repo, number, true)?
+                {
+                    return Ok(false);
+                }
+                // Reserve the backoff before an external attempt, including an
+                // ambiguous response, rather than retrying on every scan.
+                if a.db.run(
+                    "insert into kv(k,v) values(?,?) on conflict(k) do update set v=excluded.v",
+                    pa![update_key, json!({"head":head,"base":base_sha,"at":crate::db::now(),"status":"attempted"}).to_string()],
+                ) < 0 {
+                    return Err("could not persist branch update attempt".into());
+                }
                 match ghj(
                     &[
                         "api",
@@ -1217,6 +1262,56 @@ mod tests {
             current_base,
             "croquete1"
         ));
+    }
+
+    #[test]
+    fn branch_update_rejects_changed_target_and_revoked_policy() {
+        let repo = "o/r";
+        let head = "a".repeat(40);
+        let base = "b".repeat(40);
+        let pr = json!({
+            "state":"open","draft":false,"user":{"login":"owner"},
+            "head":{"sha":head,"ref":"fix/task","repo":{"full_name":repo}},
+            "base":{"sha":base,"ref":"main","repo":{"full_name":repo}}
+        });
+        assert!(same_update_target(&pr, &pr, repo, "main", "owner"));
+        for (path, value) in [
+            ("/head/sha", json!("c".repeat(40))),
+            ("/base/sha", json!("c".repeat(40))),
+            ("/head/ref", json!("fix/other")),
+            ("/head/ref", Value::Null),
+            ("/head/repo/full_name", json!("other/r")),
+            ("/draft", json!(true)),
+            ("/state", json!("closed")),
+        ] {
+            let mut changed = pr.clone();
+            *changed.pointer_mut(path).unwrap() = value;
+            assert!(!same_update_target(&pr, &changed, repo, "main", "owner"));
+        }
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            47301,
+            "apollo-office".into(),
+        ));
+        assert!(!update_policy_allows(&a, repo, 1, false).unwrap());
+        a.db.run(
+            "insert into rp(full,on_,auto_merge,local_merge) values('o/r',1,1,0)",
+            pa![],
+        );
+        assert!(update_policy_allows(&a, repo, 1, false).unwrap());
+        assert!(!update_policy_allows(&a, repo, 1, true).unwrap());
+        a.db.run("update rp set local_merge=1", pa![]);
+        assert!(update_policy_allows(&a, repo, 1, true).unwrap());
+        a.db.run(
+            "insert into jobs(repo,pr,kind,st) values('o/r',1,'review','ready')",
+            pa![],
+        );
+        assert!(!update_policy_allows(&a, repo, 1, true).unwrap());
+        assert!(update_policy_allows(&a, repo, 2, true).unwrap());
+        a.db.run("update jobs set st='done'", pa![]);
+        a.db.run("update rp set auto_merge=0", pa![]);
+        assert!(!update_policy_allows(&a, repo, 1, true).unwrap());
     }
 
     #[test]
