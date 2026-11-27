@@ -845,12 +845,17 @@ mod tests {
                 .unwrap();
             c.pragma_update(None, "max_page_count", pages).unwrap();
         }
-        let error = commit_retry(&a, &job, &snapshot, false, "ready", "retry", &json!({}))
-            .unwrap_err();
-        assert_eq!(error.sqlite_error_code(), Some(rusqlite::ErrorCode::DiskFull));
+        let error =
+            commit_retry(&a, &job, &snapshot, false, "ready", "retry", &json!({})).unwrap_err();
+        assert_eq!(
+            error.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::DiskFull)
+        );
         let generation = crate::gh::begin_head_observation(&a, "org/repo");
-        assert!(retry_snapshot_with_head(&a, &job, &snapshot, false, Some((generation, &head)))
-            .is_err());
+        assert!(
+            retry_snapshot_with_head(&a, &job, &snapshot, false, Some((generation, &head)))
+                .is_err()
+        );
         let current = a.db.jg(id).unwrap();
         assert_eq!(current.st, "drop");
         assert_eq!(current.why, job.why);
@@ -860,7 +865,11 @@ mod tests {
         assert_eq!(crate::gh::cg(&a, "head:org/repo", 600_000), Some(old));
         assert_eq!(a.db.n("select count(*) from recovery_pressure", pa![]), 0);
         a.db.run("drop trigger recovery_disk_full", pa![]);
-        a.db.0.lock().unwrap().pragma_update(None, "max_page_count", 1_000_000).unwrap();
+        a.db.0
+            .lock()
+            .unwrap()
+            .pragma_update(None, "max_page_count", 1_000_000)
+            .unwrap();
         let generation = crate::gh::begin_head_observation(&a, "org/repo");
         assert_eq!(
             retry_snapshot_with_head(&a, &job, &snapshot, false, Some((generation, &head))),
@@ -873,7 +882,8 @@ mod tests {
 
     #[test]
     fn busy_database_rejects_retry_until_independent_writer_releases_lock() {
-        let path = std::env::temp_dir().join(format!("apollo-recovery-busy-{}", rand::random::<u64>()));
+        let path =
+            std::env::temp_dir().join(format!("apollo-recovery-busy-{}", rand::random::<u64>()));
         std::fs::create_dir(&path).unwrap();
         let file = path.join("state.db");
         {
@@ -882,21 +892,37 @@ mod tests {
                 "insert into rp(full,ci,on_,auto_recover_drops) values('org/repo','cargo test',1,1)",
                 pa![],
             );
-            db.0.lock().unwrap().busy_timeout(std::time::Duration::ZERO).unwrap();
+            db.0.lock()
+                .unwrap()
+                .busy_timeout(std::time::Duration::ZERO)
+                .unwrap();
             let a = Arc::new(App::new(db, path.clone(), 47300, "apollo-office".into()));
             let id = dropped(&a, "machine kept failing: timed out", json!({}));
             let (job, snapshot) = recovery_job(&a, id).unwrap();
             let mut other = rusqlite::Connection::open(&file).unwrap();
-            let tx = other.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
-            tx.execute("update rp set ci='cargo test --locked' where full='org/repo'", []).unwrap();
-            let error = commit_retry(&a, &job, &snapshot, true, "ready", "retry", &json!({})).unwrap_err();
-            assert_eq!(error.sqlite_error_code(), Some(rusqlite::ErrorCode::DatabaseBusy));
+            let tx = other
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+            tx.execute(
+                "update rp set ci='cargo test --locked' where full='org/repo'",
+                [],
+            )
+            .unwrap();
+            let error =
+                commit_retry(&a, &job, &snapshot, true, "ready", "retry", &json!({})).unwrap_err();
+            assert_eq!(
+                error.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::DatabaseBusy)
+            );
             assert_eq!(a.db.jg(id).unwrap().st, "drop");
             tx.commit().unwrap();
             assert_eq!(retry_snapshot(&a, &job, &snapshot, true), Ok(false));
             assert_eq!(a.db.jg(id).unwrap().d, job.d);
             let (fresh_job, fresh_snapshot) = recovery_job(&a, id).unwrap();
-            assert_eq!(retry_snapshot(&a, &fresh_job, &fresh_snapshot, true), Ok(true));
+            assert_eq!(
+                retry_snapshot(&a, &fresh_job, &fresh_snapshot, true),
+                Ok(true)
+            );
             assert_eq!(a.db.jg(id).unwrap().st, "ready");
             assert_eq!(a.db.jg(id).unwrap().d["recovery_attempts"], 1);
         }

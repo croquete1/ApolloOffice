@@ -181,7 +181,7 @@ mod t {
             1,
             "x".into(),
         ));
-        a.db.run("insert into rp(full,on_) values('o/r',1)", pa![]);
+        a.db.run("insert into rp(full,on_,ci) values('o/r',1,'true')", pa![]);
         a.db.run(
             "insert into jobs(id,repo,kind,st) values(1,'o/r','fix','ready')",
             pa![],
@@ -225,6 +225,55 @@ mod t {
         a.db.run("update jobs set st='drop' where id=1", pa![]);
         assert!(admit().is_err());
         assert_eq!(reserved.get(), 2);
+    }
+
+    #[test]
+    fn final_admission_rechecks_repository_policy_inside_transaction() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            1,
+            "x".into(),
+        ));
+        a.db.run(
+            "insert into rp(full,on_,ci,hunt) values('o/r',1,'true',1)",
+            pa![],
+        );
+        a.db.run(
+            "insert into jobs(id,repo,kind,st) values(1,'o/r','fix','ready'),(2,'o/r','hunt','ready')",
+            pa![],
+        );
+        let reserved = std::cell::Cell::new(0);
+        let admit = |id| {
+            record_ci_admission(&a, "o/r", "", id, || {
+                reserved.set(reserved.get() + 1);
+            })
+        };
+        for revoke in [
+            "update rp set on_=0",
+            "update rp set on_=null",
+            "update rp set ci=null",
+            "update rp set ci=' '",
+            "update rp set ci=char(9)||char(10)",
+        ] {
+            a.db.run(revoke, pa![]);
+            assert!(!admit(1).unwrap(), "{revoke}");
+            assert!(!admit(2).unwrap(), "{revoke}");
+            assert_eq!(reserved.get(), 0);
+            assert_eq!(a.db.n("select count(*) from job_schedule", pa![]), 0);
+            a.db.run("update rp set on_=1,ci='true'", pa![]);
+        }
+        a.db.run("update rp set hunt=0", pa![]);
+        assert!(!admit(2).unwrap());
+        assert!(admit(1).unwrap());
+        a.db.run("update rp set hunt=1", pa![]);
+        assert!(admit(2).unwrap());
+        a.db.run("update rp set on_=0,ci=''", pa![]);
+        a.db.run("update jobs set st='submit' where id=1", pa![]);
+        assert!(admit(1).unwrap());
+        a.db.run("update jobs set d=json_object('rp',json('true')) where id=2", pa![]);
+        assert!(!admit(2).unwrap());
+        assert_eq!(reserved.get(), 3);
     }
 
     #[test]
@@ -1152,7 +1201,7 @@ mod t {
     #[tokio::test]
     async fn idle_cache_cleanup_blocks_admission_and_releases_on_drop() {
         let db = crate::db::Db::mem();
-        db.run("insert into rp(full) values('o/r')", pa![]);
+        db.run("insert into rp(full,ci) values('o/r','true')", pa![]);
         db.run(
             "insert into hs(id,ln,dk,on_) values('worker1',1,1,1)",
             pa![],
@@ -1200,7 +1249,7 @@ mod t {
     #[test]
     fn cache_maintenance_serializes_aliases_of_the_same_docker_target() {
         let db = crate::db::Db::mem();
-        db.run("insert into rp(full) values('o/r')", pa![]);
+        db.run("insert into rp(full,ci) values('o/r','true')", pa![]);
         db.run(
             "insert into hs(id,ssh,ln,dk,on_) values('alias-a','worker@example',1,1,1)",
             pa![],
