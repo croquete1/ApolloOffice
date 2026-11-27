@@ -549,6 +549,42 @@ mod t {
     }
 
     #[test]
+    fn startup_recovery_rejects_partially_released_analysis_tickets() {
+        let db = crate::db::Db::mem();
+        db.0.lock().unwrap().execute_batch(
+            "insert into rp(full) values('o/r');
+             insert into prs(repo,num,st) values('o/r',1,'open'),('o/r',2,'open');
+             insert into watcher_retry(repo,num,head,snapshot,attempts,next_attempt_at,analysis_ticket)
+             values('o/r',1,'head','t',2,600000,'one'),('o/r',2,'head','t',3,1800000,'two');
+             insert into jobs(id,st,kind,d) values(1,'fix','fix','{}');
+             create trigger ignore_release before update on watcher_retry
+             when old.num=2 and new.analysis_ticket is null
+             begin select raise(ignore); end;",
+        ).unwrap();
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db,
+            std::env::temp_dir(),
+            1,
+            "x".into(),
+        ));
+        let before = a.db.try_all("select * from watcher_retry order by num", vec![]).unwrap();
+        assert!(recover(&a).is_err());
+        assert_eq!(a.db.try_all("select * from watcher_retry order by num", vec![]).unwrap(), before);
+        assert_eq!(a.db.jg(1).unwrap().st, "fix");
+        a.db.0.lock().unwrap().execute_batch("drop trigger ignore_release").unwrap();
+        recover(&a).unwrap();
+        let after = a.db.try_all("select * from watcher_retry order by num", vec![]).unwrap();
+        let mut expected = before;
+        for row in &mut expected {
+            row["analysis_ticket"] = Value::Null;
+        }
+        assert_eq!(after, expected);
+        assert_eq!(a.db.jg(1).unwrap().st, "ready");
+        recover(&a).unwrap();
+        assert_eq!(a.db.try_all("select * from watcher_retry order by num", vec![]).unwrap(), after);
+    }
+
+    #[test]
     fn startup_recovery_is_atomic_and_preserves_approved_submission() {
         let db = crate::db::Db::mem();
         db.0.lock().unwrap().execute_batch(
