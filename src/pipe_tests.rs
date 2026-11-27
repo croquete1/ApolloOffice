@@ -718,6 +718,35 @@ mod t {
     }
 
     #[test]
+    fn steward_rebase_activation_is_revoked_even_after_reenable() {
+        let db = crate::db::Db::mem();
+        db.run("insert into rp(full,on_,steward_repair) values('o/r',1,0)", pa![]);
+        db.run("insert into prs(repo,num,st) values('o/r',1,'open')", pa![]);
+        let token = db.one("select steward_activation from rp", pa![]).unwrap()["steward_activation"].clone();
+        let mut job = Job::of(json!({"kind":"rebase","repo":"o/r","pr":1,"d":{
+            "steward_rebase_base_ref":"main","steward_rebase_base_sha":"a".repeat(40),
+            "steward_rebase_activation":token
+        }}));
+        assert!(steward_rebase_authorized(&db, &job).is_ok());
+        db.run("update rp set on_=0", pa![]);
+        assert!(steward_rebase_authorized(&db, &job).is_err());
+        db.run("update rp set on_=1", pa![]);
+        assert!(steward_rebase_authorized(&db, &job).is_err());
+        job.d["steward_rebase_activation"] = db.one("select steward_activation from rp", pa![]).unwrap()["steward_activation"].clone();
+        assert!(steward_rebase_authorized(&db, &job).is_ok());
+        db.run("update prs set st='closed'", pa![]);
+        assert!(steward_rebase_authorized(&db, &job).is_err());
+        db.run("update prs set st='open'", pa![]);
+        db.run("delete from rp", pa![]);
+        db.run("insert into rp(full,on_,steward_repair) values('o/r',1,0)", pa![]);
+        assert!(steward_rebase_authorized(&db, &job).is_err());
+        job.d.as_object_mut().unwrap().remove("steward_rebase_activation");
+        assert!(steward_rebase_authorized(&db, &job).is_err());
+        job.d = json!({});
+        assert!(steward_rebase_authorized(&db, &job).is_ok());
+    }
+
+    #[test]
     fn steward_rebase_requires_exact_base_at_execution_and_publication() {
         let sha = "a".repeat(40);
         let mut job = Job::of(json!({"kind":"rebase","d":{

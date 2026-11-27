@@ -1309,6 +1309,42 @@ impl Db {
                 return Err(rusqlite::Error::InvalidQuery);
             }
         }
+        // The Steward's fresh read is not authorization if repository
+        // activation or the tracked default branch changed before commit.
+        if data.contains_key("steward_rebase_base_ref")
+            || data.contains_key("steward_rebase_base_sha")
+            || data.contains_key("steward_rebase_activation")
+        {
+            let token = data
+                .get("steward_rebase_activation")
+                .and_then(Value::as_str)
+                .filter(|s| s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+                .ok_or(rusqlite::Error::InvalidQuery)?;
+            let base = data
+                .get("steward_rebase_base_ref")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .ok_or(rusqlite::Error::InvalidQuery)?;
+            if !data
+                .get("steward_rebase_base_sha")
+                .and_then(Value::as_str)
+                .is_some_and(valid_git_sha)
+            {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            let current: bool = tx.query_row(
+                "select exists(select 1 from rp join prs on prs.repo=rp.full
+                 where rp.full=?1 and rp.on_=1 and rp.steward_activation=?2
+                 and prs.num=?3 and prs.st='open'
+                 and json_extract(prs.d,'$.default_branch')=?4
+                 and json_extract(prs.d,'$.base')=?4)",
+                rusqlite::params![repo, token, number, base],
+                |row| row.get(0),
+            )?;
+            if !current {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+        }
         data.insert("watcher_observed_head".into(), json!(head));
         data.insert("watcher_observed_at".into(), json!(updated));
         let t = now();
