@@ -307,24 +307,38 @@ fn init(c: &mut Connection) -> anyhow::Result<()> {
     // A terminal/deleted tracked PR cannot retain executable review receipts.
     // Keep identifiers for audit; never write comment acknowledgements here.
     tx.execute_batch("
-        create trigger if not exists watcher_inbox_pr_terminal
+        drop trigger if exists watcher_inbox_pr_terminal;
+        drop trigger if exists watcher_inbox_pr_deleted;
+        create trigger if not exists watcher_inbox_pr_terminal_v2
         after update of st on prs when new.st in ('closed','merged') and old.st is not new.st
         begin
           update watcher_inbox set state='superseded',updated_at=cast(strftime('%s','now') as integer)*1000
             where repo=new.repo and num=new.num and state='received';
           delete from watcher_retry where repo=new.repo and num=new.num;
+          select case when exists(select 1 from watcher_inbox where repo=new.repo and num=new.num and state='received')
+            or exists(select 1 from watcher_retry where repo=new.repo and num=new.num)
+            then raise(abort,'watcher PR retirement failed') end;
         end;
-        create trigger if not exists watcher_inbox_pr_deleted
+        create trigger if not exists watcher_inbox_pr_deleted_v2
         after delete on prs
         begin
           update watcher_inbox set state='superseded',updated_at=cast(strftime('%s','now') as integer)*1000
             where repo=old.repo and num=old.num and state='received';
           delete from watcher_retry where repo=old.repo and num=old.num;
+          select case when exists(select 1 from watcher_inbox where repo=old.repo and num=old.num and state='received')
+            or exists(select 1 from watcher_retry where repo=old.repo and num=old.num)
+            then raise(abort,'watcher PR retirement failed') end;
         end;
         update watcher_inbox set state='superseded',updated_at=cast(strftime('%s','now') as integer)*1000
           where state='received' and not exists(select 1 from prs where prs.repo=watcher_inbox.repo and prs.num=watcher_inbox.num and prs.st='open');
         delete from watcher_retry where not exists(select 1 from prs where prs.repo=watcher_retry.repo and prs.num=watcher_retry.num and prs.st='open');
     ")?;
+    let stale_watcher_receipts: bool = tx.query_row(
+        "select exists(select 1 from watcher_inbox where state='received' and not exists(select 1 from prs where prs.repo=watcher_inbox.repo and prs.num=watcher_inbox.num and prs.st='open')) or exists(select 1 from watcher_retry where not exists(select 1 from prs where prs.repo=watcher_retry.repo and prs.num=watcher_retry.num and prs.st='open'))",
+        [],
+        |row| row.get(0),
+    )?;
+    anyhow::ensure!(!stale_watcher_receipts, "watcher PR retirement failed");
     // Invalidate observation tickets and remove historical metadata on activation
     // changes or removal, atomically with the repository mutation. Exact prefix,
     // not LIKE: repository names may contain wildcard characters.
@@ -3613,6 +3627,41 @@ mod watcher_receipt_lifecycle_tests {
         );
         assert_eq!(db.n("select count(*) from watcher_retry", vec![]), 0);
         assert!(!db.comment_acknowledged("o/r", "r2").unwrap());
+    }
+    #[test]
+    fn ignored_terminal_cleanup_rolls_back_pr_transition() {
+        for mutation in [
+            "update prs set st='closed' where repo='o/r' and num=1",
+            "update prs set st='merged' where repo='o/r' and num=1",
+            "delete from prs where repo='o/r' and num=1",
+        ] {
+            for fault in [
+                "create trigger ignore_retirement before update on watcher_inbox when new.state='superseded' begin select raise(ignore); end;",
+                "create trigger ignore_retirement before delete on watcher_retry begin select raise(ignore); end;",
+            ] {
+                let db = setup();
+                db.receive_review_batch("o/r", 1, "t", HEAD, &["r1".into()])
+                    .unwrap();
+                let attempt = db
+                    .claim_review_attempt("o/r", 1, "t", HEAD, 0)
+                    .unwrap()
+                    .unwrap();
+                {
+                    let c = db.0.lock().unwrap();
+                    c.execute_batch(fault).unwrap();
+                    assert!(c.execute(mutation, []).is_err());
+                    c.execute_batch("drop trigger ignore_retirement").unwrap();
+                }
+                assert_eq!(db.n("select count(*) from prs where st='open'", vec![]), 1);
+                assert!(db.has_pending_review("o/r", 1).unwrap());
+                assert_eq!(db.n("select count(*) from watcher_retry", vec![]), 1);
+                db.0.lock().unwrap().execute(mutation, []).unwrap();
+                assert!(!db.has_pending_review("o/r", 1).unwrap());
+                assert_eq!(db.n("select count(*) from watcher_retry", vec![]), 0);
+                assert!(!db.comment_acknowledged("o/r", "r1").unwrap());
+                attempt.release().unwrap();
+            }
+        }
     }
     #[test]
     fn absent_receipt_is_not_acknowledged_and_can_return() {
