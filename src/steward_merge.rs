@@ -224,8 +224,8 @@ fn current_local_proof(
             let kind: String = row.get(0)?;
             let state: String = row.get(1)?;
             let raw: String = row.get(2)?;
-            let data: Value = serde_json::from_str(&raw)
-                .map_err(|_| rusqlite::Error::InvalidQuery)?;
+            let data: Value =
+                serde_json::from_str(&raw).map_err(|_| rusqlite::Error::InvalidQuery)?;
             let job = json!({"kind":kind,"st":state,"d":data});
             if mergecheck_proof_current(&job, activation)
                 && local_proof(&job, head, base, tree, &command)
@@ -1703,7 +1703,10 @@ mod tests {
     #[test]
     fn final_local_proof_rejects_removed_or_revoked_evidence() {
         let db = crate::db::Db::mem();
-        db.run("insert into rp(full,on_,auto_merge,local_merge,ci) values('o/r',1,1,1,'cargo test')", pa![]);
+        db.run(
+            "insert into rp(full,on_,auto_merge,local_merge,ci) values('o/r',1,1,1,'cargo test')",
+            pa![],
+        );
         let policy = db.one("select merge_activation from rp", pa![]).unwrap();
         let activation = policy["merge_activation"].as_str().unwrap();
         let head = "a".repeat(40);
@@ -1715,23 +1718,34 @@ mod tests {
             "ci_evidence":{"exit":0,"command":"cargo test","candidate":head},
             "ci_verified_at":100,"last_review":{"model":"reviewer","t":101,"verdict":{"ok":true}}
         });
-        let id = db.jnew("o/r",1,"mergecheck","PR","url","done","",data.clone(),Some(1),-5.0);
-        let check = || current_local_proof(&db,"o/r",1,activation,&head,&base,&tree);
+        let id = db.jnew(
+            "o/r",
+            1,
+            "mergecheck",
+            "PR",
+            "url",
+            "done",
+            "",
+            data.clone(),
+            Some(1),
+            -5.0,
+        );
+        let check = || current_local_proof(&db, "o/r", 1, activation, &head, &base, &tree);
         assert!(check().unwrap());
         db.run("update jobs set st='drop' where id=?", pa![id]);
         assert!(!check().unwrap());
         db.run("update jobs set st='done',d='{}' where id=?", pa![id]);
         assert!(!check().unwrap());
-        db.run("update jobs set d=? where id=?", pa![data.to_string(),id]);
+        db.run("update jobs set d=? where id=?", pa![data.to_string(), id]);
         assert!(check().unwrap());
         db.run("update rp set local_merge=0", pa![]);
         db.run("update rp set local_merge=1", pa![]);
         assert!(!check().unwrap());
         let policy = db.one("select merge_activation from rp", pa![]).unwrap();
         let current = policy["merge_activation"].as_str().unwrap();
-        assert!(!current_local_proof(&db,"o/r",1,current,&head,&base,&tree).unwrap());
+        assert!(!current_local_proof(&db, "o/r", 1, current, &head, &base, &tree).unwrap());
         db.run("delete from jobs where id=?", pa![id]);
-        assert!(!current_local_proof(&db,"o/r",1,current,&head,&base,&tree).unwrap());
+        assert!(!current_local_proof(&db, "o/r", 1, current, &head, &base, &tree).unwrap());
     }
 
     #[test]
