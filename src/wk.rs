@@ -2529,7 +2529,9 @@ async fn deliver_watcher_outbox(a: &Ax, me: &str, cursor: &mut WatcherDeliveryCu
         // Persist the attempted position before I/O. A checkpoint failure is
         // diagnostic only; the in-memory cursor still advances, and every
         // external send must independently pass the durable claim gate.
-        if let Err(error) = a.db.save_watcher_delivery_cursor(author, state, previous, id) {
+        if let Err(error) =
+            a.db.save_watcher_delivery_cursor(author, state, previous, id)
+        {
             a.say(
                 "watcher",
                 &format!("{tag}: outbox cursor checkpoint failed: {error}"),
@@ -2767,8 +2769,10 @@ mod t {
                     db.run("insert into watcher_outbox(id,repo,num,author,body,state,created,updated,source_head) values(?,'o/r',1,'owner','reply',?,1,1,?)",pa![format!("{state}-{i:02}"),state.to_string(),"a".repeat(40)]);
                 }
             }
-            db.save_watcher_delivery_cursor("owner", "pending", 1, "pending-09").unwrap();
-            db.save_watcher_delivery_cursor("owner", "uncertain", 1, "uncertain-09").unwrap();
+            db.save_watcher_delivery_cursor("owner", "pending", 1, "pending-09")
+                .unwrap();
+            db.save_watcher_delivery_cursor("owner", "uncertain", 1, "uncertain-09")
+                .unwrap();
         }
         {
             let db = crate::db::Db::open(&file).unwrap();
@@ -2782,7 +2786,10 @@ mod t {
             assert!(cursor.pending.is_none() && cursor.uncertain.is_none());
             cursor.restore(&db, "owner").unwrap();
             assert_eq!(cursor.pending, Some((1, "pending-09".into())));
-            db.run("update kv set v='invalid' where k='watcher:delivery-cursor:pending:owner'", pa![]);
+            db.run(
+                "update kv set v='invalid' where k='watcher:delivery-cursor:pending:owner'",
+                pa![],
+            );
             let mut cursor = WatcherDeliveryCursor::default();
             assert!(cursor.restore(&db, "owner").is_err());
             assert!(cursor.pending.is_none());
