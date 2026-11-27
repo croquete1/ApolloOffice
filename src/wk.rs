@@ -2434,7 +2434,10 @@ fn watcher_delivery_batch(
     cursor: &WatcherDeliveryCursor,
 ) -> rusqlite::Result<Vec<Value>> {
     let (p_at, p_id) = cursor.pending.clone().unwrap_or((i64::MIN, String::new()));
-    let (u_at, u_id) = cursor.uncertain.clone().unwrap_or((i64::MIN, String::new()));
+    let (u_at, u_id) = cursor
+        .uncertain
+        .clone()
+        .unwrap_or((i64::MIN, String::new()));
     db.try_all(
         "with cursors(state,last_updated,last_id) as (values ('pending',?,?),('uncertain',?,?))
          select o.* from watcher_outbox o join cursors c on c.state=o.state
@@ -2442,7 +2445,14 @@ fn watcher_delivery_batch(
          order by row_number() over(partition by o.state order by
            case when (o.updated,o.id)>(c.last_updated,c.last_id) then 0 else 1 end,o.updated,o.id),
            case o.state when 'pending' then 0 else 1 end limit 20",
-        pa![p_at, p_id, u_at, u_id, author.to_string(), at.saturating_sub(600_000)],
+        pa![
+            p_at,
+            p_id,
+            u_at,
+            u_id,
+            author.to_string(),
+            at.saturating_sub(600_000)
+        ],
     )
 }
 
@@ -2464,8 +2474,7 @@ fn watcher_outbox_step(a: &Ax, tag: &str, operation: &str, result: rusqlite::Res
 
 async fn deliver_watcher_outbox(a: &Ax, me: &str, cursor: &mut WatcherDeliveryCursor) -> R<()> {
     cursor.for_author(me);
-    let rows =
-        watcher_delivery_batch(&a.db, me, now(), cursor).map_err(|e| X::E(e.to_string()))?;
+    let rows = watcher_delivery_batch(&a.db, me, now(), cursor).map_err(|e| X::E(e.to_string()))?;
     for row in rows {
         if a.hold("watcher") {
             break;
@@ -2688,7 +2697,8 @@ mod t {
             db.run("insert into watcher_outbox(id,repo,num,author,body,state,created,updated) values(?,'o/r',1,'owner','reply','pending',1,?)",pa![format!("p{i:02}"),at]);
         }
         db.run("insert into watcher_outbox(id,repo,num,author,body,state,created,updated) values('recent','o/r',1,'owner','reply','uncertain',1,?),('other','o/r',1,'other','reply','pending',1,0),('sent','o/r',1,'owner','reply','sent',1,0)",pa![at]);
-        let rows = watcher_delivery_batch(&db, "owner", at, &WatcherDeliveryCursor::default()).unwrap();
+        let rows =
+            watcher_delivery_batch(&db, "owner", at, &WatcherDeliveryCursor::default()).unwrap();
         assert_eq!(rows.len(), 20);
         assert_eq!(rows[0]["id"], "p00");
         assert_eq!(rows[1]["id"], "u00");
@@ -2698,7 +2708,8 @@ mod t {
             "delete from watcher_outbox where state='pending' and id<>'p00'",
             pa![],
         );
-        let rows = watcher_delivery_batch(&db, "owner", at, &WatcherDeliveryCursor::default()).unwrap();
+        let rows =
+            watcher_delivery_batch(&db, "owner", at, &WatcherDeliveryCursor::default()).unwrap();
         assert_eq!(rows.len(), 20);
         assert_eq!(
             rows.iter().filter(|r| r["state"] == "uncertain").count(),
@@ -2732,7 +2743,13 @@ mod t {
             }
         }
         assert_eq!(seen.len(), 50);
-        assert_eq!(db.n("select count(*) from watcher_outbox where updated=1", vec![]), 50);
+        assert_eq!(
+            db.n(
+                "select count(*) from watcher_outbox where updated=1",
+                vec![]
+            ),
+            50
+        );
         cursor.for_author("other");
         assert!(cursor.pending.is_none());
         assert!(cursor.uncertain.is_none());
