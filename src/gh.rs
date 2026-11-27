@@ -1,5 +1,5 @@
 use crate::app::App;
-use crate::db::now;
+use crate::db::{now, CiMarkerRow};
 use crate::pa;
 use crate::sh::{apip, ghj};
 use serde_json::{json, Value};
@@ -19,7 +19,7 @@ pub fn cs(a: &App, k: &str, v: &Value) {
 pub(crate) struct HeadObservation {
     generation: u64,
     started: Instant,
-    ci_proof: Option<(Vec<(String, String)>, Value)>,
+    ci_proof: Option<(Vec<CiMarkerRow>, Value)>,
 }
 
 /// Order requests per repository without holding a mutex across remote I/O.
@@ -51,7 +51,7 @@ pub(crate) fn publish_ci_head_observation(
     repo: &str,
     generation: u64,
     head: &Value,
-    markers: &[(String, String)],
+    markers: &[CiMarkerRow],
 ) -> bool {
     publish_head(a, repo, generation, head, Some(markers))
 }
@@ -61,7 +61,7 @@ fn publish_head(
     repo: &str,
     generation: u64,
     head: &Value,
-    markers: Option<&[(String, String)]>,
+    markers: Option<&[CiMarkerRow]>,
 ) -> bool {
     if !head["s"].as_str().is_some_and(crate::db::valid_git_sha) {
         return false;
@@ -80,11 +80,7 @@ fn publish_head(
 
 /// Only reuse a scheduler observation made for these exact CI marker rows.
 /// Manual recovery observations are not proof of a particular marker snapshot.
-pub(crate) fn cached_ci_head(
-    a: &App,
-    repo: &str,
-    markers: &[(String, String)],
-) -> Option<(u64, Value)> {
+pub(crate) fn cached_ci_head(a: &App, repo: &str, markers: &[CiMarkerRow]) -> Option<(u64, Value)> {
     with_cached_ci_head(a, repo, markers, |generation, head| {
         (generation, head.clone())
     })
@@ -95,7 +91,7 @@ pub(crate) fn cached_ci_head(
 pub(crate) fn with_cached_ci_head<T>(
     a: &App,
     repo: &str,
-    markers: &[(String, String)],
+    markers: &[CiMarkerRow],
     use_proof: impl FnOnce(u64, &Value) -> T,
 ) -> Option<T> {
     let observations = a.head_observations.lock().unwrap();

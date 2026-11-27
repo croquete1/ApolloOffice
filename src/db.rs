@@ -78,7 +78,9 @@ create index if not exists coderabbit_findings_pr on coderabbit_findings(repo,nu
 create table if not exists coderabbit_cycles(repo text not null, number integer not null, cycles integer not null check(cycles>=0), primary key(repo,number));
 ";
 
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
+
+pub(crate) type CiMarkerRow = (String, String, String);
 
 pub(crate) fn valid_git_sha(sha: &str) -> bool {
     sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit())
@@ -376,6 +378,35 @@ fn init(c: &mut Connection) -> anyhow::Result<()> {
           or old.auto_recover_drops is not new.auto_recover_drops
         begin
           update rp set recovery_activation=lower(hex(randomblob(16))) where id=new.id;
+        end;
+    ",
+    )?;
+    // CI hold receipts are distinct even when a writer repeats the same
+    // SHA, timestamp and raw JSON. Keep identity changes in the same transaction.
+    tx.execute_batch(
+        "
+        create table if not exists ci_hold_epochs(k text primary key, token text not null);
+        insert into ci_hold_epochs(k,token)
+          select k,lower(hex(randomblob(16))) from kv where k glob 'cired:*'
+          on conflict(k) do nothing;
+        create trigger if not exists ci_hold_epoch_insert
+        after insert on kv when new.k glob 'cired:*'
+        begin
+          insert into ci_hold_epochs(k,token) values(new.k,lower(hex(randomblob(16))))
+            on conflict(k) do update set token=excluded.token;
+        end;
+        create trigger if not exists ci_hold_epoch_update
+        after update of k,v on kv when old.k glob 'cired:*' or new.k glob 'cired:*'
+        begin
+          delete from ci_hold_epochs where k=old.k and old.k is not new.k;
+          insert into ci_hold_epochs(k,token)
+            select new.k,lower(hex(randomblob(16))) where new.k glob 'cired:*'
+            on conflict(k) do update set token=excluded.token;
+        end;
+        create trigger if not exists ci_hold_epoch_delete
+        after delete on kv when old.k glob 'cired:*'
+        begin
+          delete from ci_hold_epochs where k=old.k;
         end;
     ",
     )?;
@@ -2168,6 +2199,75 @@ mod strict_db_tests {
         )
         .unwrap();
         assert_ne!(recovery(&c), first);
+    }
+
+    #[test]
+    fn ci_hold_epochs_backfill_and_rotate_even_for_identical_writes() {
+        let mut c = Connection::open_in_memory().unwrap();
+        init(&mut c).unwrap();
+        c.execute_batch(
+            "drop trigger ci_hold_epoch_insert;
+             drop trigger ci_hold_epoch_update;
+             drop trigger ci_hold_epoch_delete;
+             drop table ci_hold_epochs;
+             pragma user_version=8;
+             insert into kv(k,v) values('cired:o/r','{}'),('unrelated','{}');",
+        )
+        .unwrap();
+        init(&mut c).unwrap();
+        fn token(c: &Connection) -> String {
+            c.query_row(
+                "select token from ci_hold_epochs where k='cired:o/r'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        }
+        let first = token(&c);
+        assert_eq!(first.len(), 32);
+        init(&mut c).unwrap();
+        assert_eq!(token(&c), first);
+        c.execute("update kv set v=v where k='unrelated'", [])
+            .unwrap();
+        assert_eq!(token(&c), first);
+        let tx = c.transaction().unwrap();
+        tx.execute("update kv set v=v where k='cired:o/r'", [])
+            .unwrap();
+        assert_ne!(token(&tx), first);
+        tx.rollback().unwrap();
+        assert_eq!(token(&c), first);
+        c.execute("update kv set v=v where k='cired:o/r'", [])
+            .unwrap();
+        let second = token(&c);
+        assert_ne!(second, first);
+        c.execute("delete from kv where k='cired:o/r'", []).unwrap();
+        assert_eq!(
+            c.query_row("select count(*) from ci_hold_epochs", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        c.execute("insert into kv(k,v) values('cired:o/r','{}')", [])
+            .unwrap();
+        assert_ne!(token(&c), second);
+        c.execute("update kv set k='cired:o/renamed' where k='cired:o/r'", [])
+            .unwrap();
+        assert!(c
+            .query_row(
+                "select token from ci_hold_epochs where k='cired:o/r'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .is_err());
+        assert_eq!(
+            c.query_row(
+                "select length(token) from ci_hold_epochs where k='cired:o/renamed'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            32
+        );
     }
 
     #[test]

@@ -63,6 +63,45 @@ mod t {
         assert!(!red_with(&a, "o/r", "local", || std::future::ready(head.clone())).await);
     }
 
+    #[tokio::test]
+    async fn identical_ci_hold_recreation_invalidates_cached_and_inflight_evidence() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            1,
+            "x".into(),
+        ));
+        let marker = json!({"sha":"a".repeat(40),"t":1});
+        let head = json!({"s":"b".repeat(40)});
+        a.db.ks("cired:o/r", &marker);
+        assert!(!red_with(&a, "o/r", "local", || std::future::ready(head.clone())).await);
+        a.db.ks("cired:o/r", &marker);
+        assert!(red_with(&a, "o/r", "local", || std::future::ready(Value::Null)).await);
+        assert!(red_with(&a, "o/r", "local", || {
+            a.db.kd("cired:o/r");
+            a.db.ks("cired:o/r", &marker);
+            std::future::ready(head.clone())
+        }).await);
+        assert!(!clear_prepared_ci_markers_with(&a, "o/r", "local", &"b".repeat(40), || {
+            a.db.kd("cired:o/r");
+            a.db.ks("cired:o/r", &marker);
+            std::future::ready(head.clone())
+        }).await.unwrap());
+        assert_eq!(a.db.kg("cired:o/r"), marker);
+        a.db.run("delete from ci_hold_epochs where k='cired:o/r'", pa![]);
+        assert!(red_with(&a, "o/r", "local", || std::future::ready(head.clone())).await);
+        assert!(clear_prepared_ci_markers_with(&a, "o/r", "local", &"b".repeat(40), || {
+            std::future::ready(head.clone())
+        }).await.is_err());
+        assert_eq!(a.db.kg("cired:o/r"), marker);
+        a.db.ks("cired:o/r", &marker);
+        assert!(!red_with(&a, "o/r", "local", || std::future::ready(head.clone())).await);
+        assert!(clear_prepared_ci_markers_with(&a, "o/r", "local", &"b".repeat(40), || {
+            std::future::ready(head.clone())
+        }).await.unwrap());
+        assert!(a.db.kg("cired:o/r").is_null());
+    }
+
     #[test]
     fn ci_hold_snapshot_includes_global_and_host_markers_and_rejects_invalid_json() {
         let a = std::sync::Arc::new(crate::app::App::new(
