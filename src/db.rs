@@ -1526,6 +1526,55 @@ impl Db {
         Ok(true)
     }
 
+    // Cursor checkpoints are scheduling hints, never send authorizations.
+    pub(crate) fn load_watcher_delivery_cursor(
+        &self,
+        author: &str,
+        state: &str,
+    ) -> rusqlite::Result<Option<(i64, String)>> {
+        if !matches!(state, "pending" | "uncertain") || author.is_empty() {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let key = format!("watcher:delivery-cursor:{state}:{author}");
+        let rows = self.try_all("select v from kv where k=?", crate::pa![key])?;
+        match rows.as_slice() {
+            [] => Ok(None),
+            [row] => serde_json::from_str(row["v"].as_str().ok_or(rusqlite::Error::InvalidQuery)?)
+                .map(Some)
+                .map_err(|_| rusqlite::Error::InvalidQuery),
+            _ => Err(rusqlite::Error::InvalidQuery),
+        }
+    }
+
+    pub(crate) fn save_watcher_delivery_cursor(
+        &self,
+        author: &str,
+        state: &str,
+        updated: i64,
+        id: &str,
+    ) -> rusqlite::Result<()> {
+        if !matches!(state, "pending" | "uncertain") || author.is_empty() || id.is_empty() {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let key = format!("watcher:delivery-cursor:{state}:{author}");
+        let value = json!([updated, id]).to_string();
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            "insert into kv(k,v) values(?,?) on conflict(k) do update set v=excluded.v",
+            rusqlite::params![key, value],
+        )?;
+        let persisted: bool = tx.query_row(
+            "select exists(select 1 from kv where k=? and v=?)",
+            rusqlite::params![key, value],
+            |row| row.get(0),
+        )?;
+        if changed != 1 || !persisted {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        tx.commit()
+    }
+
     // Rotate only the exact observed row. Do not resurrect a cancelled reply
     // or move a newer observation backwards.
     pub(crate) fn rotate_watcher_reply(
@@ -3179,6 +3228,40 @@ mod watcher_outbox_tests {
             .queue_review_and_ack("o/r", 1, "next", &["r2".into()], &req)
             .unwrap());
         assert_eq!(db.n("select count(*) from watcher_outbox", vec![]), 1);
+    }
+
+    #[test]
+    fn delivery_cursor_write_failures_preserve_previous_checkpoint() {
+        let db = Db::mem();
+        assert!(db
+            .load_watcher_delivery_cursor("owner", "pending")
+            .unwrap()
+            .is_none());
+        db.save_watcher_delivery_cursor("owner", "pending", 1, "a")
+            .unwrap();
+        db.run("create trigger ignore_cursor before update on kv when new.k='watcher:delivery-cursor:pending:owner' begin select raise(ignore); end", vec![]);
+        assert!(db
+            .save_watcher_delivery_cursor("owner", "pending", 2, "b")
+            .is_err());
+        assert_eq!(
+            db.load_watcher_delivery_cursor("owner", "pending").unwrap(),
+            Some((1, "a".into()))
+        );
+        db.run("drop trigger ignore_cursor", vec![]);
+        db.save_watcher_delivery_cursor("owner", "pending", 0, "c")
+            .unwrap();
+        assert_eq!(
+            db.load_watcher_delivery_cursor("owner", "pending").unwrap(),
+            Some((0, "c".into()))
+        );
+        assert!(db
+            .load_watcher_delivery_cursor("other", "pending")
+            .unwrap()
+            .is_none());
+        assert!(db
+            .load_watcher_delivery_cursor("owner", "uncertain")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
