@@ -3201,13 +3201,21 @@ mod watcher_outbox_tests {
             assert!(!db.rotate_watcher_reply("a", "other", state, 1, 20).unwrap());
             assert!(db.rotate_watcher_reply("a", "owner", state, 1, 20).unwrap());
             assert!(!db.rotate_watcher_reply("a", "owner", state, 1, 30).unwrap());
-            assert!(db.rotate_watcher_reply("a", "owner", state, 20, 10).unwrap());
+            assert!(db
+                .rotate_watcher_reply("a", "owner", state, 20, 10)
+                .unwrap());
             let row = db.one("select * from watcher_outbox", vec![]).unwrap();
             assert_eq!(row["updated"], 20);
             assert_eq!(row["state"], state);
-            let target = if state == "pending" { "cancelled" } else { "sent" };
+            let target = if state == "pending" {
+                "cancelled"
+            } else {
+                "sent"
+            };
             assert!(db.finish_watcher_reply("a", target).unwrap());
-            assert!(!db.rotate_watcher_reply("a", "owner", state, 20, 40).unwrap());
+            assert!(!db
+                .rotate_watcher_reply("a", "owner", state, 20, 40)
+                .unwrap());
         }
     }
 
