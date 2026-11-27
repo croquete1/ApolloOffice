@@ -1503,9 +1503,27 @@ impl Db {
     /// Persist the uncertain state BEFORE the external POST. A crash or
     /// ambiguous response must never automatically issue a second POST.
     pub fn claim_watcher_reply(&self, id: &str, author: &str) -> rusqlite::Result<bool> {
-        let c = self.0.lock().unwrap();
-        let changed=c.execute("update watcher_outbox set state='uncertain',updated=? where id=? and author=? and state='pending' and exists(select 1 from rp where full=watcher_outbox.repo and on_=1) and source_head<>'' and exists(select 1 from prs where repo=watcher_outbox.repo and num=watcher_outbox.num and st='open' and case when json_valid(d) then json_extract(d,'$.watcher_head') end=watcher_outbox.source_head)",rusqlite::params![now(),id,author])?;
-        Ok(changed == 1)
+        let mut c = self.0.lock().unwrap();
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let eligible: bool = tx.query_row(
+            "select exists(select 1 from watcher_outbox where id=? and author=? and state='pending' and exists(select 1 from rp where full=watcher_outbox.repo and on_=1) and source_head<>'' and exists(select 1 from prs where repo=watcher_outbox.repo and num=watcher_outbox.num and st='open' and case when json_valid(d) then json_extract(d,'$.watcher_head') end=watcher_outbox.source_head))",
+            rusqlite::params![id, author],
+            |row| row.get(0),
+        )?;
+        if !eligible {
+            return Ok(false);
+        }
+        let changed=tx.execute("update watcher_outbox set state='uncertain',updated=? where id=? and author=? and state='pending' and exists(select 1 from rp where full=watcher_outbox.repo and on_=1) and source_head<>'' and exists(select 1 from prs where repo=watcher_outbox.repo and num=watcher_outbox.num and st='open' and case when json_valid(d) then json_extract(d,'$.watcher_head') end=watcher_outbox.source_head)",rusqlite::params![now(),id,author])?;
+        let reserved: bool = tx.query_row(
+            "select exists(select 1 from watcher_outbox where id=? and author=? and state='uncertain')",
+            rusqlite::params![id, author],
+            |row| row.get(0),
+        )?;
+        if changed != 1 || !reserved {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        tx.commit()?;
+        Ok(true)
     }
 
     pub fn finish_watcher_reply(&self, id: &str, state: &str) -> rusqlite::Result<bool> {
@@ -3121,6 +3139,39 @@ mod watcher_outbox_tests {
             .queue_review_and_ack("o/r", 1, "next", &["r2".into()], &req)
             .unwrap());
         assert_eq!(db.n("select count(*) from watcher_outbox", vec![]), 1);
+    }
+
+    #[test]
+    fn reply_claim_requires_durable_uncertain_state_before_post() {
+        let db = Db::mem();
+        let head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        db.run("insert into rp(full) values('o/r')", vec![]);
+        db.run(
+            "insert into prs(repo,num,st,upd,d) values('o/r',1,'open','t',?)",
+            crate::pa![json!({"watcher_head":head}).to_string()],
+        );
+        db.0.lock().unwrap().execute(
+            "insert into watcher_outbox(id,repo,num,author,body,state,created,updated,source_head) values('a','o/r',1,'owner','reply','pending',1,1,?)",
+            [head],
+        ).unwrap();
+        for fault in [
+            "create trigger fail_claim before update on watcher_outbox when new.state='uncertain' begin select raise(ignore); end;",
+            "create trigger fail_claim after update on watcher_outbox when new.state='uncertain' begin update watcher_outbox set state='pending' where id=new.id; end;",
+        ] {
+            db.0.lock().unwrap().execute_batch(fault).unwrap();
+            assert!(!db.claim_watcher_reply("missing", "owner").unwrap());
+            assert!(!db.claim_watcher_reply("a", "other").unwrap());
+            assert!(db.claim_watcher_reply("a", "owner").is_err());
+            let row = db.one("select * from watcher_outbox", vec![]).unwrap();
+            assert_eq!(row["state"], "pending");
+            assert_eq!(row["updated"], 1);
+            db.run("drop trigger fail_claim", vec![]);
+        }
+        assert!(db.claim_watcher_reply("a", "owner").unwrap());
+        assert_eq!(db.watcher_outbox_counts().unwrap()["uncertain"], 1);
+        assert!(!db.claim_watcher_reply("a", "owner").unwrap());
+        assert!(db.finish_watcher_reply("a", "sent").unwrap());
+        assert!(!db.claim_watcher_reply("a", "owner").unwrap());
     }
 
     #[test]
