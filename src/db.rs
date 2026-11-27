@@ -3388,8 +3388,10 @@ mod watcher_storage_failure_tests {
     }
 
     fn rebase_request(db: &Db) -> Value {
-        let token = db.one("select steward_activation from rp where full='o/r'", vec![])
-            .unwrap()["steward_activation"].clone();
+        let token = db
+            .one("select steward_activation from rp where full='o/r'", vec![])
+            .unwrap()["steward_activation"]
+            .clone();
         json!({"title":"PR","url":"https://github.com/o/r/pull/1","why":"conflict",
             "data":{"branch":"fix","head":"o/r","steward_rebase_base_ref":"main",
             "steward_rebase_base_sha":"b".repeat(40),"steward_rebase_activation":token}})
@@ -3399,60 +3401,107 @@ mod watcher_storage_failure_tests {
     fn ignored_job_insert_never_acknowledges_review_or_reports_rebase_success() {
         let db = Db::mem();
         seed(&db);
-        db.run("update prs set d=json_set(d,'$.base','main','$.default_branch','main')", vec![]);
+        db.run(
+            "update prs set d=json_set(d,'$.base','main','$.default_branch','main')",
+            vec![],
+        );
         let rebase = rebase_request(&db);
-        db.0.lock().unwrap().execute_batch(
-            "create trigger ignore_pr_job before insert on jobs
+        db.0.lock()
+            .unwrap()
+            .execute_batch(
+                "create trigger ignore_pr_job before insert on jobs
              when new.kind in ('review','rebase') begin select raise(ignore); end;",
-        ).unwrap();
-        assert!(db.queue_review_and_ack("o/r", 1, "t", &["r1".into()], &request()).is_err());
-        assert!(db.queue_watcher_rebase("o/r", 1, "t", HEAD, &rebase).is_err());
+            )
+            .unwrap();
+        assert!(db
+            .queue_review_and_ack("o/r", 1, "t", &["r1".into()], &request())
+            .is_err());
+        assert!(db
+            .queue_watcher_rebase("o/r", 1, "t", HEAD, &rebase)
+            .is_err());
         assert_pending(&db);
         db.run("drop trigger ignore_pr_job", vec![]);
-        assert!(db.queue_review_and_ack("o/r", 1, "t", &["r1".into()], &request()).unwrap());
+        assert!(db
+            .queue_review_and_ack("o/r", 1, "t", &["r1".into()], &request())
+            .unwrap());
         assert!(db.comment_acknowledged("o/r", "r1").unwrap());
         assert_eq!(db.n("select count(*) from jobs", vec![]), 1);
     }
 
     #[test]
     fn concurrent_steward_rebase_and_watcher_review_admit_only_one_operation() {
-        let path = std::env::temp_dir().join(format!("apollo-pr-operation-race-{}", rand::random::<u64>()));
+        let path = std::env::temp_dir().join(format!(
+            "apollo-pr-operation-race-{}",
+            rand::random::<u64>()
+        ));
         std::fs::create_dir(&path).unwrap();
         let file = path.join("state.db");
         {
             let db = Db::open(&file).unwrap();
             seed(&db);
-            db.run("update prs set d=json_set(d,'$.base','main','$.default_branch','main')", vec![]);
+            db.run(
+                "update prs set d=json_set(d,'$.base','main','$.default_branch','main')",
+                vec![],
+            );
             let other = Db::open(&file).unwrap();
             let rebase = rebase_request(&db);
             let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
             let other_barrier = barrier.clone();
             let contender = std::thread::spawn(move || {
                 other_barrier.wait();
-                other.queue_watcher_rebase("o/r", 1, "t", HEAD, &rebase).unwrap()
+                other
+                    .queue_watcher_rebase("o/r", 1, "t", HEAD, &rebase)
+                    .unwrap()
             });
             barrier.wait();
-            let review_won = db.queue_review_and_ack("o/r", 1, "t", &["r1".into()], &request()).unwrap();
+            let review_won = db
+                .queue_review_and_ack("o/r", 1, "t", &["r1".into()], &request())
+                .unwrap();
             let rebase_won = contender.join().unwrap();
             assert_ne!(review_won, rebase_won);
             assert_eq!(db.n("select count(*) from jobs", vec![]), 1);
             assert_eq!(db.comment_acknowledged("o/r", "r1").unwrap(), review_won);
-            assert_eq!(db.n("select count(*) from watcher_outbox", vec![]), i64::from(review_won));
-            assert_eq!(db.n("select count(*) from watcher_inbox where state='received'", vec![]), i64::from(rebase_won));
+            assert_eq!(
+                db.n("select count(*) from watcher_outbox", vec![]),
+                i64::from(review_won)
+            );
+            assert_eq!(
+                db.n(
+                    "select count(*) from watcher_inbox where state='received'",
+                    vec![]
+                ),
+                i64::from(rebase_won)
+            );
             if rebase_won {
                 db.run("update jobs set st='done' where kind='rebase'", vec![]);
-                assert!(db.queue_review_and_ack("o/r", 1, "t", &["r1".into()], &request()).unwrap());
+                assert!(db
+                    .queue_review_and_ack("o/r", 1, "t", &["r1".into()], &request())
+                    .unwrap());
             }
             assert!(db.comment_acknowledged("o/r", "r1").unwrap());
-            assert_eq!(db.n("select count(*) from jobs where st='ready'", vec![]), 1);
-            assert!(!db.queue_review_and_ack("o/r", 1, "t", &["r1".into()], &request()).unwrap());
+            assert_eq!(
+                db.n("select count(*) from jobs where st='ready'", vec![]),
+                1
+            );
+            assert!(!db
+                .queue_review_and_ack("o/r", 1, "t", &["r1".into()], &request())
+                .unwrap());
         }
         {
             let db = Db::open(&file).unwrap();
             assert!(db.comment_acknowledged("o/r", "r1").unwrap());
-            assert_eq!(db.n("select count(*) from jobs where kind='review'", vec![]), 1);
+            assert_eq!(
+                db.n("select count(*) from jobs where kind='review'", vec![]),
+                1
+            );
             assert_eq!(db.n("select count(*) from watcher_outbox", vec![]), 1);
-            assert_eq!(db.n("select count(*) from watcher_inbox where state='received'", vec![]), 0);
+            assert_eq!(
+                db.n(
+                    "select count(*) from watcher_inbox where state='received'",
+                    vec![]
+                ),
+                0
+            );
         }
         std::fs::remove_dir_all(path).unwrap();
     }
