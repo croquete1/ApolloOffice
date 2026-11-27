@@ -459,19 +459,82 @@ fn can_update_branch(
         && detail["base"]["sha"] != current_base
 }
 
-fn update_policy_allows(a: &Ax, repo: &str, number: i64, local: bool) -> Result<bool, String> {
+fn update_policy_allows(a: &Ax, repo: &str, number: i64, local: bool, activation: &str) -> Result<bool, String> {
     if a.hold("watcher") || a.drain.load(std::sync::atomic::Ordering::SeqCst) {
         return Ok(false);
     }
     a.db.try_n(
-        "select count(*) from rp where full=? and on_=1 and auto_merge=1
+        "select count(*) from rp where full=? and on_=1 and auto_merge=1 and merge_activation=?
          and (?=0 or local_merge=1)
          and not exists(select 1 from jobs where repo=rp.full and pr=?
            and kind in ('review','rebase','mergecheck') and st not in ('done','drop'))",
-        pa![repo.to_string(), local as i64, number],
+        pa![repo.to_string(), activation.to_string(), local as i64, number],
     )
     .map(|count| count == 1)
     .map_err(|error| format!("branch update policy unavailable: {error}"))
+}
+
+// Both update paths reserve the exact attempt before remote I/O. A storage
+// error, duplicate reservation or revoked policy never authorizes a PUT.
+fn reserve_branch_update(
+    db: &crate::db::Db,
+    repo: &str,
+    number: i64,
+    activation: &str,
+    local: bool,
+    target: (&str, &str),
+    at: i64,
+) -> rusqlite::Result<bool> {
+    use rusqlite::OptionalExtension;
+    let (head, base) = target;
+    if !valid_merge_activation(activation) || !valid_sha(head) || !valid_sha(base) {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let mut c = db.0.lock().unwrap();
+    let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let policy = "select exists(select 1 from rp where full=?1 and on_=1 and auto_merge=1 and merge_activation=?2
+        and (?3=0 or local_merge=1)
+        and not exists(select 1 from jobs where repo=rp.full and pr=?4
+          and kind in ('review','rebase','mergecheck') and st not in ('done','drop')))";
+    let authorized: bool = tx.query_row(
+        policy,
+        rusqlite::params![repo, activation, local as i64, number],
+        |row| row.get(0),
+    )?;
+    if !authorized {
+        return Ok(false);
+    }
+    let key = format!("steward:update:{repo}#{number}");
+    let previous: Option<String> = tx
+        .query_row("select v from kv where k=?", [&key], |row| row.get(0))
+        .optional()?;
+    if let Some(previous) = previous {
+        let previous: Value =
+            serde_json::from_str(&previous).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        if update_retry_deferred(&previous, head, base, at) {
+            return Ok(false);
+        }
+    }
+    let data = json!({"head":head,"base":base,"at":at,"status":"attempted","merge_activation":activation}).to_string();
+    let changed = tx.execute(
+        "insert into kv(k,v) values(?,?) on conflict(k) do update set v=excluded.v",
+        rusqlite::params![key, data],
+    )?;
+    let persisted: bool = tx.query_row(
+        "select exists(select 1 from kv where k=? and v=?)",
+        rusqlite::params![key, data],
+        |row| row.get(0),
+    )?;
+    let authorized: bool = tx.query_row(
+        policy,
+        rusqlite::params![repo, activation, local as i64, number],
+        |row| row.get(0),
+    )?;
+    if changed != 1 || !persisted || !authorized {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    tx.commit()?;
+    Ok(true)
 }
 
 // Both update paths require a fresh owned PR and the exact observed target.
@@ -774,10 +837,17 @@ fn final_gate(
 }
 
 async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result<bool, String> {
-    let local_enabled = a.db.n(
-        "select local_merge from rp where full=? and on_=1 and auto_merge=1",
+    let policy = a.db.try_all(
+        "select local_merge,merge_activation from rp where full=? and on_=1 and auto_merge=1",
         pa![repo.to_string()],
-    ) == 1;
+    ).map_err(|error| format!("merge policy unavailable: {error}"))?;
+    let Some(policy) = policy.first() else {
+        return Ok(false);
+    };
+    let Some(activation) = policy["merge_activation"].as_str().filter(|s| valid_merge_activation(s)) else {
+        return Ok(false);
+    };
+    let local_enabled = policy["local_merge"] == 1;
     // A triagem local NÃO considera um check CodeRabbit prova de testes.
     let selected = match if local_enabled {
         local_candidate(listed, assessed)
@@ -830,7 +900,13 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
             if !same_update_target(&detail, &latest, repo, base, &login)
                 || !can_update_branch(&latest, repo, base, current_base, &login)
                 || fresh_base["commit"]["sha"] != current_base
-                || !update_policy_allows(a, repo, number, false)?
+                || !update_policy_allows(a, repo, number, false, activation)?
+            {
+                return Ok(false);
+            }
+            if !reserve_branch_update(&a.db, repo, number, activation, false, (&head, current_base), crate::db::now())
+                .map_err(|error| format!("branch update reservation unavailable: {error}"))?
+                || !update_policy_allows(a, repo, number, false, activation)?
             {
                 return Ok(false);
             }
@@ -963,17 +1039,6 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
     }
     let mut local_evidence = None;
     if mode == MergeMode::Local {
-        let policy = a.db.try_all(
-            "select merge_activation from rp where full=? and on_=1 and auto_merge=1 and local_merge=1",
-            pa![repo.to_string()],
-        ).map_err(|error| format!("local merge activation unavailable: {error}"))?;
-        let Some(activation) = policy
-            .first()
-            .and_then(|row| row["merge_activation"].as_str())
-            .filter(|s| valid_merge_activation(s))
-        else {
-            return Ok(false);
-        };
         // A árvore testada tem de já conter a main atual como ancestral.
         // Caso contrário, o update-branch cria um commit normal (sem force-push),
         // e a PR será novamente testada e revista no próximo ciclo.
@@ -994,17 +1059,17 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
                     ghj(&["api", &format!("repos/{repo}/branches/{base}")], 40).await?;
                 if !same_update_target(&detail, &latest, repo, base, &login)
                     || fresh_base["commit"]["sha"] != base_sha
-                    || !update_policy_allows(a, repo, number, true)?
+                    || !update_policy_allows(a, repo, number, true, activation)?
                 {
                     return Ok(false);
                 }
                 // Reserve the backoff before an external attempt, including an
                 // ambiguous response, rather than retrying on every scan.
-                if a.db.run(
-                    "insert into kv(k,v) values(?,?) on conflict(k) do update set v=excluded.v",
-                    pa![update_key, json!({"head":head,"base":base_sha,"at":crate::db::now(),"status":"attempted"}).to_string()],
-                ) < 0 {
-                    return Err("could not persist branch update attempt".into());
+                if !reserve_branch_update(&a.db, repo, number, activation, true, (&head, base_sha), crate::db::now())
+                    .map_err(|error| format!("branch update reservation unavailable: {error}"))?
+                    || !update_policy_allows(a, repo, number, true, activation)?
+                {
+                    return Ok(false);
                 }
                 match ghj(
                     &[
@@ -1106,6 +1171,9 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
         {
             return Ok(false);
         }
+    }
+    if !update_policy_allows(a, repo, number, mode == MergeMode::Local, activation)? {
+        return Ok(false);
     }
     // sha=HEAD impede integrar um commit da PR que tenha sido alterado.
     let merged = ghj(
@@ -1428,24 +1496,60 @@ mod tests {
             47301,
             "apollo-office".into(),
         ));
-        assert!(!update_policy_allows(&a, repo, 1, false).unwrap());
+        assert!(!update_policy_allows(&a, repo, 1, false, "").unwrap());
         a.db.run(
             "insert into rp(full,on_,auto_merge,local_merge) values('o/r',1,1,0)",
             pa![],
         );
-        assert!(update_policy_allows(&a, repo, 1, false).unwrap());
-        assert!(!update_policy_allows(&a, repo, 1, true).unwrap());
+        let policy = a.db.one("select merge_activation from rp", pa![]).unwrap();
+        let activation = policy["merge_activation"].as_str().unwrap();
+        assert!(update_policy_allows(&a, repo, 1, false, activation).unwrap());
+        assert!(!update_policy_allows(&a, repo, 1, true, activation).unwrap());
         a.db.run("update rp set local_merge=1", pa![]);
-        assert!(update_policy_allows(&a, repo, 1, true).unwrap());
+        assert!(!update_policy_allows(&a, repo, 1, false, activation).unwrap());
+        let policy = a.db.one("select merge_activation from rp", pa![]).unwrap();
+        let activation = policy["merge_activation"].as_str().unwrap();
+        assert!(update_policy_allows(&a, repo, 1, true, activation).unwrap());
         a.db.run(
             "insert into jobs(repo,pr,kind,st) values('o/r',1,'review','ready')",
             pa![],
         );
-        assert!(!update_policy_allows(&a, repo, 1, true).unwrap());
-        assert!(update_policy_allows(&a, repo, 2, true).unwrap());
+        assert!(!update_policy_allows(&a, repo, 1, true, activation).unwrap());
+        assert!(update_policy_allows(&a, repo, 2, true, activation).unwrap());
         a.db.run("update jobs set st='done'", pa![]);
         a.db.run("update rp set auto_merge=0", pa![]);
-        assert!(!update_policy_allows(&a, repo, 1, true).unwrap());
+        assert!(!update_policy_allows(&a, repo, 1, true, activation).unwrap());
+    }
+
+    #[test]
+    fn branch_update_reservation_is_atomic_and_epoch_bound() {
+        let db = crate::db::Db::mem();
+        db.run(
+            "insert into rp(full,on_,auto_merge,local_merge) values('o/r',1,1,1)",
+            pa![],
+        );
+        let policy = db.one("select merge_activation from rp", pa![]).unwrap();
+        let activation = policy["merge_activation"].as_str().unwrap();
+        let head = "a".repeat(40);
+        let base = "b".repeat(40);
+        let reserve = |at| reserve_branch_update(&db, "o/r", 1, activation, true, (&head, &base), at);
+        for fault in [
+            "create trigger fail_reserve before insert on kv when new.k glob 'steward:update:*' begin select raise(ignore); end;",
+            "create trigger fail_reserve after insert on kv when new.k glob 'steward:update:*' begin update kv set v='{}' where k=new.k; end;",
+            "create trigger fail_reserve after insert on kv when new.k glob 'steward:update:*' begin update rp set auto_merge=0; end;",
+        ] {
+            db.0.lock().unwrap().execute_batch(fault).unwrap();
+            assert!(reserve(100).is_err());
+            assert_eq!(db.n("select count(*) from kv where k glob 'steward:update:*'", pa![]), 0);
+            assert_eq!(db.n("select auto_merge from rp", pa![]), 1);
+            db.run("drop trigger fail_reserve", pa![]);
+        }
+        assert!(reserve(100).unwrap());
+        assert!(!reserve(101).unwrap());
+        assert!(reserve(300_100).unwrap());
+        db.run("update rp set auto_merge=0", pa![]);
+        db.run("update rp set auto_merge=1", pa![]);
+        assert!(!reserve(600_100).unwrap());
     }
 
     #[test]
