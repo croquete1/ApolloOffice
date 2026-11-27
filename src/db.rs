@@ -1722,8 +1722,18 @@ impl Db {
         data.insert("watcher_observed_head".into(), json!(head));
         data.insert("watcher_observed_at".into(), json!(updated));
         let t = now();
+        let encoded = json!(data).to_string();
         if tx.execute("insert into jobs(repo,num,kind,title,url,st,why,d,pr,prio,t0,t1) values(?,?,'rebase',?,?,'ready',?,?,?,-1.0,?,?)",
-            rusqlite::params![repo,number,title,url,why,json!(data).to_string(),number,t,t])? != 1 {
+            rusqlite::params![repo,number,title,url,why,encoded,number,t,t])? != 1 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let job = tx.last_insert_rowid();
+        let persisted: bool = tx.query_row(
+            "select exists(select 1 from jobs where id=?1 and repo=?2 and num=?3 and pr=?3 and kind='rebase' and st='ready' and title=?4 and url=?5 and why=?6 and d=?7 and prio=-1.0 and t0=?8 and t1=?8)",
+            rusqlite::params![job, repo, number, title, url, why, encoded, t],
+            |row| row.get(0),
+        )?;
+        if !persisted {
             return Err(rusqlite::Error::InvalidQuery);
         }
         tx.commit()?;
@@ -4233,6 +4243,43 @@ mod watcher_storage_failure_tests {
         json!({"title":"PR","url":"https://github.com/o/r/pull/1","why":"conflict",
             "data":{"branch":"fix","head":"o/r","steward_rebase_base_ref":"main",
             "steward_rebase_base_sha":"b".repeat(40),"steward_rebase_activation":token}})
+    }
+
+    #[test]
+    fn rebase_admission_rejects_mutated_or_deleted_job_after_insert() {
+        let db = Db::mem();
+        seed(&db);
+        db.run(
+            "update prs set d=json_set(d,'$.base','main','$.default_branch','main')",
+            vec![],
+        );
+        let request = rebase_request(&db);
+        for fault in [
+            "create trigger mutate_rebase after insert on jobs when new.kind='rebase' begin update jobs set d='{}' where id=new.id; end;",
+            "create trigger mutate_rebase after insert on jobs when new.kind='rebase' begin update jobs set st='drop' where id=new.id; end;",
+            "create trigger mutate_rebase after insert on jobs when new.kind='rebase' begin delete from jobs where id=new.id; end;",
+        ] {
+            db.0.lock().unwrap().execute_batch(fault).unwrap();
+            assert!(db
+                .queue_watcher_rebase("o/r", 1, "t", HEAD, &request)
+                .is_err());
+            assert_pending(&db);
+            db.0.lock().unwrap().execute_batch("drop trigger mutate_rebase").unwrap();
+        }
+        assert!(db
+            .queue_watcher_rebase("o/r", 1, "t", HEAD, &request)
+            .unwrap());
+        let row = db
+            .one("select * from jobs where kind='rebase'", vec![])
+            .unwrap();
+        assert_eq!(row["d"]["watcher_observed_head"], HEAD);
+        assert_eq!(
+            row["d"]["steward_rebase_activation"],
+            request["data"]["steward_rebase_activation"]
+        );
+        assert!(!db
+            .queue_watcher_rebase("o/r", 1, "t", HEAD, &request)
+            .unwrap());
     }
 
     #[test]
