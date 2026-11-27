@@ -277,6 +277,85 @@ mod t {
     }
 
     #[test]
+    fn disk_full_admission_does_not_reserve_lane_or_persist_history() {
+        let db = crate::db::Db::mem();
+        db.run("insert into rp(full,ci) values('o/r','true')", pa![]);
+        db.run("insert into hs(id,ln,on_) values('local',2,1)", pa![]);
+        let id = db.jnew("o/r", 1, "fix", "fixture", "", "ready", "", json!({}), None, 0.0);
+        let a = std::sync::Arc::new(crate::app::App::new(
+            db, std::env::temp_dir(), 1, "x".into(),
+        ));
+        {
+            let c = a.db.0.lock().unwrap();
+            c.execute_batch(
+                "create table admission_pressure(payload blob);
+                 create trigger admission_disk_full after insert on job_schedule
+                 begin insert into admission_pressure values(zeroblob(1048576)); end;",
+            ).unwrap();
+            let pages: i64 = c.pragma_query_value(None, "page_count", |row| row.get(0)).unwrap();
+            c.pragma_update(None, "max_page_count", pages).unwrap();
+        }
+        let error = record_ci_admission(&a, "o/r", "", id, || panic!("reserved on failed write"))
+            .unwrap_err();
+        assert_eq!(error.sqlite_error_code(), Some(rusqlite::ErrorCode::DiskFull));
+        assert!(!admit(&a, "o/r", "local", id));
+        assert!(a.act.lock().unwrap().is_empty());
+        assert!(a.lk.lock().unwrap().is_empty());
+        assert_eq!(a.db.jg(id).unwrap().st, "ready");
+        assert_eq!(a.db.n("select count(*) from job_schedule", pa![]), 0);
+        assert_eq!(a.db.n("select count(*) from admission_pressure", pa![]), 0);
+        a.db.run("drop trigger admission_disk_full", pa![]);
+        a.db.0.lock().unwrap().pragma_update(None, "max_page_count", 1_000_000).unwrap();
+        assert!(admit(&a, "o/r", "local", id));
+        assert!(a.act.lock().unwrap().contains("o/r local"));
+        assert!(a.lk.lock().unwrap().contains(&id));
+        assert_eq!(a.db.n("select count(*) from job_schedule", pa![]), 1);
+    }
+
+    #[test]
+    fn busy_admission_rechecks_hold_committed_by_independent_writer() {
+        let path = std::env::temp_dir().join(format!("apollo-admit-busy-{}", rand::random::<u64>()));
+        std::fs::create_dir(&path).unwrap();
+        let file = path.join("state.db");
+        {
+            let db = crate::db::Db::open(&file).unwrap();
+            db.run("insert into rp(full,ci) values('o/r','true')", pa![]);
+            db.run("insert into hs(id,ln,on_) values('local',2,1)", pa![]);
+            let id = db.jnew("o/r", 1, "fix", "fixture", "", "ready", "", json!({}), None, 0.0);
+            db.0.lock().unwrap().busy_timeout(std::time::Duration::ZERO).unwrap();
+            let a = std::sync::Arc::new(crate::app::App::new(
+                db, path.clone(), 1, "x".into(),
+            ));
+            let mut other = rusqlite::Connection::open(&file).unwrap();
+            let tx = other.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
+            tx.execute("insert into kv(k,v) values(?1,?2)", rusqlite::params![
+                "cired:o/r", json!({"sha":"a".repeat(40),"t":1}).to_string()
+            ]).unwrap();
+            let error = record_ci_admission(&a, "o/r", "", id, || panic!("reserved while busy"))
+                .unwrap_err();
+            assert_eq!(error.sqlite_error_code(), Some(rusqlite::ErrorCode::DatabaseBusy));
+            assert!(!admit(&a, "o/r", "local", id));
+            assert!(a.act.lock().unwrap().is_empty());
+            assert!(a.lk.lock().unwrap().is_empty());
+            tx.commit().unwrap();
+            assert!(!admit(&a, "o/r", "local", id));
+            assert_eq!(a.db.n("select count(*) from job_schedule", pa![]), 0);
+            assert!(a.act.lock().unwrap().is_empty());
+            assert!(a.lk.lock().unwrap().is_empty());
+            let suffix = hk(&a, "local");
+            let rows = ci_marker_rows(&a.db.0.lock().unwrap(), "o/r", &suffix).unwrap();
+            let generation = crate::gh::begin_head_observation(&a, "o/r");
+            assert!(crate::gh::publish_ci_head_observation(
+                &a, "o/r", generation, &json!({"s":"b".repeat(40)}), &rows
+            ));
+            assert!(admit(&a, "o/r", "local", id));
+            assert_eq!(a.db.n("select count(*) from job_schedule", pa![]), 1);
+            assert!(a.lk.lock().unwrap().contains(&id));
+        }
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
     fn removed_repository_cannot_admit_stale_submission() {
         let db = crate::db::Db::mem();
         db.run(
