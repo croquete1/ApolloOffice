@@ -78,7 +78,7 @@ create index if not exists coderabbit_findings_pr on coderabbit_findings(repo,nu
 create table if not exists coderabbit_cycles(repo text not null, number integer not null, cycles integer not null check(cycles>=0), primary key(repo,number));
 ";
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 pub(crate) fn valid_git_sha(sha: &str) -> bool {
     sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit())
@@ -129,6 +129,11 @@ const LEGACY_COLUMNS: &[(&str, &str, &str)] = &[
         "rp",
         "steward_activation",
         "alter table rp add column steward_activation text not null default ''",
+    ),
+    (
+        "rp",
+        "recovery_activation",
+        "alter table rp add column recovery_activation text not null default ''",
     ),
     (
         "rp",
@@ -352,6 +357,24 @@ fn init(c: &mut Connection) -> anyhow::Result<()> {
         when old.on_ is not new.on_ or old.steward_repair is not new.steward_repair or old.full is not new.full
         begin
           update rp set steward_activation=lower(hex(randomblob(16))) where id=new.id;
+        end;
+    ")?;
+    // Recovery authorization is a separate epoch: changing CI or automatic
+    // recovery and then restoring it must not revive a pre-I/O snapshot.
+    tx.execute_batch("
+        update rp set recovery_activation=lower(hex(randomblob(16))) where recovery_activation='';
+        create trigger if not exists recovery_activation_insert
+        after insert on rp
+        begin
+          update rp set recovery_activation=lower(hex(randomblob(16))) where id=new.id;
+        end;
+        create trigger if not exists recovery_activation_change
+        after update of on_,steward_repair,full,ci,auto_recover_drops on rp
+        when old.on_ is not new.on_ or old.steward_repair is not new.steward_repair
+          or old.full is not new.full or old.ci is not new.ci
+          or old.auto_recover_drops is not new.auto_recover_drops
+        begin
+          update rp set recovery_activation=lower(hex(randomblob(16))) where id=new.id;
         end;
     ")?;
     // Backfill recoverable history once; a cleared legacy job may only be
@@ -2084,6 +2107,54 @@ mod strict_db_tests {
         .unwrap();
         assert_ne!(token(&c), first);
         assert_ne!(token(&c), renamed);
+    }
+
+    #[test]
+    fn recovery_epoch_migrates_and_rotates_without_revoking_steward_receipts() {
+        let mut c = Connection::open_in_memory().unwrap();
+        init(&mut c).unwrap();
+        c.execute_batch(
+            "drop trigger recovery_activation_insert;
+             drop trigger recovery_activation_change;
+             alter table rp drop column recovery_activation;
+             pragma user_version=7;
+             insert into rp(full,on_,ci,auto_recover_drops,steward_repair)
+             values('o/r',1,'cargo test',1,1);",
+        ).unwrap();
+        let steward: String = c.query_row("select steward_activation from rp", [], |r| r.get(0)).unwrap();
+        init(&mut c).unwrap();
+        fn recovery(c: &Connection) -> String {
+            c.query_row("select recovery_activation from rp", [], |r| r.get(0)).unwrap()
+        }
+        let first = recovery(&c);
+        assert_eq!(first.len(), 32);
+        init(&mut c).unwrap();
+        assert_eq!(recovery(&c), first);
+        c.execute("update rp set ci='cargo test',auto_recover_drops=1", []).unwrap();
+        assert_eq!(recovery(&c), first);
+        let mut last = first.clone();
+        for change in [
+            "update rp set ci='cargo test --locked'",
+            "update rp set ci='cargo test'",
+            "update rp set auto_recover_drops=0",
+            "update rp set auto_recover_drops=1",
+        ] {
+            c.execute(change, []).unwrap();
+            let token = recovery(&c);
+            assert_ne!(token, last);
+            assert_ne!(token, first);
+            last = token;
+        }
+        let actual_steward: String = c.query_row("select steward_activation from rp", [], |r| r.get(0)).unwrap();
+        assert_eq!(actual_steward, steward);
+        c.execute("update rp set on_=0", []).unwrap();
+        assert_ne!(recovery(&c), last);
+        let disabled = recovery(&c);
+        c.execute("update rp set on_=1", []).unwrap();
+        assert_ne!(recovery(&c), disabled);
+        c.execute("delete from rp", []).unwrap();
+        c.execute("insert into rp(full,on_,ci,auto_recover_drops) values('o/r',1,'cargo test',1)", []).unwrap();
+        assert_ne!(recovery(&c), first);
     }
 
     #[test]
