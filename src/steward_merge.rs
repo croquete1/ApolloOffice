@@ -1902,18 +1902,16 @@ mod tests {
             assert_eq!(previous["at"], 100);
             let activation = previous["merge_activation"].as_str().unwrap();
             assert!(!reserve_branch_update(&db, "o/r", 1, activation, true, target, 101).unwrap());
-            let observed = observed_branch_update(
-                &previous,
-                &head,
-                &old_comparison,
-                &base_comparison,
-                200,
-            )
-            .unwrap();
+            let observed =
+                observed_branch_update(&previous, &head, &old_comparison, &base_comparison, 200)
+                    .unwrap();
             assert!(replace_branch_update_record(&db, "o/r", 1, &previous, &observed).unwrap());
             drop(db);
             let db = crate::db::Db::open(&path).unwrap();
-            assert_eq!(load_branch_update(&db, "o/r", 1).unwrap(), Some(observed.clone()));
+            assert_eq!(
+                load_branch_update(&db, "o/r", 1).unwrap(),
+                Some(observed.clone())
+            );
             assert!(!replace_branch_update_record(&db, "o/r", 1, &previous, &observed).unwrap());
         }
         std::fs::remove_dir_all(root).unwrap();
