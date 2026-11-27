@@ -4079,21 +4079,31 @@ mod watcher_rebase_admission_tests {
         db.run("insert into rp(full) values('o/r')", vec![]);
         db.run(
             "insert into prs(repo,num,st,upd,d) values('o/r',1,'open','t',?)",
-            crate::pa![json!({"watcher_head":HEAD,"base":"main","default_branch":"main"}).to_string()],
+            crate::pa![
+                json!({"watcher_head":HEAD,"base":"main","default_branch":"main"}).to_string()
+            ],
         );
-        let token = db.one("select steward_activation from rp", vec![]).unwrap()["steward_activation"].clone();
+        let token = db.one("select steward_activation from rp", vec![]).unwrap()
+            ["steward_activation"]
+            .clone();
         let mut request = json!({"title":"PR","url":"https://github.com/o/r/pull/1","why":"conflict","data":{"branch":"fix","head":"o/r","steward_rebase_base_ref":"main","steward_rebase_base_sha":"b".repeat(40),"steward_rebase_activation":token}});
         for keys in [
             vec!["steward_rebase_base_ref"],
             vec!["steward_rebase_base_sha"],
             vec!["steward_rebase_activation"],
-            vec!["steward_rebase_base_ref", "steward_rebase_base_sha", "steward_rebase_activation"],
+            vec![
+                "steward_rebase_base_ref",
+                "steward_rebase_base_sha",
+                "steward_rebase_activation",
+            ],
         ] {
             let mut incomplete = request.clone();
             for key in keys {
                 incomplete["data"].as_object_mut().unwrap().remove(key);
             }
-            assert!(db.queue_watcher_rebase("o/r", 1, "t", HEAD, &incomplete).is_err());
+            assert!(db
+                .queue_watcher_rebase("o/r", 1, "t", HEAD, &incomplete)
+                .is_err());
         }
         assert_eq!(db.n("select count(*) from jobs", vec![]), 0);
         assert!(db
@@ -4108,10 +4118,9 @@ mod watcher_rebase_admission_tests {
         assert!(db
             .queue_watcher_rebase("o/r", 1, "t", HEAD, &request)
             .is_err());
-        request["data"]["steward_rebase_activation"] = db
-            .one("select steward_activation from rp", vec![])
-            .unwrap()["steward_activation"]
-            .clone();
+        request["data"]["steward_rebase_activation"] =
+            db.one("select steward_activation from rp", vec![]).unwrap()["steward_activation"]
+                .clone();
         let job = db.jnew(
             "o/r",
             1,
