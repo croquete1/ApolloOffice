@@ -459,7 +459,13 @@ fn can_update_branch(
         && detail["base"]["sha"] != current_base
 }
 
-fn update_policy_allows(a: &Ax, repo: &str, number: i64, local: bool, activation: &str) -> Result<bool, String> {
+fn update_policy_allows(
+    a: &Ax,
+    repo: &str,
+    number: i64,
+    local: bool,
+    activation: &str,
+) -> Result<bool, String> {
     if a.hold("watcher") || a.drain.load(std::sync::atomic::Ordering::SeqCst) {
         return Ok(false);
     }
@@ -468,7 +474,12 @@ fn update_policy_allows(a: &Ax, repo: &str, number: i64, local: bool, activation
          and (?=0 or local_merge=1)
          and not exists(select 1 from jobs where repo=rp.full and pr=?
            and kind in ('review','rebase','mergecheck') and st not in ('done','drop'))",
-        pa![repo.to_string(), activation.to_string(), local as i64, number],
+        pa![
+            repo.to_string(),
+            activation.to_string(),
+            local as i64,
+            number
+        ],
     )
     .map(|count| count == 1)
     .map_err(|error| format!("branch update policy unavailable: {error}"))
@@ -515,7 +526,9 @@ fn reserve_branch_update(
             return Ok(false);
         }
     }
-    let data = json!({"head":head,"base":base,"at":at,"status":"attempted","merge_activation":activation}).to_string();
+    let data =
+        json!({"head":head,"base":base,"at":at,"status":"attempted","merge_activation":activation})
+            .to_string();
     let changed = tx.execute(
         "insert into kv(k,v) values(?,?) on conflict(k) do update set v=excluded.v",
         rusqlite::params![key, data],
@@ -837,14 +850,19 @@ fn final_gate(
 }
 
 async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result<bool, String> {
-    let policy = a.db.try_all(
-        "select local_merge,merge_activation from rp where full=? and on_=1 and auto_merge=1",
-        pa![repo.to_string()],
-    ).map_err(|error| format!("merge policy unavailable: {error}"))?;
+    let policy =
+        a.db.try_all(
+            "select local_merge,merge_activation from rp where full=? and on_=1 and auto_merge=1",
+            pa![repo.to_string()],
+        )
+        .map_err(|error| format!("merge policy unavailable: {error}"))?;
     let Some(policy) = policy.first() else {
         return Ok(false);
     };
-    let Some(activation) = policy["merge_activation"].as_str().filter(|s| valid_merge_activation(s)) else {
+    let Some(activation) = policy["merge_activation"]
+        .as_str()
+        .filter(|s| valid_merge_activation(s))
+    else {
         return Ok(false);
     };
     let local_enabled = policy["local_merge"] == 1;
@@ -904,8 +922,16 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
             {
                 return Ok(false);
             }
-            if !reserve_branch_update(&a.db, repo, number, activation, false, (&head, current_base), crate::db::now())
-                .map_err(|error| format!("branch update reservation unavailable: {error}"))?
+            if !reserve_branch_update(
+                &a.db,
+                repo,
+                number,
+                activation,
+                false,
+                (&head, current_base),
+                crate::db::now(),
+            )
+            .map_err(|error| format!("branch update reservation unavailable: {error}"))?
                 || !update_policy_allows(a, repo, number, false, activation)?
             {
                 return Ok(false);
@@ -1065,8 +1091,16 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
                 }
                 // Reserve the backoff before an external attempt, including an
                 // ambiguous response, rather than retrying on every scan.
-                if !reserve_branch_update(&a.db, repo, number, activation, true, (&head, base_sha), crate::db::now())
-                    .map_err(|error| format!("branch update reservation unavailable: {error}"))?
+                if !reserve_branch_update(
+                    &a.db,
+                    repo,
+                    number,
+                    activation,
+                    true,
+                    (&head, base_sha),
+                    crate::db::now(),
+                )
+                .map_err(|error| format!("branch update reservation unavailable: {error}"))?
                     || !update_policy_allows(a, repo, number, true, activation)?
                 {
                     return Ok(false);
@@ -1532,7 +1566,8 @@ mod tests {
         let activation = policy["merge_activation"].as_str().unwrap();
         let head = "a".repeat(40);
         let base = "b".repeat(40);
-        let reserve = |at| reserve_branch_update(&db, "o/r", 1, activation, true, (&head, &base), at);
+        let reserve =
+            |at| reserve_branch_update(&db, "o/r", 1, activation, true, (&head, &base), at);
         for fault in [
             "create trigger fail_reserve before insert on kv when new.k glob 'steward:update:*' begin select raise(ignore); end;",
             "create trigger fail_reserve after insert on kv when new.k glob 'steward:update:*' begin update kv set v='{}' where k=new.k; end;",
