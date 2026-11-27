@@ -4781,6 +4781,44 @@ fn hk(a: &Ax, h: &str) -> String {
     }
 }
 
+// A CI failure is superseded only by two valid, different Git object IDs.
+fn ci_marker_superseded(head: &Value, marker: &Value) -> bool {
+    let Some(head) = head["s"].as_str().filter(|sha| crate::db::valid_git_sha(sha)) else {
+        return false;
+    };
+    let Some(failed) = marker["sha"].as_str().filter(|sha| crate::db::valid_git_sha(sha)) else {
+        return false;
+    };
+    !head.eq_ignore_ascii_case(failed)
+}
+
+#[cfg(test)]
+#[test]
+fn ci_marker_requires_two_valid_distinct_object_ids() {
+    let failed = json!({"sha":"a".repeat(40)});
+    assert!(ci_marker_superseded(&json!({"s":"b".repeat(40)}), &failed));
+    for head in [
+        Value::Null,
+        json!({}),
+        json!({"s":42}),
+        json!({"s":"invalid"}),
+        json!({"s":"g".repeat(40)}),
+        json!({"s":"a".repeat(39)}),
+        json!({"s":"a".repeat(40)}),
+        json!({"s":"A".repeat(40)}),
+    ] {
+        assert!(!ci_marker_superseded(&head, &failed));
+    }
+    for marker in [
+        Value::Null,
+        json!({}),
+        json!({"sha":"invalid"}),
+        json!({"sha":"g".repeat(40)}),
+    ] {
+        assert!(!ci_marker_superseded(&json!({"s":"b".repeat(40)}), &marker));
+    }
+}
+
 async fn red(a: &Ax, r: &str, h: &str) -> bool {
     let mut cr = a.db.kg(&format!("cired:{r}"));
     if cr.is_null() {
@@ -4793,7 +4831,9 @@ async fn red(a: &Ax, r: &str, h: &str) -> bool {
         return false;
     }
     let k = format!("head:{r}");
-    let h = match crate::gh::cg(a, &k, 600_000) {
+    let h = match crate::gh::cg(a, &k, 600_000).filter(|v| {
+        v["s"].as_str().is_some_and(crate::db::valid_git_sha)
+    }) {
         Some(v) => v,
         None => {
             let v = ghj(
@@ -4807,11 +4847,13 @@ async fn red(a: &Ax, r: &str, h: &str) -> bool {
             )
             .await
             .unwrap_or(Value::Null);
-            crate::gh::cs(a, &k, &v);
+            if v["s"].as_str().is_some_and(crate::db::valid_git_sha) {
+                crate::gh::cs(a, &k, &v);
+            }
             v
         }
     };
-    !(h["s"].is_string() && cr["sha"].is_string() && h["s"] != cr["sha"])
+    !ci_marker_superseded(&h, &cr)
 }
 
 /// Safe wait boundaries retain the approved submission or verified commit;
