@@ -585,7 +585,10 @@ fn admit_recheck(
                and json_extract(d,'$.expected_head')=?
                and json_extract(d,'$.expected_base')=?
          )",
-        rusqlite::params![repo, number, title, url, data, number, t, t, repo, repo, number, repo, repo, number, head, base],
+        rusqlite::params![
+            repo, number, title, url, data, number, t, t, repo, repo, number, repo, repo, number,
+            head, base
+        ],
     )?;
     let job = tx.last_insert_rowid();
     let persisted: bool = tx.query_row(
