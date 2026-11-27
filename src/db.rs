@@ -1546,8 +1546,10 @@ impl Db {
             .ok_or(rusqlite::Error::InvalidQuery)?;
         let t = now();
         let data = json!({"title":title,"body":body,"after":number,"source_comments":ids});
-        tx.execute("insert into jobs(repo,num,kind,title,url,st,why,d,prio,t0,t1) values(?,0,'fix',?,?,'vet',?,?,-1.0,?,?)",
-            rusqlite::params![repo,title,url,why,data.to_string(),t,t])?;
+        if tx.execute("insert into jobs(repo,num,kind,title,url,st,why,d,prio,t0,t1) values(?,0,'fix',?,?,'vet',?,?,-1.0,?,?)",
+            rusqlite::params![repo,title,url,why,data.to_string(),t,t])? != 1 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
         Self::ack_merged_in_tx(&tx, repo, number, updated, ids, complete)?;
         tx.commit()?;
         crate::app::chg();
@@ -2390,6 +2392,52 @@ mod late_followup_tests {
             }
             assert!(!db.comment_acknowledged("o/r", "i1").unwrap());
             assert_eq!(db.n("select count(*) from jobs", vec![]), 0);
+        }
+    }
+
+    #[test]
+    fn ignored_followup_insert_preserves_comments_and_cursor() {
+        for complete in [false, true] {
+            let db = Db::mem();
+            db.run("insert into rp(full) values('o/r')", vec![]);
+            db.run(
+                "insert into prs(repo,num,st,upd,d) values('o/r',1,'merged','new',?)",
+                crate::pa![json!({"comment_seen_at":"old"}).to_string()],
+            );
+            let request = json!({"title":"follow-up","body":"verified request","url":"https://example.test","why":"maintainer"});
+            let ids = vec!["i1".into()];
+            db.0.lock()
+                .unwrap()
+                .execute_batch(
+                    "create trigger ignore_followup before insert on jobs
+                     when new.kind='fix' begin select raise(ignore); end;",
+                )
+                .unwrap();
+            assert!(db
+                .queue_followup_and_ack("o/r", 1, "new", &ids, &request, complete)
+                .is_err());
+            assert!(!db.comment_acknowledged("o/r", "i1").unwrap());
+            assert_eq!(db.n("select count(*) from jobs", vec![]), 0);
+            assert_eq!(
+                db.one("select d from prs where repo='o/r' and num=1", vec![])
+                    .unwrap()["d"]["comment_seen_at"],
+                "old"
+            );
+            db.run("drop trigger ignore_followup", vec![]);
+            assert!(db
+                .queue_followup_and_ack("o/r", 1, "new", &ids, &request, complete)
+                .unwrap());
+            assert!(db.comment_acknowledged("o/r", "i1").unwrap());
+            assert_eq!(db.n("select count(*) from jobs", vec![]), 1);
+            assert_eq!(
+                db.one("select d from prs where repo='o/r' and num=1", vec![])
+                    .unwrap()["d"]["comment_seen_at"],
+                if complete { "new" } else { "old" }
+            );
+            assert!(db
+                .queue_followup_and_ack("o/r", 1, "new", &ids, &request, complete)
+                .unwrap());
+            assert_eq!(db.n("select count(*) from jobs", vec![]), 1);
         }
     }
 
