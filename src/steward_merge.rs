@@ -663,14 +663,19 @@ fn observed_branch_update(
 ) -> Option<Value> {
     let old_head = previous["head"].as_str()?;
     let base = previous["base"].as_str()?;
-    if !matches!(previous["status"].as_str(), Some("attempted" | "accepted" | "uncertain"))
-        || !valid_sha(old_head)
+    if !matches!(
+        previous["status"].as_str(),
+        Some("attempted" | "accepted" | "uncertain")
+    ) || !valid_sha(old_head)
         || !valid_sha(base)
         || !valid_sha(new_head)
         || old_head == new_head
         || old_comparison["status"] != "ahead"
         || old_comparison["merge_base_commit"]["sha"] != old_head
-        || !matches!(base_comparison["status"].as_str(), Some("ahead" | "identical"))
+        || !matches!(
+            base_comparison["status"].as_str(),
+            Some("ahead" | "identical")
+        )
         || base_comparison["merge_base_commit"]["sha"] != base
     {
         return None;
@@ -707,24 +712,50 @@ async fn reconcile_branch_update(a: &Ax, repo: &str, number: i64) -> Result<(), 
         return Ok(());
     };
     let previous = &previous;
-    if !matches!(previous["status"].as_str(), Some("attempted" | "accepted" | "uncertain")) {
+    if !matches!(
+        previous["status"].as_str(),
+        Some("attempted" | "accepted" | "uncertain")
+    ) {
         return Ok(());
     }
-    let old = previous["head"].as_str().filter(|sha| valid_sha(sha)).ok_or("invalid reserved HEAD")?;
-    let base = previous["base"].as_str().filter(|sha| valid_sha(sha)).ok_or("invalid reserved base")?;
+    let old = previous["head"]
+        .as_str()
+        .filter(|sha| valid_sha(sha))
+        .ok_or("invalid reserved HEAD")?;
+    let base = previous["base"]
+        .as_str()
+        .filter(|sha| valid_sha(sha))
+        .ok_or("invalid reserved base")?;
     let detail = ghj(&["api", &format!("repos/{repo}/pulls/{number}")], 40).await?;
     let Some(new_head) = detail["head"]["sha"].as_str().filter(|sha| valid_sha(sha)) else {
         return Ok(());
     };
-    if detail["number"] != number || detail["state"] != "open" || detail["draft"] != false
-        || detail["head"]["repo"]["full_name"] != repo || detail["base"]["repo"]["full_name"] != repo
+    if detail["number"] != number
+        || detail["state"] != "open"
+        || detail["draft"] != false
+        || detail["head"]["repo"]["full_name"] != repo
+        || detail["base"]["repo"]["full_name"] != repo
         || new_head == old
     {
         return Ok(());
     }
-    let old_comparison = ghj(&["api", &format!("repos/{repo}/compare/{old}...{new_head}")], 40).await?;
-    let base_comparison = ghj(&["api", &format!("repos/{repo}/compare/{base}...{new_head}")], 40).await?;
-    let Some(observed) = observed_branch_update(previous, new_head, &old_comparison, &base_comparison, crate::db::now()) else {
+    let old_comparison = ghj(
+        &["api", &format!("repos/{repo}/compare/{old}...{new_head}")],
+        40,
+    )
+    .await?;
+    let base_comparison = ghj(
+        &["api", &format!("repos/{repo}/compare/{base}...{new_head}")],
+        40,
+    )
+    .await?;
+    let Some(observed) = observed_branch_update(
+        previous,
+        new_head,
+        &old_comparison,
+        &base_comparison,
+        crate::db::now(),
+    ) else {
         return Ok(());
     };
     if replace_branch_update_record(&a.db, repo, number, previous, &observed)
@@ -1758,16 +1789,36 @@ mod tests {
         let key = "steward:update:o/r#1";
         let old_compare = json!({"status":"ahead","merge_base_commit":{"sha":old}});
         let base_compare = json!({"status":"ahead","merge_base_commit":{"sha":base}});
-        assert!(observed_branch_update(&previous, &old, &old_compare, &base_compare, 200).is_none());
-        assert!(observed_branch_update(&previous, &head, &json!({"status":"ahead"}), &base_compare, 200).is_none());
-        assert!(observed_branch_update(&previous, &head, &old_compare, &json!({"status":"diverged","merge_base_commit":{"sha":base}}), 200).is_none());
-        let observed = observed_branch_update(&previous, &head, &old_compare, &base_compare, 200).unwrap();
+        assert!(
+            observed_branch_update(&previous, &old, &old_compare, &base_compare, 200).is_none()
+        );
+        assert!(observed_branch_update(
+            &previous,
+            &head,
+            &json!({"status":"ahead"}),
+            &base_compare,
+            200
+        )
+        .is_none());
+        assert!(observed_branch_update(
+            &previous,
+            &head,
+            &old_compare,
+            &json!({"status":"diverged","merge_base_commit":{"sha":base}}),
+            200
+        )
+        .is_none());
+        let observed =
+            observed_branch_update(&previous, &head, &old_compare, &base_compare, 200).unwrap();
         assert_eq!(observed["status"], "observed");
         assert_eq!(observed["observed_head"], head);
         assert_eq!(observed["at"], 100);
         assert!(load_branch_update(&db, "o/r", 1).unwrap().is_none());
         db.ks(key, &previous);
-        assert_eq!(load_branch_update(&db, "o/r", 1).unwrap(), Some(previous.clone()));
+        assert_eq!(
+            load_branch_update(&db, "o/r", 1).unwrap(),
+            Some(previous.clone())
+        );
         db.run("create trigger ignore_observation before update on kv when new.k glob 'steward:update:*' begin select raise(ignore); end;", pa![]);
         assert!(replace_branch_update_record(&db, "o/r", 1, &previous, &observed).is_err());
         assert_eq!(db.kg(key), previous);
@@ -1775,7 +1826,9 @@ mod tests {
         assert!(replace_branch_update_record(&db, "o/r", 1, &previous, &observed).unwrap());
         assert_eq!(db.kg(key), observed);
         assert!(!replace_branch_update_record(&db, "o/r", 1, &previous, &observed).unwrap());
-        assert!(observed_branch_update(&observed, &head, &old_compare, &base_compare, 300).is_none());
+        assert!(
+            observed_branch_update(&observed, &head, &old_compare, &base_compare, 300).is_none()
+        );
     }
 
     #[test]
