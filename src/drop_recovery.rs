@@ -58,7 +58,7 @@ struct RecoverySnapshot {
 fn recovery_job(a: &Ax, id: i64) -> Option<(Job, RecoverySnapshot)> {
     let rows =
         a.db.try_all(
-            "select jobs.*, rp.steward_activation as recovery_activation, rp.ci as recovery_ci
+            "select jobs.*, rp.recovery_activation as recovery_activation, rp.ci as recovery_ci
              from jobs join rp on rp.full=jobs.repo
              where jobs.id=? and not exists(select 1 from kv where k=?)",
             pa![id, format!("submit_publication:{id}")],
@@ -342,7 +342,7 @@ fn commit_retry(
            and not exists(select fullkey,type,atom from json_tree(?8)
              except select fullkey,type,atom from json_tree(jobs.d))
            and exists(select 1 from rp where full=jobs.repo and on_=1
-             and steward_activation=?16 and ci=?17
+             and recovery_activation=?16 and ci=?17
              and trim(ci)<>'' and (?9=0 or auto_recover_drops=1))
            and (?9=0 or not exists(select 1 from kv where k=?10 and v<>'false'))
            and (jobs.num<=0 or not exists (
@@ -788,6 +788,21 @@ mod tests {
         a.db.run("update rp set auto_recover_drops=0", vec![]);
         assert!(!commit().unwrap());
         a.db.run("update rp set auto_recover_drops=1", vec![]);
+        // Restoring the value must not revive the original authorization.
+        assert!(!commit().unwrap());
+        assert_eq!(a.db.jg(id).unwrap().st, "drop");
+        let (fresh_job, fresh_snapshot) = recovery_job(&a, id).unwrap();
+        let commit = || {
+            commit_retry(
+                &a,
+                &fresh_job,
+                &fresh_snapshot,
+                true,
+                "ready",
+                "retry",
+                &json!({}),
+            )
+        };
         a.db.ks(&format!("kill:{id}"), &json!(true));
         assert!(!commit().unwrap());
         assert_eq!(a.db.kg(&format!("kill:{id}")), true);
@@ -833,6 +848,8 @@ mod tests {
                 "recreate",
                 "reactivate",
                 "ci",
+                "ci_aba",
+                "auto_aba",
                 "none",
                 "cancel",
                 "newer_head",
@@ -886,6 +903,14 @@ mod tests {
                                 }
                                 "ci" => {
                                     a.db.run("update rp set ci='cargo test --locked'", pa![]);
+                                }
+                                "ci_aba" => {
+                                    a.db.run("update rp set ci='cargo test --locked'", pa![]);
+                                    a.db.run("update rp set ci='cargo test'", pa![]);
+                                }
+                                "auto_aba" => {
+                                    a.db.run("update rp set auto_recover_drops=0", pa![]);
+                                    a.db.run("update rp set auto_recover_drops=1", pa![]);
                                 }
                                 _ => {}
                             }
