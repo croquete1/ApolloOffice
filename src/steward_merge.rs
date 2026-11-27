@@ -751,8 +751,12 @@ fn reconciliation_target<'a>(
     {
         return None;
     }
-    let head = detail["head"]["sha"].as_str().filter(|sha| valid_sha(sha))?;
-    let base = detail["base"]["sha"].as_str().filter(|sha| valid_sha(sha))?;
+    let head = detail["head"]["sha"]
+        .as_str()
+        .filter(|sha| valid_sha(sha))?;
+    let base = detail["base"]["sha"]
+        .as_str()
+        .filter(|sha| valid_sha(sha))?;
     let head_ref = detail["head"]["ref"].as_str().filter(|r| !r.is_empty())?;
     let base_ref = detail["base"]["ref"].as_str().filter(|r| !r.is_empty())?;
     if head_ref == base_ref {
