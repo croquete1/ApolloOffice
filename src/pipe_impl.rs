@@ -5392,8 +5392,10 @@ fn repo_limit_reached(open: i64, daily: i64, max_open: i64, max_daily: i64) -> b
 }
 
 pub fn bl(a: &Ax, r: &str) -> i64 {
-    if a.pending_ci_holds.lock().unwrap().keys().any(|(repo, _)| repo == r)
-        || !a.db.kg(&format!("cired:{r}")).is_null() {
+    // Release the pending lock before touching SQLite: writers acquire
+    // these locks in database -> pending order.
+    let pending = a.pending_ci_holds.lock().unwrap().keys().any(|(repo, _)| repo == r);
+    if pending || !a.db.kg(&format!("cired:{r}")).is_null() {
         return 0;
     }
     hosts(a)
