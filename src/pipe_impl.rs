@@ -3071,7 +3071,29 @@ async fn fix(a: &Ax, j: &mut Job, fb0: String, k0: u64) -> R<Value> {
     ))
 }
 
+// New Steward conflict jobs carry the exact base approved at routing.
+// Legacy jobs without either field retain their existing behavior.
+fn rebase_base_matches(j: &Job, actual_ref: &str, actual_sha: &str) -> R<()> {
+    if j.kind != "rebase" {
+        return Ok(());
+    }
+    let expected_ref = j.d.get("steward_rebase_base_ref");
+    let expected_sha = j.d.get("steward_rebase_base_sha");
+    if expected_ref.is_none() && expected_sha.is_none() {
+        return Ok(());
+    }
+    if actual_ref.trim().is_empty()
+        || expected_ref.and_then(Value::as_str) != Some(actual_ref)
+        || !crate::db::valid_git_sha(actual_sha)
+        || expected_sha.and_then(Value::as_str) != Some(actual_sha)
+    {
+        return drop("Steward rebase base changed or evidence invalid; manual review required");
+    }
+    Ok(())
+}
+
 async fn reb(a: &Ax, j: &mut Job) -> R<()> {
+    kill(a, j)?;
     a.db.jset(j.id, &[("st", json!("fix"))]);
     a.st("fixer", "work", Some(j.id), "");
     let mn = j.s("mn");
@@ -3088,6 +3110,9 @@ async fn reb(a: &Ax, j: &mut Job) -> R<()> {
         &format!("refs/remotes/origin/{mn}"),
     )
     .await?;
+    let fetched_base = ok(a, j, &format!("git rev-parse origin/{}", q(&mn)), 60).await?;
+    rebase_base_matches(j, &mn, &fetched_base)?;
+    kill(a, j)?;
     let r = x(a, j, &format!("git rebase -q origin/{}", q(&mn)), 600).await;
     if r.c != 0 {
         let fs = x(a, j, "git diff --name-only --diff-filter=U", 60)
@@ -3148,6 +3173,7 @@ async fn reb(a: &Ax, j: &mut Job) -> R<()> {
         ));
     }
     j.d["base"] = json!(ok(a, j, &format!("git rev-parse origin/{}", q(&mn)), 60).await?);
+    rebase_base_matches(j, &mn, &j.s("base"))?;
     let fx = j.s("fx");
     j.d["f"] = json!({"title": if fx.is_empty() { format!("Rebase onto {mn}") } else { format!("Rebase onto {mn}: {fx}") }, "tests": [], "test_cmd": j.s("test_cmd"), "cause": "", "fix": ""});
     a.db.jd(j);
@@ -3942,6 +3968,7 @@ async fn submit(a: &Ax, j: &mut Job) -> R<(String, i64)> {
     if let Some(source)=review_bound_head(j)?{
         let number=j.pr.filter(|n|*n>0).ok_or_else(||X::Drop("PR operation has no original PR number".into()))?;
         let remote=ghj(&["api",&format!("repos/{}/pulls/{number}",j.repo)],60).await.map_err(X::E)?;
+        rebase_base_matches(j, remote["base"]["ref"].as_str().unwrap_or(""), remote["base"]["sha"].as_str().unwrap_or(""))?;
         if !review_publish_target_matches(&remote,&hr,&br,source,&sha)
             || remote["head"]["sha"].as_str()!=rem.as_deref(){
             return drop("PR operation publication target changed; no push; manual review required");

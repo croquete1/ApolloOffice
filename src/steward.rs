@@ -410,6 +410,8 @@ fn conflict_request(listed: &Value, fresh: &Value, saved: &Value, login: &str) -
         || saved["st"] != "open"
         || saved["upd"] != updated
         || saved["d"]["watcher_head"] != head
+        // The existing Fixer can only rebase onto the default branch.
+        || saved["d"]["default_branch"] != base
     {
         return None;
     }
@@ -423,7 +425,8 @@ fn conflict_request(listed: &Value, fresh: &Value, saved: &Value, login: &str) -
     let url = fresh["url"].as_str().filter(|s| !s.trim().is_empty())?;
     Some(json!({
         "title":title,"url":url,"why":format!("merge conflict with {base}"),
-        "data":{"branch":branch,"head":format!("{login}/{source}"),"test_cmd":saved["d"]["test_cmd"]}
+        "data":{"branch":branch,"head":format!("{login}/{source}"),"test_cmd":saved["d"]["test_cmd"],
+                "steward_rebase_base_ref":base,"steward_rebase_base_sha":base_sha}
     }))
 }
 
@@ -648,11 +651,17 @@ mod tests {
             "headRepositoryOwner":{"login":"owner"},"headRepository":{"name":"fork"},
             "headRefName":"fix","title":"PR","url":"https://github.com/o/r/pull/1"
         });
-        let saved =
-            json!({"st":"open","upd":updated,"d":{"watcher_head":head,"test_cmd":"cargo test"}});
+        let saved = json!({"st":"open","upd":updated,"d":{"watcher_head":head,"test_cmd":"cargo test","default_branch":"main"}});
         let request = conflict_request(&listed, &fresh, &saved, "owner").unwrap();
         assert_eq!(request["data"]["head"], "owner/fork");
         assert_eq!(request["data"]["test_cmd"], "cargo test");
+        assert_eq!(request["data"]["steward_rebase_base_ref"], "main");
+        assert_eq!(request["data"]["steward_rebase_base_sha"], base);
+        let mut other_listed = listed.clone();
+        let mut other_fresh = fresh.clone();
+        other_listed["baseRefName"] = json!("release");
+        other_fresh["baseRefName"] = json!("release");
+        assert!(conflict_request(&other_listed, &other_fresh, &saved, "owner").is_none());
         for (key, value) in [
             ("state", json!("CLOSED")),
             ("mergeable", json!("MERGEABLE")),
