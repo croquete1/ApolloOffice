@@ -187,6 +187,58 @@ fn local_proof(job: &Value, head: &str, base: &str, tree: &str, ci: &str) -> boo
         && author != reviewed_by
 }
 
+// Read policy and proof from a single SQLite snapshot. The caller repeats
+// this check after remote preflight, immediately before requesting merge.
+fn current_local_proof(
+    db: &crate::db::Db,
+    repo: &str,
+    number: i64,
+    activation: &str,
+    head: &str,
+    base: &str,
+    tree: &str,
+) -> rusqlite::Result<bool> {
+    use rusqlite::OptionalExtension;
+    let mut c = db.0.lock().unwrap();
+    let tx = c.transaction()?;
+    let command: Option<String> = tx
+        .query_row(
+            "select trim(ci) from rp where full=? and on_=1 and auto_merge=1 and local_merge=1 and merge_activation=?",
+            rusqlite::params![repo, activation],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(command) = command.filter(|s| !s.is_empty()) else {
+        return Ok(false);
+    };
+    if !valid_merge_activation(activation) || !valid_sha(tree) {
+        return Ok(false);
+    }
+    let found = {
+        let mut stmt = tx.prepare(
+            "select kind,st,d from jobs where repo=? and pr=? and kind in ('fix','review','mergecheck') and st='done'",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![repo, number])?;
+        let mut found = false;
+        while let Some(row) = rows.next()? {
+            let kind: String = row.get(0)?;
+            let state: String = row.get(1)?;
+            let raw: String = row.get(2)?;
+            let data: Value = serde_json::from_str(&raw)
+                .map_err(|_| rusqlite::Error::InvalidQuery)?;
+            let job = json!({"kind":kind,"st":state,"d":data});
+            if mergecheck_proof_current(&job, activation)
+                && local_proof(&job, head, base, tree, &command)
+            {
+                found = true;
+            }
+        }
+        found
+    };
+    tx.commit()?;
+    Ok(found)
+}
+
 fn remote_checks_clean(checks: &Value, status: &Value) -> bool {
     let Some(runs) = checks["check_runs"].as_array() else {
         return false;
@@ -909,7 +961,7 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
     if !review_threads_resolved(repo, number).await? || !review_gate(&reviews, &expected) {
         return Ok(false);
     }
-    let mut local_activation = None;
+    let mut local_evidence = None;
     if mode == MergeMode::Local {
         let policy = a.db.try_all(
             "select merge_activation from rp where full=? and on_=1 and auto_merge=1 and local_merge=1",
@@ -922,7 +974,6 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
         else {
             return Ok(false);
         };
-        local_activation = Some(activation.to_string());
         // A árvore testada tem de já conter a main atual como ancestral.
         // Caso contrário, o update-branch cria um commit normal (sem force-push),
         // e a PR será novamente testada e revista no próximo ciclo.
@@ -988,25 +1039,13 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
         let Some(tree) = commit["tree"]["sha"].as_str() else {
             return Ok(false);
         };
-        let command = crate::pipe::rp(a, repo)["ci"]
-            .as_str()
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        if command.is_empty() {
-            return Ok(false);
-        }
-        let proven = a.db.try_all(
-            "select kind,st,d from jobs where repo=? and pr=? and kind in ('fix','review','mergecheck') and st='done'",
-            pa![repo.to_string(), number],
-        ).map_err(|error| format!("local merge proof database unavailable: {error}"))?;
-        if !proven.iter().any(|job| {
-            mergecheck_proof_current(job, activation)
-                && local_proof(job, &head, base_sha, tree, &command)
-        }) {
+        if !current_local_proof(&a.db, repo, number, activation, &head, base_sha, tree)
+            .map_err(|error| format!("local merge proof database unavailable: {error}"))?
+        {
             queue_recheck(a, repo, number, &head, base_sha, &detail);
             return Ok(false);
         }
+        local_evidence = Some((activation.to_string(), tree.to_string()));
     }
 
     // Reconfirmar a configuração e os SHAs imediatamente antes de um ato mutável.
@@ -1061,12 +1100,10 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
     {
         return Ok(false);
     }
-    if let Some(activation) = local_activation {
-        let current = a.db.try_n(
-            "select count(*) from rp where full=? and on_=1 and auto_merge=1 and local_merge=1 and merge_activation=?",
-            pa![repo.to_string(), activation],
-        ).map_err(|error| format!("local merge activation unavailable: {error}"))?;
-        if current != 1 {
+    if let Some((activation, tree)) = local_evidence {
+        if !current_local_proof(&a.db, repo, number, &activation, &head, base_sha, &tree)
+            .map_err(|error| format!("final local merge proof unavailable: {error}"))?
+        {
             return Ok(false);
         }
     }
@@ -1661,6 +1698,40 @@ mod tests {
         pr["reviewDecision"] = json!("APPROVED");
         assessment["possible_duplicates"] = json!([11]);
         assert!(stale_base_candidate(&pr, &assessment).is_err());
+    }
+
+    #[test]
+    fn final_local_proof_rejects_removed_or_revoked_evidence() {
+        let db = crate::db::Db::mem();
+        db.run("insert into rp(full,on_,auto_merge,local_merge,ci) values('o/r',1,1,1,'cargo test')", pa![]);
+        let policy = db.one("select merge_activation from rp", pa![]).unwrap();
+        let activation = policy["merge_activation"].as_str().unwrap();
+        let head = "a".repeat(40);
+        let base = "b".repeat(40);
+        let tree = "c".repeat(40);
+        let data = json!({
+            "merge_activation":activation,"base":base,"published_sha":head,
+            "ci_tree":tree,"publish_tree":tree,"author":"author",
+            "ci_evidence":{"exit":0,"command":"cargo test","candidate":head},
+            "ci_verified_at":100,"last_review":{"model":"reviewer","t":101,"verdict":{"ok":true}}
+        });
+        let id = db.jnew("o/r",1,"mergecheck","PR","url","done","",data.clone(),Some(1),-5.0);
+        let check = || current_local_proof(&db,"o/r",1,activation,&head,&base,&tree);
+        assert!(check().unwrap());
+        db.run("update jobs set st='drop' where id=?", pa![id]);
+        assert!(!check().unwrap());
+        db.run("update jobs set st='done',d='{}' where id=?", pa![id]);
+        assert!(!check().unwrap());
+        db.run("update jobs set d=? where id=?", pa![data.to_string(),id]);
+        assert!(check().unwrap());
+        db.run("update rp set local_merge=0", pa![]);
+        db.run("update rp set local_merge=1", pa![]);
+        assert!(!check().unwrap());
+        let policy = db.one("select merge_activation from rp", pa![]).unwrap();
+        let current = policy["merge_activation"].as_str().unwrap();
+        assert!(!current_local_proof(&db,"o/r",1,current,&head,&base,&tree).unwrap());
+        db.run("delete from jobs where id=?", pa![id]);
+        assert!(!current_local_proof(&db,"o/r",1,current,&head,&base,&tree).unwrap());
     }
 
     #[test]
