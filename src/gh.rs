@@ -25,11 +25,13 @@ pub(crate) struct HeadObservation {
 /// Order requests per repository without holding a mutex across remote I/O.
 pub(crate) fn begin_head_observation(a: &App, repo: &str) -> u64 {
     let mut observations = a.head_observations.lock().unwrap();
-    let observation = observations.entry(repo.to_owned()).or_insert_with(|| HeadObservation {
-        generation: 0,
-        started: Instant::now(),
-        ci_proof: None,
-    });
+    let observation = observations
+        .entry(repo.to_owned())
+        .or_insert_with(|| HeadObservation {
+            generation: 0,
+            started: Instant::now(),
+            ci_proof: None,
+        });
     observation.generation = observation
         .generation
         .checked_add(1)
