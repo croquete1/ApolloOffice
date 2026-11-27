@@ -122,7 +122,7 @@ create index if not exists coderabbit_findings_pr on coderabbit_findings(repo,nu
 create table if not exists coderabbit_cycles(repo text not null, number integer not null, cycles integer not null check(cycles>=0), primary key(repo,number));
 ";
 
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 
 pub(crate) type CiMarkerRow = (String, String, String);
 
@@ -185,6 +185,11 @@ const LEGACY_COLUMNS: &[(&str, &str, &str)] = &[
         "rp",
         "local_merge",
         "alter table rp add column local_merge int default 0",
+    ),
+    (
+        "rp",
+        "merge_activation",
+        "alter table rp add column merge_activation text not null default ''",
     ),
     (
         "rp",
@@ -495,6 +500,38 @@ fn init(c: &mut Connection) -> anyhow::Result<()> {
         end;
     ",
     )?;
+    // Merge authorization is independent of repair/recovery authorization.
+    // A disable/enable cycle or CI command change cannot revive an old recheck.
+    tx.execute_batch("
+        update rp set merge_activation=lower(hex(randomblob(16))) where merge_activation='';
+        create trigger if not exists merge_activation_insert
+        after insert on rp
+        begin
+          update rp set merge_activation=lower(hex(randomblob(16))) where id=new.id;
+          select case when not exists(select 1 from rp where id=new.id and length(merge_activation)=32
+            and merge_activation not glob '*[^0-9a-f]*' and merge_activation is not new.merge_activation)
+            then raise(abort,'merge activation initialization failed') end;
+        end;
+        create trigger if not exists merge_activation_change
+        after update of on_,full,auto_merge,local_merge,ci on rp
+        when old.on_ is not new.on_ or old.full is not new.full
+          or old.auto_merge is not new.auto_merge or old.local_merge is not new.local_merge or old.ci is not new.ci
+        begin
+          update rp set merge_activation=lower(hex(randomblob(16))) where id=new.id;
+          select case when not exists(select 1 from rp where id=new.id and length(merge_activation)=32
+            and merge_activation not glob '*[^0-9a-f]*' and merge_activation is not old.merge_activation)
+            then raise(abort,'merge activation revocation failed') end;
+        end;
+    ")?;
+    let invalid_merge_activation: bool = tx.query_row(
+        "select exists(select 1 from rp where length(merge_activation)<>32 or merge_activation glob '*[^0-9a-f]*')",
+        [],
+        |row| row.get(0),
+    )?;
+    anyhow::ensure!(
+        !invalid_merge_activation,
+        "merge activation initialization failed"
+    );
     // CI hold receipts are distinct even when a writer repeats the same
     // SHA, timestamp and raw JSON. Keep identity changes in the same transaction.
     tx.execute_batch(
@@ -2661,6 +2698,63 @@ mod strict_db_tests {
         .unwrap();
         assert_ne!(token(&c), first);
         assert_ne!(token(&c), renamed);
+    }
+
+    #[test]
+    fn merge_activation_migrates_and_revokes_on_policy_changes() {
+        let mut c = Connection::open_in_memory().unwrap();
+        init(&mut c).unwrap();
+        c.execute_batch(
+            "drop trigger merge_activation_insert;
+             drop trigger merge_activation_change;
+             alter table rp drop column merge_activation;
+             pragma user_version=9;
+             insert into rp(full,on_,auto_merge,local_merge,ci)
+             values('o/r',1,1,1,'cargo test');",
+        )
+        .unwrap();
+        init(&mut c).unwrap();
+        fn token(c: &Connection) -> String {
+            c.query_row("select merge_activation from rp", [], |r| r.get(0))
+                .unwrap()
+        }
+        let first = token(&c);
+        assert_eq!(first.len(), 32);
+        init(&mut c).unwrap();
+        assert_eq!(token(&c), first);
+        c.execute("update rp set local_merge=1,ci='cargo test'", [])
+            .unwrap();
+        assert_eq!(token(&c), first);
+        for change in [
+            "update rp set local_merge=0",
+            "update rp set local_merge=1",
+            "update rp set auto_merge=0",
+            "update rp set auto_merge=1",
+            "update rp set ci='cargo test --locked'",
+            "update rp set ci='cargo test'",
+            "update rp set on_=0",
+            "update rp set on_=1",
+            "update rp set full='o/renamed'",
+        ] {
+            let before = token(&c);
+            c.execute(change, []).unwrap();
+            assert_ne!(token(&c), before);
+        }
+        c.execute_batch("create trigger ignore_merge_epoch before update of merge_activation on rp begin select raise(ignore); end;").unwrap();
+        let before = token(&c);
+        assert!(c.execute("update rp set local_merge=0", []).is_err());
+        assert_eq!(token(&c), before);
+        assert_eq!(
+            c.query_row("select local_merge from rp", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        c.execute_batch(
+            "drop trigger ignore_merge_epoch; delete from rp; insert into rp(full) values('o/r');",
+        )
+        .unwrap();
+        assert_ne!(token(&c), before);
+        assert_ne!(token(&c), first);
     }
 
     #[test]

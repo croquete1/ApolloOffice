@@ -4378,7 +4378,22 @@ fn idle_all(a: &Ax, id: i64) {
 }
 
 /// Revalidates an existing PR without creating commits or publishing changes.
+fn mergecheck_authorized(db: &crate::db::Db, j: &Job) -> R<()> {
+    let activation = j.d["merge_activation"].as_str().filter(|s| {
+        s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit())
+    }).ok_or_else(|| X::Drop("Missing mergecheck activation; fresh recheck required".into()))?;
+    let current = db.try_n(
+        "select count(*) from rp where full=? and on_=1 and auto_merge=1 and local_merge=1 and merge_activation=?",
+        pa![j.repo.clone(), activation.to_string()],
+    ).map_err(|error| X::Defer(format!("Mergecheck authorization unavailable: {error}")))?;
+    if current != 1 {
+        return drop("Mergecheck authorization revoked; fresh recheck required");
+    }
+    Ok(())
+}
+
 async fn mergecheck(a: &Ax, j: &mut Job) -> R<()> {
+    mergecheck_authorized(&a.db, j)?;
     let head = j.s("expected_head");
     let base = j.s("expected_base");
     let branch = j.s("branch");
@@ -4392,6 +4407,7 @@ async fn mergecheck(a: &Ax, j: &mut Job) -> R<()> {
         || before["head"]["repo"]["full_name"] != j.repo || before["state"] != "open" || before["draft"] != false {
         return drop("PR mudou antes de executar testes locais");
     }
+    mergecheck_authorized(&a.db, j)?;
     prep(a, j).await?;
     let actual_head = ok(a, j, "git rev-parse HEAD", 60).await?;
     let main = crate::gh::meta(a, &j.repo).await.map_err(X::E)?["main"].as_str().unwrap_or("main").to_string();
@@ -4402,8 +4418,10 @@ async fn mergecheck(a: &Ax, j: &mut Job) -> R<()> {
     j.d["base"] = json!(base);
     j.d["body"] = before["body"].clone();
     a.db.jd(j);
+    mergecheck_authorized(&a.db, j)?;
     let ci_result = ci(a, j).await?;
     if !ci_result.is_empty() { return drop(format!("CI reprovada na revalidação: {}", crate::sh::head(&ci_result, 700))); }
+    mergecheck_authorized(&a.db, j)?;
     let mut report = json!({"title":j.title,"tests":[],"test_cmd":rp(a,&j.repo)["ci"],"cause":"Revisão de integração existente","fix":"Código existente sob revisão"});
     let feedback = review(a, j, &mut report).await?;
     if !feedback.is_empty() { return drop(format!("Reviewer reprovou: {}", crate::sh::head(&feedback, 700))); }
@@ -4415,6 +4433,7 @@ async fn mergecheck(a: &Ax, j: &mut Job) -> R<()> {
         || fresh["state"] != "open" || fresh["draft"] != false {
         return drop("PR mudou entre testes, revisão e revalidação final");
     }
+    mergecheck_authorized(&a.db, j)?;
     j.d["published_sha"] = json!(head);
     j.d["publish_tree"] = json!(tree);
     a.db.jd(j);

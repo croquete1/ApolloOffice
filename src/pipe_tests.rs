@@ -754,6 +754,29 @@ mod t {
     }
 
     #[test]
+    fn mergecheck_activation_rejects_legacy_and_revoked_jobs() {
+        let db = crate::db::Db::mem();
+        db.run("insert into rp(full,on_,auto_merge,local_merge,ci) values('o/r',1,1,1,'cargo test')", pa![]);
+        let mut job = Job::of(json!({"kind":"mergecheck","repo":"o/r","pr":1,"d":{}}));
+        assert!(mergecheck_authorized(&db, &job).is_err());
+        job.d["merge_activation"] = db.one("select merge_activation from rp", pa![]).unwrap()["merge_activation"].clone();
+        assert!(mergecheck_authorized(&db, &job).is_ok());
+        for change in [
+            "update rp set auto_merge=0",
+            "update rp set auto_merge=1",
+            "update rp set local_merge=0",
+            "update rp set local_merge=1",
+            "update rp set ci='cargo test --locked'",
+            "update rp set ci='cargo test'",
+        ] {
+            db.run(change, pa![]);
+            assert!(mergecheck_authorized(&db, &job).is_err());
+        }
+        job.d["merge_activation"] = db.one("select merge_activation from rp", pa![]).unwrap()["merge_activation"].clone();
+        assert!(mergecheck_authorized(&db, &job).is_ok());
+    }
+
+    #[test]
     fn steward_rebase_activation_is_revoked_even_after_reenable() {
         let db = crate::db::Db::mem();
         db.run("insert into rp(full,on_,steward_repair) values('o/r',1,0)", pa![]);
