@@ -2,6 +2,60 @@
 mod t {
     use super::*;
 
+    #[tokio::test]
+    async fn scheduler_ci_hold_rechecks_marker_after_remote_observation() {
+        for mutation in ["none", "replace", "remove", "malformed", "db_error"] {
+            let a = std::sync::Arc::new(crate::app::App::new(
+                crate::db::Db::mem(),
+                std::env::temp_dir(),
+                1,
+                "x".into(),
+            ));
+            a.db.ks("cired:o/r", &json!({"sha":"a".repeat(40)}));
+            let held = red_with(&a, "o/r", "local", || {
+                match mutation {
+                    "replace" => a.db.ks("cired:o/r", &json!({"sha":"b".repeat(40)})),
+                    "remove" => a.db.kd("cired:o/r"),
+                    "malformed" => {
+                        a.db.run("update kv set v='{' where k='cired:o/r'", pa![]);
+                    }
+                    "db_error" => {
+                        a.db.run("drop table kv", pa![]);
+                    }
+                    _ => {}
+                }
+                std::future::ready(json!({"s":"b".repeat(40)}))
+            })
+            .await;
+            assert_eq!(held, mutation != "none", "{mutation}");
+        }
+    }
+
+    #[test]
+    fn ci_hold_snapshot_includes_global_and_host_markers_and_rejects_invalid_json() {
+        let a = std::sync::Arc::new(crate::app::App::new(
+            crate::db::Db::mem(),
+            std::env::temp_dir(),
+            1,
+            "x".into(),
+        ));
+        assert!(ci_markers(&a, "o/r", "@host").unwrap().is_empty());
+        a.db.ks("cired:o/r", &json!({"sha":"a".repeat(40)}));
+        a.db.ks("cired:o/r@host", &json!({"sha":"b".repeat(40)}));
+        a.db.ks("cired:o/r@other", &json!({"sha":"c".repeat(40)}));
+        let markers = ci_markers(&a, "o/r", "@host").unwrap();
+        assert_eq!(markers.len(), 2);
+        assert!(!markers.iter().all(|marker| ci_marker_superseded(
+            &json!({"s":"b".repeat(40)}),
+            marker
+        )));
+        assert_eq!(ci_markers(&a, "o/r", "").unwrap().len(), 1);
+        a.db.run("update kv set v='{' where k='cired:o/r@host'", pa![]);
+        assert!(ci_markers(&a, "o/r", "@host").is_err());
+        a.db.run("drop table kv", pa![]);
+        assert!(ci_markers(&a, "o/r", "").is_err());
+    }
+
     #[test]
     fn removed_repository_cannot_admit_stale_submission() {
         let db = crate::db::Db::mem();

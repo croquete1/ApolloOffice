@@ -4819,42 +4819,69 @@ fn ci_marker_requires_two_valid_distinct_object_ids() {
     }
 }
 
+// Read both applicable holds together. Missing rows are distinct from
+// malformed JSON and database errors, which must not authorize dispatch.
+fn ci_markers(a: &Ax, repo: &str, suffix: &str) -> rusqlite::Result<Vec<Value>> {
+    let rows = a.db.try_all(
+        "select v from kv where k in (?,?) order by k",
+        pa![format!("cired:{repo}"), format!("cired:{repo}{suffix}")],
+    )?;
+    rows.into_iter()
+        .map(|row| {
+            let raw = row["v"].as_str().ok_or(rusqlite::Error::InvalidQuery)?;
+            serde_json::from_str(raw).map_err(|_| rusqlite::Error::InvalidQuery)
+        })
+        .collect()
+}
+
 async fn red(a: &Ax, r: &str, h: &str) -> bool {
-    let mut cr = a.db.kg(&format!("cired:{r}"));
-    if cr.is_null() {
-        let x = hk(a, h);
-        if !x.is_empty() {
-            cr = a.db.kg(&format!("cired:{r}{x}"));
-        }
-    }
-    if cr.is_null() {
+    red_with(a, r, h, || async {
+        ghj(
+            &[
+                "api",
+                &format!("repos/{r}/commits/HEAD"),
+                "--jq",
+                "{s: .sha}",
+            ],
+            60,
+        )
+        .await
+        .unwrap_or(Value::Null)
+    })
+    .await
+}
+
+async fn red_with<F, Fut>(a: &Ax, r: &str, h: &str, remote: F) -> bool
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Value>,
+{
+    let suffix = hk(a, h);
+    let Ok(markers) = ci_markers(a, r, &suffix) else {
+        return true;
+    };
+    if markers.is_empty() {
         return false;
     }
     let k = format!("head:{r}");
-    let h = match crate::gh::cg(a, &k, 600_000).filter(|v| {
+    let head = match crate::gh::cg(a, &k, 600_000).filter(|v| {
         v["s"].as_str().is_some_and(crate::db::valid_git_sha)
     }) {
         Some(v) => v,
         None => {
             let generation = crate::gh::begin_head_observation(a, r);
-            let v = ghj(
-                &[
-                    "api",
-                    &format!("repos/{r}/commits/HEAD"),
-                    "--jq",
-                    "{s: .sha}",
-                ],
-                60,
-            )
-            .await
-            .unwrap_or(Value::Null);
+            let v = remote().await;
             if !crate::gh::publish_head_observation(a, r, generation, &v) {
                 return true;
             }
             v
         }
     };
-    !ci_marker_superseded(&h, &cr)
+    // A newer hold or changed host scope during I/O requires a fresh decision.
+    if hk(a, h) != suffix || ci_markers(a, r, &suffix).ok().as_ref() != Some(&markers) {
+        return true;
+    }
+    !markers.iter().all(|marker| ci_marker_superseded(&head, marker))
 }
 
 /// Safe wait boundaries retain the approved submission or verified commit;
