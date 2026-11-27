@@ -520,8 +520,7 @@ fn reserve_branch_update(
         .query_row("select v from kv where k=?", [&key], |row| row.get(0))
         .optional()?;
     if let Some(previous) = previous {
-        let previous: Value =
-            serde_json::from_str(&previous).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let previous = decode_branch_update(&previous)?;
         if update_retry_deferred(&previous, head, base, at) {
             return Ok(false);
         }
@@ -687,6 +686,39 @@ fn observed_branch_update(
     Some(observed)
 }
 
+// Legacy records predate the policy epoch and used updated/error/blocked.
+// Do not treat structurally corrupt records as absence or an expired attempt.
+fn decode_branch_update(raw: &str) -> rusqlite::Result<Value> {
+    let record: Value = serde_json::from_str(raw).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let status = record["status"]
+        .as_str()
+        .ok_or(rusqlite::Error::InvalidQuery)?;
+    if !matches!(
+        status,
+        "attempted" | "accepted" | "uncertain" | "observed" | "updated" | "error" | "blocked"
+    ) || !record["head"].as_str().is_some_and(valid_sha)
+        || !record["base"].as_str().is_some_and(valid_sha)
+        || !record["at"].as_i64().is_some_and(|at| at >= 0)
+    {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    if let Some(activation) = record.get("merge_activation") {
+        if !activation.as_str().is_some_and(valid_merge_activation) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+    } else if matches!(status, "accepted" | "uncertain") {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    if status == "observed"
+        && (!record["observed_head"].as_str().is_some_and(valid_sha)
+            || record["observed_head"] == record["head"]
+            || !record["observed_at"].as_i64().is_some_and(|at| at >= 0))
+    {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(record)
+}
+
 fn load_branch_update(
     db: &crate::db::Db,
     repo: &str,
@@ -701,8 +733,7 @@ fn load_branch_update(
             |row| row.get(0),
         )
         .optional()?;
-    raw.map(|value| serde_json::from_str(&value).map_err(|_| rusqlite::Error::InvalidQuery))
-        .transpose()
+    raw.map(|value| decode_branch_update(&value)).transpose()
 }
 
 async fn reconcile_branch_update(a: &Ax, repo: &str, number: i64) -> Result<(), String> {
@@ -1915,6 +1946,62 @@ mod tests {
             assert!(!replace_branch_update_record(&db, "o/r", 1, &previous, &observed).unwrap());
         }
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn malformed_branch_update_records_cannot_be_replaced() {
+        let db = crate::db::Db::mem();
+        db.run(
+            "insert into rp(full,on_,auto_merge,local_merge) values('o/r',1,1,1)",
+            pa![],
+        );
+        let policy = db.one("select merge_activation from rp", pa![]).unwrap();
+        let activation = policy["merge_activation"].as_str().unwrap();
+        let head = "a".repeat(40);
+        let base = "b".repeat(40);
+        let target = (head.as_str(), base.as_str());
+        let key = "steward:update:o/r#1";
+        let valid = branch_update_reservation(activation, target, 100);
+        let mut wrong_time = valid.clone();
+        wrong_time["at"] = json!("100");
+        let mut wrong_epoch = valid.clone();
+        wrong_epoch["merge_activation"] = Value::Null;
+        let mut unknown = valid.clone();
+        unknown["status"] = json!("unknown");
+        let mut invalid_observed = valid.clone();
+        invalid_observed["status"] = json!("observed");
+        for invalid in [
+            Value::Null,
+            json!([]),
+            json!({}),
+            wrong_time,
+            wrong_epoch,
+            unknown,
+            invalid_observed,
+        ] {
+            db.ks(key, &invalid);
+            assert!(load_branch_update(&db, "o/r", 1).is_err());
+            assert!(
+                reserve_branch_update(&db, "o/r", 1, activation, true, target, 400_000).is_err()
+            );
+            let raw =
+                db.0.lock()
+                    .unwrap()
+                    .query_row("select v from kv where k=?", [key], |row| {
+                        row.get::<_, String>(0)
+                    })
+                    .unwrap();
+            assert_eq!(raw, invalid.to_string());
+        }
+        for status in ["attempted", "updated", "error", "blocked"] {
+            let legacy = json!({"head":head,"base":base,"at":100,"status":status});
+            db.ks(key, &legacy);
+            assert_eq!(load_branch_update(&db, "o/r", 1).unwrap(), Some(legacy));
+            assert!(!reserve_branch_update(&db, "o/r", 1, activation, true, target, 101).unwrap());
+            assert!(
+                reserve_branch_update(&db, "o/r", 1, activation, true, target, 400_000).unwrap()
+            );
+        }
     }
 
     #[test]
