@@ -1776,10 +1776,9 @@ async fn ci0(a: &Ax, j: &mut Job) -> R<String> {
             }
             if bn.is_empty() {
                 a.st("ci", "idle", None, "sad");
-                a.db.ks(
-                    &format!("cired:{}{}", j.repo, hk(a, &j.h())),
-                    &json!({"sha": bs, "t": now()}),
-                );
+                let suffix = hk(a, &j.h());
+                record_ci_failure(a, &j.repo, &suffix, &json!({"sha":bs,"t":now()}))
+                    .map_err(|error| X::Defer(format!("CI hold storage unavailable: {error}")))?;
                 return Err(X::Back(format!(
                     "`{c}` also fails on {} without the fix, waiting until it is green again",
                     j.s("mn")
@@ -4818,6 +4817,47 @@ fn ci_marker_requires_two_valid_distinct_object_ids() {
 // malformed JSON and database errors, which must not authorize dispatch.
 type CiMarkerRows = Vec<crate::db::CiMarkerRow>;
 
+// Lock order: database, then pending receipts. A failed write remains a
+// process-local hold until the exact receipt is persisted. Never infer
+// an absent hold from a failed write or discard it on a later read.
+fn persist_pending_ci_holds(
+    connection: &rusqlite::Connection,
+    pending: &mut std::collections::HashMap<(String, String), Value>,
+    repo: &str,
+) -> rusqlite::Result<()> {
+    let keys: Vec<_> = pending.keys().filter(|(r, _)| r == repo).cloned().collect();
+    for key in keys {
+        let marker = &pending[&key];
+        let count = connection.execute(
+            "insert into kv(k,v) values(?1,?2) on conflict(k) do update set v=excluded.v",
+            rusqlite::params![format!("cired:{}{}", key.0, key.1), marker.to_string()],
+        )?;
+        if count != 1 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        pending.remove(&key);
+        crate::app::chg();
+    }
+    Ok(())
+}
+
+fn record_ci_failure(a: &Ax, repo: &str, suffix: &str, marker: &Value) -> rusqlite::Result<()> {
+    let connection = a.db.0.lock().unwrap();
+    let mut pending = a.pending_ci_holds.lock().unwrap();
+    pending.insert((repo.to_owned(), suffix.to_owned()), marker.clone());
+    persist_pending_ci_holds(&connection, &mut pending, repo)
+}
+
+fn flush_ci_failures(a: &Ax, connection: &rusqlite::Connection, repo: &str) -> rusqlite::Result<()> {
+    persist_pending_ci_holds(connection, &mut a.pending_ci_holds.lock().unwrap(), repo)
+}
+
+fn current_ci_marker_rows(a: &Ax, repo: &str, suffix: &str) -> rusqlite::Result<CiMarkerRows> {
+    let connection = a.db.0.lock().unwrap();
+    flush_ci_failures(a, &connection, repo)?;
+    ci_marker_rows(&connection, repo, suffix)
+}
+
 fn ci_marker_rows(
     connection: &rusqlite::Connection,
     repo: &str,
@@ -4861,6 +4901,7 @@ fn clear_superseded_ci_markers(
     generation: Option<u64>,
 ) -> rusqlite::Result<bool> {
     let mut connection = a.db.0.lock().unwrap();
+    flush_ci_failures(a, &connection, repo)?;
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let markers = ci_marker_rows(&tx, repo, suffix)?;
     if &markers != expected {
@@ -4921,7 +4962,7 @@ where
     Fut: std::future::Future<Output = Value>,
 {
     let suffix = hk(a, host);
-    let expected = ci_marker_rows(&a.db.0.lock().unwrap(), repo, &suffix)?;
+    let expected = current_ci_marker_rows(a, repo, &suffix)?;
     let generation = if expected.is_empty() {
         None
     } else {
@@ -4965,10 +5006,7 @@ where
     Fut: std::future::Future<Output = Value>,
 {
     let suffix = hk(a, h);
-    let rows = {
-        let connection = a.db.0.lock().unwrap();
-        ci_marker_rows(&connection, r, &suffix)
-    };
+    let rows = current_ci_marker_rows(a, r, &suffix);
     let Ok(rows) = rows else {
         return true;
     };
@@ -4990,7 +5028,7 @@ where
         }
     };
     // A newer hold, host scope or HEAD request requires a fresh decision.
-    let latest = ci_marker_rows(&a.db.0.lock().unwrap(), r, &suffix);
+    let latest = current_ci_marker_rows(a, r, &suffix);
     if hk(a, h) != suffix
         || latest.ok().as_ref() != Some(&rows)
         || !crate::gh::head_observation_is_current(a, r, generation)
@@ -5050,6 +5088,7 @@ fn record_ci_admission(
     reserve: impl FnOnce(),
 ) -> rusqlite::Result<bool> {
     let mut connection = a.db.0.lock().unwrap();
+    flush_ci_failures(a, &connection, repo)?;
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let at = now();
     let (state, raw, kind, enabled, hunt, ci): (
@@ -5353,7 +5392,10 @@ fn repo_limit_reached(open: i64, daily: i64, max_open: i64, max_daily: i64) -> b
 }
 
 pub fn bl(a: &Ax, r: &str) -> i64 {
-    if !a.db.kg(&format!("cired:{r}")).is_null() {
+    // Release the pending lock before touching SQLite: writers acquire
+    // these locks in database -> pending order.
+    let pending = a.pending_ci_holds.lock().unwrap().keys().any(|(repo, _)| repo == r);
+    if pending || !a.db.kg(&format!("cired:{r}")).is_null() {
         return 0;
     }
     hosts(a)
