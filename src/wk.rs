@@ -2293,7 +2293,9 @@ async fn watch_pr(
                         &up,
                         &ack_ids,
                         &request,
-                        attempt.as_ref().ok_or_else(|| X::E("Missing review attempt".into()))?,
+                        attempt
+                            .as_ref()
+                            .ok_or_else(|| X::E("Missing review attempt".into()))?,
                     )
                     .map_err(|e| X::E(e.to_string()))?
                 {
@@ -2355,8 +2357,15 @@ async fn watch_pr(
     // Advance the comment cursor only after successful analysis and queue persistence.
     if !batch_acked {
         recheck_review_evidence(&r, n, me, &v, &observed_comments, &cr).await?;
-        a.db.ack_review_with_attempt(&r, n, &up, &source_head, (&ack_ids, attempt.as_ref()), &outbound)
-            .map_err(|e| X::E(e.to_string()))?;
+        a.db.ack_review_with_attempt(
+            &r,
+            n,
+            &up,
+            &source_head,
+            (&ack_ids, attempt.as_ref()),
+            &outbound,
+        )
+        .map_err(|e| X::E(e.to_string()))?;
     }
 
     if let Some(attempt) = attempt {
