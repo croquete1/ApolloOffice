@@ -4466,19 +4466,13 @@ async fn go(a: &Ax, id: i64, h: &str) {
                 clean(a, &jj).await;
                 return Err(X::Back(String::new()));
             }
-            for k in [
-                format!("cired:{}", j.repo),
-                format!("cired:{}{}", j.repo, hk(a, &j.h())),
-            ] {
-                if let Some(cr) = a.db.kg(&k).as_object() {
-                    if cr.get("sha").and_then(|x| x.as_str()) == Some(j.s("base").as_str()) {
-                        return Err(X::Back(format!(
-                            "{}: CI is red on the default branch, waiting until it moves",
-                            j.repo
-                        )));
-                    }
-                    a.db.kd(&k);
-                }
+            if !clear_superseded_ci_markers(a, &j.repo, &hk(a, &j.h()), &j.s("base"))
+                .map_err(|error| X::Defer(format!("CI hold cleanup unavailable: {error}")))?
+            {
+                return Err(X::Back(format!(
+                    "{}: CI hold not superseded by the prepared base",
+                    j.repo
+                )));
             }
             if j.kind == "fix" {
                 stage(a, "repro", || race(a, &j, "before repro")).await?;
@@ -4832,6 +4826,43 @@ fn ci_markers(a: &Ax, repo: &str, suffix: &str) -> rusqlite::Result<Vec<Value>> 
             serde_json::from_str(raw).map_err(|_| rusqlite::Error::InvalidQuery)
         })
         .collect()
+}
+
+// A single write transaction prevents partial cleanup and deletion of a
+// marker replaced after inspection. Never erase malformed or matching holds.
+fn clear_superseded_ci_markers(
+    a: &Ax,
+    repo: &str,
+    suffix: &str,
+    base: &str,
+) -> rusqlite::Result<bool> {
+    let global = format!("cired:{repo}");
+    let scoped = format!("cired:{repo}{suffix}");
+    let mut connection = a.db.0.lock().unwrap();
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let markers = {
+        let mut statement = tx.prepare("select k,v from kv where k in (?1,?2) order by k")?;
+        let rows = statement.query_map(rusqlite::params![global, scoped], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (_, raw) in &markers {
+        let marker: Value = serde_json::from_str(raw).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        if !ci_marker_superseded(&json!({"s":base}), &marker) {
+            return Ok(false);
+        }
+    }
+    for (key, raw) in &markers {
+        if tx.execute("delete from kv where k=?1 and v=?2", rusqlite::params![key, raw])? != 1 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+    }
+    tx.commit()?;
+    if !markers.is_empty() {
+        crate::app::chg();
+    }
+    Ok(true)
 }
 
 async fn red(a: &Ax, r: &str, h: &str) -> bool {
