@@ -2287,7 +2287,14 @@ async fn watch_pr(
                 let request = json!({"title":v["title"],"url":v["url"],"change":ch,"data":data,"reply":outbound});
                 if !a
                     .db
-                    .queue_review_and_ack(&r, n, &up, &ack_ids, &request)
+                    .queue_review_with_attempt(
+                        &r,
+                        n,
+                        &up,
+                        &ack_ids,
+                        &request,
+                        attempt.as_ref().ok_or_else(|| X::E("Missing review attempt".into()))?,
+                    )
                     .map_err(|e| X::E(e.to_string()))?
                 {
                     a.say(
@@ -2348,7 +2355,7 @@ async fn watch_pr(
     // Advance the comment cursor only after successful analysis and queue persistence.
     if !batch_acked {
         recheck_review_evidence(&r, n, me, &v, &observed_comments, &cr).await?;
-        a.db.ack_pr_comments_with_reply(&r, n, &up, &source_head, &ack_ids, &outbound)
+        a.db.ack_review_with_attempt(&r, n, &up, &source_head, (&ack_ids, attempt.as_ref()), &outbound)
             .map_err(|e| X::E(e.to_string()))?;
     }
 
