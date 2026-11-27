@@ -3138,9 +3138,13 @@ mod watcher_outbox_tests {
                 )
                 .unwrap();
                 assert!(c.execute(mutation, []).is_err());
-                c.execute_batch("drop trigger ignore_outbox_revoke").unwrap();
+                c.execute_batch("drop trigger ignore_outbox_revoke")
+                    .unwrap();
             }
-            assert_eq!(db.n("select count(*) from rp where full='o/r' and on_=1", vec![]), 1);
+            assert_eq!(
+                db.n("select count(*) from rp where full='o/r' and on_=1", vec![]),
+                1
+            );
             assert_eq!(db.n("select count(*) from prs where st='open' and json_extract(d,'$.watcher_head') is not null", vec![]), 1);
             assert_eq!(db.watcher_outbox_counts().unwrap()["pending"], 1);
             db.0.lock().unwrap().execute(mutation, []).unwrap();
