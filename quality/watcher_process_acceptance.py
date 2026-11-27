@@ -39,7 +39,9 @@ def fake_gh():
         return 0
     if args == ["pr", "comment", "1", "-R", "o/r", "--body-file", "-"]:
         body = sys.stdin.read()
+        # Count even unexpected payloads: a failed local claim must never POST.
         if body != BODY:
+            (root / ("post-" + uuid.uuid4().hex)).touch()
             return 98
         # Every POST attempt has its own record; no fixture-side deduplication.
         if fixture["accepted"]:
@@ -126,6 +128,8 @@ def scenario(source_binary, accepted):
             db.execute("insert into rp(full,on_,hunt,auto_merge) values('o/r',1,0,0)")
             db.execute("insert into prs(repo,num,st,upd,d) values('o/r',1,'open',?,?)", (timestamp, json.dumps({"seen": True, "comment_seen_at": timestamp, "watcher_head": HEAD})))
             db.execute("insert into watcher_outbox(id,repo,num,author,body,state,created,updated,source_head) values('fixture','o/r',1,'tester',?,'pending',?,?,?)", (BODY, now, now, HEAD))
+            db.execute("insert into watcher_outbox(id,repo,num,author,body,state,created,updated,source_head) values('blocked','o/r',1,'tester','must not post','pending',?,?,?)", (now, now - 1, HEAD))
+            db.execute("create trigger blocked_claim before update on watcher_outbox when old.id='blocked' and new.state='uncertain' begin select raise(ignore); end")
         with running(binary, root, env) as process:
             wait_for(root, process, lambda row: row[0] == "uncertain" and any(root.glob("post-*")) and (not accepted or json.loads((root / "remote.json").read_text())), "ambiguous POST")
         assert len(list(root.glob("post-*"))) == 1
@@ -136,6 +140,8 @@ def scenario(source_binary, accepted):
             wanted = "sent" if accepted else "uncertain"
             wait_for(root, process, lambda row: row[0] == wanted and row[1] > 0, "restart reconciliation")
         assert read_state(root)[0] == wanted
+        with closing(db_connection(root)) as db:
+            assert db.execute("select state from watcher_outbox where id='blocked'").fetchone() == ("pending",)
         assert len(list(root.glob("post-*"))) == 1
         print(f"F02 Watcher restart: accepted={accepted}, final={wanted}, POST attempts=1", flush=True)
 

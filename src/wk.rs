@@ -2410,6 +2410,22 @@ fn watcher_delivery_batch(
     )
 }
 
+// A local storage error belongs to the current reply. Global authentication
+// errors still abort the batch before any further external POST.
+fn watcher_outbox_step(a: &Ax, tag: &str, operation: &str, result: rusqlite::Result<bool>) -> bool {
+    match result {
+        Ok(changed) => changed,
+        Err(error) => {
+            a.say(
+                "watcher",
+                &format!("{tag}: outbox {operation} failed: {error}"),
+                None,
+            );
+            false
+        }
+    }
+}
+
 async fn deliver_watcher_outbox(a: &Ax, me: &str) -> R<()> {
     let rows = watcher_delivery_batch(&a.db, me, now()).map_err(|e| X::E(e.to_string()))?;
     for row in rows {
@@ -2442,23 +2458,6 @@ async fn deliver_watcher_outbox(a: &Ax, me: &str) -> R<()> {
             );
             continue;
         };
-        // Persist rotation before remote I/O, including reconciliation and
-        // expiry. A failed row cannot authorize a POST or stop the batch.
-        match a
-            .db
-            .rotate_watcher_reply(id, author, state, previous, now())
-        {
-            Ok(true) => {}
-            Ok(false) => continue,
-            Err(error) => {
-                a.say(
-                    "watcher",
-                    &format!("{tag}: outbox rotation failed: {error}"),
-                    None,
-                );
-                continue;
-            }
-        }
         if state == "uncertain" {
             // Positive confirmation only: absence is not evidence that a POST failed.
             if let Ok(comments) = apip_unique(&format!(
@@ -2467,24 +2466,47 @@ async fn deliver_watcher_outbox(a: &Ax, me: &str) -> R<()> {
             .await
             {
                 if reply_confirmed(&comments, author, body)
-                    && a.db
-                        .finish_watcher_reply(id, "sent")
-                        .map_err(|e| X::E(e.to_string()))?
+                    && watcher_outbox_step(
+                        a,
+                        &tag,
+                        "reconciliation",
+                        a.db.finish_watcher_reply(id, "sent"),
+                    )
                 {
                     a.say(
                         "watcher",
                         &format!("{tag}: previously uncertain reply confirmed"),
                         None,
                     );
+                    continue;
                 }
             }
+            // A reconciliation timestamp describes a completed read attempt,
+            // not merely the reservation to start one. Never resend.
+            watcher_outbox_step(
+                a,
+                &tag,
+                "rotation",
+                a.db.rotate_watcher_reply(id, author, state, previous, now()),
+            );
+            continue;
+        }
+        // Pending replies must persist rotation before any external action.
+        if !watcher_outbox_step(
+            a,
+            &tag,
+            "rotation",
+            a.db.rotate_watcher_reply(id, author, state, previous, now()),
+        ) {
             continue;
         }
         if now().saturating_sub(row["created"].as_i64().unwrap_or(0)) >= 86_400_000 {
-            if a.db
-                .finish_watcher_reply(id, "cancelled")
-                .map_err(|e| X::E(e.to_string()))?
-            {
+            if watcher_outbox_step(
+                a,
+                &tag,
+                "expiration",
+                a.db.finish_watcher_reply(id, "cancelled"),
+            ) {
                 a.say(
                     "watcher",
                     &format!("{tag}: unsent reply expired; manual review required"),
@@ -2513,10 +2535,12 @@ async fn deliver_watcher_outbox(a: &Ax, me: &str) -> R<()> {
         match watcher_reply_remote_matches(&pr, row["source_head"].as_str().unwrap_or("")) {
             Some(true) => {}
             Some(false) => {
-                if a.db
-                    .finish_watcher_reply(id, "cancelled")
-                    .map_err(|e| X::E(e.to_string()))?
-                {
+                if watcher_outbox_step(
+                    a,
+                    &tag,
+                    "cancellation",
+                    a.db.finish_watcher_reply(id, "cancelled"),
+                ) {
                     a.say(
                         "watcher",
                         &format!("{tag}: unsent reply cancelled because PR closed or HEAD changed"),
@@ -2534,11 +2558,7 @@ async fn deliver_watcher_outbox(a: &Ax, me: &str) -> R<()> {
         if a.hold("watcher") {
             break;
         }
-        if !a
-            .db
-            .claim_watcher_reply(id, me)
-            .map_err(|e| X::E(e.to_string()))?
-        {
+        if !watcher_outbox_step(a, &tag, "claim", a.db.claim_watcher_reply(id, me)) {
             continue;
         }
         match gh_input(
@@ -2557,9 +2577,7 @@ async fn deliver_watcher_outbox(a: &Ax, me: &str) -> R<()> {
         .await
         {
             Ok(_) => {
-                if a.db
-                    .finish_watcher_reply(id, "sent")
-                    .map_err(|e| X::E(e.to_string()))?
+                if watcher_outbox_step(a, &tag, "completion", a.db.finish_watcher_reply(id, "sent"))
                 {
                     a.db.ks(&format!("wr:{tag}"), &json!(now()));
                     a.say("watcher", &format!("{tag}: queued reply delivered"), None);
