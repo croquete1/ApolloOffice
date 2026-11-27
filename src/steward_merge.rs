@@ -915,7 +915,11 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
             "select merge_activation from rp where full=? and on_=1 and auto_merge=1 and local_merge=1",
             pa![repo.to_string()],
         ).map_err(|error| format!("local merge activation unavailable: {error}"))?;
-        let Some(activation) = policy.first().and_then(|row| row["merge_activation"].as_str()).filter(|s| valid_merge_activation(s)) else {
+        let Some(activation) = policy
+            .first()
+            .and_then(|row| row["merge_activation"].as_str())
+            .filter(|s| valid_merge_activation(s))
+        else {
             return Ok(false);
         };
         local_activation = Some(activation.to_string());
@@ -996,10 +1000,10 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
             "select kind,st,d from jobs where repo=? and pr=? and kind in ('fix','review','mergecheck') and st='done'",
             pa![repo.to_string(), number],
         ).map_err(|error| format!("local merge proof database unavailable: {error}"))?;
-        if !proven
-            .iter()
-            .any(|job| mergecheck_proof_current(job, activation) && local_proof(job, &head, base_sha, tree, &command))
-        {
+        if !proven.iter().any(|job| {
+            mergecheck_proof_current(job, activation)
+                && local_proof(job, &head, base_sha, tree, &command)
+        }) {
             queue_recheck(a, repo, number, &head, base_sha, &detail);
             return Ok(false);
         }
