@@ -1980,7 +1980,9 @@ async fn watch_pr(
     {
         return Err(X::E("open PR HEAD or base SHA unavailable".into()));
     }
-    if a.db.ch("update prs set st=?,title=?,upd=?,merged=?,d=json_set(d,'$.base',?,'$.default_branch',?,'$.watcher_head',?,'$.watcher_base_sha',?) where repo=? and num=? and st='open' and upd is ?",pa![st.to_string(),v["title"].as_str().unwrap_or("").to_string(),up.clone(),v["mergedAt"].as_str().map(String::from),base,default_branch.clone(),source_head.clone(),v["baseRefOid"].as_str().map(String::from),r.clone(),n,p["upd"].as_str().map(String::from)])!=1 {
+    // A successful metadata observation is not a successful comment inventory.
+    // Invalidate the old cursor atomically when either observed SHA changes.
+    if a.db.ch("update prs set st=?,title=?,upd=?,merged=?,d=json_set(d,'$.base',?,'$.default_branch',?,'$.comment_seen_at',case when json_extract(d,'$.watcher_head') is not ? or json_extract(d,'$.watcher_base_sha') is not ? then null else json_extract(d,'$.comment_seen_at') end,'$.watcher_head',?,'$.watcher_base_sha',?) where repo=? and num=? and st='open' and upd is ?",pa![st.to_string(),v["title"].as_str().unwrap_or("").to_string(),up.clone(),v["mergedAt"].as_str().map(String::from),base,default_branch.clone(),source_head.clone(),v["baseRefOid"].as_str().map(String::from),source_head.clone(),v["baseRefOid"].as_str().map(String::from),r.clone(),n,p["upd"].as_str().map(String::from)])!=1 {
             return Err(X::E("could not persist PR metadata".into()));
         }
     let tag = format!("{r}#{n}");
@@ -2032,6 +2034,7 @@ async fn watch_pr(
     if !has_pending
         && p["d"]["comment_seen_at"].as_str() == Some(up.as_str())
         && p["d"]["watcher_head"] == source_head
+        && p["d"]["watcher_base_sha"] == v["baseRefOid"]
         && p["d"]["seen"].as_bool().unwrap_or(false)
     {
         a.db.ks(&format!("ws:{tag}"), &json!(now()));
