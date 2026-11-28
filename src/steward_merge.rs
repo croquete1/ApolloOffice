@@ -427,6 +427,14 @@ fn valid_sha(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|c| c.is_ascii_hexdigit())
 }
 
+// A tree is evidence only when the returned object is the requested commit.
+fn commit_tree_for_head<'a>(commit: &'a Value, head: &str) -> Option<&'a str> {
+    if !valid_sha(head) || commit["sha"] != head {
+        return None;
+    }
+    commit["tree"]["sha"].as_str().filter(|sha| valid_sha(sha))
+}
+
 /// An advanced base makes the previous CI proof stale. Updating is allowed
 /// only for the owner's same-repository PR branch; GitHub reruns its gates on
 /// the new head before the ordinary merge path can proceed.
@@ -1360,7 +1368,7 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
         }
 
         let commit = ghj(&["api", &format!("repos/{repo}/git/commits/{head}")], 45).await?;
-        let Some(tree) = commit["tree"]["sha"].as_str() else {
+        let Some(tree) = commit_tree_for_head(&commit, &head) else {
             return Ok(false);
         };
         if !current_local_proof(&a.db, repo, number, activation, &head, base_sha, tree)
@@ -1574,6 +1582,25 @@ mod tests {
         let mut snapshot = sample_final_reads();
         snapshot.pr["mergeable_state"] = json!("dirty");
         assert!(!final_gate(Ok(snapshot), &e).unwrap());
+    }
+
+    #[test]
+    fn remote_tree_requires_exact_commit_identity() {
+        let head = "a".repeat(40);
+        let tree = "b".repeat(40);
+        let commit = json!({"sha":head,"tree":{"sha":tree}});
+        assert_eq!(commit_tree_for_head(&commit, &head), Some(tree.as_str()));
+        for (path, value) in [
+            ("/sha", json!("c".repeat(40))),
+            ("/sha", Value::Null),
+            ("/tree/sha", json!("invalid")),
+            ("/tree/sha", Value::Null),
+        ] {
+            let mut changed = commit.clone();
+            *changed.pointer_mut(path).unwrap() = value;
+            assert!(commit_tree_for_head(&changed, &head).is_none());
+        }
+        assert!(commit_tree_for_head(&commit, "invalid").is_none());
     }
 
     #[test]
