@@ -1503,9 +1503,10 @@ impl Db {
         ids: &[String],
         reply: &Value,
     ) -> rusqlite::Result<()> {
-        self.ack_review_inner(repo, number, updated, head, (ids, None), reply)
+        self.ack_review_inner(repo, number, updated, (head, None), (ids, None), reply)
     }
 
+    #[cfg(test)]
     pub(crate) fn ack_review_with_attempt(
         &self,
         repo: &str,
@@ -1518,7 +1519,29 @@ impl Db {
         if batch.1.is_none() && (!batch.0.is_empty() || !reply.is_null()) {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        self.ack_review_inner(repo, number, updated, head, batch, reply)
+        self.ack_review_inner(repo, number, updated, (head, None), batch, reply)
+    }
+
+    pub(crate) fn ack_review_for_base(
+        &self,
+        repo: &str,
+        number: i64,
+        updated: &str,
+        target: (&str, &str),
+        batch: (&[String], Option<&ReviewAttempt>),
+        reply: &Value,
+    ) -> rusqlite::Result<()> {
+        if batch.1.is_none() && (!batch.0.is_empty() || !reply.is_null()) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        self.ack_review_inner(
+            repo,
+            number,
+            updated,
+            (target.0, Some(target.1)),
+            batch,
+            reply,
+        )
     }
 
     fn ack_review_inner(
@@ -1526,7 +1549,7 @@ impl Db {
         repo: &str,
         number: i64,
         updated: &str,
-        head: &str,
+        (head, base): (&str, Option<&str>),
         (ids, attempt): (&[String], Option<&ReviewAttempt>),
         reply: &Value,
     ) -> rusqlite::Result<()> {
@@ -1534,6 +1557,11 @@ impl Db {
         let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         if !Self::review_snapshot_matches(&tx, repo, number, updated, head)? {
             return Err(rusqlite::Error::InvalidQuery);
+        }
+        if let Some(base) = base {
+            if !Self::review_base_matches(&tx, repo, number, base)? {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
         }
         let unique = ids.iter().collect::<std::collections::HashSet<_>>();
         if unique.len() != ids.len() || ids.iter().any(|id| id.trim().is_empty() || id.len() > 128)
@@ -4536,6 +4564,78 @@ mod watcher_storage_failure_tests {
         fresh.release().unwrap();
         assert!(db.comment_acknowledged("o/r", "r1").unwrap());
         assert_eq!(db.n("select count(*) from jobs", vec![]), 1);
+    }
+
+    #[test]
+    fn corrupt_base_metadata_revokes_ticket_without_preventing_repair() {
+        let db = Db::mem();
+        seed(&db);
+        let base = "b".repeat(40);
+        let metadata = json!({"watcher_head":HEAD,"watcher_base_sha":base}).to_string();
+        db.run(
+            "update prs set d=? where num=1",
+            crate::pa![metadata.clone()],
+        );
+        let attempt = db
+            .claim_review_attempt_for_base("o/r", 1, "t", (HEAD, &base), 0)
+            .unwrap()
+            .unwrap();
+        {
+            let c = db.0.lock().unwrap();
+            assert_eq!(
+                c.execute("update prs set d='invalid' where num=1", [])
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                c.execute("update prs set d=? where num=1", [&metadata])
+                    .unwrap(),
+                1
+            );
+        }
+        let rows = db.try_all("select * from watcher_retry", vec![]).unwrap();
+        assert!(rows[0]["analysis_ticket"].is_null());
+        assert_eq!(rows[0]["next_attempt_at"], 600000);
+        let ids = vec!["r1".into()];
+        assert!(db
+            .queue_review_with_attempt("o/r", 1, "t", &ids, &request(), &attempt)
+            .is_err());
+        assert_pending(&db);
+        attempt.release().unwrap();
+    }
+
+    #[test]
+    fn empty_review_ack_requires_observed_local_base() {
+        let db = Db::mem();
+        seed(&db);
+        db.run("delete from watcher_inbox", vec![]);
+        let base = "b".repeat(40);
+        let changed = "c".repeat(40);
+        let sql = "update prs set d=json_set(d,'$.watcher_base_sha',?) where num=1";
+        db.run(sql, crate::pa![changed.clone()]);
+        let before = db.try_all("select d from prs where num=1", vec![]).unwrap();
+        assert!(db
+            .ack_review_for_base("o/r", 1, "t", (HEAD, &base), (&[], None), &Value::Null)
+            .is_err());
+        assert_eq!(
+            db.try_all("select d from prs where num=1", vec![]).unwrap(),
+            before
+        );
+        assert!(db
+            .ack_review_for_base("o/r", 1, "t", (HEAD, ""), (&[], None), &Value::Null)
+            .is_err());
+        db.ack_review_for_base("o/r", 1, "t", (HEAD, &changed), (&[], None), &Value::Null)
+            .unwrap();
+        let cursor = db
+            .one(
+                "select json_extract(d,'$.comment_seen_at') as cursor from prs where num=1",
+                vec![],
+            )
+            .unwrap();
+        assert_eq!(cursor["cursor"], "t");
+        assert_eq!(db.n("select count(*) from jobs", vec![]), 0);
+        assert_eq!(db.n("select count(*) from cm", vec![]), 0);
+        assert_eq!(db.n("select count(*) from watcher_outbox", vec![]), 0);
     }
 
     #[test]
