@@ -26,6 +26,7 @@ pub struct ReviewAttempt {
     repo: String,
     number: i64,
     ticket: String,
+    base_sha: Option<String>,
 }
 
 impl ReviewAttempt {
@@ -40,6 +41,11 @@ impl ReviewAttempt {
     ) -> rusqlite::Result<bool> {
         if !Arc::ptr_eq(&self.db.0, &db.0) || self.repo != repo || self.number != number {
             return Ok(false);
+        }
+        if let Some(base) = &self.base_sha {
+            if !Db::review_base_matches(tx, repo, number, base)? {
+                return Ok(false);
+            }
         }
         tx.query_row(
             "select exists(select 1 from watcher_retry where repo=? and num=? and head=? and snapshot=? and analysis_ticket=?)",
@@ -1331,6 +1337,7 @@ impl Db {
     /// Reserve a retry window before any provider call. A process crash consumes
     /// an attempt instead of causing an immediate repeat. New snapshots reset the
     /// counter; repeated failures back off from ten minutes to one hour.
+    #[cfg(test)]
     pub fn claim_review_attempt(
         &self,
         repo: &str,
@@ -1339,10 +1346,54 @@ impl Db {
         head: &str,
         at: i64,
     ) -> rusqlite::Result<Option<ReviewAttempt>> {
+        self.claim_review_attempt_inner(repo, number, updated, head, None, at)
+    }
+
+    pub(crate) fn claim_review_attempt_for_base(
+        &self,
+        repo: &str,
+        number: i64,
+        updated: &str,
+        target: (&str, &str),
+        at: i64,
+    ) -> rusqlite::Result<Option<ReviewAttempt>> {
+        self.claim_review_attempt_inner(repo, number, updated, target.0, Some(target.1), at)
+    }
+
+    fn review_base_matches(
+        tx: &rusqlite::Transaction<'_>,
+        repo: &str,
+        number: i64,
+        base: &str,
+    ) -> rusqlite::Result<bool> {
+        if !valid_git_sha(base) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        tx.query_row(
+            "select exists(select 1 from prs where repo=? and num=? and json_extract(d,'$.watcher_base_sha')=?)",
+            rusqlite::params![repo, number, base],
+            |row| row.get(0),
+        )
+    }
+
+    fn claim_review_attempt_inner(
+        &self,
+        repo: &str,
+        number: i64,
+        updated: &str,
+        head: &str,
+        base: Option<&str>,
+        at: i64,
+    ) -> rusqlite::Result<Option<ReviewAttempt>> {
         let mut c = self.0.lock().unwrap();
         let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         if !Self::review_snapshot_matches(&tx, repo, number, updated, head)? {
             return Err(rusqlite::Error::InvalidQuery);
+        }
+        if let Some(base) = base {
+            if !Self::review_base_matches(&tx, repo, number, base)? {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
         }
         let changed=tx.execute("insert into watcher_retry(repo,num,head,snapshot,attempts,next_attempt_at)
             values(?,?,?,?,1,?+600000)
@@ -1369,6 +1420,7 @@ impl Db {
             repo: repo.to_string(),
             number,
             ticket,
+            base_sha: base.map(String::from),
         }))
     }
 
@@ -4343,6 +4395,64 @@ mod watcher_storage_failure_tests {
             ),
             1
         );
+    }
+
+    #[test]
+    fn review_attempt_rejects_changed_local_base_before_admission() {
+        let base = "b".repeat(40);
+        let changed = "c".repeat(40);
+        for queue in [true, false] {
+            let db = Db::mem();
+            seed(&db);
+            let ids = vec!["r1".into()];
+            let req = request();
+            assert!(db
+                .claim_review_attempt_for_base("o/r", 1, "t", (HEAD, &base), 0)
+                .is_err());
+            db.run(
+                "update prs set d=json_set(d,'$.watcher_base_sha',?) where num=1",
+                crate::pa![base.clone()],
+            );
+            let attempt = db
+                .claim_review_attempt_for_base("o/r", 1, "t", (HEAD, &base), 0)
+                .unwrap()
+                .unwrap();
+            db.run(
+                "update prs set d=json_set(d,'$.watcher_base_sha',?) where num=1",
+                crate::pa![changed.clone()],
+            );
+            assert!(db
+                .queue_review_with_attempt("o/r", 1, "t", &ids, &req, &attempt)
+                .is_err());
+            assert!(db
+                .ack_review_with_attempt("o/r", 1, "t", HEAD, (&ids, Some(&attempt)), &req["reply"])
+                .is_err());
+            assert_pending(&db);
+            attempt.release().unwrap();
+            let fresh = db
+                .claim_review_attempt_for_base("o/r", 1, "t", (HEAD, &changed), 600000)
+                .unwrap()
+                .unwrap();
+            if queue {
+                assert!(db
+                    .queue_review_with_attempt("o/r", 1, "t", &ids, &req, &fresh)
+                    .unwrap());
+            } else {
+                db.ack_review_with_attempt(
+                    "o/r",
+                    1,
+                    "t",
+                    HEAD,
+                    (&ids, Some(&fresh)),
+                    &req["reply"],
+                )
+                .unwrap();
+            }
+            fresh.release().unwrap();
+            assert!(db.comment_acknowledged("o/r", "r1").unwrap());
+            assert_eq!(db.n("select count(*) from jobs", vec![]), i64::from(queue));
+            assert_eq!(db.n("select count(*) from watcher_outbox", vec![]), 1);
+        }
     }
 
     #[test]
