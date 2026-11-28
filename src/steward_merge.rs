@@ -2167,8 +2167,8 @@ mod tests {
         std::process::exit(73);
     }
 
-    #[test]
-    fn branch_update_survives_process_exit() {
+    #[tokio::test]
+    async fn branch_update_survives_process_exit() {
         let root = std::env::temp_dir().join(format!(
             "apollo-branch-update-crash-{}",
             rand::random::<u64>()
@@ -2181,6 +2181,17 @@ mod tests {
         let target = (old.as_str(), base.as_str());
         let old_comparison = json!({"status":"ahead","base_commit":{"sha":old},"merge_base_commit":{"sha":old},"ahead_by":1,"behind_by":0});
         let base_comparison = json!({"status":"ahead","base_commit":{"sha":base},"merge_base_commit":{"sha":base},"ahead_by":1,"behind_by":0});
+        let pr = json!({
+            "number":1,"state":"open","draft":false,
+            "head":{"sha":head,"ref":"fix/task","repo":{"full_name":"o/r"}},
+            "base":{"sha":base,"ref":"main","repo":{"full_name":"o/r"}}
+        });
+        let paths = [
+            "repos/o/r/pulls/1".to_string(),
+            format!("repos/o/r/compare/{old}...{head}"),
+            format!("repos/o/r/compare/{base}...{head}"),
+            "repos/o/r/pulls/1".to_string(),
+        ];
         for phase in ["attempted", "accepted", "uncertain"] {
             let path = root.join(format!("{phase}.db"));
             let status = std::process::Command::new(&exe)
@@ -2200,17 +2211,64 @@ mod tests {
             assert_eq!(previous["at"], 100);
             let activation = previous["merge_activation"].as_str().unwrap();
             assert!(!reserve_branch_update(&db, "o/r", 1, activation, true, target, 101).unwrap());
-            let observed =
-                observed_branch_update(&previous, &head, &old_comparison, &base_comparison, 200)
-                    .unwrap();
-            assert!(replace_branch_update_record(&db, "o/r", 1, &previous, &observed).unwrap());
+            // A failed read after restart must not consume the durable attempt.
+            let mut failed = std::collections::VecDeque::from([
+                Ok(pr.clone()),
+                Err("GitHub unavailable after restart".to_string()),
+            ]);
+            let mut calls = Vec::new();
+            let result = reconcile_branch_update_with(&db, "o/r", 1, |path| {
+                calls.push(path);
+                std::future::ready(failed.pop_front().unwrap())
+            })
+            .await;
+            assert!(result.is_err());
+            assert_eq!(calls.as_slice(), &paths[..2]);
+            assert!(failed.is_empty());
             drop(db);
+
+            let db = crate::db::Db::open(&path).unwrap();
+            assert_eq!(
+                load_branch_update(&db, "o/r", 1).unwrap(),
+                Some(previous.clone())
+            );
+            let mut replies = std::collections::VecDeque::from([
+                Ok(pr.clone()),
+                Ok(old_comparison.clone()),
+                Ok(base_comparison.clone()),
+                Ok(pr.clone()),
+            ]);
+            calls.clear();
+            let result = reconcile_branch_update_with(&db, "o/r", 1, |path| {
+                calls.push(path);
+                std::future::ready(replies.pop_front().unwrap())
+            })
+            .await;
+            assert!(result.unwrap());
+            assert_eq!(calls.as_slice(), paths.as_slice());
+            assert!(replies.is_empty());
+            let observed = load_branch_update(&db, "o/r", 1).unwrap().unwrap();
+            assert_eq!(observed["status"], "observed");
+            assert_eq!(observed["observed_head"], head);
+            assert_eq!(observed["merge_activation"], previous["merge_activation"]);
+            assert_eq!(observed["at"], previous["at"]);
+            drop(db);
+
             let db = crate::db::Db::open(&path).unwrap();
             assert_eq!(
                 load_branch_update(&db, "o/r", 1).unwrap(),
                 Some(observed.clone())
             );
+            calls.clear();
+            let result = reconcile_branch_update_with(&db, "o/r", 1, |path| {
+                calls.push(path);
+                std::future::ready(Err("unexpected remote read".to_string()))
+            })
+            .await;
+            assert!(!result.unwrap());
+            assert!(calls.is_empty());
             assert!(!replace_branch_update_record(&db, "o/r", 1, &previous, &observed).unwrap());
+            assert_eq!(load_branch_update(&db, "o/r", 1).unwrap(), Some(observed));
         }
         std::fs::remove_dir_all(root).unwrap();
     }
