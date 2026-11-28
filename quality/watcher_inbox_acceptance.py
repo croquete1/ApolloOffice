@@ -20,6 +20,12 @@ def github():
     if args[:2] == ['api', '--paginate']:
         endpoint = args[-1]
         if endpoint == 'repos/o/r/issues/1/comments?per_page=100':
+            stage = (root / 'stage').read_text()
+            if stage in ('base-inventory-failure', 'base-inventory-recovery'):
+                (root / f'inventory-{stage}').touch()
+                if stage == 'base-inventory-failure':
+                    print('fixture: comment inventory unavailable', file=sys.stderr)
+                    return 1
             print((root / 'remote.json').read_text())
             return 0
         if endpoint in ('repos/o/r/pulls/1/reviews?per_page=100', 'repos/o/r/pulls/1/comments?per_page=100'):
@@ -226,6 +232,27 @@ def scenario(source_binary):
         assert query(root, 'select state from watcher_inbox') == [('done',)]
         assert query(root, 'select count(*) from cm') == [(1,)]
         assert not list(root.glob('replay-*'))
+        assert not list(root.glob('post-*'))
+        # Only the base changes: HEAD, updatedAt and the completed comment remain
+        # unchanged. A failed inventory must not let the old cursor become valid
+        # against the newly persisted base on the next process.
+        fixture = json.loads((root / 'fixture.json').read_text())
+        fixture['pr']['baseRefOid'] = 'c' * 40
+        (root / 'fixture.json').write_text(json.dumps(fixture))
+        with closing(db_connection(root)) as db, db:
+            db.execute("delete from kv where k='ws:o/r#1'")
+        run_stage(binary, root, env, 'base-inventory-failure',
+                  lambda: (root / 'inventory-base-inventory-failure').exists()
+                  and event(root, 'fixture: comment inventory unavailable'))
+        assert query(root, "select json_extract(d,'$.watcher_base_sha'), json_extract(d,'$.comment_seen_at') from prs where num=1") == [('c' * 40, None)]
+        with closing(db_connection(root)) as db, db:
+            db.execute("delete from kv where k='ws:o/r#1'")
+        run_stage(binary, root, env, 'base-inventory-recovery',
+                  lambda: (root / 'inventory-base-inventory-recovery').exists()
+                  and query(root, "select json_extract(d,'$.comment_seen_at') from prs where num=1") == [(timestamp,)])
+        assert query(root, 'select count(*) from jobs') == [(1,)]
+        assert query(root, 'select count(*) from cm') == [(1,)]
+        assert query(root, 'select state from watcher_inbox') == [('done',)]
         assert not list(root.glob('post-*'))
 
 
