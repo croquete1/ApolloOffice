@@ -1534,7 +1534,14 @@ impl Db {
         if batch.1.is_none() && (!batch.0.is_empty() || !reply.is_null()) {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        self.ack_review_inner(repo, number, updated, (target.0, Some(target.1)), batch, reply)
+        self.ack_review_inner(
+            repo,
+            number,
+            updated,
+            (target.0, Some(target.1)),
+            batch,
+            reply,
+        )
     }
 
     fn ack_review_inner(
@@ -4565,7 +4572,10 @@ mod watcher_storage_failure_tests {
         seed(&db);
         let base = "b".repeat(40);
         let metadata = json!({"watcher_head":HEAD,"watcher_base_sha":base}).to_string();
-        db.run("update prs set d=? where num=1", crate::pa![metadata.clone()]);
+        db.run(
+            "update prs set d=? where num=1",
+            crate::pa![metadata.clone()],
+        );
         let attempt = db
             .claim_review_attempt_for_base("o/r", 1, "t", (HEAD, &base), 0)
             .unwrap()
@@ -4573,11 +4583,13 @@ mod watcher_storage_failure_tests {
         {
             let c = db.0.lock().unwrap();
             assert_eq!(
-                c.execute("update prs set d='invalid' where num=1", []).unwrap(),
+                c.execute("update prs set d='invalid' where num=1", [])
+                    .unwrap(),
                 1
             );
             assert_eq!(
-                c.execute("update prs set d=? where num=1", [&metadata]).unwrap(),
+                c.execute("update prs set d=? where num=1", [&metadata])
+                    .unwrap(),
                 1
             );
         }
@@ -4615,7 +4627,10 @@ mod watcher_storage_failure_tests {
         db.ack_review_for_base("o/r", 1, "t", (HEAD, &changed), (&[], None), &Value::Null)
             .unwrap();
         let cursor = db
-            .one("select json_extract(d,'$.comment_seen_at') as cursor from prs where num=1", vec![])
+            .one(
+                "select json_extract(d,'$.comment_seen_at') as cursor from prs where num=1",
+                vec![],
+            )
             .unwrap();
         assert_eq!(cursor["cursor"], "t");
         assert_eq!(db.n("select count(*) from jobs", vec![]), 0);
