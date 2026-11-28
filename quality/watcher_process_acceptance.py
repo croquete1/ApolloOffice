@@ -35,7 +35,11 @@ def fake_gh():
         print(json.dumps({"full_name": "o/r", "default_branch": "main", "permissions": {"push": True}}))
         return 0
     if args[:2] == ["pr", "view"] and args[2:5] == ["1", "-R", "o/r"]:
-        print(json.dumps(fixture["pr"]))
+        pr = fixture["pr"]
+        if fixture.get("wrong_outbox_number") and args[5:] in (["--json", "number,state,headRefOid"], ["--json", "state,headRefOid"]):
+            (root / ("wrong-number-read-" + uuid.uuid4().hex)).touch()
+            pr = {**pr, "number": 2}
+        print(json.dumps(pr))
         return 0
     if args == ["pr", "comment", "1", "-R", "o/r", "--body-file", "-"]:
         body = sys.stdin.read()
@@ -148,6 +152,15 @@ def scenario(source_binary, accepted, cursor_restart=False):
                 db.execute("create trigger audit_cursor after update on kv when new.k='watcher:delivery-cursor:pending:tester' begin insert into cursor_acceptance_audit(v) values(new.v); end")
         with closing(db_connection(root)) as db, db:
             db.execute("insert into watcher_outbox(id,repo,num,author,body,state,created,updated,source_head) values('fixture','o/r',1,'tester',?,'pending',?,?,?)", (BODY, now, now, HEAD))
+        if accepted and not cursor_restart:
+            # Both queued rows see the wrong PR number but the exact expected HEAD.
+            # A third read proves a later scheduler pass has begun.
+            (root / "fixture.json").write_text(json.dumps({"accepted": accepted, "pr": pr, "wrong_outbox_number": True}))
+            with running(binary, root, env) as process:
+                wait_for(root, process, lambda row: row[0] != "pending" or (row[1] > now and len(list(root.glob("wrong-number-read-*"))) >= 3), "wrong PR number")
+            assert read_state(root)[0] == "pending"
+            assert not list(root.glob("post-*"))
+            (root / "fixture.json").write_text(json.dumps({"accepted": accepted, "pr": pr}))
         with running(binary, root, env) as process:
             wait_for(root, process, lambda row: row[0] == "uncertain" and any(root.glob("post-*")) and (not accepted or json.loads((root / "remote.json").read_text())), "ambiguous POST")
         assert len(list(root.glob("post-*"))) == 1
