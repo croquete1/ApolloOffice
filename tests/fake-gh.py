@@ -144,6 +144,6 @@ if a[:2] == ["pr", "create"]:
     print(f"https://github.com/{R}/pull/{n}")
     sys.exit(0)
 if a[:2] == ["pr", "view"]:
-    out({"state": "OPEN", "mergedAt": None, "updatedAt": "2026-01-01T00:00:00Z", "title": "x", "url": "u", "mergeable": "MERGEABLE", "headRefName": "b", "headRepositoryOwner": {"login": "tester"}, "headRepository": {"name": "r"}, "baseRefName": "main"})
+    out({"number": int(a[2]), "baseRefOid": "b" * 40, "state": "OPEN", "mergedAt": None, "updatedAt": "2026-01-01T00:00:00Z", "title": "x", "url": "u", "mergeable": "MERGEABLE", "headRefName": "b", "headRepositoryOwner": {"login": "tester"}, "headRepository": {"name": "r"}, "baseRefName": "main"})
 sys.stderr.write("fake gh: unknown " + " ".join(a))
 sys.exit(1)
