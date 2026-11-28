@@ -52,6 +52,8 @@ def github():
 def provider():
     root = Path(os.environ['WATCHER_FIXTURE'])
     stage = (root / 'stage').read_text()
+    # Record invocation before any argument, prompt or message validation.
+    (root / f'{stage}-invoked').touch()
     args = sys.argv[2:]
     prompt = Path(args[args.index('--system-prompt-file') + 1]).read_text()
     message = sys.stdin.read()
@@ -142,6 +144,18 @@ def scenario(source_binary):
         env = {'PATH': '/usr/bin:/bin', 'HOME': str(root / 'home'), 'WATCHER_FIXTURE': str(root),
                'APOLLO_OFFICE_GH': str(root / 'gh'), 'APOLLO_OFFICE_CLAUDE': str(root / 'claude'),
                'APOLLO_OFFICE_CODEX': '/bin/false', 'APOLLO_OFFICE_OPENCODE': '/bin/false', 'APOLLO_OFFICE_FAST': '1'}
+        # Negative control: an invocation rejected before role recognition
+        # must still be visible to the no-provider assertions below.
+        (root / 'stage').write_text('fixture-invalid-prompt')
+        invalid_prompt = root / 'invalid-prompt.txt'
+        invalid_prompt.write_text('Unrecognised role')
+        rejected = subprocess.run(
+            [str(root / 'claude'), '--system-prompt-file', str(invalid_prompt)],
+            input='', text=True, capture_output=True, env=env, cwd=root, timeout=20)
+        assert rejected.returncode == 99, rejected
+        assert (root / 'fixture-invalid-prompt-invoked').exists()
+        assert not (root / 'fixture-invalid-prompt-guard').exists()
+        assert not (root / 'fixture-invalid-prompt-watcher').exists()
         timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
         pr = {'number': 1, 'baseRefOid': 'b' * 40, 'state': 'OPEN', 'mergedAt': None, 'updatedAt': timestamp, 'title': 'Fixture', 'url': 'https://github.com/o/r/pull/1',
               'mergeable': 'MERGEABLE', 'headRefName': 'fix', 'headRepositoryOwner': {'login': 'tester'}, 'headRepository': {'name': 'r'},
