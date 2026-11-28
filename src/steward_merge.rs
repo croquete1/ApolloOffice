@@ -607,9 +607,8 @@ fn reconciliation_error_snapshot(
         )
         .optional()?;
     Ok(raw.filter(|value| {
-        serde_json::from_str::<Value>(value).is_ok_and(|error| {
-            error["pr"] == number && error["phase"] == "reconciliation"
-        })
+        serde_json::from_str::<Value>(value)
+            .is_ok_and(|error| error["pr"] == number && error["phase"] == "reconciliation")
     }))
 }
 
