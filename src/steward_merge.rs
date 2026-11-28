@@ -783,18 +783,27 @@ fn reconciliation_target<'a>(
     Some((head, base, head_ref, base_ref))
 }
 
-async fn reconcile_branch_update(a: &Ax, repo: &str, number: i64) -> Result<(), String> {
-    let Some(previous) = load_branch_update(&a.db, repo, number)
+async fn reconcile_branch_update_with<F, Fut>(
+    db: &crate::db::Db,
+    repo: &str,
+    number: i64,
+    mut read: F,
+) -> Result<bool, String>
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = Result<Value, String>>,
+{
+    let Some(previous) = load_branch_update(db, repo, number)
         .map_err(|error| format!("branch update reconciliation unavailable: {error}"))?
     else {
-        return Ok(());
+        return Ok(false);
     };
     let previous = &previous;
     if !matches!(
         previous["status"].as_str(),
         Some("attempted" | "accepted" | "uncertain")
     ) {
-        return Ok(());
+        return Ok(false);
     }
     let old = previous["head"]
         .as_str()
@@ -804,29 +813,21 @@ async fn reconcile_branch_update(a: &Ax, repo: &str, number: i64) -> Result<(), 
         .as_str()
         .filter(|sha| valid_sha(sha))
         .ok_or("invalid reserved base")?;
-    let detail = ghj(&["api", &format!("repos/{repo}/pulls/{number}")], 40).await?;
+    let detail = read(format!("repos/{repo}/pulls/{number}")).await?;
     let Some(target) = reconciliation_target(&detail, repo, number) else {
-        return Ok(());
+        return Ok(false);
     };
     let new_head = target.0;
     if new_head == old {
-        return Ok(());
+        return Ok(false);
     }
-    let old_comparison = ghj(
-        &["api", &format!("repos/{repo}/compare/{old}...{new_head}")],
-        40,
-    )
-    .await?;
-    let base_comparison = ghj(
-        &["api", &format!("repos/{repo}/compare/{base}...{new_head}")],
-        40,
-    )
-    .await?;
+    let old_comparison = read(format!("repos/{repo}/compare/{old}...{new_head}")).await?;
+    let base_comparison = read(format!("repos/{repo}/compare/{base}...{new_head}")).await?;
     // Comparing immutable commits proves ancestry, not that the PR still
     // points to them. Re-read the target before persisting an observation.
-    let latest = ghj(&["api", &format!("repos/{repo}/pulls/{number}")], 40).await?;
+    let latest = read(format!("repos/{repo}/pulls/{number}")).await?;
     if reconciliation_target(&latest, repo, number) != Some(target) {
-        return Ok(());
+        return Ok(false);
     }
     let Some(observed) = observed_branch_update(
         previous,
@@ -835,10 +836,17 @@ async fn reconcile_branch_update(a: &Ax, repo: &str, number: i64) -> Result<(), 
         &base_comparison,
         crate::db::now(),
     ) else {
-        return Ok(());
+        return Ok(false);
     };
-    if replace_branch_update_record(&a.db, repo, number, previous, &observed)
-        .map_err(|error| format!("branch update observation unavailable: {error}"))?
+    replace_branch_update_record(db, repo, number, previous, &observed)
+        .map_err(|error| format!("branch update observation unavailable: {error}"))
+}
+
+async fn reconcile_branch_update(a: &Ax, repo: &str, number: i64) -> Result<(), String> {
+    if reconcile_branch_update_with(&a.db, repo, number, |path| async move {
+        ghj(&["api", &path], 40).await
+    })
+    .await?
     {
         a.say("watcher", &format!("{repo}#{number}: novo HEAD observado inclui os dois commits reservados; validação obrigatória"), None);
     }
@@ -1951,6 +1959,83 @@ mod tests {
         assert_eq!(accepted["status"], "accepted");
         assert_eq!(accepted["at"], 300_100);
         assert_eq!(accepted["merge_activation"], activation);
+    }
+
+    #[tokio::test]
+    async fn reconciliation_checks_remote_sequence_and_preserves_attempt_on_failure() {
+        let repo = "o/r";
+        let old = "a".repeat(40);
+        let base = "b".repeat(40);
+        let head = "c".repeat(40);
+        let pr = json!({
+            "number":1,"state":"open","draft":false,
+            "head":{"sha":head,"ref":"fix/task","repo":{"full_name":repo}},
+            "base":{"sha":base,"ref":"main","repo":{"full_name":repo}}
+        });
+        let proof = |sha: &str| {
+            json!({
+                "status":"ahead","base_commit":{"sha":sha},
+                "merge_base_commit":{"sha":sha},"ahead_by":1,"behind_by":0
+            })
+        };
+        let paths = [
+            format!("repos/{repo}/pulls/1"),
+            format!("repos/{repo}/compare/{old}...{head}"),
+            format!("repos/{repo}/compare/{base}...{head}"),
+            format!("repos/{repo}/pulls/1"),
+        ];
+        for scenario in ["ok", "changed", "network", "replaced"] {
+            let db = crate::db::Db::mem();
+            let key = "steward:update:o/r#1";
+            let previous = branch_update_reservation(&"d".repeat(32), (&old, &base), 100);
+            let replacement = branch_update_reservation(&"e".repeat(32), (&old, &base), 200);
+            db.ks(key, &previous);
+            let mut last = pr.clone();
+            if scenario == "changed" {
+                last["head"]["sha"] = json!("f".repeat(40));
+            }
+            let mut replies = std::collections::VecDeque::from([
+                Ok(pr.clone()),
+                Ok(proof(&old)),
+                Ok(proof(&base)),
+                if scenario == "network" {
+                    Err("GitHub unavailable".to_string())
+                } else {
+                    Ok(last)
+                },
+            ]);
+            let mut calls = Vec::new();
+            let result = reconcile_branch_update_with(&db, repo, 1, |path| {
+                calls.push(path);
+                if scenario == "replaced" && calls.len() == 4 {
+                    db.ks(key, &replacement);
+                }
+                std::future::ready(replies.pop_front().unwrap())
+            })
+            .await;
+            assert_eq!(calls.as_slice(), paths.as_slice());
+            assert!(replies.is_empty());
+            match scenario {
+                "ok" => {
+                    assert!(result.unwrap());
+                    let observed = load_branch_update(&db, repo, 1).unwrap().unwrap();
+                    assert_eq!(observed["status"], "observed");
+                    assert_eq!(observed["observed_head"], head);
+                }
+                "network" => {
+                    assert!(result.is_err());
+                    assert_eq!(db.kg(key), previous);
+                }
+                "replaced" => {
+                    assert!(!result.unwrap());
+                    assert_eq!(db.kg(key), replacement);
+                }
+                _ => {
+                    assert!(!result.unwrap());
+                    assert_eq!(db.kg(key), previous);
+                }
+            }
+        }
     }
 
     #[test]
