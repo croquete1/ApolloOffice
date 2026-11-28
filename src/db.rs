@@ -4691,7 +4691,8 @@ mod watcher_storage_failure_tests {
                 )
                 .unwrap();
                 assert!(c.execute(sql, [&changed]).is_err());
-                c.execute_batch("drop trigger ignore_snapshot_revoke").unwrap();
+                c.execute_batch("drop trigger ignore_snapshot_revoke")
+                    .unwrap();
             }
             assert_eq!(
                 db.try_all("select * from watcher_retry", vec![]).unwrap(),
