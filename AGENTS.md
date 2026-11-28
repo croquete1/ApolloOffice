@@ -71,3 +71,4 @@ As falhas repetidas de Rustfmt são um problema de processo: aplicar formataçã
 - Comparações entre commits imutáveis demonstram ancestralidade, mas não a frescura do alvo remoto. Depois de I/O assíncrono, reler a identidade completa do alvo antes de persistir observações; preservar CAS local e explicitar a janela de corrida residual sem lease remoto.
 - Em operações remotas mutáveis, validar também o identificador numérico do objeto nas respostas, incluindo confirmação posterior; o URL pedido e a coincidência de SHAs não substituem a identidade devolvida pelo serviço.
 - Ao obter a árvore Git para validar evidência de CI, verificar também o SHA do commit devolvido pela API; um tree SHA válido isoladamente não comprova a identidade do commit.
+- Aplicar a mesma prova de ancestralidade a todos os consumidores que dela dependem; validar a identidade devolvida da base, merge-base, estado e contagens coerentes, sem confundir um status isolado com evidência suficiente.

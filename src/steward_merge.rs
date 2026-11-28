@@ -659,6 +659,22 @@ async fn submit_reserved_branch_update(
     Ok(())
 }
 
+// Require the comparison to identify the requested base and prove ancestry.
+fn comparison_proves_ancestry(comparison: &Value, base: &str, head: &str) -> bool {
+    valid_sha(base)
+        && valid_sha(head)
+        && comparison["base_commit"]["sha"] == base
+        && comparison["merge_base_commit"]["sha"] == base
+        && comparison["behind_by"].as_u64() == Some(0)
+        && if base == head {
+            comparison["status"] == "identical"
+                && comparison["ahead_by"].as_u64() == Some(0)
+        } else {
+            comparison["status"] == "ahead"
+                && comparison["ahead_by"].as_u64().is_some_and(|n| n > 0)
+        }
+}
+
 // Only an observed descendant containing BOTH reserved commits is evidence
 // of integration. This does not attribute the change to our HTTP request.
 fn observed_branch_update(
@@ -677,13 +693,8 @@ fn observed_branch_update(
         || !valid_sha(base)
         || !valid_sha(new_head)
         || old_head == new_head
-        || old_comparison["status"] != "ahead"
-        || old_comparison["merge_base_commit"]["sha"] != old_head
-        || !matches!(
-            base_comparison["status"].as_str(),
-            Some("ahead" | "identical")
-        )
-        || base_comparison["merge_base_commit"]["sha"] != base
+        || !comparison_proves_ancestry(old_comparison, old_head, new_head)
+        || !comparison_proves_ancestry(base_comparison, base, new_head)
     {
         return None;
     }
@@ -1328,7 +1339,7 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
             45,
         )
         .await?;
-        if ancestry["status"] != "ahead" && ancestry["status"] != "identical" {
+        if !comparison_proves_ancestry(&ancestry, base_sha, &head) {
             if ancestry["status"] == "diverged" {
                 let update_key = format!("steward:update:{repo}#{number}");
                 if update_retry_deferred(&a.db.kg(&update_key), &head, base_sha, crate::db::now()) {
@@ -1582,6 +1593,37 @@ mod tests {
         let mut snapshot = sample_final_reads();
         snapshot.pr["mergeable_state"] = json!("dirty");
         assert!(!final_gate(Ok(snapshot), &e).unwrap());
+    }
+
+    #[test]
+    fn ancestry_requires_matching_base_and_consistent_counts() {
+        let base = "a".repeat(40);
+        let head = "b".repeat(40);
+        let proof = json!({
+            "status":"ahead","base_commit":{"sha":base},
+            "merge_base_commit":{"sha":base},"ahead_by":1,"behind_by":0
+        });
+        assert!(comparison_proves_ancestry(&proof, &base, &head));
+        for (path, value) in [
+            ("/base_commit/sha", json!("c".repeat(40))),
+            ("/merge_base_commit/sha", json!("c".repeat(40))),
+            ("/ahead_by", json!(0)),
+            ("/behind_by", json!(1)),
+            ("/behind_by", Value::Null),
+            ("/status", json!("identical")),
+            ("/status", json!("diverged")),
+        ] {
+            let mut changed = proof.clone();
+            *changed.pointer_mut(path).unwrap() = value;
+            assert!(!comparison_proves_ancestry(&changed, &base, &head));
+        }
+        let identical = json!({
+            "status":"identical","base_commit":{"sha":base},
+            "merge_base_commit":{"sha":base},"ahead_by":0,"behind_by":0
+        });
+        assert!(comparison_proves_ancestry(&identical, &base, &base));
+        assert!(!comparison_proves_ancestry(&identical, &base, &head));
+        assert!(!comparison_proves_ancestry(&proof, &base, &base));
     }
 
     #[test]
@@ -1960,8 +2002,8 @@ mod tests {
         let head = "c".repeat(40);
         let previous = branch_update_reservation(&"d".repeat(32), (&old, &base), 100);
         let key = "steward:update:o/r#1";
-        let old_compare = json!({"status":"ahead","merge_base_commit":{"sha":old}});
-        let base_compare = json!({"status":"ahead","merge_base_commit":{"sha":base}});
+        let old_compare = json!({"status":"ahead","base_commit":{"sha":old},"merge_base_commit":{"sha":old},"ahead_by":1,"behind_by":0});
+        let base_compare = json!({"status":"ahead","base_commit":{"sha":base},"merge_base_commit":{"sha":base},"ahead_by":1,"behind_by":0});
         assert!(
             observed_branch_update(&previous, &old, &old_compare, &base_compare, 200).is_none()
         );
@@ -2053,8 +2095,8 @@ mod tests {
         let base = "b".repeat(40);
         let head = "c".repeat(40);
         let target = (old.as_str(), base.as_str());
-        let old_comparison = json!({"status":"ahead","merge_base_commit":{"sha":old}});
-        let base_comparison = json!({"status":"ahead","merge_base_commit":{"sha":base}});
+        let old_comparison = json!({"status":"ahead","base_commit":{"sha":old},"merge_base_commit":{"sha":old},"ahead_by":1,"behind_by":0});
+        let base_comparison = json!({"status":"ahead","base_commit":{"sha":base},"merge_base_commit":{"sha":base},"ahead_by":1,"behind_by":0});
         for phase in ["attempted", "accepted", "uncertain"] {
             let path = root.join(format!("{phase}.db"));
             let status = std::process::Command::new(&exe)
