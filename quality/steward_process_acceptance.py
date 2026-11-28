@@ -1,8 +1,8 @@
 """Actual daemon restart acceptance for Steward's durable branch-update observation.
 
-Seed a committed attempt, not a remote PUT. Run the release binary in an
-isolated non-root network namespace. The fake CLI supplies remote reads and
-records any forbidden merge/update attempt before returning.
+Run the release binary in an isolated non-root network namespace. Test
+both a seeded attempt and a real Steward-issued update with a simulated
+ambiguous remote outcome. Record all attempted mutations before returning.
 """
 from contextlib import closing
 from datetime import datetime, timezone
@@ -21,6 +21,7 @@ from watcher_process_acceptance import db_connection, isolated_network, running
 OLD = "a" * 40
 BASE = "b" * 40
 HEAD = "c" * 40
+PREVIOUS_BASE = "d" * 40
 KEY = "steward:update:o/r#1"
 ERROR = "steward:merge_error:o/r"
 
@@ -48,8 +49,20 @@ def fake_gh():
         return out({"login": "tester", "id": 1, "name": "Tester"})
     if args == ["api", "repos/o/r"]:
         return out({"full_name": "o/r", "default_branch": "main", "permissions": {"push": True}})
+    if args == ["api", "repos/o/r/branches/main"]:
+        return out({"name": "main", "commit": {"sha": BASE}})
     if any(arg.endswith(("/update-branch", "/merge")) for arg in args):
         record("mutation")
+        expected = ["api", "-X", "PUT", "repos/o/r/pulls/1/update-branch",
+                    "-f", f"expected_head_sha={OLD}"]
+        if stage == "submit" and args == expected:
+            reservation = read_value(root, KEY)
+            if (reservation and reservation["status"] == "attempted"
+                    and reservation["head"] == OLD and reservation["base"] == BASE):
+                record("reserved-before-put")
+                print("fixture: connection lost after branch update", file=sys.stderr)
+                return 1
+        record("unexpected-mutation")
         return 98
     if args == ["api", "repos/o/r/pulls/1"]:
         return out(fixture["rest"])
@@ -93,7 +106,7 @@ def wait_for(root, process, predicate, label):
                          f"scan_error={read_value(root, 'steward:error:o/r')}")
 
 
-def scenario(source_binary):
+def scenario(source_binary, submit=False):
     with tempfile.TemporaryDirectory(prefix="apollo-steward-") as directory:
         root = Path(directory)
         binary = root / "apollo-office"
@@ -118,8 +131,16 @@ def scenario(source_binary):
                   "baseRefOid": BASE, "createdAt": timestamp, "updatedAt": timestamp,
                   "mergeStateStatus": "BLOCKED", "reviewDecision": "REVIEW_REQUIRED",
                   "statusCheckRollup": [], "files": []}
+        if submit:
+            # Present the stale base to the PR API but the current base to the
+            # branch API. Only the owned, opted-in branch refresh is eligible.
+            rest["head"]["sha"] = OLD
+            rest["base"]["sha"] = PREVIOUS_BASE
+            rest["user"] = {"login": "tester"}
+            detail.update(headRefOid=OLD, baseRefOid=PREVIOUS_BASE,
+                          mergeStateStatus="BEHIND")
         (root / "fixture.json").write_text(json.dumps({"rest": rest, "detail": detail}))
-        (root / "stage").write_text("failure")
+        (root / "stage").write_text("submit" if submit else "failure")
         subprocess.run([str(binary), "--data", str(root / "data"), "status"],
                        env=env, cwd=root, check=True, capture_output=True, timeout=20)
         with closing(db_connection(root)) as db, db:
@@ -129,9 +150,26 @@ def scenario(source_binary):
             db.execute("insert into rp(full,on_,hunt,iss,auto_merge,local_merge) values('o/r',1,0,0,1,0)")
             activation = db.execute("select merge_activation from rp where full='o/r'").fetchone()[0]
             assert len(activation) == 32
-            previous = {"head": OLD, "base": BASE, "at": 100, "status": "uncertain",
-                        "merge_activation": activation, "error": "fixture: ambiguous prior attempt"}
-            db.execute("insert into kv(k,v) values(?,?)", (KEY, json.dumps(previous, separators=(",", ":"), sort_keys=True)))
+            if not submit:
+                previous = {"head": OLD, "base": BASE, "at": 100, "status": "uncertain",
+                            "merge_activation": activation, "error": "fixture: ambiguous prior attempt"}
+                db.execute("insert into kv(k,v) values(?,?)", (KEY, json.dumps(previous, separators=(",", ":"), sort_keys=True)))
+        if submit:
+            with running(binary, root, env) as process:
+                wait_for(root, process, lambda: (read_value(root, KEY) or {}).get("status") == "uncertain"
+                         and any(root.glob("submit-reserved-before-put-*")), "ambiguous branch PUT")
+            previous = read_value(root, KEY)
+            assert previous["head"] == OLD and previous["base"] == BASE
+            assert previous["merge_activation"] == activation
+            assert len(list(root.glob("submit-mutation-*"))) == 1
+            assert len(list(root.glob("submit-reserved-before-put-*"))) == 1
+            # The fake service exposes its new HEAD only after the first
+            # process has stopped; the next daemon must reconcile, not PUT.
+            rest["head"]["sha"] = HEAD
+            rest["base"]["sha"] = BASE
+            detail.update(headRefOid=HEAD, baseRefOid=BASE, mergeStateStatus="BLOCKED")
+            (root / "fixture.json").write_text(json.dumps({"rest": rest, "detail": detail}))
+            (root / "stage").write_text("failure")
         with running(binary, root, env) as process:
             wait_for(root, process, lambda: read_value(root, ERROR) is not None and
                      any(root.glob("failure-old-compare-*")), "failed reconciliation")
@@ -145,7 +183,7 @@ def scenario(source_binary):
         observed = read_value(root, KEY)
         assert observed["observed_head"] == HEAD
         assert observed["head"] == OLD and observed["base"] == BASE
-        assert observed["merge_activation"] == activation and observed["at"] == 100
+        assert observed["merge_activation"] == activation and observed["at"] == previous["at"]
         assert len(list(root.glob("recover-old-compare-*"))) == 1
         assert len(list(root.glob("recover-base-compare-*"))) == 1
 
@@ -161,8 +199,9 @@ def scenario(source_binary):
                      "second replay scan")
         assert read_value(root, KEY) == observed
         assert not list(root.glob("replay-*-compare-*"))
-        assert not list(root.glob("*-mutation-*"))
-        print("Steward daemon restart: uncertain preserved, observed after recovery, replay without comparisons or mutation", flush=True)
+        assert len(list(root.glob("*-mutation-*"))) == int(submit)
+        assert not list(root.glob("*-unexpected-mutation-*"))
+        print(f"Steward daemon restart: submit={submit}, uncertain preserved, observed after recovery, replay without comparisons or mutation", flush=True)
 
 
 if __name__ == "__main__":
@@ -171,4 +210,6 @@ if __name__ == "__main__":
     isolated_network()
     if len(sys.argv) != 2:
         raise SystemExit("usage: steward_process_acceptance.py /path/to/apollo-office")
-    scenario(Path(sys.argv[1]).resolve(strict=True))
+    binary = Path(sys.argv[1]).resolve(strict=True)
+    scenario(binary)
+    scenario(binary, submit=True)
