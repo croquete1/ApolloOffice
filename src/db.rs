@@ -5127,7 +5127,8 @@ mod watcher_storage_failure_tests {
 
     #[test]
     fn full_file_database_preserves_live_review_and_allows_recovery() {
-        let path = std::env::temp_dir().join(format!("apollo-review-full-{}", rand::random::<u64>()));
+        let path =
+            std::env::temp_dir().join(format!("apollo-review-full-{}", rand::random::<u64>()));
         std::fs::create_dir(&path).unwrap();
         let file = path.join("state.db");
         let base = "b".repeat(40);
