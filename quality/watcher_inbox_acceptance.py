@@ -161,6 +161,24 @@ def scenario(source_binary):
             assert query(root, 'select count(*) from watcher_outbox') == [(0,)]
             assert query(root, 'select count(*) from watcher_retry') == [(1,)]
 
+        # An UPDATE can report success even when an AFTER trigger clears the
+        # reserved ticket. The real caller must fail before either model CLI.
+        with closing(db_connection(root)) as db, db:
+            db.execute("""create trigger fixture_clear_ticket after update of analysis_ticket on watcher_retry
+                        when new.analysis_ticket is not null
+                        begin update watcher_retry set analysis_ticket=null
+                        where repo=new.repo and num=new.num; end""")
+        run_stage(binary, root, env, 'ticket-not-persisted',
+                  lambda: pending(root) and event(root, 'processing deferred')
+                  and query(root, 'select count(*) from watcher_retry') == [(0,)])
+        assert query(root, 'select count(*) from watcher_retry') == [(0,)]
+        assert query(root, 'select count(*) from jobs') == [(0,)]
+        assert query(root, 'select count(*) from cm') == [(0,)]
+        assert query(root, 'select count(*) from watcher_outbox') == [(0,)]
+        assert not list(root.glob('ticket-not-persisted-*'))
+        assert not list(root.glob('post-*'))
+        with closing(db_connection(root)) as db, db:
+            db.execute('drop trigger fixture_clear_ticket')
         run_stage(binary, root, env, 'before-guard', lambda: pending(root) and (root / 'before-guard-guard').exists())
         assert_pending()
         interrupted = query(root, 'select analysis_ticket,next_attempt_at from watcher_retry')
