@@ -4782,14 +4782,9 @@ mod watcher_storage_failure_tests {
                 .unwrap();
             let apply = || -> rusqlite::Result<()> {
                 match mode {
-                    "empty" => db.ack_review_for_base(
-                        "o/r",
-                        1,
-                        "t",
-                        target,
-                        (&[], None),
-                        &Value::Null,
-                    ),
+                    "empty" => {
+                        db.ack_review_for_base("o/r", 1, "t", target, (&[], None), &Value::Null)
+                    }
                     "ack" => db.ack_review_for_base(
                         "o/r",
                         1,
