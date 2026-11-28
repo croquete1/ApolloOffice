@@ -1169,6 +1169,14 @@ impl Db {
         if changed != 1 {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
+        let persisted: bool = tx.query_row(
+            "select exists(select 1 from prs where repo=? and num=? and json_type(d,'$.seen')='true' and json_extract(d,'$.comment_seen_at')=?)",
+            rusqlite::params![repo, number, updated],
+            |row| row.get(0),
+        )?;
+        if !persisted {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
         Ok(())
     }
 
@@ -4741,6 +4749,102 @@ mod watcher_storage_failure_tests {
         );
         assert_pending(&db);
         assert!(!db.comment_acknowledged("o/r", "r1").unwrap());
+    }
+
+    #[test]
+    fn restored_review_cursor_rolls_back_admission_and_acknowledgement() {
+        for mode in ["empty", "ack", "queue"] {
+            let db = Db::mem();
+            seed(&db);
+            let base = "b".repeat(40);
+            let target = (HEAD, base.as_str());
+            let sql = "update prs set d=json_set(d,'$.watcher_base_sha',?) where num=1";
+            db.run(sql, crate::pa![base.clone()]);
+            if mode == "empty" {
+                db.run("delete from watcher_inbox", vec![]);
+            }
+            let ids = vec!["r1".into()];
+            let req = request();
+            let attempt = if mode == "empty" {
+                None
+            } else {
+                db.claim_review_attempt_for_base("o/r", 1, "t", target, 0)
+                    .unwrap()
+            };
+            let before = db.try_all("select d from prs where num=1", vec![]).unwrap();
+            db.0.lock()
+                .unwrap()
+                .execute_batch(
+                    "create trigger restore_cursor after update of d on prs
+                     when json_extract(new.d,'$.comment_seen_at')='t'
+                     begin update prs set d=old.d where repo=new.repo and num=new.num; end;",
+                )
+                .unwrap();
+            let apply = || -> rusqlite::Result<()> {
+                match mode {
+                    "empty" => db.ack_review_for_base(
+                        "o/r",
+                        1,
+                        "t",
+                        target,
+                        (&[], None),
+                        &Value::Null,
+                    ),
+                    "ack" => db.ack_review_for_base(
+                        "o/r",
+                        1,
+                        "t",
+                        target,
+                        (&ids, attempt.as_ref()),
+                        &req["reply"],
+                    ),
+                    _ => db
+                        .queue_review_with_attempt(
+                            "o/r",
+                            1,
+                            "t",
+                            &ids,
+                            &req,
+                            attempt.as_ref().unwrap(),
+                        )
+                        .and_then(|queued| {
+                            if queued {
+                                Ok(())
+                            } else {
+                                Err(rusqlite::Error::InvalidQuery)
+                            }
+                        }),
+                }
+            };
+            assert!(apply().is_err());
+            assert_eq!(
+                db.try_all("select d from prs where num=1", vec![]).unwrap(),
+                before
+            );
+            assert_eq!(db.n("select count(*) from jobs", vec![]), 0);
+            assert_eq!(db.n("select count(*) from cm", vec![]), 0);
+            assert_eq!(db.n("select count(*) from watcher_outbox", vec![]), 0);
+            if mode != "empty" {
+                assert_pending(&db);
+            }
+            db.run("drop trigger restore_cursor", vec![]);
+            apply().unwrap();
+            assert_eq!(
+                db.n("select count(*) from jobs", vec![]),
+                i64::from(mode == "queue")
+            );
+            assert_eq!(
+                db.n("select count(*) from cm", vec![]),
+                i64::from(mode != "empty")
+            );
+            assert_eq!(
+                db.n("select count(*) from watcher_outbox", vec![]),
+                i64::from(mode != "empty")
+            );
+            if let Some(attempt) = attempt {
+                attempt.release().unwrap();
+            }
+        }
     }
 
     #[test]
