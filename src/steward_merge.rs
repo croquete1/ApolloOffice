@@ -830,7 +830,9 @@ async fn reconcile_branch_update(a: &Ax, repo: &str, number: i64) -> Result<(), 
 // Both update paths require a fresh owned PR and the exact observed target.
 // The GitHub PUT still carries expected_head_sha; it cannot fence a base race.
 fn same_update_target(before: &Value, after: &Value, repo: &str, base: &str, login: &str) -> bool {
-    owned_update_target(before, repo, base, login)
+    before["number"].as_i64().is_some_and(|n| n > 0)
+        && before["number"] == after["number"]
+        && owned_update_target(before, repo, base, login)
         && owned_update_target(after, repo, base, login)
         && before["head"]["sha"] == after["head"]["sha"]
         && before["head"]["ref"] == after["head"]["ref"]
@@ -1066,6 +1068,7 @@ impl Drop for MergePermit {
 }
 
 struct ExpectedMerge<'a> {
+    number: i64,
     repo: &'a str,
     base: &'a str,
     base_sha: &'a str,
@@ -1075,7 +1078,9 @@ struct ExpectedMerge<'a> {
 }
 
 fn pr_current(pr: &Value, expected: &ExpectedMerge<'_>) -> bool {
-    pr["state"] == "open"
+    expected.number > 0
+        && pr["number"] == expected.number
+        && pr["state"] == "open"
         && pr["draft"] == false
         && pr["head"]["sha"] == expected.head
         && pr["base"]["sha"] == expected.base_sha
@@ -1085,6 +1090,14 @@ fn pr_current(pr: &Value, expected: &ExpectedMerge<'_>) -> bool {
         && pr["mergeable"] == true
         && pr["mergeable_state"] == "clean"
         && (expected.mode != MergeMode::Local || pr["head"]["repo"]["full_name"] == expected.repo)
+}
+
+fn merge_confirmed(pr: &Value, expected: &ExpectedMerge<'_>) -> bool {
+    expected.number > 0
+        && pr["number"] == expected.number
+        && pr["merged"] == true
+        && pr["head"]["sha"] == expected.head
+        && pr["base"]["repo"]["full_name"] == expected.repo
 }
 
 fn review_gate(reviews: &Value, expected: &ExpectedMerge<'_>) -> bool {
@@ -1166,7 +1179,8 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
     let Some(base_sha) = detail["base"]["sha"].as_str() else {
         return Ok(false);
     };
-    if detail["head"]["sha"] != head
+    if detail["number"] != number
+        || detail["head"]["sha"] != head
         || detail["state"] != "open"
         || detail["draft"] != false
         || detail["base"]["repo"]["full_name"] != repo
@@ -1285,6 +1299,7 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
     let reviews =
         json!(apip_unique(&format!("repos/{repo}/pulls/{number}/reviews?per_page=100")).await?);
     let expected = ExpectedMerge {
+        number,
         repo,
         base,
         base_sha,
@@ -1438,7 +1453,7 @@ async fn try_one(a: &Ax, repo: &str, listed: &Value, assessed: &Value) -> Result
         return Err(format!("GitHub não confirmou o merge de {repo}#{number}"));
     }
     let confirm = ghj(&["api", &format!("repos/{repo}/pulls/{number}")], 40).await?;
-    if confirm["merged"] != true {
+    if !merge_confirmed(&confirm, &expected) {
         return Err(format!(
             "Merge de {repo}#{number} não confirmado por leitura"
         ));
@@ -1512,6 +1527,7 @@ mod tests {
 
     fn sample_expected() -> ExpectedMerge<'static> {
         ExpectedMerge {
+            number: 42,
             repo: "croquete1/repo-e2e",
             base: "main",
             base_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -1525,7 +1541,7 @@ mod tests {
         let e = sample_expected();
         FinalReads {
             pr: json!({
-                "state":"open","draft":false,"mergeable":true,
+                "number":e.number,"state":"open","draft":false,"mergeable":true,
                 "mergeable_state":"clean","user":{"login":e.author},
                 "head":{"sha":e.head,"repo":{"full_name":e.repo}},
                 "base":{"ref":e.base,"sha":e.base_sha,"repo":{"full_name":e.repo}}
@@ -1558,6 +1574,32 @@ mod tests {
         let mut snapshot = sample_final_reads();
         snapshot.pr["mergeable_state"] = json!("dirty");
         assert!(!final_gate(Ok(snapshot), &e).unwrap());
+    }
+
+    #[test]
+    fn pr_identity_must_match_before_and_after_merge() {
+        let e = sample_expected();
+        let mut snapshot = sample_final_reads();
+        snapshot.pr["number"] = json!(43);
+        assert!(!final_gate(Ok(snapshot), &e).unwrap());
+        let mut snapshot = sample_final_reads();
+        snapshot.pr["number"] = Value::Null;
+        assert!(!final_gate(Ok(snapshot), &e).unwrap());
+
+        let mut pr = sample_final_reads().pr;
+        pr["merged"] = json!(true);
+        assert!(merge_confirmed(&pr, &e));
+        for (path, value) in [
+            ("/number", json!(43)),
+            ("/number", Value::Null),
+            ("/merged", json!(false)),
+            ("/head/sha", json!("c".repeat(40))),
+            ("/base/repo/full_name", json!("other/repo")),
+        ] {
+            let mut changed = pr.clone();
+            *changed.pointer_mut(path).unwrap() = value;
+            assert!(!merge_confirmed(&changed, &e));
+        }
     }
 
     #[test]
@@ -1725,12 +1767,14 @@ mod tests {
         let head = "a".repeat(40);
         let base = "b".repeat(40);
         let pr = json!({
-            "state":"open","draft":false,"user":{"login":"owner"},
+            "number":1,"state":"open","draft":false,"user":{"login":"owner"},
             "head":{"sha":head,"ref":"fix/task","repo":{"full_name":repo}},
             "base":{"sha":base,"ref":"main","repo":{"full_name":repo}}
         });
         assert!(same_update_target(&pr, &pr, repo, "main", "owner"));
         for (path, value) in [
+            ("/number", json!(2)),
+            ("/number", Value::Null),
             ("/head/sha", json!("c".repeat(40))),
             ("/base/sha", json!("c".repeat(40))),
             ("/head/ref", json!("fix/other")),
