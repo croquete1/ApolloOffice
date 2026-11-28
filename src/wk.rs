@@ -2402,7 +2402,10 @@ pub(crate) fn reply_confirmed(rows: &[Value], author: &str, body: &str) -> bool 
 }
 
 // None means remote evidence is incomplete; defer without changing delivery state.
-fn watcher_reply_remote_matches(pr: &Value, source_head: &str) -> Option<bool> {
+fn watcher_reply_remote_matches(number: i64, pr: &Value, source_head: &str) -> Option<bool> {
+    if number <= 0 || pr["number"].as_i64() != Some(number) {
+        return None;
+    }
     match pr["state"].as_str() {
         Some("MERGED" | "CLOSED") => Some(false),
         Some("OPEN") => {
@@ -2624,7 +2627,7 @@ async fn deliver_watcher_outbox(a: &Ax, me: &str, cursor: &mut WatcherDeliveryCu
                 "-R",
                 repo,
                 "--json",
-                "state,headRefOid",
+                "number,state,headRefOid",
             ],
             45,
         )
@@ -2632,7 +2635,7 @@ async fn deliver_watcher_outbox(a: &Ax, me: &str, cursor: &mut WatcherDeliveryCu
         else {
             continue;
         };
-        match watcher_reply_remote_matches(&pr, row["source_head"].as_str().unwrap_or("")) {
+        match watcher_reply_remote_matches(number, &pr, row["source_head"].as_str().unwrap_or("")) {
             Some(true) => {}
             Some(false) => {
                 if watcher_outbox_step(
@@ -2966,29 +2969,48 @@ mod t {
         let head = "a".repeat(40);
         let other = "b".repeat(40);
         assert_eq!(
-            watcher_reply_remote_matches(&json!({"state":"OPEN","headRefOid":head}), &head),
+            watcher_reply_remote_matches(
+                1,
+                &json!({"number":1,"state":"OPEN","headRefOid":head}),
+                &head
+            ),
             Some(true)
         );
         assert_eq!(
-            watcher_reply_remote_matches(&json!({"state":"OPEN","headRefOid":other}), &head),
+            watcher_reply_remote_matches(
+                1,
+                &json!({"number":1,"state":"OPEN","headRefOid":other}),
+                &head
+            ),
             Some(false)
         );
         for state in ["CLOSED", "MERGED"] {
             assert_eq!(
-                watcher_reply_remote_matches(&json!({"state":state}), &head),
+                watcher_reply_remote_matches(1, &json!({"number":1,"state":state}), &head),
                 Some(false)
+            );
+            assert_eq!(
+                watcher_reply_remote_matches(1, &json!({"number":2,"state":state}), &head),
+                None
             );
         }
         for incomplete in [
             json!({}),
-            json!({"state":"OPEN"}),
-            json!({"state":"OPEN","headRefOid":"invalid"}),
-            json!({"state":"UNKNOWN","headRefOid":head}),
+            json!({"number":1,"state":"OPEN"}),
+            json!({"number":1,"state":"OPEN","headRefOid":"invalid"}),
+            json!({"number":1,"state":"UNKNOWN","headRefOid":head}),
+            json!({"state":"OPEN","headRefOid":head}),
+            json!({"number":2,"state":"OPEN","headRefOid":head}),
+            json!({"number":"1","state":"OPEN","headRefOid":head}),
         ] {
-            assert_eq!(watcher_reply_remote_matches(&incomplete, &head), None);
+            assert_eq!(watcher_reply_remote_matches(1, &incomplete, &head), None);
         }
         assert_eq!(
-            watcher_reply_remote_matches(&json!({"state":"OPEN","headRefOid":head}), ""),
+            watcher_reply_remote_matches(1, &json!({"number":1,"state":"OPEN","headRefOid":head}), ""),
+            None
+        );
+        assert_eq!(
+            watcher_reply_remote_matches(0, &json!({"number":0,"state":"OPEN","headRefOid":head}), &head),
             None
         );
     }
