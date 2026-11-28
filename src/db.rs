@@ -1512,6 +1512,21 @@ impl Db {
         {
             return Err(rusqlite::Error::InvalidQuery);
         }
+        // A successful UPDATE alone does not prove ownership. Do not return
+        // a live reservation to the provider caller before checking its value.
+        let persisted: bool = tx.query_row(
+            "select exists(select 1 from watcher_retry where repo=? and num=? and head=? and snapshot=? and analysis_ticket=?)",
+            rusqlite::params![repo, number, head, updated, ticket],
+            |row| row.get(0),
+        )?;
+        if !persisted || !Self::review_snapshot_matches(&tx, repo, number, updated, head)? {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        if let Some(base) = base {
+            if !Self::review_base_matches(&tx, repo, number, base)? {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+        }
         tx.commit()?;
         Ok(Some(ReviewAttempt {
             db: self.clone(),
@@ -4732,6 +4747,44 @@ mod watcher_storage_failure_tests {
                 .queue_review_with_attempt("o/r", 1, "t", &ids, &req, &fresh)
                 .unwrap());
             fresh.release().unwrap();
+            assert_eq!(db.n("select count(*) from jobs", vec![]), 1);
+        }
+    }
+
+    #[test]
+    fn altered_review_ticket_is_not_returned_to_provider_caller() {
+        for replacement in ["null", "'replacement'"] {
+            let db = Db::mem();
+            seed(&db);
+            let base = "b".repeat(40);
+            db.run(
+                "update prs set d=json_set(d,'$.watcher_base_sha',?) where num=1",
+                crate::pa![base.clone()],
+            );
+            let target = (HEAD, base.as_str());
+            let sql = format!(
+                "create trigger alter_ticket after update of analysis_ticket on watcher_retry
+                 when new.analysis_ticket is not null and new.analysis_ticket is not {replacement}
+                 begin update watcher_retry set analysis_ticket={replacement}
+                 where repo=new.repo and num=new.num; end;"
+            );
+            db.0.lock().unwrap().execute_batch(&sql).unwrap();
+            assert!(db
+                .claim_review_attempt_for_base("o/r", 1, "t", target, 0)
+                .is_err());
+            assert_eq!(db.n("select count(*) from watcher_retry", vec![]), 0);
+            assert_pending(&db);
+            db.run("drop trigger alter_ticket", vec![]);
+            let fresh = db
+                .claim_review_attempt_for_base("o/r", 1, "t", target, 0)
+                .unwrap()
+                .unwrap();
+            let ids = vec!["r1".into()];
+            assert!(db
+                .queue_review_with_attempt("o/r", 1, "t", &ids, &request(), &fresh)
+                .unwrap());
+            fresh.release().unwrap();
+            assert!(db.comment_acknowledged("o/r", "r1").unwrap());
             assert_eq!(db.n("select count(*) from jobs", vec![]), 1);
         }
     }
