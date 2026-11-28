@@ -736,6 +736,35 @@ fn load_branch_update(
     raw.map(|value| decode_branch_update(&value)).transpose()
 }
 
+// Capture the complete PR target, not only the HEAD returned before I/O.
+fn reconciliation_target<'a>(
+    detail: &'a Value,
+    repo: &str,
+    number: i64,
+) -> Option<(&'a str, &'a str, &'a str, &'a str)> {
+    if number <= 0
+        || detail["number"] != number
+        || detail["state"] != "open"
+        || detail["draft"] != false
+        || detail["head"]["repo"]["full_name"] != repo
+        || detail["base"]["repo"]["full_name"] != repo
+    {
+        return None;
+    }
+    let head = detail["head"]["sha"]
+        .as_str()
+        .filter(|sha| valid_sha(sha))?;
+    let base = detail["base"]["sha"]
+        .as_str()
+        .filter(|sha| valid_sha(sha))?;
+    let head_ref = detail["head"]["ref"].as_str().filter(|r| !r.is_empty())?;
+    let base_ref = detail["base"]["ref"].as_str().filter(|r| !r.is_empty())?;
+    if head_ref == base_ref {
+        return None;
+    }
+    Some((head, base, head_ref, base_ref))
+}
+
 async fn reconcile_branch_update(a: &Ax, repo: &str, number: i64) -> Result<(), String> {
     let Some(previous) = load_branch_update(&a.db, repo, number)
         .map_err(|error| format!("branch update reconciliation unavailable: {error}"))?
@@ -758,16 +787,11 @@ async fn reconcile_branch_update(a: &Ax, repo: &str, number: i64) -> Result<(), 
         .filter(|sha| valid_sha(sha))
         .ok_or("invalid reserved base")?;
     let detail = ghj(&["api", &format!("repos/{repo}/pulls/{number}")], 40).await?;
-    let Some(new_head) = detail["head"]["sha"].as_str().filter(|sha| valid_sha(sha)) else {
+    let Some(target) = reconciliation_target(&detail, repo, number) else {
         return Ok(());
     };
-    if detail["number"] != number
-        || detail["state"] != "open"
-        || detail["draft"] != false
-        || detail["head"]["repo"]["full_name"] != repo
-        || detail["base"]["repo"]["full_name"] != repo
-        || new_head == old
-    {
+    let new_head = target.0;
+    if new_head == old {
         return Ok(());
     }
     let old_comparison = ghj(
@@ -780,6 +804,12 @@ async fn reconcile_branch_update(a: &Ax, repo: &str, number: i64) -> Result<(), 
         40,
     )
     .await?;
+    // Comparing immutable commits proves ancestry, not that the PR still
+    // points to them. Re-read the target before persisting an observation.
+    let latest = ghj(&["api", &format!("repos/{repo}/pulls/{number}")], 40).await?;
+    if reconciliation_target(&latest, repo, number) != Some(target) {
+        return Ok(());
+    }
     let Some(observed) = observed_branch_update(
         previous,
         new_head,
@@ -1809,6 +1839,46 @@ mod tests {
         assert_eq!(accepted["status"], "accepted");
         assert_eq!(accepted["at"], 300_100);
         assert_eq!(accepted["merge_activation"], activation);
+    }
+
+    #[test]
+    fn reconciliation_target_detects_remote_changes() {
+        let repo = "o/r";
+        let head = "a".repeat(40);
+        let base = "b".repeat(40);
+        let pr = json!({
+            "number":1,"state":"open","draft":false,
+            "head":{"sha":head,"ref":"fix/task","repo":{"full_name":repo}},
+            "base":{"sha":base,"ref":"main","repo":{"full_name":repo}}
+        });
+        let target = reconciliation_target(&pr, repo, 1).unwrap();
+        assert_eq!(target.0, head.as_str());
+        assert_eq!(reconciliation_target(&pr, repo, 1), Some(target));
+        let mut changed = pr.clone();
+        changed["head"]["sha"] = json!("c".repeat(40));
+        assert_ne!(reconciliation_target(&changed, repo, 1), Some(target));
+        changed = pr.clone();
+        changed["base"]["sha"] = json!("d".repeat(40));
+        assert_ne!(reconciliation_target(&changed, repo, 1), Some(target));
+        changed = pr.clone();
+        changed["base"]["ref"] = json!("release");
+        assert_ne!(reconciliation_target(&changed, repo, 1), Some(target));
+        changed = pr.clone();
+        changed["head"]["ref"] = json!("fix/replaced");
+        assert_ne!(reconciliation_target(&changed, repo, 1), Some(target));
+        changed = pr.clone();
+        changed["state"] = json!("closed");
+        assert!(reconciliation_target(&changed, repo, 1).is_none());
+        changed = pr.clone();
+        changed["draft"] = json!(true);
+        assert!(reconciliation_target(&changed, repo, 1).is_none());
+        changed = pr.clone();
+        changed["head"]["repo"]["full_name"] = json!("other/r");
+        assert!(reconciliation_target(&changed, repo, 1).is_none());
+        changed = pr.clone();
+        changed["base"]["ref"] = Value::Null;
+        assert!(reconciliation_target(&changed, repo, 1).is_none());
+        assert!(reconciliation_target(&pr, repo, 2).is_none());
     }
 
     #[test]
