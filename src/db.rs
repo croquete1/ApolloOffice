@@ -1280,13 +1280,7 @@ impl Db {
         target: (&str, &str),
         ids: &[String],
     ) -> rusqlite::Result<()> {
-        self.receive_review_batch_inner(
-            repo,
-            number,
-            updated,
-            (target.0, Some(target.1)),
-            ids,
-        )
+        self.receive_review_batch_inner(repo, number, updated, (target.0, Some(target.1)), ids)
     }
 
     fn receive_review_batch_inner(
