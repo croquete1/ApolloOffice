@@ -128,7 +128,7 @@ create index if not exists coderabbit_findings_pr on coderabbit_findings(repo,nu
 create table if not exists coderabbit_cycles(repo text not null, number integer not null, cycles integer not null check(cycles>=0), primary key(repo,number));
 ";
 
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 
 pub(crate) type CiMarkerRow = (String, String, String);
 
@@ -370,6 +370,16 @@ fn init(c: &mut Connection) -> anyhow::Result<()> {
     // without resetting the retry deadline or discarding receipt history.
     tx.execute_batch(
         "
+        create trigger if not exists watcher_attempt_base_changed
+        after update of d on prs
+        when json_extract(old.d,'$.watcher_base_sha') is not json_extract(new.d,'$.watcher_base_sha')
+        begin
+          update watcher_retry set analysis_ticket=null
+            where repo=old.repo and num=old.num and analysis_ticket is not null;
+          select case when exists(select 1 from watcher_retry
+            where repo=old.repo and num=old.num and analysis_ticket is not null)
+            then raise(abort,'watcher base attempt revocation failed') end;
+        end;
         create trigger if not exists watcher_attempt_repo_changed
         after update of on_,full on rp
         when old.on_ is not new.on_ or old.full is not new.full
@@ -4453,6 +4463,75 @@ mod watcher_storage_failure_tests {
             assert_eq!(db.n("select count(*) from jobs", vec![]), i64::from(queue));
             assert_eq!(db.n("select count(*) from watcher_outbox", vec![]), 1);
         }
+    }
+
+    #[test]
+    fn local_base_roundtrip_revokes_analysis_without_losing_receipts() {
+        let db = Db::mem();
+        seed(&db);
+        let base = "b".repeat(40);
+        let changed = "c".repeat(40);
+        let sql = "update prs set d=json_set(d,'$.watcher_base_sha',?) where num=1";
+        db.run(sql, crate::pa![base.clone()]);
+        let ids = vec!["r1".into()];
+        let req = request();
+        let old = db
+            .claim_review_attempt_for_base("o/r", 1, "t", (HEAD, &base), 0)
+            .unwrap()
+            .unwrap();
+        db.run(sql, crate::pa![base.clone()]);
+        let before = db.try_all("select * from watcher_retry", vec![]).unwrap();
+        assert!(!before[0]["analysis_ticket"].is_null());
+        {
+            let c = db.0.lock().unwrap();
+            c.execute_batch(
+                "create trigger ignore_base_revoke before update on watcher_retry
+                 when new.analysis_ticket is null begin select raise(ignore); end;",
+            )
+            .unwrap();
+            assert!(c.execute(sql, [&changed]).is_err());
+            let stored: String = c
+                .query_row(
+                    "select json_extract(d,'$.watcher_base_sha') from prs where num=1",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(stored, base);
+            c.execute_batch("drop trigger ignore_base_revoke").unwrap();
+        }
+        assert_eq!(
+            db.try_all("select * from watcher_retry", vec![]).unwrap(),
+            before
+        );
+        db.run(sql, crate::pa![changed.clone()]);
+        db.run(sql, crate::pa![base.clone()]);
+        let after = db.try_all("select * from watcher_retry", vec![]).unwrap();
+        assert!(after[0]["analysis_ticket"].is_null());
+        assert_eq!(after[0]["next_attempt_at"], before[0]["next_attempt_at"]);
+        assert_eq!(after[0]["attempts"], before[0]["attempts"]);
+        assert!(db
+            .queue_review_with_attempt("o/r", 1, "t", &ids, &req, &old)
+            .is_err());
+        assert!(db
+            .ack_review_with_attempt("o/r", 1, "t", HEAD, (&ids, Some(&old)), &req["reply"])
+            .is_err());
+        assert_pending(&db);
+        assert!(db
+            .claim_review_attempt_for_base("o/r", 1, "t", (HEAD, &base), 599999)
+            .unwrap()
+            .is_none());
+        let fresh = db
+            .claim_review_attempt_for_base("o/r", 1, "t", (HEAD, &base), 600000)
+            .unwrap()
+            .unwrap();
+        old.release().unwrap();
+        assert!(db
+            .queue_review_with_attempt("o/r", 1, "t", &ids, &req, &fresh)
+            .unwrap());
+        fresh.release().unwrap();
+        assert!(db.comment_acknowledged("o/r", "r1").unwrap());
+        assert_eq!(db.n("select count(*) from jobs", vec![]), 1);
     }
 
     #[test]
