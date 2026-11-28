@@ -667,8 +667,7 @@ fn comparison_proves_ancestry(comparison: &Value, base: &str, head: &str) -> boo
         && comparison["merge_base_commit"]["sha"] == base
         && comparison["behind_by"].as_u64() == Some(0)
         && if base == head {
-            comparison["status"] == "identical"
-                && comparison["ahead_by"].as_u64() == Some(0)
+            comparison["status"] == "identical" && comparison["ahead_by"].as_u64() == Some(0)
         } else {
             comparison["status"] == "ahead"
                 && comparison["ahead_by"].as_u64().is_some_and(|n| n > 0)
