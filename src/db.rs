@@ -1260,6 +1260,7 @@ impl Db {
 
     /// Record receipt before invoking Guard/Watcher. Only identifiers are stored;
     /// comment bodies are always fetched again and never treated as authorization.
+    #[cfg(test)]
     pub fn receive_review_batch(
         &self,
         repo: &str,
@@ -1268,10 +1269,37 @@ impl Db {
         head: &str,
         ids: &[String],
     ) -> rusqlite::Result<()> {
+        self.receive_review_batch_inner(repo, number, updated, (head, None), ids)
+    }
+
+    pub(crate) fn receive_review_batch_for_base(
+        &self,
+        repo: &str,
+        number: i64,
+        updated: &str,
+        target: (&str, &str),
+        ids: &[String],
+    ) -> rusqlite::Result<()> {
+        self.receive_review_batch_inner(repo, number, updated, (target.0, Some(target.1)), ids)
+    }
+
+    fn receive_review_batch_inner(
+        &self,
+        repo: &str,
+        number: i64,
+        updated: &str,
+        (head, base): (&str, Option<&str>),
+        ids: &[String],
+    ) -> rusqlite::Result<()> {
         let mut c = self.0.lock().unwrap();
         let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         if !Self::review_snapshot_matches(&tx, repo, number, updated, head)? {
             return Err(rusqlite::Error::InvalidQuery);
+        }
+        if let Some(base) = base {
+            if !Self::review_base_matches(&tx, repo, number, base)? {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
         }
         let unique = ids.iter().collect::<std::collections::HashSet<_>>();
         if unique.len() != ids.len() || ids.iter().any(|id| id.is_empty() || id.len() > 128) {
@@ -1309,6 +1337,7 @@ impl Db {
     /// Reconcile previously received IDs only after a successful fresh comment
     /// read and remote snapshot recheck. Absence is NOT an acknowledgement;
     /// an ID seen again is eligible for a new receipt and authorization check.
+    #[cfg(test)]
     pub fn reconcile_review_receipts(
         &self,
         repo: &str,
@@ -1317,10 +1346,43 @@ impl Db {
         head: &str,
         observed: &[String],
     ) -> rusqlite::Result<usize> {
+        self.reconcile_review_receipts_inner(repo, number, updated, (head, None), observed)
+    }
+
+    pub(crate) fn reconcile_review_receipts_for_base(
+        &self,
+        repo: &str,
+        number: i64,
+        updated: &str,
+        target: (&str, &str),
+        observed: &[String],
+    ) -> rusqlite::Result<usize> {
+        self.reconcile_review_receipts_inner(
+            repo,
+            number,
+            updated,
+            (target.0, Some(target.1)),
+            observed,
+        )
+    }
+
+    fn reconcile_review_receipts_inner(
+        &self,
+        repo: &str,
+        number: i64,
+        updated: &str,
+        (head, base): (&str, Option<&str>),
+        observed: &[String],
+    ) -> rusqlite::Result<usize> {
         let mut c = self.0.lock().unwrap();
         let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         if !Self::review_snapshot_matches(&tx, repo, number, updated, head)? {
             return Err(rusqlite::Error::InvalidQuery);
+        }
+        if let Some(base) = base {
+            if !Self::review_base_matches(&tx, repo, number, base)? {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
         }
         let unique = observed.iter().collect::<std::collections::HashSet<_>>();
         if unique.len() != observed.len()
@@ -4636,6 +4698,49 @@ mod watcher_storage_failure_tests {
         assert_eq!(db.n("select count(*) from jobs", vec![]), 0);
         assert_eq!(db.n("select count(*) from cm", vec![]), 0);
         assert_eq!(db.n("select count(*) from watcher_outbox", vec![]), 0);
+    }
+
+    #[test]
+    fn stale_base_cannot_receive_or_retire_review_receipts() {
+        let db = Db::mem();
+        seed(&db);
+        let base = "b".repeat(40);
+        let changed = "c".repeat(40);
+        let sql = "update prs set d=json_set(d,'$.watcher_base_sha',?) where num=1";
+        db.run(sql, crate::pa![changed.clone()]);
+        let ids = vec!["r2".into()];
+        let before = db.try_all("select * from watcher_inbox", vec![]).unwrap();
+        for stale in [base.as_str(), ""] {
+            let target = (HEAD, stale);
+            assert!(db
+                .receive_review_batch_for_base("o/r", 1, "t", target, &ids)
+                .is_err());
+            assert!(db
+                .reconcile_review_receipts_for_base("o/r", 1, "t", target, &ids)
+                .is_err());
+            assert_eq!(
+                db.try_all("select * from watcher_inbox", vec![]).unwrap(),
+                before
+            );
+            assert_pending(&db);
+        }
+        let target = (HEAD, changed.as_str());
+        assert_eq!(
+            db.reconcile_review_receipts_for_base("o/r", 1, "t", target, &ids)
+                .unwrap(),
+            1
+        );
+        db.receive_review_batch_for_base("o/r", 1, "t", target, &ids)
+            .unwrap();
+        assert_eq!(
+            db.n(
+                "select count(*) from watcher_inbox where state='received' and comment_id='r2'",
+                vec![]
+            ),
+            1
+        );
+        assert_pending(&db);
+        assert!(!db.comment_acknowledged("o/r", "r1").unwrap());
     }
 
     #[test]
