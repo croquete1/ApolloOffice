@@ -25,6 +25,21 @@ def github():
         if endpoint in ('repos/o/r/pulls/1/reviews?per_page=100', 'repos/o/r/pulls/1/comments?per_page=100'):
             print('[]')
             return 0
+    stage = (root / 'stage').read_text()
+    # Change only the final PR read, after the model has produced a verdict.
+    # Keep the timestamp and HEAD unchanged to exercise independent identity.
+    if (stage in ('changed-base', 'wrong-pr') and
+            (root / f'{stage}-watcher').exists() and
+            args[:5] == ['pr', 'view', '1', '-R', 'o/r'] and
+            '--json' in args and
+            'baseRefOid' in args[args.index('--json') + 1].split(',')):
+        pr = json.loads((root / 'fixture.json').read_text())['pr']
+        if stage == 'changed-base':
+            pr['baseRefOid'] = 'c' * 40
+        else:
+            pr['number'] = 2
+        print(json.dumps(pr))
+        return 0
     return fake_gh()
 
 
@@ -175,6 +190,13 @@ def scenario(source_binary):
             run_stage(binary, root, env, stage, lambda: failed_verdict(stage))
             assert_pending()
             assert query(root, 'select analysis_ticket from watcher_retry') == [(None,)]
+        for stage in ('changed-base', 'wrong-pr'):
+            run_stage(binary, root, env, stage, lambda: (root / f'{stage}-watcher').exists()
+                      and event(root, 'PR changed during review analysis')
+                      and query(root, 'select analysis_ticket from watcher_retry') == [(None,)])
+            assert_pending()
+            assert query(root, 'select count(*) from jobs') == [(0,)]
+            assert not list(root.glob('post-*'))
         with closing(db_connection(root)) as db, db:
             db.execute("insert into jobs(repo,num,pr,kind,st,title,url,why,d,t0,t1) values('o/r',1,1,'review','approve','Active fixture','url','fixture','{}',1,1)")
         run_stage(binary, root, env, 'active-job', lambda: event(root, 'new review deferred until active review finishes') and query(root, 'select analysis_ticket from watcher_retry') == [(None,)])
