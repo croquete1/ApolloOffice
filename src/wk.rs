@@ -2098,27 +2098,28 @@ async fn watch_pr(
         .iter()
         .filter_map(|c| c["id"].as_str().map(String::from))
         .collect();
+    let source_base = v["baseRefOid"]
+        .as_str()
+        .ok_or_else(|| X::E("open PR base SHA unavailable".into()))?;
+    let target = (source_head.as_str(), source_base);
     if has_pending {
         recheck_review_evidence(&r, n, me, &v, &observed_comments, &cr).await?;
         let retired =
-            a.db.reconcile_review_receipts(&r, n, &up, &source_head, &received_ids)
+            a.db.reconcile_review_receipts_for_base(&r, n, &up, target, &received_ids)
                 .map_err(|e| X::E(e.to_string()))?;
         if retired > 0 {
             a.say("watcher",&format!("{tag}: {retired} receipt(s) no longer in observed pending inventory; no acknowledgement or action"),None);
         }
     }
-    a.db.receive_review_batch(&r, n, &up, &source_head, &received_ids)
+    a.db.receive_review_batch_for_base(&r, n, &up, target, &received_ids)
         .map_err(|e| X::E(e.to_string()))?;
     let pending = !received_ids.is_empty()
         || a.db
             .has_pending_review(&r, n)
             .map_err(|e| X::E(e.to_string()))?;
     let attempt = if pending {
-        let source_base = v["baseRefOid"]
-            .as_str()
-            .ok_or_else(|| X::E("open PR base SHA unavailable".into()))?;
         let Some(attempt) =
-            a.db.claim_review_attempt_for_base(&r, n, &up, (&source_head, source_base), now())
+            a.db.claim_review_attempt_for_base(&r, n, &up, target, now())
                 .map_err(|e| X::E(e.to_string()))?
         else {
             return Ok(());
@@ -2384,7 +2385,7 @@ async fn watch_pr(
             &r,
             n,
             &up,
-            (&source_head, v["baseRefOid"].as_str().unwrap_or("")),
+            target,
             (&ack_ids, attempt.as_ref()),
             &outbound,
         )
