@@ -646,10 +646,19 @@ fn replace_branch_update_record_with_error(
         return Err(rusqlite::Error::InvalidQuery);
     }
     if let Some(expected) = diagnostic {
+        let error_key = format!("steward:merge_error:{repo}");
         tx.execute(
             "delete from kv where k=? and v=?",
-            rusqlite::params![format!("steward:merge_error:{repo}"), expected],
+            rusqlite::params![error_key, expected],
         )?;
+        let remains: bool = tx.query_row(
+            "select exists(select 1 from kv where k=? and v=?)",
+            rusqlite::params![error_key, expected],
+            |row| row.get(0),
+        )?;
+        if remains {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
     }
     tx.commit()?;
     Ok(true)
@@ -2040,6 +2049,8 @@ mod tests {
             "other_pr",
             "other_phase",
             "new_error",
+            "delete_abort",
+            "delete_ignore",
         ] {
             let db = crate::db::Db::mem();
             let key = "steward:update:o/r#1";
@@ -2054,6 +2065,20 @@ mod tests {
             });
             let newer = json!({"pr":1,"phase":"reconciliation","at":200,"reason":"new failure"});
             db.ks(error_key, &error);
+            let trigger = match scenario {
+                "delete_abort" => Some("raise(abort, 'fixture delete failure')"),
+                "delete_ignore" => Some("raise(ignore)"),
+                _ => None,
+            };
+            if let Some(action) = trigger {
+                db.0.lock()
+                    .unwrap()
+                    .execute_batch(&format!(
+                        "create trigger deny_error_delete before delete on kv
+                         when old.k='steward:merge_error:o/r' begin select {action}; end"
+                    ))
+                    .unwrap();
+            }
             let mut last = pr.clone();
             if scenario == "changed" {
                 last["head"]["sha"] = json!("f".repeat(40));
@@ -2094,10 +2119,30 @@ mod tests {
                         _ => assert_eq!(db.kg(error_key), error),
                     }
                 }
-                "network" => {
+                "network" | "delete_abort" | "delete_ignore" => {
                     assert!(result.is_err());
                     assert_eq!(db.kg(key), previous);
                     assert_eq!(db.kg(error_key), error);
+                    if trigger.is_some() {
+                        db.0.lock()
+                            .unwrap()
+                            .execute_batch("drop trigger deny_error_delete")
+                            .unwrap();
+                        let mut retry = std::collections::VecDeque::from([
+                            Ok(pr.clone()),
+                            Ok(proof(&old)),
+                            Ok(proof(&base)),
+                            Ok(pr.clone()),
+                        ]);
+                        let recovered = reconcile_branch_update_with(&db, repo, 1, |_| {
+                            std::future::ready(retry.pop_front().unwrap())
+                        })
+                        .await;
+                        assert!(recovered.unwrap());
+                        assert!(retry.is_empty());
+                        assert_eq!(db.kg(key)["status"], "observed");
+                        assert_eq!(db.kg(error_key), Value::Null);
+                    }
                 }
                 "replaced" => {
                     assert!(!result.unwrap());
