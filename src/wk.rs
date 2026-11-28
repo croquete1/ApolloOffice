@@ -2117,10 +2117,9 @@ async fn watch_pr(
         let source_base = v["baseRefOid"]
             .as_str()
             .ok_or_else(|| X::E("open PR base SHA unavailable".into()))?;
-        let Some(attempt) = a
-            .db
-            .claim_review_attempt_for_base(&r, n, &up, (&source_head, source_base), now())
-            .map_err(|e| X::E(e.to_string()))?
+        let Some(attempt) =
+            a.db.claim_review_attempt_for_base(&r, n, &up, (&source_head, source_base), now())
+                .map_err(|e| X::E(e.to_string()))?
         else {
             return Ok(());
         };
