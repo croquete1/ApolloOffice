@@ -115,7 +115,7 @@ def scenario(source_binary, accepted, cursor_restart=False):
                "APOLLO_OFFICE_GH": str(gh), "APOLLO_OFFICE_FAST": "1", "APOLLO_OFFICE_CLAUDE": "/bin/false",
                "APOLLO_OFFICE_CODEX": "/bin/false", "APOLLO_OFFICE_OPENCODE": "/bin/false"}
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        pr = {"state": "OPEN", "mergedAt": None, "updatedAt": timestamp, "title": "Fixture", "url": "https://github.com/o/r/pull/1",
+        pr = {"number": 1, "baseRefOid": "b" * 40, "state": "OPEN", "mergedAt": None, "updatedAt": timestamp, "title": "Fixture", "url": "https://github.com/o/r/pull/1",
               "mergeable": "MERGEABLE", "headRefName": "fix", "headRepositoryOwner": {"login": "tester"}, "headRepository": {"name": "r"},
               "baseRefName": "main", "reviewDecision": "APPROVED", "headRefOid": HEAD}
         (root / "fixture.json").write_text(json.dumps({"accepted": accepted, "pr": pr}))

@@ -1700,9 +1700,15 @@ fn pending_checked(cs: Vec<Value>, last: &str) -> R<Vec<Value>> {
     Ok(pending(cs, last))
 }
 
-fn same_review_snapshot(original: &Value, fresh: &Value) -> bool {
-    original["state"] == "OPEN"
+fn same_review_snapshot(number: i64, original: &Value, fresh: &Value) -> bool {
+    number > 0
+        && original["number"] == number
+        && fresh["number"] == number
+        && original["state"] == "OPEN"
         && fresh["state"] == "OPEN"
+        && original["baseRefOid"]
+            .as_str()
+            .is_some_and(crate::db::valid_git_sha)
         && original["headRefOid"]
             .as_str()
             .is_some_and(crate::db::valid_git_sha)
@@ -1729,6 +1735,7 @@ fn same_review_snapshot(original: &Value, fresh: &Value) -> bool {
             "headRepositoryOwner",
             "headRepository",
             "baseRefName",
+            "baseRefOid",
             "reviewDecision",
         ]
         .iter()
@@ -1736,8 +1743,8 @@ fn same_review_snapshot(original: &Value, fresh: &Value) -> bool {
 }
 
 async fn recheck_review_snapshot(repo: &str, number: i64, original: &Value) -> R<()> {
-    let fresh=ghj(&["pr","view",&number.to_string(),"-R",repo,"--json","state,headRefOid,updatedAt,headRefName,headRepositoryOwner,headRepository,baseRefName,reviewDecision"],60).await.map_err(X::E)?;
-    if !same_review_snapshot(original, &fresh) {
+    let fresh=ghj(&["pr","view",&number.to_string(),"-R",repo,"--json","number,state,headRefOid,updatedAt,headRefName,headRepositoryOwner,headRepository,baseRefName,baseRefOid,reviewDecision"],60).await.map_err(X::E)?;
+    if !same_review_snapshot(number, original, &fresh) {
         return Err(X::E(
             "PR changed during review analysis; comments remain pending".into(),
         ));
@@ -1844,12 +1851,15 @@ async fn watch_pr(
                 "-R",
                 &r,
                 "--json",
-                "state,mergedAt,updatedAt,title,url,baseRefName",
+                "number,state,mergedAt,updatedAt,title,url,baseRefName",
             ],
             60,
         )
         .await
         .map_err(X::E)?;
+        if n <= 0 || v["number"] != n || v["state"] != "MERGED" {
+            return Err(X::E("merged PR identity changed".into()));
+        }
         let up = valid_pr_timestamp(&v)?;
         let base = valid_pr_base(&v)?;
         if a.db.ch("update prs set upd=?, d=json_set(d,'$.base',?,'$.default_branch',?) where repo=? and num=? and st='merged' and upd is ?", pa![up.clone(), base, default_branch.clone(), r.clone(), n,p["upd"].as_str().map(String::from)]) != 1 {
@@ -1926,9 +1936,9 @@ async fn watch_pr(
         }
     }
     let fields = if p["d"]["auto_merge"].as_bool() == Some(true) {
-        "state,mergedAt,updatedAt,title,url,mergeable,headRefName,headRepositoryOwner,headRepository,baseRefName,reviewDecision,isDraft,headRefOid,statusCheckRollup"
+        "number,state,mergedAt,updatedAt,title,url,mergeable,headRefName,headRepositoryOwner,headRepository,baseRefName,baseRefOid,reviewDecision,isDraft,headRefOid,statusCheckRollup"
     } else {
-        "state,mergedAt,updatedAt,title,url,mergeable,headRefName,headRepositoryOwner,headRepository,baseRefName,reviewDecision,headRefOid"
+        "number,state,mergedAt,updatedAt,title,url,mergeable,headRefName,headRepositoryOwner,headRepository,baseRefName,baseRefOid,reviewDecision,headRefOid"
     };
     let v = match ghj(
         &["pr", "view", &n.to_string(), "-R", &r, "--json", fields],
@@ -1946,6 +1956,9 @@ async fn watch_pr(
             return Ok(());
         }
     };
+    if n <= 0 || v["number"] != n {
+        return Err(X::E("PR identity changed".into()));
+    }
     let up = valid_pr_timestamp(&v)?;
     let base = valid_pr_base(&v)?;
     let st = match v["state"].as_str() {
@@ -1959,8 +1972,13 @@ async fn watch_pr(
         .filter(|s| crate::db::valid_git_sha(s))
         .unwrap_or("")
         .to_string();
-    if st == "open" && source_head.is_empty() {
-        return Err(X::E("open PR HEAD unavailable".into()));
+    if st == "open"
+        && (source_head.is_empty()
+            || !v["baseRefOid"]
+                .as_str()
+                .is_some_and(crate::db::valid_git_sha))
+    {
+        return Err(X::E("open PR HEAD or base SHA unavailable".into()));
     }
     if a.db.ch("update prs set st=?,title=?,upd=?,merged=?,d=json_set(d,'$.base',?,'$.default_branch',?,'$.watcher_head',?) where repo=? and num=? and st='open' and upd is ?",pa![st.to_string(),v["title"].as_str().unwrap_or("").to_string(),up.clone(),v["mergedAt"].as_str().map(String::from),base,default_branch.clone(),source_head.clone(),r.clone(),n,p["upd"].as_str().map(String::from)])!=1 {
             return Err(X::E("could not persist PR metadata".into()));
@@ -2210,13 +2228,15 @@ async fn watch_pr(
                     "-R",
                     &r,
                     "--json",
-                    "body,files,headRefOid,updatedAt,changedFiles",
+                    "number,body,files,headRefOid,baseRefOid,updatedAt,changedFiles",
                 ],
                 60,
             )
             .await
             .map_err(X::E)?;
-            if pv["headRefOid"] != source_head
+            if pv["number"] != n
+                || pv["headRefOid"] != source_head
+                || pv["baseRefOid"] != v["baseRefOid"]
                 || pv["updatedAt"] != up
                 || !pv["files"].as_array().is_some_and(|files| {
                     pv["changedFiles"].as_u64() == Some(files.len() as u64)
@@ -2897,10 +2917,16 @@ mod t {
 
     #[test]
     fn review_snapshot_requires_same_head_and_review_state() {
-        let original = json!({"state":"OPEN","headRefOid":"a".repeat(40),"updatedAt":"2026-11-24T11:00:00Z","headRefName":"fix","headRepositoryOwner":{"login":"owner"},"headRepository":{"name":"repo"},"baseRefName":"main","reviewDecision":"CHANGES_REQUESTED"});
-        assert!(same_review_snapshot(&original, &original));
+        let original = json!({"number":1,"state":"OPEN","headRefOid":"a".repeat(40),"baseRefOid":"b".repeat(40),"updatedAt":"2026-11-24T11:00:00Z","headRefName":"fix","headRepositoryOwner":{"login":"owner"},"headRepository":{"name":"repo"},"baseRefName":"main","reviewDecision":"CHANGES_REQUESTED"});
+        assert!(same_review_snapshot(1, &original, &original));
+        assert!(!same_review_snapshot(2, &original, &original));
+        assert!(!same_review_snapshot(0, &original, &original));
         for (key, value) in [
             ("headRefOid", json!("b".repeat(40))),
+            ("baseRefOid", json!("c".repeat(40))),
+            ("baseRefOid", Value::Null),
+            ("number", json!(2)),
+            ("number", Value::Null),
             ("state", json!("CLOSED")),
             ("reviewDecision", json!("APPROVED")),
             ("updatedAt", json!("later")),
@@ -2908,10 +2934,10 @@ mod t {
         ] {
             let mut changed = original.clone();
             changed[key] = value;
-            assert!(!same_review_snapshot(&original, &changed));
+            assert!(!same_review_snapshot(1, &original, &changed));
         }
         let invalid = json!({"state":"OPEN","headRefOid":"invalid"});
-        assert!(!same_review_snapshot(&invalid, &invalid));
+        assert!(!same_review_snapshot(1, &invalid, &invalid));
     }
 
     #[test]
