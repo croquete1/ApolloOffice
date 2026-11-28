@@ -174,6 +174,8 @@ def scenario(source_binary, submit=False):
             wait_for(root, process, lambda: read_value(root, ERROR) is not None and
                      any(root.glob("failure-old-compare-*")), "failed reconciliation")
         assert read_value(root, KEY) == previous
+        diagnostic = read_value(root, ERROR)
+        assert diagnostic["pr"] == 1 and diagnostic["phase"] == "reconciliation"
         assert not list(root.glob("failure-base-compare-*"))
 
         (root / "stage").write_text("recover")
@@ -181,6 +183,7 @@ def scenario(source_binary, submit=False):
             wait_for(root, process, lambda: read_value(root, KEY).get("status") == "observed",
                      "restart recovery")
         observed = read_value(root, KEY)
+        assert read_value(root, ERROR) is None
         assert observed["observed_head"] == HEAD
         assert observed["head"] == OLD and observed["base"] == BASE
         assert observed["merge_activation"] == activation and observed["at"] == previous["at"]
@@ -198,6 +201,7 @@ def scenario(source_binary, submit=False):
             wait_for(root, process, lambda: read_value(root, "steward:o/r")["at"] > first,
                      "second replay scan")
         assert read_value(root, KEY) == observed
+        assert read_value(root, ERROR) is None
         assert not list(root.glob("replay-*-compare-*"))
         assert len(list(root.glob("*-mutation-*"))) == int(submit)
         assert not list(root.glob("*-unexpected-mutation-*"))

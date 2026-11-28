@@ -587,6 +587,40 @@ fn replace_branch_update_record(
     reservation: &Value,
     outcome: &Value,
 ) -> rusqlite::Result<bool> {
+    replace_branch_update_record_with_error(db, repo, number, reservation, outcome, None)
+}
+
+// Snapshot only the diagnostic produced by this PR's reconciliation. Do not
+// clear legacy, unrelated or newly replaced errors.
+fn reconciliation_error_snapshot(
+    db: &crate::db::Db,
+    repo: &str,
+    number: i64,
+) -> rusqlite::Result<Option<String>> {
+    use rusqlite::OptionalExtension;
+    let c = db.0.lock().unwrap();
+    let raw: Option<String> = c
+        .query_row(
+            "select v from kv where k=?",
+            [format!("steward:merge_error:{repo}")],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(raw.filter(|value| {
+        serde_json::from_str::<Value>(value).is_ok_and(|error| {
+            error["pr"] == number && error["phase"] == "reconciliation"
+        })
+    }))
+}
+
+fn replace_branch_update_record_with_error(
+    db: &crate::db::Db,
+    repo: &str,
+    number: i64,
+    reservation: &Value,
+    outcome: &Value,
+    diagnostic: Option<&str>,
+) -> rusqlite::Result<bool> {
     let mut c = db.0.lock().unwrap();
     let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let key = format!("steward:update:{repo}#{number}");
@@ -611,6 +645,12 @@ fn replace_branch_update_record(
     )?;
     if changed != 1 || !persisted {
         return Err(rusqlite::Error::InvalidQuery);
+    }
+    if let Some(expected) = diagnostic {
+        tx.execute(
+            "delete from kv where k=? and v=?",
+            rusqlite::params![format!("steward:merge_error:{repo}"), expected],
+        )?;
     }
     tx.commit()?;
     Ok(true)
@@ -813,6 +853,8 @@ where
         .as_str()
         .filter(|sha| valid_sha(sha))
         .ok_or("invalid reserved base")?;
+    let diagnostic = reconciliation_error_snapshot(db, repo, number)
+        .map_err(|error| format!("branch update diagnostic unavailable: {error}"))?;
     let detail = read(format!("repos/{repo}/pulls/{number}")).await?;
     let Some(target) = reconciliation_target(&detail, repo, number) else {
         return Ok(false);
@@ -838,8 +880,15 @@ where
     ) else {
         return Ok(false);
     };
-    replace_branch_update_record(db, repo, number, previous, &observed)
-        .map_err(|error| format!("branch update observation unavailable: {error}"))
+    replace_branch_update_record_with_error(
+        db,
+        repo,
+        number,
+        previous,
+        &observed,
+        diagnostic.as_deref(),
+    )
+    .map_err(|error| format!("branch update observation unavailable: {error}"))
 }
 
 async fn reconcile_branch_update(a: &Ax, repo: &str, number: i64) -> Result<(), String> {
@@ -1528,7 +1577,7 @@ pub async fn run(a: &Ax, repo: &str, listed: &[Value], assessed: &[Value]) {
             if let Err(error) = reconcile_branch_update(a, repo, number).await {
                 a.db.ks(
                     &format!("steward:merge_error:{repo}"),
-                    &json!({"pr":number,"reason":crate::sh::head(&error, 500)}),
+                    &json!({"pr":number,"phase":"reconciliation","at":crate::db::now(),"reason":crate::sh::head(&error, 500)}),
                 );
                 continue;
             }
@@ -1539,7 +1588,7 @@ pub async fn run(a: &Ax, repo: &str, listed: &[Value], assessed: &[Value]) {
             Err(error) => {
                 a.db.ks(
                     &format!("steward:merge_error:{repo}"),
-                    &json!({"pr":pr["number"],"reason":crate::sh::head(&error, 500)}),
+                    &json!({"pr":pr["number"],"phase":"merge","at":crate::db::now(),"reason":crate::sh::head(&error, 500)}),
                 );
                 return;
             }
@@ -1984,12 +2033,28 @@ mod tests {
             format!("repos/{repo}/compare/{base}...{head}"),
             format!("repos/{repo}/pulls/1"),
         ];
-        for scenario in ["ok", "changed", "network", "replaced"] {
+        for scenario in [
+            "ok",
+            "changed",
+            "network",
+            "replaced",
+            "other_pr",
+            "other_phase",
+            "new_error",
+        ] {
             let db = crate::db::Db::mem();
             let key = "steward:update:o/r#1";
             let previous = branch_update_reservation(&"d".repeat(32), (&old, &base), 100);
             let replacement = branch_update_reservation(&"e".repeat(32), (&old, &base), 200);
             db.ks(key, &previous);
+            let error_key = "steward:merge_error:o/r";
+            let error = json!({
+                "pr":if scenario == "other_pr" { 2 } else { 1 },
+                "phase":if scenario == "other_phase" { "merge" } else { "reconciliation" },
+                "at":100,"reason":"initial failure"
+            });
+            let newer = json!({"pr":1,"phase":"reconciliation","at":200,"reason":"new failure"});
+            db.ks(error_key, &error);
             let mut last = pr.clone();
             if scenario == "changed" {
                 last["head"]["sha"] = json!("f".repeat(40));
@@ -2010,29 +2075,40 @@ mod tests {
                 if scenario == "replaced" && calls.len() == 4 {
                     db.ks(key, &replacement);
                 }
+                if scenario == "new_error" && calls.len() == 4 {
+                    db.ks(error_key, &newer);
+                }
                 std::future::ready(replies.pop_front().unwrap())
             })
             .await;
             assert_eq!(calls.as_slice(), paths.as_slice());
             assert!(replies.is_empty());
             match scenario {
-                "ok" => {
+                "ok" | "other_pr" | "other_phase" | "new_error" => {
                     assert!(result.unwrap());
                     let observed = load_branch_update(&db, repo, 1).unwrap().unwrap();
                     assert_eq!(observed["status"], "observed");
                     assert_eq!(observed["observed_head"], head);
+                    match scenario {
+                        "ok" => assert_eq!(db.kg(error_key), Value::Null),
+                        "new_error" => assert_eq!(db.kg(error_key), newer),
+                        _ => assert_eq!(db.kg(error_key), error),
+                    }
                 }
                 "network" => {
                     assert!(result.is_err());
                     assert_eq!(db.kg(key), previous);
+                    assert_eq!(db.kg(error_key), error);
                 }
                 "replaced" => {
                     assert!(!result.unwrap());
                     assert_eq!(db.kg(key), replacement);
+                    assert_eq!(db.kg(error_key), error);
                 }
                 _ => {
                     assert!(!result.unwrap());
                     assert_eq!(db.kg(key), previous);
+                    assert_eq!(db.kg(error_key), error);
                 }
             }
         }
