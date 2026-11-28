@@ -1980,7 +1980,7 @@ async fn watch_pr(
     {
         return Err(X::E("open PR HEAD or base SHA unavailable".into()));
     }
-    if a.db.ch("update prs set st=?,title=?,upd=?,merged=?,d=json_set(d,'$.base',?,'$.default_branch',?,'$.watcher_head',?) where repo=? and num=? and st='open' and upd is ?",pa![st.to_string(),v["title"].as_str().unwrap_or("").to_string(),up.clone(),v["mergedAt"].as_str().map(String::from),base,default_branch.clone(),source_head.clone(),r.clone(),n,p["upd"].as_str().map(String::from)])!=1 {
+    if a.db.ch("update prs set st=?,title=?,upd=?,merged=?,d=json_set(d,'$.base',?,'$.default_branch',?,'$.watcher_head',?,'$.watcher_base_sha',?) where repo=? and num=? and st='open' and upd is ?",pa![st.to_string(),v["title"].as_str().unwrap_or("").to_string(),up.clone(),v["mergedAt"].as_str().map(String::from),base,default_branch.clone(),source_head.clone(),v["baseRefOid"].as_str().map(String::from),r.clone(),n,p["upd"].as_str().map(String::from)])!=1 {
             return Err(X::E("could not persist PR metadata".into()));
         }
     let tag = format!("{r}#{n}");
@@ -2114,8 +2114,11 @@ async fn watch_pr(
             .has_pending_review(&r, n)
             .map_err(|e| X::E(e.to_string()))?;
     let attempt = if pending {
+        let source_base = v["baseRefOid"]
+            .as_str()
+            .ok_or_else(|| X::E("open PR base SHA unavailable".into()))?;
         let Some(attempt) =
-            a.db.claim_review_attempt(&r, n, &up, &source_head, now())
+            a.db.claim_review_attempt_for_base(&r, n, &up, (&source_head, source_base), now())
                 .map_err(|e| X::E(e.to_string()))?
         else {
             return Ok(());
