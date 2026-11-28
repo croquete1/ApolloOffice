@@ -5126,6 +5126,78 @@ mod watcher_storage_failure_tests {
     }
 
     #[test]
+    fn full_file_database_preserves_live_review_and_allows_recovery() {
+        let path =
+            std::env::temp_dir().join(format!("apollo-review-full-{}", rand::random::<u64>()));
+        std::fs::create_dir(&path).unwrap();
+        let file = path.join("state.db");
+        let base = "b".repeat(40);
+        let target = (HEAD, base.as_str());
+        let ids = vec!["r1".into()];
+        {
+            let db = Db::open(&file).unwrap();
+            seed(&db);
+            db.run(
+                "update prs set d=json_set(d,'$.watcher_base_sha',?) where num=1",
+                crate::pa![base.clone()],
+            );
+            let attempt = db
+                .claim_review_attempt_for_base("o/r", 1, "t", target, 0)
+                .unwrap()
+                .unwrap();
+            let before = db.try_all("select * from watcher_retry", vec![]).unwrap();
+            let snapshot = db.try_all("select d from prs", vec![]).unwrap();
+            {
+                let c = db.0.lock().unwrap();
+                let pages: i64 = c
+                    .pragma_query_value(None, "page_count", |r| r.get(0))
+                    .unwrap();
+                c.pragma_update(None, "max_page_count", pages).unwrap();
+            }
+            let mut req = request();
+            req["change"] = json!("x".repeat(1_048_576));
+            let error = db
+                .queue_review_with_attempt("o/r", 1, "t", &ids, &req, &attempt)
+                .unwrap_err();
+            assert_eq!(
+                error.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::DiskFull)
+            );
+            assert_pending(&db);
+            assert_eq!(
+                db.try_all("select * from watcher_retry", vec![]).unwrap(),
+                before
+            );
+            assert_eq!(db.try_all("select d from prs", vec![]).unwrap(), snapshot);
+            attempt.release().unwrap();
+        }
+        {
+            let db = Db::open(&file).unwrap();
+            assert_pending(&db);
+            let retry = db.try_all("select * from watcher_retry", vec![]).unwrap();
+            assert!(retry[0]["analysis_ticket"].is_null());
+            assert_eq!(retry[0]["next_attempt_at"], 600000);
+            assert!(db
+                .claim_review_attempt_for_base("o/r", 1, "t", target, 599999)
+                .unwrap()
+                .is_none());
+            let attempt = db
+                .claim_review_attempt_for_base("o/r", 1, "t", target, 600000)
+                .unwrap()
+                .unwrap();
+            assert!(db
+                .queue_review_with_attempt("o/r", 1, "t", &ids, &request(), &attempt)
+                .unwrap());
+            attempt.release().unwrap();
+            assert!(db.comment_acknowledged("o/r", "r1").unwrap());
+            assert_eq!(db.n("select count(*) from jobs", vec![]), 1);
+            assert_eq!(db.n("select count(*) from watcher_outbox", vec![]), 1);
+            assert!(!db.has_pending_review("o/r", 1).unwrap());
+        }
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
     fn ignored_watcher_effects_roll_back_job_and_ack() {
         for sql in [
             "create trigger ignore_effect before insert on watcher_outbox begin select raise(ignore); end;",
