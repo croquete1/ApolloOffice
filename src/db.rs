@@ -372,7 +372,11 @@ fn init(c: &mut Connection) -> anyhow::Result<()> {
         "
         create trigger if not exists watcher_attempt_base_changed
         after update of d on prs
-        when json_extract(old.d,'$.watcher_base_sha') is not json_extract(new.d,'$.watcher_base_sha')
+        when case
+          when json_valid(old.d) and json_valid(new.d)
+            then json_extract(old.d,'$.watcher_base_sha') is not json_extract(new.d,'$.watcher_base_sha')
+          else old.d is not new.d
+        end
         begin
           update watcher_retry set analysis_ticket=null
             where repo=old.repo and num=old.num and analysis_ticket is not null;
