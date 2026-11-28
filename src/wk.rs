@@ -2380,11 +2380,11 @@ async fn watch_pr(
     // Advance the comment cursor only after successful analysis and queue persistence.
     if !batch_acked {
         recheck_review_evidence(&r, n, me, &v, &observed_comments, &cr).await?;
-        a.db.ack_review_with_attempt(
+        a.db.ack_review_for_base(
             &r,
             n,
             &up,
-            &source_head,
+            (&source_head, v["baseRefOid"].as_str().unwrap_or("")),
             (&ack_ids, attempt.as_ref()),
             &outbound,
         )
